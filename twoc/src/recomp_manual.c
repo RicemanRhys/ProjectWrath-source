@@ -21,32 +21,22 @@
 #include <stdio.h>
 #include <stdint.h>
 
+/* The generated-code headers: register aliases (eax, ecx, esp ...), MEM32/MEM8,
+ * PUSH32, RECOMP_ABI_CALL and the declarations of every lifted function. The
+ * hand-written sub_ functions below need them; they are only active with
+ * RECOMP_GENERATED_CODE defined. */
+#define RECOMP_GENERATED_CODE
+#include "recomp/gen/recomp_funcs.h"
+
 /* ── ICALL trace ring buffer ───────────────────────────────── */
 
 /*
- * These globals are written by the RECOMP_ICALL macro (defined in
- * recomp_types.h) every time an indirect call is dispatched. When a
- * crash occurs, the VEH handler or recomp_icall_fail_log() can dump
- * the last 16 call targets to help you trace what happened.
- *
- * The runtime owns them: xbox_kernel defines all three in
- * src/kernel/xbox_memory_layout.c, and recomp_types.h declares them extern.
- * Declare, do not define -- a definition here as well is a duplicate symbol,
- * and a project copied from this template failed to link on all three:
- *
- *   xbox_memory_layout.obj : error LNK2005: g_icall_count already defined
- *                            in recomp_manual.obj
+ * The RECOMP_ICALL macro (recomp_types.h) writes g_icall_trace, g_icall_trace_idx
+ * and g_icall_count on every indirect call; recomp_icall_fail_log() dumps the
+ * last 16 targets. The runtime owns them (xbox_kernel, src/kernel/
+ * xbox_memory_layout.c) and recomp_types.h declares them extern, so nothing is
+ * defined or declared here: a second definition is a duplicate symbol (LNK2005).
  */
-extern volatile uint32_t g_icall_trace[16];
-extern volatile uint32_t g_icall_trace_idx;
-extern volatile uint64_t g_icall_count;
-
-typedef void (*recomp_func_t)(void);
-
-/* ── Register state (defined in xbox_memory_layout.c) ──────── */
-
-extern uint32_t g_eax;
-extern ptrdiff_t g_xbox_mem_offset;
 
 /* ── Manual function overrides ─────────────────────────────── */
 
@@ -188,3 +178,86 @@ void recomp_icall_not_code_log(uint32_t va)
  */
 void sub_0014726F(void) {}
 void sub_0014FF0C(void) {}
+
+/* ── D3D interrupt DPC, vblank forced on ───────────────────── */
+
+/*
+ * sub_00106E60: the deferred routine of the D3D library's GPU interrupt
+ * (KeInitializeDpc(ctx+0x84, 0x106E60, ctx) at 0x1074E4, ctx = 0x10E378). The
+ * ISR at 0x106580 queues it. Hand-written from the disassembly (0x106E60 to
+ * 0x106F02); the only change is marked VBLANK below.
+ *
+ *   VOID DeferredRoutine(PKDPC dpc, PVOID ctx, PVOID arg1, PVOID arg2)  ; ret 16
+ *
+ * It reads PMC_INTR_0 at [[ctx]+0x100] (ctx+0 holds the NV2A base, 0xFD000000)
+ * and runs one handler per pending bit, repeating while any handler reports
+ * more work. The vblank handler is sub_00106720: it signals ctx+0x1CC and calls
+ * the game's callback at [ctx+0x1C8] (0x39910 here, which bumps the frame counter
+ * the splash screen waits on).
+ *
+ * VBLANK: the runtime's tick sets the vblank bit of PMC_INTR_0 in plain memory
+ * every 16 ms, but its own NV2A ack thread (xbox_memory_layout.c, NV2A_ACK)
+ * clears PMC_INTR_0 in a loop, so by the time this routine runs the bit has
+ * nearly always gone and the vblank handler is skipped (16 of 601 in a 25 s run).
+ * The ISR is only raised by that tick and only for a vblank, so this routine
+ * treats bit 24 as set on its first pass. Later passes read the register as
+ * given, as hardware would: the vblank interrupt has been acknowledged by then.
+ * Every other branch is unchanged.
+ *
+ * Bits, from the code: 0x1000 -> sub_00106BF0, 0x100000 -> set [regs+0x9100]=1,
+ * 0x1000000 (vblank) -> sub_00106720, 0x100 -> sub_00106CE0, 0x10000 -> re-arm
+ * [regs+0x8100] if bit 0 is set. Everything but 0x1000 gates the last four.
+ *
+ * Registers: ebx/esi/edi/ebp are saved and restored by the original and used here
+ * only as C locals; the callees preserve g_ebx/g_esi/g_edi themselves. Arguments
+ * to the thiscall handlers go in ecx, with a return address pushed as the
+ * lifted callees expect.
+ */
+void sub_00106E60(void)
+{
+    uint32_t ctx  = MEM32(esp + 8);          /* the DPC's DeferredContext */
+    uint32_t regs = MEM32(ctx);              /* NV2A register base */
+    uint32_t more;                           /* edi in the original */
+    int first = 1;
+
+    do {
+        uint32_t pending = MEM32(regs + 0x100);      /* esi */
+        if (first) {
+            pending |= 0x1000000u;                   /* VBLANK: see above */
+            first = 0;
+        }
+        more = 0;
+
+        if (pending & 0x1000) {
+            ecx = ctx;
+            PUSH32(esp, 0x00106E87u); RECOMP_ABI_CALL(0x00106BF0u, sub_00106BF0);
+            more = eax;
+        }
+        if (pending & 0xFFFFEFFFu) {
+            if (pending & 0x100000) {
+                MEM32(regs + 0x9100) = 1;
+                more |= MEM32(regs + 0x9100);
+            }
+            if (pending & 0x1000000) {
+                ecx = ctx;
+                PUSH32(esp, 0x00106EB8u); RECOMP_ABI_CALL(0x00106720u, sub_00106720);
+                more |= eax;
+            }
+            if (pending & 0x100) {
+                ecx = ctx;
+                PUSH32(esp, 0x00106EC9u); RECOMP_ABI_CALL(0x00106CE0u, sub_00106CE0);
+                more |= eax;
+            }
+            if (pending & 0x10000) {
+                uint32_t r = MEM32(ctx);
+                if (MEM8(r + 0x8100) & 1)
+                    MEM32(r + 0x8100) = 1;
+            }
+        }
+    } while (more);
+
+    eax = MEM32(ctx + 0xB4);
+    MEM32(ctx + 0xA4) = more;                /* 0 here: the loop only ends on 0 */
+    MEM32(regs + 0x140) = eax;               /* PMC_INTR_EN_0 restored */
+    esp += 20;                               /* ret 16 */
+}

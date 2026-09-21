@@ -626,6 +626,17 @@ Report: `step4_seed_report.md` in the session scratch folder (with `seed_table.t
 - **Options (none tried):** (a) a hand-written replacement for `sub_00106E60` in `twoc/src/recomp_manual.c` that runs the vblank part and the `[ctx+0x1C8]` callback directly; (b) the same for `sub_00106720` only; (c) call the 0x39910 callback from a hook on the tick, which is the least faithful.
 - **Audit caveat:** heuristic. It finds pointer-taken starts, not starts reached only by computed addresses. The disassembler leaves 121 gaps of 48 bytes or more in `.text`, not all of them code, and those were not audited further.
 
+### 18.7 Step 5: hand-written D3D DPC. Past the splash: first new screen.
+
+Report: `step5_dpc_report.md` in the session scratch folder. Change in `twoc/src/recomp_manual.c` only.
+
+- **No documented switch exists for the ack thread.** I checked every `RECOMP_*` environment variable in the runtime and the docs. The thread starts unconditionally whenever the NV2A aperture exists (`xbox_Nv2aAckStart`, called from `xbox_memory_layout.c`). Its register table and stop flag are static, and nothing in the header exposes them. `RECOMP_VBLANK` only enables the tick that sets the pending bits.
+- **The fix (option a):** a hand-written `sub_00106E60` (the D3D interrupt DPC) in `recomp_manual.c`, written from the disassembly. It keeps every branch. The one change: on the first pass of each DPC invocation the pending mask is OR-ed with 0x1000000 (vblank), because the ISR is raised only by the tick and only for a vblank. Later passes read PMC_INTR_0 as given. `recomp_manual.c` now defines `RECOMP_GENERATED_CODE` and includes `recomp/gen/recomp_funcs.h`. The old local `g_eax` and other declarations were removed (the local `g_eax` lacked `RECOMP_TLS`). Re-lifted with the existing `lift.ps1` (`--exclude-manual`): 4,659 of 4,662 lifted, 0 failed. The 3 skipped are the two data stubs and this function.
+- **Result of `RECOMP_VBLANK=1 RECOMP_PB_EXEC=1 RECOMP_PB_SCAN=1` (25 s watchdog):** `[0x1BABB0]` now counts (0x244 at the watchdog). The game leaves the splash and loads the pause, hub and title levels, particles and cubemaps, `titles.dat`, then `levels\b\logos\logos.nux`, `logos1.cut` and `logos2.cut`, which is the engine's logo sequence. It is still running at 25 s (the kernel-call count is 74k, the vblank ISR and DPC keep firing, and the main thread is in `KeDelayExecutionThread`).
+- **New screen:** the last executor dump (`d009`) is a full-screen blocky green gradient, bright at the top left, with no text. It looks like a low-resolution or badly filtered background quad, but I haven't identified the scene. The `RECOMP_FB_WINDOW` snapshot at about 10 s is black.
+- **Executor:** 3,021 draws, 6,654 triangles, 286 batches skipped as not screen-space, and **689,147 unhandled methods (365 distinct)**, up from 13,820 (314) at the splash. This is the likely reason the picture isn't recognisable. Only the two CRT memcpy ICALL failures remain, and there is no crash.
+- **Still not done:** the memcpy workaround (18.3). `sub_00106720` has an `in al, dx` (port 0x80C0) that the lifter emits as a no-op. Run longer than 25 s to see later screens.
+
 ---
 
 ## Appendix: links
