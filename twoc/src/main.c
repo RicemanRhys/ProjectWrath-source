@@ -382,6 +382,15 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance,
      * does nothing while appearing to be set. */
     xbox_WatchdogStart();
 
+    /* GPU completion fence. The statically linked D3D's fence wait
+     * (sub_001034D0) spins until *MEM32(dev + 0x34) reaches the fence value,
+     * where dev = MEM32(0x0010EBF0) is the D3D device, dev + 0x30 is the
+     * software PUT and dev + 0x34 points at the GPU's GET. Nothing here
+     * advances that, so the first swap hung forever. The runtime's poll thread
+     * copies PUT into *GET once the chain becomes valid. */
+    if (xbox_Nv2aMirrorFence(0x0010EBF0u, 0x30u, 0x34u) != 0)
+        fprintf(stderr, "[BOOT] fence mirror table full\n");
+
     /* Step 7: Call the recompiled entry point */
     printf("\nStarting game...\n");
     fflush(stdout);

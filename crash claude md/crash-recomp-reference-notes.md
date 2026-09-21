@@ -537,6 +537,61 @@ The docs offer two routes for a library that is statically linked into the XBE: 
 
 ---
 
+## 17. First run of `crash_twoc.exe` (Sep 22, 2026)
+
+Full report: `report.md` in the session scratch folder (not in the repo). Nothing was fixed; no source, build or generated file changed.
+
+- **Command:** from the repo root, `RECOMP_WATCHDOG_SECS=25 RECOMP_FB_WINDOW=1 RECOMP_FB_DUMP=<file>.bmp`, under `timeout 40`. A second diagnostic run added `RECOMP_KERNEL_LOG_BUDGET=2000000` (the default budget of 200 kernel calls hides everything after early init) and `RECOMP_PEEK`. The dump is a BMP, not a PNG, and the venv has no Pillow.
+- **Result: a hang, not a crash.** The watchdog fired at 25 s (exit code 3). No access violation. The game got through XAPI/CRT startup, D3D and DSOUND init, save-data probes, and loaded `sfx\generic\genericsfx.dat` and `gfx\copyr1.raw`. It made 3,629 kernel calls, then none: the ICALL total stopped moving (a CPU spin, not slowness).
+- **No framebuffer dump:** the game never called `AvSetDisplayMode` (ordinal 3), so the window never opened. Nothing has been drawn.
+- **Hang cause (inferred from disassembly, not yet verified by a fix):** a D3D library fence wait, `sub_001034D0`, reached through `sub_00100C40` (swap/present-like) -> `sub_00100C00` -> `sub_001003A0` -> `sub_001037A0`. It spins until `*[dev+0x34]` reaches the fence, with `dev = [0x0010EBF0]`, `dev+0x30` = PUT and `dev+0x34` = pointer to GET. Nothing advances it. The runtime has `xbox_Nv2aMirrorFence(device_ptr_va, put_off, get_ptr_off)` for exactly this, and `twoc/src/main.c` doesn't register it. Candidate: `xbox_Nv2aMirrorFence(0x0010EBF0, 0x30, 0x34)`.
+- **Bug found: CRT memcpy drops some copies.** `sub_000F5DD0` (0xF5DD0..0xF606A) has two `jmp [reg*4+table]` instructions the lifter didn't turn into switches (0xF5E1D and 0xF5E24; the second indexes with a negative `ecx` and reads the table at 0xF5F18). They were lifted as `RECOMP_ITAIL`, the targets are mid-function labels, the indirect call fails, and the copy is skipped. Seen as `[ICALL] Failed to resolve VA` at 0xF5F30, 0xF606C, 0xF60A7, 0xF60D8. Fix is in the lifter (`xboxrecomp/tools/`, needs agreement) or a hand-written memcpy in `twoc/src/recomp_manual.c`.
+- **Correction to section 15.3:** the `sub_0014FF0C` stub (recorded as 0x14FF0C..0x153708) runs 0x308 bytes into the XPP section (starts 0x153400) and covers real code at 0x153600 (looks like XPP device-table init). Failed calls to 0x153600 and 0x153EE5 (an undetected function start) follow from it. XPP init therefore doesn't run, so no input; the planned `xbox_input` replacement (section 15.1) sidesteps it.
+- **Other observations:** `NtFreeVirtualMemory failed err=87` with garbage 64-bit-looking bases (`kernel_memory.c:306`, runtime side, inferred cause: 64-bit read of a 32-bit guest pointer). The runtime writes `xbox_kernel.log` into the working directory and it isn't gitignored yet. At the hang, `[0x4F2540]=640`, `[0x4F2544]=480` and `[0x945284]=0` (no widescreen/480p flag bits), which answers part of the open check in section 14.9.
+- **Proposed order:** (1) register the fence mirror and re-run; (2) try `RECOMP_PB_EXEC=1` to see whether the toolkit's push-buffer executor produces a first image, which decides whether the API-entry-point D3D plan in section 15.1 stays; (3) work around or fix memcpy; (4) XPP later.
+
+---
+
+## 18. Bring-up log: steps 1 and 2 (Sep 22, 2026)
+
+Reports live in the session scratch folder (`step1_report.md`, and so on), not in the repo. Rule for this section: fixes stay in `twoc/`. Nothing in `xboxrecomp/` is changed and nothing is raised upstream.
+
+### 18.1 Step 1: fence mirror. Worked.
+
+- **Change:** `twoc/src/main.c` now calls `xbox_Nv2aMirrorFence(0x0010EBF0, 0x30, 0x34)` before the guest entry point.
+- **Result:** the section 17 hang is gone. Kernel calls went from 3,629 (stalled) to 17,782 in 25 s, and the first swap completes. `AvSetDisplayMode` is now reached and the framebuffer window opens (640x480). The game loads `levels\b\pause`, `levels\b\hub` (`.nux`, `.ter`), `stuff\xboxmods01.nus`, `levels\b\titles\title.nux`, `stuff\font.nux` and `memoryfiles.dat`, and NV2A USER PUT advances to 0x14F60. The section 17 diagnosis is confirmed by this.
+- **No pixels yet:** the dump (about 10 s in) is entirely black. Expected, since nothing executes the push buffer without `RECOMP_PB_EXEC`.
+- **The watchdog is a fixed timer:** "no exit after 25s" only means the game was still running.
+
+### 18.2 Lifter gap: jump tables with a negative index (recorded, not fixed)
+
+The lifter turns some `jmp [reg*4 + table]` into a `switch` but not these two, in the CRT memcpy `sub_000F5DD0`. They are emitted as `RECOMP_ITAIL(MEM32(...))`, which needs a function entry, so the mid-function targets fail and the copy is skipped.
+
+Minimal repro from `xboxrecomp/` after a lift:
+
+```
+000F5E13: 83 e9 04               sub ecx, 4
+000F5E16: 72 0c                  jb 0xf5e24
+...
+000F5E1D: ff 24 85 30 5e 0f 00   jmp dword ptr [eax*4 + 0xf5e30]   ; not recognised
+000F5E24: ff 24 8d 28 5f 0f 00   jmp dword ptr [ecx*4 + 0xf5f28]   ; not recognised
+000F5E2C: ff 24 8d ac 5e 0f 00   jmp dword ptr [ecx*4 + 0xf5eac]   ; recognised (8 entries)
+```
+
+- Table data at 0xF5F18 (4 entries): `F5F28 F5F30 F5F3C F5F50`, used by other jumps as `[edx*4+0xF5F18]`, which the lifter does recognise.
+- The 0xF5E24 jump uses base 0xF5F28 with `ecx` in -4..-1 after `sub ecx,4` / `jb`. The table ends at the base, so entries sit at negative offsets. This is probably why detection fails (inferred).
+- The 0xF5E1D jump uses base 0xF5E30 with `eax = edi & 3`. Entry 0 (`[0xF5E30]` = `0x90000F5E`) is not a code address, and entries 1 to 3 (`F5E40 F5E6C F5E90`) are. Since the `and eax,3` result is presumably never 0 on that path, the lifter may be rejecting the table for its junk first entry (inferred).
+- **Symptom:** `grep -n "RECOMP_ITAIL(MEM32(ecx \* 4 + 0xF5F28))" twoc/src/recomp/gen/recomp_0002.c` finds it. The run shows `[ICALL] Failed to resolve VA 0x000F5F30`, `0x000F606C`, `0x000F60A7` or `0x000F60D8`, depending on the copy size.
+- **Workaround plan (step 3, in `twoc/` only):** a hand-written memcpy in `twoc/src/recomp_manual.c`, via `--exclude-manual`, then re-lift.
+
+### 18.3 Runtime issues seen, recorded, not fixed
+
+- **D: `NtFreeVirtualMemory` failures** (`xboxrecomp/src/kernel/kernel_memory.c:306`): 51 warnings in the step 1 run (`err=87`, and one `err=487`). Bases such as `0x00F7FAB001ED2000` look like two adjacent 32-bit guest words read as one 64-bit pointer (inferred). Effect: CRT heap frees fail (a leak).
+- **Init noise in `xbox_kernel.log`:** `Unresolved kernel ordinal 0` x231 and a warning "232 kernel imports are unresolved" (yet the bridge reports 113/113 resolved). Not investigated. `AvSendTVEncoderOption: unknown option 0x0F`.
+- `xbox_kernel.log` is written into the working directory. It is now in `.gitignore`.
+
+---
+
 ## Appendix: links
 
 **Sent by the user:**

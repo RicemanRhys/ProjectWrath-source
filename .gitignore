@@ -33,6 +33,9 @@ __pycache__/
 *.pyc
 .venv/
 
+# Runtime log written into the working directory
+xbox_kernel.log
+
 # IDE / OS
 .vs/
 .vscode/
