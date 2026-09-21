@@ -1,0 +1,210 @@
+[
+ {
+  "start": "0x0002B880",
+  "note": "pointer-only function start (see notes section 18.6)"
+ },
+ {
+  "start": "0x0002B950",
+  "note": "pointer-only function start (see notes section 18.6)"
+ },
+ {
+  "start": "0x0002BF30",
+  "note": "thread proc: CreateThread at 0x2C03C"
+ },
+ {
+  "start": "0x00031E20",
+  "note": "pointer-only function start (see notes section 18.6)"
+ },
+ {
+  "start": "0x00031FD0",
+  "note": "pointer-only function start (see notes section 18.6)"
+ },
+ {
+  "start": "0x000321B0",
+  "note": "pointer-only function start (see notes section 18.6)"
+ },
+ {
+  "start": "0x000323E0",
+  "note": "pointer-only function start (see notes section 18.6)"
+ },
+ {
+  "start": "0x00032600",
+  "note": "pointer-only function start (see notes section 18.6)"
+ },
+ {
+  "start": "0x00032740",
+  "note": "pointer-only function start (see notes section 18.6)"
+ },
+ {
+  "start": "0x00032890",
+  "note": "pointer-only function start (see notes section 18.6)"
+ },
+ {
+  "start": "0x000329E0",
+  "note": "pointer-only function start (see notes section 18.6)"
+ },
+ {
+  "start": "0x00033A90",
+  "note": "pointer-only function start (see notes section 18.6)"
+ },
+ {
+  "start": "0x00033E20",
+  "note": "pointer-only function start (see notes section 18.6)"
+ },
+ {
+  "start": "0x0003F3A0",
+  "note": "pointer-only function start (see notes section 18.6)"
+ },
+ {
+  "start": "0x0003F4E0",
+  "note": "pointer-only function start (see notes section 18.6)"
+ },
+ {
+  "start": "0x00043850",
+  "note": "pointer-only function start (see notes section 18.6)"
+ },
+ {
+  "start": "0x00044B50",
+  "note": "pointer-only function start (see notes section 18.6)"
+ },
+ {
+  "start": "0x00044CC0",
+  "note": "pointer-only function start (see notes section 18.6)"
+ },
+ {
+  "start": "0x000458D0",
+  "note": "pointer-only function start (see notes section 18.6)"
+ },
+ {
+  "start": "0x00045970",
+  "note": "pointer-only function start (see notes section 18.6)"
+ },
+ {
+  "start": "0x000479B0",
+  "note": "pointer-only function start (see notes section 18.6)"
+ },
+ {
+  "start": "0x00047A60",
+  "note": "pointer-only function start (see notes section 18.6)"
+ },
+ {
+  "start": "0x00047CA0",
+  "note": "pointer-only function start (see notes section 18.6)"
+ },
+ {
+  "start": "0x000490B0",
+  "note": "pointer-only function start (see notes section 18.6)"
+ },
+ {
+  "start": "0x00049270",
+  "note": "pointer-only function start (see notes section 18.6)"
+ },
+ {
+  "start": "0x000494F0",
+  "note": "pointer-only function start (see notes section 18.6)"
+ },
+ {
+  "start": "0x00049690",
+  "note": "pointer-only function start (see notes section 18.6)"
+ },
+ {
+  "start": "0x000497F0",
+  "note": "pointer-only function start (see notes section 18.6)"
+ },
+ {
+  "start": "0x00049950",
+  "note": "pointer-only function start (see notes section 18.6)"
+ },
+ {
+  "start": "0x0004D840",
+  "note": "pointer-only function start (see notes section 18.6)"
+ },
+ {
+  "start": "0x00050660",
+  "note": "pointer-only function start (see notes section 18.6)"
+ },
+ {
+  "start": "0x00050980",
+  "note": "pointer-only function start (see notes section 18.6)"
+ },
+ {
+  "start": "0x000585F0",
+  "note": "pointer-only function start (see notes section 18.6)"
+ },
+ {
+  "start": "0x000595A0",
+  "note": "pointer-only function start (see notes section 18.6)"
+ },
+ {
+  "start": "0x000596F0",
+  "note": "pointer-only function start (see notes section 18.6)"
+ },
+ {
+  "start": "0x000598D0",
+  "note": "pointer-only function start (see notes section 18.6)"
+ },
+ {
+  "start": "0x00059E60",
+  "note": "pointer-only function start (see notes section 18.6)"
+ },
+ {
+  "start": "0x0005A070",
+  "note": "pointer-only function start (see notes section 18.6)"
+ },
+ {
+  "start": "0x0005A3C0",
+  "note": "pointer-only function start (see notes section 18.6)"
+ },
+ {
+  "start": "0x0005A890",
+  "note": "pointer-only function start (see notes section 18.6)"
+ },
+ {
+  "start": "0x0005AA60",
+  "note": "pointer-only function start (see notes section 18.6)"
+ },
+ {
+  "start": "0x0005AD30",
+  "note": "pointer-only function start (see notes section 18.6)"
+ },
+ {
+  "start": "0x0005B520",
+  "note": "pointer-only function start (see notes section 18.6)"
+ },
+ {
+  "start": "0x0005B740",
+  "note": "pointer-only function start (see notes section 18.6)"
+ },
+ {
+  "start": "0x0005C140",
+  "note": "pointer-only function start (see notes section 18.6)"
+ },
+ {
+  "start": "0x0005C6F0",
+  "note": "pointer-only function start (see notes section 18.6)"
+ },
+ {
+  "start": "0x0005D660",
+  "note": "pointer-only function start (see notes section 18.6)"
+ },
+ {
+  "start": "0x0005DA30",
+  "note": "thread proc: CreateThread at 0xB9AE2"
+ },
+ {
+  "start": "0x00086BC0",
+  "note": "thread proc: CreateThread at 0x87962"
+ },
+ {
+  "start": "0x00106580",
+  "note": "D3D vblank ISR: KeInitializeInterrupt at 0x10756C"
+ },
+ {
+  "start": "0x00153600",
+  "note": "XPP function 0x153600..0x153708, swallowed by the bogus sub_0014FF0C; target of failing ICALL"
+ },
+ {
+  "start": "0x00153EE5",
+  "note": "XPP function (KeInitializeTimerEx at 0x153EFD); target of failing ICALL at run time"
+ }
+]
