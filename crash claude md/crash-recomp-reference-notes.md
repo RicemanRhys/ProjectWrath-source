@@ -561,9 +561,17 @@ Reports live in the session scratch folder (`step1_report.md`, and so on), not i
 - **Change:** `twoc/src/main.c` now calls `xbox_Nv2aMirrorFence(0x0010EBF0, 0x30, 0x34)` before the guest entry point.
 - **Result:** the section 17 hang is gone. Kernel calls went from 3,629 (stalled) to 17,782 in 25 s, and the first swap completes. `AvSetDisplayMode` is now reached and the framebuffer window opens (640x480). The game loads `levels\b\pause`, `levels\b\hub` (`.nux`, `.ter`), `stuff\xboxmods01.nus`, `levels\b\titles\title.nux`, `stuff\font.nux` and `memoryfiles.dat`, and NV2A USER PUT advances to 0x14F60. The section 17 diagnosis is confirmed by this.
 - **No pixels yet:** the dump (about 10 s in) is entirely black. Expected, since nothing executes the push buffer without `RECOMP_PB_EXEC`.
-- **The watchdog is a fixed timer:** "no exit after 25s" only means the game was still running.
+- **Correction:** the game was not still loading at 25 s. The kernel-call log stops at #17782 (about 10 s in) and the ICALL total at the watchdog (37,498) is unchanged in step 2. The fence hang was fixed, and the game then stalled in a second wait (18.2). The watchdog is a fixed timer, so "no exit after Ns" alone proves nothing.
 
-### 18.2 Lifter gap: jump tables with a negative index (recorded, not fixed)
+### 18.2 Step 2: push-buffer executor (`RECOMP_PB_EXEC=1 RECOMP_PB_SCAN=1`). First pixels. No code change.
+
+- **Result:** the framebuffer shows the **Universal Interactive Studios splash** (from `gfx\copyr1.raw`), clean at 640x480, in the timed dump and in 11 more dumps the executor writes. The recompiled D3D library drives the toolkit's NV2A push-buffer executor, so this route works so far.
+- **Executor stats:** 16 clears, 30 draws, 90 triangles, about 13.8 M pixels written. **13,820 unhandled methods (314 distinct)**, which will limit later scenes. The push-buffer survey shows 363 distinct (subchannel, method) pairs and 0 unrecognised words.
+- **The game then stops on the splash** (same ICALL total 37,498, same esp, last file `memoryfiles.dat`, with or without the executor). It is in `sub_000875A0` (splash routine, called from `sub_00087BF0` at 0x87CF0), busy-waiting at 0x87782 for `[0x1BABB0]` to reach 0x78 (120 ticks, about 2 s at 60 Hz).
+- **What advances it (inferred from code, not yet tested):** `sub_00039910` is `inc [0x1BABB0]; ret`, registered at 0x3B0FA with `push 0x39910`. That is the D3D vertical-blank callback. The D3D library connected GPU interrupt vector 3 (ISR 0x106580), but nothing raises vblank. The runtime has an opt-in, `RECOMP_VBLANK` (`kernel_bridge.c`, `kernel_vblank_tick`), which sets the PCRTC vblank bit and calls the vector-3 ISR every 16 ms.
+- **Next:** test `RECOMP_VBLANK=1 RECOMP_PB_EXEC=1`, then the memcpy workaround (18.3).
+
+### 18.3 Lifter gap: jump tables with a negative index (recorded, not fixed)
 
 The lifter turns some `jmp [reg*4 + table]` into a `switch` but not these two, in the CRT memcpy `sub_000F5DD0`. They are emitted as `RECOMP_ITAIL(MEM32(...))`, which needs a function entry, so the mid-function targets fail and the copy is skipped.
 
@@ -584,7 +592,7 @@ Minimal repro from `xboxrecomp/` after a lift:
 - **Symptom:** `grep -n "RECOMP_ITAIL(MEM32(ecx \* 4 + 0xF5F28))" twoc/src/recomp/gen/recomp_0002.c` finds it. The run shows `[ICALL] Failed to resolve VA 0x000F5F30`, `0x000F606C`, `0x000F60A7` or `0x000F60D8`, depending on the copy size.
 - **Workaround plan (step 3, in `twoc/` only):** a hand-written memcpy in `twoc/src/recomp_manual.c`, via `--exclude-manual`, then re-lift.
 
-### 18.3 Runtime issues seen, recorded, not fixed
+### 18.4 Runtime issues seen, recorded, not fixed
 
 - **D: `NtFreeVirtualMemory` failures** (`xboxrecomp/src/kernel/kernel_memory.c:306`): 51 warnings in the step 1 run (`err=87`, and one `err=487`). Bases such as `0x00F7FAB001ED2000` look like two adjacent 32-bit guest words read as one 64-bit pointer (inferred). Effect: CRT heap frees fail (a leak).
 - **Init noise in `xbox_kernel.log`:** `Unresolved kernel ordinal 0` x231 and a warning "232 kernel imports are unresolved" (yet the bridge reports 113/113 resolved). Not investigated. `AvSendTVEncoderOption: unknown option 0x0F`.
