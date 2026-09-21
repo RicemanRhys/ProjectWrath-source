@@ -43,3 +43,7 @@ xbox_kernel.log
 *.user
 Thumbs.db
 .DS_Store
+
+# twoc/run_twoc.ps1 logs and framebuffer dumps
+run_twoc*.log
+dumps/

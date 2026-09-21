@@ -20,6 +20,7 @@
 
 #include <stdio.h>
 #include <stdint.h>
+#include <string.h>
 
 /* The generated-code headers: register aliases (eax, ecx, esp ...), MEM32/MEM8,
  * PUSH32, RECOMP_ABI_CALL and the declarations of every lifted function. The
@@ -260,4 +261,34 @@ void sub_00106E60(void)
     MEM32(ctx + 0xA4) = more;                /* 0 here: the loop only ends on 0 */
     MEM32(regs + 0x140) = eax;               /* PMC_INTR_EN_0 restored */
     esp += 20;                               /* ret 16 */
+}
+
+/* ── CRT memcpy/memmove ────────────────────────────────────── */
+
+/*
+ * sub_000F5DD0 (0xF5DD0..0xF606A) is the CRT's memmove, which the game also uses
+ * as memcpy: `void *memmove(void *dst, const void *src, size_t n)`, cdecl, returns
+ * dst. It picks a copy strategy from the low bits of dst and the size and jumps
+ * through nine small tables (0xF5E30, 0xF5F18, 0xF5F28, 0xF5FB8, 0xF6060,
+ * 0xF60B0 ...) to per-remainder tails that sit in the middle of the function.
+ * The lifter turned two of those jumps (0xF5E1D and 0xF5E24, the second indexing
+ * the table backwards with a negative ecx) into RECOMP_ITAIL indirect tail calls,
+ * and the tails are not function entries, so those copies were skipped: the call
+ * failed to resolve 0xF5F30, 0xF606C, 0xF60A7 or 0xF60D8 and returned without
+ * copying, silently corrupting whatever was being loaded.
+ *
+ * The guest address space is one linear host mapping (XBOX_PTR), so the host
+ * memmove is correct for every size, alignment and overlap. Register effects
+ * match the original: edi and esi are restored, eax = dst, ecx/edx are volatile.
+ */
+void sub_000F5DD0(void)
+{
+    uint32_t dst = MEM32(esp + 4);
+    uint32_t src = MEM32(esp + 8);
+    uint32_t n   = MEM32(esp + 12);
+
+    if (n)
+        memmove((void *)XBOX_PTR(dst), (const void *)XBOX_PTR(src), n);
+    eax = dst;
+    esp += 4;                                /* ret (cdecl: the caller pops the args) */
 }
