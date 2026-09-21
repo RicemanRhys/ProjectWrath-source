@@ -1,0 +1,42 @@
+# Game files: extracted disc contents and disc images (never commit)
+game_files/
+*.iso
+*.xiso
+# Any XBE, including patched copies (keep private)
+*.xbe
+
+# Upstream toolkit: a separate clone, pinned by commit in the notes
+xboxrecomp/
+
+# Generated recomp output (regenerate from the XBE with the pipeline)
+**/src/recomp/gen/
+**/tools/*/output/
+*_analysis.json
+
+# Build output
+build/
+out/
+bin/
+*.obj
+*.o
+*.lib
+*.exe
+*.dll
+*.pdb
+*.ilk
+*.exp
+CMakeCache.txt
+CMakeFiles/
+
+# Python
+__pycache__/
+*.pyc
+.venv/
+
+# IDE / OS
+.vs/
+.vscode/
+.idea/
+*.user
+Thumbs.db
+.DS_Store

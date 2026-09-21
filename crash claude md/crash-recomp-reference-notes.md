@@ -1,0 +1,581 @@
+# Recomp / Decomp / PC-Port Reference Notes
+
+Compiled Sep 21, 2026 from a research chat. Facts come from READMEs, wiki pages and search snippets read that day. Star counts and project status change quickly, so re-check before relying on them. Anything marked **(unverified)** is a link I never opened.
+
+---
+
+## 1. The Crash project at a glance
+
+- **Goal:** a native Windows PC version of *Crash Bandicoot: The Wrath of Cortex* (the **Xbox** version) using static recompilation, worked on together with Claude Code.
+- **Wish list:** stable 60fps (xemu currently gives a choppy 30-40fps), 16:9 widescreen, surround sound, mouse look.
+- **Idea to try first:** a 16:9 patch tested in xemu before the recomp runs, mainly to find out whether the game culls geometry at the sides.
+- **Hardware (as stated):** RTX 4080 Super, Ryzen 7 7800X.
+- **Have:** own ISO of the game: **NTSC-U (North America)**, confirmed from the XBE header. Details in section 13.
+- **Deliberately not done yet:** the project `CLAUDE.md` (postponed by choice).
+- **Toolkit chosen:** `xboxrecomp` by sp00nznet (original Xbox, x86).
+
+---
+
+## 2. Plan for the first Claude Code session
+
+**Prerequisites (Windows):** Visual Studio 2022 ("Desktop development with C++"), CMake 3.20+, Python 3.10+ with `pip install capstone`, Git, Claude Code.
+
+**Folder layout:**
+```
+crash/
+  xboxrecomp/    (cloned; builds runtime libraries only)
+  twoc/          (your game project, copied from xboxrecomp/templates/new-game)
+  game_files/    (extracted disc contents, gitignored, never committed)
+```
+
+**Extract the ISO:** use `extract-xiso` or `xdvdfs` (the xboxrecomp README also lists an ISO tool of its own). `default.xbe` must sit at the top level of `game_files/`. Keep the ISO itself outside the repo. Confirm it's the Xbox release (PS2 and GameCube releases won't work).
+
+**Milestones, one at a time:**
+1. Check prerequisites, build the runtime libraries, run the tests (`pytest tools/`).
+2. Parse the XBE and report: engine, XDK version, sections, function count, threading, so we can judge how hard the target is. Also note the game's frame rate/timing method.
+3. Optional Ghidra naming pass, before lifting, so generated C has real names.
+4. Lift to C, scaffold the game project from the template, get it to compile.
+5. Boot, then loop: crash, trace, fix, repeat.
+6. Then graphics debugging, then features (60fps, 16:9, surround, mouse look).
+
+**First prompt to paste into Claude Code** (from `crash/`):
+```
+I want to statically recompile the original Xbox version of Crash Bandicoot:
+The Wrath of Cortex into a native Windows exe, using the xboxrecomp toolkit in
+./xboxrecomp. Goals: playable, stable 60fps, widescreen (16:9), surround sound,
+mouse look. I own the disc; the extracted files are in ./game_files (never
+commit them).
+
+Before running anything, read xboxrecomp/README.md and the docs/ folder in full,
+especially GETTING_STARTED.md, the decompilation guide, and the technical notes
+on indirect calls, the register model, memory layout, D3D8->D3D11 translation
+and NV2A shader translation.
+
+Then: (1) check prerequisites (MSVC 2022, CMake, Python + capstone) and tell me
+what's missing, (2) build the runtime libraries and run the tests, (3) parse
+the XBE and report engine, XDK version, sections, function count, threading and
+frame timing so we can judge how hard this target is. Stop there and write what
+you learned into a CLAUDE.md before continuing.
+```
+(Earlier versions of this prompt named specific doc files that I had not verified exist. This version tells Claude Code to read everything in `docs/` instead.)
+
+**Working habits that pay off:**
+- Every pipeline step goes in a script, so regenerating the lifted C is one command.
+- Commit after each working state. Keep the generated C out of git (millions of lines).
+- Grep the generated code instead of reading it wholesale, unless you don't mind the usage.
+- Have Claude Code add a "dump framebuffer to PNG and exit after N seconds" mode, so it can see its own output.
+- Learn RenderDoc for graphics debugging.
+- Record what's learned about the engine in `CLAUDE.md` as you go.
+
+---
+
+## 3. Facts about the game
+
+- Developer: Traveller's Tales. Publisher: Universal Interactive. Released PS2 Oct 2001, **Xbox Apr 2002**, GameCube Sep 2002 (the GameCube port was by Eurocom).
+- Xbox version: higher-quality textures, better lighting and fur, reduced load times vs PS2.
+- **Video:** Xbox supports 480p, but **not 16:9, 720p or 1080i** (ConsoleMods wiki). TCRF also says the Xbox version is the only one natively capable of 480p.
+- **Audio:** MobyGames lists Xbox sound as **Dolby Digital**. IGN's Xbox review called the surround mix "sloppy", and IGN's GameCube review lamented the lack of Dolby Pro Logic there. I haven't confirmed the format in-game.
+- Reviewers noted fixed camera angles and "sluggish" controls.
+- The PAL GameCube version reportedly has unused 60Hz/widescreen toggle code (Xbox fandom wiki).
+- PCSX2's wiki lists a widescreen patch for the PS2 version.
+
+---
+
+## 4. Wish-list analysis
+
+### 60fps
+- xemu emulates the whole console, so it is expensive. A recomp translates code ahead of time, so the CPU cost mostly disappears. A 2003 Xbox game is light work for the hardware above, so smoothness should improve a lot (expectation, not a measurement).
+- The user believes the game can reach 60fps on real hardware. If so, a working recomp should just run at native speed. Verify with frame-time logging: some games mix 60 and 30 in busy scenes, or use a limiter.
+- If the game is really 30fps or has timing-locked logic, options are (a) patching the frame wait, as the Simpsons recomp did with an instruction-level patch, and (b) **visual interpolation with the logic left at the original rate**, as TriAevum and WiiCompiled do (experimental, may show artifacts).
+- Other stutter sources: shader-compile hitches (can precompile shaders), frame pacing/vsync bugs, and translation-layer performance bugs.
+
+### 16:9
+- Native 4:3 only, so this is a new feature. Widening means changing projection (aspect/FOV), UI placement, and possibly culling.
+- **Culled at runtime:** fixable. Patch or disable the culling check in a hook and the geometry draws.
+- **Never built or stripped in level data:** not restorable automatically. Options are widening modestly, skyboxes/fog fillers, or hand-made geometry after reverse-engineering the level format.
+- **Chunk streaming / baked visibility lists:** may need widened loading ranges or overridden lists.
+- HUD/menus need repositioning. Pre-rendered videos would stay 4:3 (pillarboxed).
+- **Quick test:** run with culling disabled and look at the level edges.
+- **xemu pre-test idea:** patch a copy of `default.xbe` (aspect ratio, FOV, culling) and run it in xemu. The addresses found carry over to the recomp. I haven't verified whether xemu has a built-in patch system, so patching the XBE is the reliable route. A flag flip (like OGxHD) won't test culling. Keep patched XBEs private.
+- Finding the right spots needs the same disassembly as the recomp, done in Claude Code on the real file, not from chat.
+
+### Surround sound
+- Likely Dolby Digital (per MobyGames), to be confirmed in the game's audio menu or from the audio libraries the XBE imports.
+- Audio is a separate runtime piece. xboxrecomp's architecture listed a basic Windows audio backend plus an audio-chip emulation layer. True 5.1/7.1 output would need a multichannel-capable backend, so plan to add and test it.
+- The original mix was criticized, and a recomp would reproduce it.
+
+### Mouse look
+- **Easy:** convert mouse movement into right-stick input (Kameo RePowered does this, WASD as the left stick).
+- **Medium:** true mouse look by finding the camera's yaw/pitch and writing to it from a hook.
+- **Caveat:** reviewers describe fixed camera angles, so a free camera may not exist for much of the game. Check once the game runs.
+
+---
+
+## 5. Claude Code and usage notes
+
+- Claude Code (terminal/desktop) is the right tool for build/run/debug loops. Cowork is aimed at general knowledge work, not this.
+- **Usage is shared** across Claude chat, Claude Code and Cowork: a rolling 5-hour window plus a weekly limit. Anthropic doesn't publish fixed prompt counts, and the third-party numbers I found conflicted, so use `/usage` in Claude Code to see where you stand.
+- Opus uses more of the allowance than Sonnet (one source: about 2.5x per token). Default to Sonnet 5, and switch to Opus with `/model` only for hard bugs. Pro's default is Sonnet 5, and the 1M-context option draws extra usage credits on Pro.
+- Ways to stretch it: fresh session per task (`/clear`), a good `CLAUDE.md`, lower effort for mechanical work.
+- Setup that needs no usage: installing prerequisites, cloning, extracting the ISO.
+- `CLAUDE.md` is a plain Markdown file in the project folder that Claude Code reads at the start of every session. `/init` drafts one. Contents planned: goal, layout, build commands (MSVC needs a Developer prompt), rules (never commit game files or generated code), a "what we've learned" section.
+
+---
+
+## 6. Existing work on Crash and Twinsanity (as of my search)
+
+No **Xbox** recomp of either game was found. Only decomp/reverse-engineering work:
+
+| Project | What it is |
+|---|---|
+| `denzi-gh/crashwoc-decomp` | WIP decomp of Wrath of Cortex for **GameCube** (USA Rev 0, GCBE7D). Uses decomp-toolkit, objdiff and a ProDG toolchain. README mentions AI-assisted workflows, including Claude Code. |
+| `calmsacibis995/crash-ps2` | Decomp of the **PS2** version (NTSC-U v1.00). Can't be built yet; mostly stubs. |
+| OpenCrashWOC (Open-Travelers) | Clean-room open-source reimplementation. Only its landing page was seen. |
+| `NeoKesha/OpenSanityNeo` | Twinsanity **Xbox PAL**: a rebuildable x86 disassembly with resolved labels. Glitchy, only some chunks playable, Ghidra project and code-gen script not published yet. |
+| `Smartkin/twinsanity-reversed` | Twinsanity **PS2** reverse-engineering notes and Ghidra data. |
+
+Other Crash items seen in search results (not opened): `wurlyfox/c1` (Crash 1 port to C), `CTR-tools/ctr-native` (Crash Team Racing native port), `ughman/c2c` (Crash 2 in C, old), `Matteo842/CrashBandicoot-Launcher` (Crash 1 PS1 recomp launcher built on RecompOne).
+
+The GameCube version was ported by a different studio, so its decomp is a structural/naming reference, not a drop-in.
+
+---
+
+## 7. Glossary
+
+- **Emulator** (xemu, Xenia, Dolphin): a program that pretends to be the console while you play.
+- **Static recompilation:** translating the game's machine code into C/C++ ahead of time, then compiling a native program.
+- **Runtime:** the stand-ins the recompiled game still needs: OS/kernel, graphics, audio, input.
+- **Decompilation:** hand-rewriting the game's code as readable source. A *matching* decomp compiles back to a byte-identical binary with the original compiler.
+- **Port:** taking source (a decomp) and adapting it to run on a new platform.
+- **XBE / XEX:** executable formats for the original Xbox / Xbox 360. **DOL / REL:** GameCube/Wii executables.
+- **Hook:** a small function that replaces or wraps one game function. **Midasm hook:** an inline patch at one instruction address.
+- **Culling:** skipping objects outside the camera's view.
+- **HLE:** high-level emulation of system services.
+- **objdiff / decomp-toolkit / m2c / decomp.me:** common decomp tools (comparison, splitting, auto-draft C, collaborative matching).
+
+---
+
+## 8. Reference projects by console
+
+### Original Xbox (x86)
+- **xboxrecomp** (sp00nznet): toolkit for recompiling original Xbox games from XBE to native Windows programs. Pipeline: XBE parser (`--json`, output named `<name>_analysis.json`), disassembler (`--text-only`, or `--extra-sections` for XDK library code), library function identification, ABI analysis (don't skip), optional Ghidra naming, then the lift to C (millions of lines). **The repo builds libraries only.** The exe comes from your own game project (template in `templates/new-game`). Runtime libraries cover kernel, D3D8->D3D11, audio, input. Docs cover the register model, indirect calls, memory layout, D3D8 translation and NV2A shaders. It also has a decomp mode that splits the game into per-function assembly. Prerequisites: Windows, VS 2022, CMake, Python + capstone. The README says a first boot will crash, indirect calls are the hardest ~10%, and Burnout 3 took about two weeks to reach rendered tracks (its earlier "playable" claim is being redone). Debug helpers include watchdog/trace environment variables and a framebuffer window. Forks have older READMEs, so use sp00nznet's repo. `https://github.com/sp00nznet/xboxrecomp`
+- **OpenSanityNeo**: see section 6.
+
+### Xbox 360 (PowerPC)
+- **XenonRecomp** (hedge-dev, ~6.5k stars): converts Xbox 360 executables to C++. **Translator only, no runtime.** XenonAnalyse finds jump tables (may need per-game tweaks). Needs Clang 18+. Exceptions unsupported, MMIO unimplemented. Supports hooks and mid-asm hooks. Foundation of Unleashed Recompiled.
+- **XenosRecomp** (hedge-dev): converts Xbox 360 shaders to HLSL.
+- **ReXGlue SDK** (rexglue): recompilation runtime + toolkit, rooted in Xenia code, inspired by XenonRecomp. Early development. Runtime uses a Xenia-derived GPU/kernel emulation layer: the game's CPU code is native but GPU commands are still translated at runtime. Has a wiki with a quickstart. Fork **rexglue-ostentation** (SolarRecomps) adds texture/audio replacement.
+- **The Simpsons Game Recomp** (YesterMester): ReXGlue-based, ~82,000 recompiled functions. Playable on Linux/Steam Deck, Windows first bring-up. Real 60fps needed an instruction-level patch of a hardcoded "wait 2 vblanks". A performance roadmap plans replacing GPU emulation with a native renderer in stages. Installs from the user's own ISO through a launcher. v0.0.4.1 as of Jul 2026.
+- **Naughty Bear ReStuff** (MaxDeadBear): ReXGlue-based, 60fps, randomizer, texture/audio replacement, installs via the Goopie launcher.
+- **reDAHM** (masterspike52): Destroy All Humans! Path of the Furon, ReXGlue-based. No README content on the page I read.
+- **KameoRePowered** (birabittoh): ReXGlue-based, cleanest README. Scripts download the SDK, extract the ISO into `assets/`, build (Title Update and DLC supported), kb/mouse controls. **Hook system:** add a guest address to a config file, implement a C++ function; or a midasm hook for inline patches. Licence note: recompiled output is not redistributable.
+- **Marathon Recompiled** (sonicnext-dev, Sonic '06): XenonRecomp + XenosRecomp, ahead-of-time shader conversion, own runtime. Windows/Linux/macOS. Under development, "not for public use", preserves original bugs. Build: clone with submodules, put your game files in `MarathonRecompLib/private/`.
+- **EdgeOfTimeRecomp** (goliathret, Spider-Man: Edge of Time): ReXGlue + a XenosRecomp fork. Shows no screen yet. ReXGlue's emulated renderer had "significant restrictions", so a custom native renderer (hooking the game's embedded D3DX9) is being built in a private repo. Strict policy against LLM-driven PRs.
+- **Lesson:** getting the CPU code native is the part that works well. The GPU translation is what takes the time.
+
+### PS2 (MIPS)
+- **PS2Recomp** (ran-j): **(unverified)** never opened.
+- PS2 decomps of Crash: see section 6.
+
+### GameCube / Wii (PowerPC)
+- **WiiCompiled** (patchzyy): working static recomp + native port of Mario Kart Wii (PAL `RMCP01`). .NET translator, **aurora** graphics layer on Dawn/WebGPU, custom runtime. Any aspect ratio, high internal res, experimental frame interpolation. Physics verified via ghost replays. Setup translates and compiles on the user's PC (no translated binary shipped). The translator handles DOL/REL generically, but a playable port needs a game-specific runtime (audio, input, GX).
+- **GCRecompiler** (ExpansionPak): archived May 23, 2026, unfinished. Points to another recompiler, GCRecomp (Rust).
+- **Decomp -> port route:** see below.
+- **Twilight Princess:** `zeldaret/tp` is a fully matching GameCube decomp (the repo says it will not produce a port). **Dusklight** (Twilit Realm, formerly Dusk) is the native PC/mobile port built on it, using aurora, released May 2026 after ~5 years.
+- **doldecomp/melee:** WIP matching decomp (US 1.02, `GALE01`), 3,000+ commits. `configure.py` + ninja, objdiff, m2c-based helper, decomp-permuter. Its built DOL can be shifted (add or remove code). Not a port.
+- **melee-pc** (999sian): one-person beta port of Melee built from the decomp on aurora, "same approach as Dusklight". Works for most modes. Missing: online rollback, widescreen camera/HUD, macOS. Its **porting notes are valuable**:
+  - Hard-coded GameCube offsets break because pointers grow to 8 bytes.
+  - Bitfield order, byte order and struct layouts need fixing one by one.
+  - Aurora's `GXEnd` submits a draw, so every `GXBegin` needs one.
+  - GCC-only big-endian struct support is used, and lint tools check struct sizes against the GameCube ABI.
+  - Decompiled game code is **not licensed**. Only the port code is GPL, and the repo isn't redistributable as a whole.
+- **doldecomp/sms** (Super Mario Sunshine): WIP decomp, updated Sep 19, 2026. Supports JPN Rev 0 (GMSJ01); PAL Rev 0 "slightly broken". The US version wasn't listed. No PC port found. (See section 9.)
+
+### Switch (AArch64)
+- **suyu** (suyu-emu; another copy under dougchansan, unopened): Switch emulator plus an AArch64-to-x86-64 recompiler mode, based on Eden (yuzu lineage). Archived Sep 5, 2026 as the final v0.04. 1 star, essentially no community. Legal risk: yuzu-lineage emulators have had trouble with Nintendo. Treat as reference only; I didn't verify that the recompiler mode works.
+
+### 3DS (ARM)
+- **TriAevum** (coccofresco): experimental alpha native port of Ocarina of Time 3D, built on Ship of Harkinian's platform code and Azahar 3DS research. Widescreen framing with adjustable FOV, **60/90Hz visual interpolation with the original 30Hz logic kept**, texture packs, graphics options. The README doesn't say how edge content or culling is handled. Needs your own decrypted EUR copy.
+
+---
+
+## 9. If you do a Super Mario Sunshine (GameCube) project later
+
+- Check which region you own first: the decomp supports JPN Rev 0, and PAL is partly broken.
+- Two routes: (1) finish or contribute to the decomp, then port it Dusklight/melee-pc style; (2) a WiiCompiled-style translator + aurora + a game-specific runtime you write yourself.
+- Decomp ports hit pointer-size and layout bugs (see melee-pc). Recomps keep the original 32-bit memory layout, which avoids that class of bug but doesn't give readable source.
+- Different games need different compilers. Melee and Sunshine use Metrowerks, while the Crash GameCube decomp uses ProDG.
+
+---
+
+## 10. Cross-cutting lessons
+
+- **Frame rate is often hard-coded.** Look for waits and timing-locked logic. Interpolation is a fallback that leaves logic untouched.
+- **Hooks are the modding mechanism** (function hooks and mid-asm hooks): 60fps patches, widescreen, controls.
+- **The GPU is the hardest part.** Even ReXGlue projects hit renderer limits and are building custom renderers or converting shaders ahead of time.
+- **Never redistribute game-derived code:** the generated C, the recompiled output, patched executables, or decompiled source. Ship tools and launchers that build from the user's own disc, the way these projects do. Keep game files and generated code out of git.
+- **Setup tools that translate on the user's machine** (WiiCompiled, Simpsons launcher) are the common pattern.
+- **Read each project's own contribution rules** before opening PRs (AI policies vary).
+- **Errors should be loud:** projects prefer crashes with logs over silent failures.
+- **A matching decomp doesn't need to be 100% complete** before someone starts a port (Melee's FAQ says so), though a complete decomp is a better reference.
+
+---
+
+## 11. Warnings
+
+- **Fake "PC port" repos exist.** Repos like `Zelda-TP-PC-Port` with keyword-stuffed READMEs and "run the installer as Administrator" instructions look like malware bait. The real Twilight Princess projects are `zeldaret/tp` and Twilit Realm's Dusklight. Only take builds from a project's own Releases page. WiiCompiled's README warns the same.
+- Several projects (Marathon, EdgeOfTime, reDAHM) say they're in development and not for public use. Don't trust anyone claiming a finished port.
+- Third-party usage-limit figures are inconsistent. Use `/usage` and Anthropic's support pages.
+
+---
+
+## 12. Open questions
+
+1. ~~What region is the ISO?~~ Answered: NTSC-U, title ID VU-003 (section 13).
+2. Does the game run at 30fps or 60fps on real Xbox hardware? Is its logic timing-locked? *Partly answered (section 14.8): logic is a fixed 60 Hz tick with 1 to 6 catch-up ticks. The real-hardware render rate is still unknown.*
+3. Which audio format does it actually use (Dolby Digital vs Pro Logic)? *Still open: a DOLBY section is linked (section 14.4), but I haven't confirmed it is enabled.*
+4. Is 4:3 geometry culled at runtime, baked into the level data, or both? *Not investigated. What is known about resolution and projection is in section 14.9.*
+5. Are cutscenes engine-rendered or pre-rendered video? *Probably engine-rendered (section 14.5, inferred from `.hgo` intro/outro assets and no video codec linked).*
+6. Does xemu offer a patch/cheat mechanism, or is patching the XBE the route?
+7. How much of the camera is fixed vs free (matters for mouse look)?
+8. Is PS2Recomp relevant to any PS2 project? (never opened)
+
+---
+
+## 13. Our disc and workspace (Sep 21, 2026)
+
+**ISO:** `crash rom/Crash Bandicoot - The Wrath of Cortex (USA).xiso.iso` (975,896,576 bytes, already in xiso form). Kept outside git.
+
+**Extraction:** `xdvdfs unpack` with xdvdfs v0.8.3 (the Windows zip from antangelo/xdvdfs GitHub Releases) into `game_files/`. That gave 2,267 files, 932 MB, with `default.xbe` at the top level.
+
+**XBE certificate (`default.xbe`, 1,777,664 bytes, base 0x10000):**
+
+| Field | Value |
+|---|---|
+| Title | Crash Bandicoot: tWoC |
+| Title ID | `0x56550003` = **VU-003** (VU = Universal Interactive) |
+| Game region flags | `0x00000001` = **North America only (NTSC-U)** |
+| Certificate timestamp | 2002-03-20 18:42:29 UTC (fits the Apr 2002 Xbox release) |
+| Disc number / version | 0 / 1 (probably the original release, not a revision) |
+| Allowed media | `0x2` (DVD-X2) |
+
+**Folder layout of `game_files/`:**
+```
+default.xbe
+Crashdat/                  2,266 files, 931 MB
+  levels/                  481 files, 459 MB
+  sfx/                     683 files, 353 MB (sfx/Music holds the music as .wav)
+  chars/                   959 files, 46 MB
+  stuff/                   37 files, 7.1 MB
+  Gfx/                     48 files, 3.7 MB
+  ats/                     51 files, 110 KB
+  levels.dat, chars.dat, memoryfiles.dat, oldmemoryfiles.dat
+  Universal.bmp, lega2l.bmp
+  mkdat.exe                (a leftover TT build tool, not the game)
+```
+Most common file types: .wav (663), .ani (524), .hgo (252), .bsa (205), .nux (70), .dat, .bmp, .ter, .LGT, .ats. The `.nux`/`.hgo` models match Traveller's Tales' NU engine naming.
+
+**Workspace:**
+- The top folder is a git repo. `.gitignore` excludes `game_files/`, `*.iso`/`*.xiso`, `*.xbe`, `xboxrecomp/`, generated recomp output (`**/src/recomp/gen/`, `**/tools/*/output/`, `*_analysis.json`) and build output.
+- `xboxrecomp/` is a separate clone of sp00nznet/xboxrecomp (branch `main`) at commit **`766ecefcd7fb2a9b344de8ec891f6fe9ea14261b`**, "Release v0.11.0 -- Nothing Said So", dated 2026-09-19. The outer repo ignores it, so record the commit here if it changes.
+- The notes live in `crash claude md/`, not in the top folder.
+
+---
+
+## 14. Toolchain and XBE analysis (Sep 21, 2026)
+
+Milestones 1 and 2 from section 2 are done up to function ID and ABI analysis. **No lifting, no Ghidra yet.** Addresses are Xbox VAs (base 0x10000). Items marked **(inferred)** come from reading disassembly and have not been run or tested.
+
+### 14.1 Toolchain and build
+
+- **Bitness:** the runtime libraries and the game exe are **x64** (xboxrecomp README: "native x86-64 exe"). Only the conformance test oracle is 32-bit, and `python -m tools.conformance` calls `vcvars32.bat` itself. The shell here is already a VS x64 environment (`VSCMD_ARG_TGT_ARCH=x64`). In a fresh shell use "x64 Native Tools Command Prompt for VS 2022" or run `vcvars64.bat`.
+- **Versions:** MSVC 19.44 (VS 2022 Community), CMake 4.4.3, Python 3.13.15. Project venv at `.venv/` (gitignored) with capstone 5.0.9, pytest 9.1.1, plus `pefile` and `numpy`, which `tools/fusion` imports but the README doesn't list.
+- **Runtime libraries:** `cmake -S xboxrecomp -B xboxrecomp/build`, then `cmake --build xboxrecomp/build --config Release`. 0 errors, 68 warnings, 8 libs (`xbox_kernel`, `xbox_d3d8`, `xbox_dsound`, `xbox_input`, `xbox_usb`, `xbox_apu`, `xbox_nv2a`, `xbox_video`). Libraries only, no exe.
+- **Tests (run from `xboxrecomp/`, using `..\.venv\Scripts\python.exe`):** `-m pytest tools/` gives 364 passed, 24 skipped. `-m tools.conformance` gives 5261 vectors and 211 function vectors, 0 mismatches.
+- **The 24 skips (resolved Sep 22, 2026, see section 16):** these tests only look for `clang` or `gcc`, never `cl`. LLVM is now installed and the same run gives 388 passed, 0 skipped.
+
+### 14.2 Commands run (all from `xboxrecomp/`, outputs gitignored)
+
+```
+py -3 -m tools.xbe_parser ..\game_files\default.xbe --json ..\game_files\crash_analysis.json   (instant)
+py -3 -m tools.disasm ..\game_files\default.xbe -v        (13 s; no --text-only, so the library sections are included)
+py -3 -m tools.func_id ..\game_files\default.xbe -v       (1 s)
+py -3 -m tools.abi_analysis ..\game_files\default.xbe -v  (1 s)
+```
+Outputs: `game_files/crash_analysis.json`, `xboxrecomp/tools/{disasm,func_id,abi_analysis}/output/`. Use the venv's python in place of `py -3`. `tools.disasm` rewrites `functions.json` from scratch, so re-run any name merge after it.
+
+### 14.3 XBE facts
+
+| Item | Value |
+|---|---|
+| Title | Crash Bandicoot: tWoC, retail, NA, DVD_X2 |
+| Build date | 2002-03-19 00:26:22 UTC. Debug path `C:\Projects\Crash\Release\Crash.exe` |
+| Image | base 0x10000, size 0x9400E0 (9.25 MB), stack commit 0x10000, heap reserve 0x100000 |
+| Entry point | 0x000EF089. This is the standard XAPI startup stub: it calls CreateThread (0xECC6A) with thread proc 0xEF01A, which calls the game main loop `sub_00087BF0` |
+| Kernel thunks | 0x0015AA60 |
+| XDK | **1.0.4361** for all 8 libs: XAPILIB, D3D8, D3DX8, XGRAPHC, DSOUND, XBOXKRNL, LIBCMT, LIBC. The docs list signature DBs for 4627, 5233, 5455, 5558, 5849 and 5933, so 4361 is not covered |
+
+**Sections (11):**
+
+| Section | VA | VSize | Notes |
+|---|---|---|---|
+| .text | 0x00011000 | 0xEC680 | game code, then XAPI/CRT at about 0xEC800 to 0xFD680 |
+| D3D | 0x000FD680 | 0x11F04 | D3D8 library |
+| D3DX | 0x0010F5A0 | 0x243B8 | D3DX8 library |
+| XGRPH | 0x00133960 | 0x213D | |
+| DSOUND | 0x00135AA0 | 0x1D944 | |
+| XPP | 0x00153400 | 0x7648 | USB peripheral (input) library |
+| .rdata | 0x0015AA60 | 0x119E4 | |
+| .data | 0x0016C460 | 0x7D92F8 | about 8 MB, mostly BSS |
+| DOLBY | 0x00945760 | 0x7180 | 1 detected function, so mostly DSP image or data (inferred) |
+| $$XTIMAGE | 0x0094C8E0 | 0x2800 | title image |
+| $$XSIMAGE | 0x0094F0E0 | 0x1000 | save image |
+
+- **No XMV, WMADEC, XONLINE or XNET sections.** No video-codec, WMA or network libraries are linked.
+- **Kernel imports: 113 of 366.**
+
+| Group | Count |
+|---|---|
+| Av | 4 |
+| Ex | 6 |
+| Hal | 8 |
+| Io | 9 |
+| Ke | 22 |
+| Kf | 2 |
+| Mm | 12 |
+| Nt | 22 |
+| Ob | 2 |
+| Ps | 3 |
+| Rtl | 12 |
+| Xbox | 6 |
+| Xc | 3 (SHA only) |
+| DbgPrint, LaunchDataPage | 1 each |
+
+- **Not imported:** no `KeQueryPerformanceCounter`, no network or crypto beyond SHA. `XeLoadSection` and `XeUnloadSection` are imported (XAPI section loading).
+
+### 14.4 Libraries used
+
+- **Graphics:** D3D8 (286 functions), D3DX8 (583, heavy SSE/MMX: about 1,780 instructions) and XGRAPHC (30). The game calls **91 distinct D3D entry points from 123 game functions**, concentrated in a wrapper cluster around 0x398A0 to 0x3A760. It also calls 9 D3DX and 2 XGRPH entry points. The D3D library is statically linked and touches hardware directly (PCI config read, GPU interrupt via `KeConnectInterrupt` at 0x1074CD). Which route the recomp takes (replace the D3D entry points, or run the recompiled library over the NV2A emulation) is still to be decided. Read `docs/technical/d3d-translation.md` and `d3d8ltcg-device-context.md` next.
+- **Audio:** DSOUND (445 functions) with 28 entry points used from about 36 game functions, mostly the cluster at 0xB8E00 to 0xB9C00. The DOLBY section is present, consistent with Dolby Digital output but not confirmed as enabled. Music and SFX are plain `.wav` files (strings such as `MUSIC\CRTIMER` and `%s.wav`), and no WMA or XMV libraries are linked.
+- **Input:** XPP (222 functions), called through 10 entry points from about 14 game functions (0x362F0, 0x36330, 0x369F0, 0xEB2A0 to 0xEB6C0). Button-name strings `xbox2_a/b/x/y/black/white`.
+- **Interrupt-driven library code:** D3D (GPU), DSOUND (APU, 2 interrupts) and XPP (USB OHCI) all use `KeConnectInterrupt`, DPCs and timers (`KeSetTimer` at 17 sites, mostly XPP). The runtime's `apu`, `usb` and `nv2a` layers matter here.
+
+### 14.5 Engine clues
+
+- **Not RenderWare:** func_id found 0 RW strings and 0 RW functions. Consistent with Traveller's Tales' own engine.
+- **Only 3,814 strings.** Most are asset paths, so there are almost no function or debug names.
+- **Asset extensions:** `.hgo`, `.nus`/`.nux`, `.ani`, `.bsa`, `.ghg`, `.ai`, `.anm`, `.gra`, `.LGT`, `.mtl`, `.obj`, `.crt`, `.dds`, `.bmp`. Data root `d:\crashdat\levels\`, which matches `game_files/Crashdat`.
+- **Leftover in-game editor and debug menus:**
+  - Menu strings such as Switch Properties, Terrain One Cycle, Attached Particles/Sounds, Waypoints and a light editor.
+  - A material editor with "Shader:" entries (Environmap, BRDF Gold, Projected Tex, Specular, Water Caustics, Glass, Water) and cull mode CCW/CW/None.
+  - Cubemaps.
+  - `fmvdump\frm` (debug FMV frame dump).
+  - `DEBUG`.
+- **PS2 leftovers:** memory-card test menus with "PS2 Card" and "Slot 0/1".
+- **Localization:** text in 6 languages (EN, NL, ES, IT, DE, FR).
+- **Cutscenes:** they appear to be engine-rendered, because intro and outro assets are `.hgo` objects (`levels\b\intro\cscrash.hgo` and similar) and there is no video codec section **(inferred)**.
+- **C++ presence:** 182 validated vtables, 1,642 virtual methods, 98 constructors.
+
+### 14.6 Functions
+
+- **Disassembler total: 4,610 functions**, 432,515 instructions, 91,429 xrefs. About 21% of the 22,095 the docs list for Burnout 3.
+- **Correction (found in section 15.3):** 2 of the 445 DSOUND "functions" are data, not code (`sub_0014726F`, 50 KB, and `sub_0014FF0C`, 14 KB). So DSOUND has 443 real functions, the true total is **4,608**, and the DSOUND x87 and other instruction counts above include garbage from that data. Other small data-as-code regions may remain inside function ranges (the lifter reported 90 unimplemented instructions; the ones sampled were data).
+
+| Section | Functions |
+|---|---|
+| .text | 3,043 |
+| D3D | 286 |
+| D3DX | 583 |
+| DSOUND | 445 |
+| XPP | 222 |
+| XGRPH | 30 |
+| DOLBY | 1 |
+
+- **Library code by location (my split, approximate):** 1,567 in the XDK sections, plus about 596 XAPI/CRT functions in `.text` from about 0xEC800. That is about 2,160 (47%) library, and about 2,447 game functions (about 954 KB, median 126 bytes, largest `sub_000B0EF0` at 14,240 bytes).
+- **By name, func_id identified only 12 CRT functions (0.2%):** `_ftol`, `fmod`, `_aullshr`, `strcat`, `_allmul`, `memmove`, `_allshr`, `_alldiv`, `_allshl`, `_purecall`, `strcmp`, `strcpy`. The signature DB doesn't fit XDK 4361.
+- **func_id's own totals:** it reports 5,966 functions. That includes 1,356 "vtable thunk" candidates (unverified; the disasm docs warn such addresses can sit inside existing functions), so **use 4,610**. Its "game_render, game_audio, game_input" classes (about 1,100 functions) just mean "calls into an XDK section", not library identification.
+- **ABI analysis:** 4,569 cdecl and 41 thiscall. **3,460 (75%) are "low-confidence default"** (cdecl, 0 params), and only about 1,150 have real evidence, mostly from `ret N`. Signatures may be wrong for the rest.
+- **Game-code instruction mix:**
+  - About 43,750 x87 instructions.
+  - Essentially no SSE (a `cvttss2si` in the float-to-int helper at 0x7AF40, which is called from many sites).
+  - 151 jump tables.
+  - About 146 indirect call sites (69 `call [abs]`, 32 `call [mem]`, 45 `call reg`) plus 1 `jmp reg`. That is small compared with the "hardest ~10%" warning in the docs.
+
+### 14.7 Threading
+
+- **Main thread:** created by the XAPI startup stub, running proc 0xEF01A, which calls the main loop.
+- **Three more threads** created by game code through CreateThread (0xECC6A):
+  - At 0x2C043, proc 0x2BF30 (handle at [0x1BAA8C]).
+  - At 0x87969, proc 0x86BC0 (handle at [0x23C454]).
+  - At 0xB9AE9, proc 0x5DA30 (in the sound-code cluster).
+- **Roles:** not determined.
+- **Kernel calls:** `NtResumeThread`, `NtSuspendThread`, `KeSetBasePriorityThread` (1 each, XAPI wrappers), `PsTerminateSystemThread` (2), `KeSetEvent`, `NtSetEvent` and `KeWaitForSingleObject` (6 and 3 and 6), `NtWaitForSingleObject` (2), critical sections (4 init sites in CRT/XAPI).
+
+### 14.8 Frame rate and timing
+
+- **The game timer is a hard-coded 60 Hz logic tick with catch-up (inferred).**
+  - `sub_00037540` is called once per main-loop iteration (at 0x8840B).
+  - It computes ticks = round((QPC delta / QPF) × **60.0** (float at 0x15D5C0)) minus the carried count, and returns it **clamped to 1..6**.
+  - The result goes to [0x1A0A98], and an inner loop at 0x88450 runs the per-tick logic that many times per rendered frame. Any of [0x23C2C8], [0x23C2C4] or [0x23C2CC] being nonzero forces it to 1.
+  - `sub_00037520` (called at 0x88295) reads the frequency and stores it at 0x58E2A8.
+- **QPC and QPF:**
+  - XAPI QueryPerformanceCounter at 0xED3AF is a bare `rdtsc`, with no kernel call.
+  - XAPI QueryPerformanceFrequency at 0xED3C0 returns 0x2BB5C755, which is 733,333,333 Hz.
+  - A separate 16-slot QPC start/stop profiler (`sub_000361B0` and `sub_00036200`, about 25 call sites, mostly in the main loop).
+- **The tick count is never below 1 (inferred).** If the recomp presented faster than 60 Hz, the game would run **fast**. The frame rate has to be limited by vsync or a limiter.
+- **Other timing calls:** `GetTickCount` (`KeTickCount`) from 12 sites in 5 game clusters (0x2BD80, 0x2D950, 0x86BB0, 0xB8B40, 0xB9E00), roles unknown. `Sleep` has one caller, in the XAPI layer. **No frame limiter or vsync wait found in game code yet.** Presentation and vblank waits live in the D3D library (`KeWaitForSingleObject`/`KeSetEvent` at 0xFECB0, 0x1034D0, 0x106720, 0x106940, and an `rdtsc` helper at 0x106570). The game's Present call and swap interval are not located.
+- **Not yet known:** whether the game reaches 60 fps on real hardware (open question 2). The logic is fixed-step at 60 Hz with 1 to 6 catch-up ticks, and it does not by itself say whether rendering keeps up.
+- **No PAL/50 Hz variant** of the constant found (disc is NTSC-U anyway).
+
+### 14.9 Aspect ratio, resolution and projection
+
+- **Display setup:** `sub_0007AF00` (called from 0x37330) calls XGetVideoFlags-style `0xEDC56` (EEPROM setting via `ExQueryNonVolatileSetting`, type 8, shifted right by 16 and masked with 0x5F) and stores it at [0x945284]. It then stores **640 at [0x4F2540] and 480 at [0x4F2544]** and calls 0x3B0C0.
+  - [0x945284] is read only by 0x7AF00 and `sub_00039A80` (in the D3D wrapper cluster, likely building the presentation parameters).
+  - [0x4F2540] (width) is read by 11 functions, and [0x4F2544] (height) by 26.
+  - Whether the game honors the widescreen or 480p bits is **not yet checked**. Read `sub_00039A80` first.
+- **Constants:**
+  - No 16/9 float (1.7778) anywhere in data or code.
+  - No literal 640.0f or 480.0f floats.
+  - One 1.3333334f at 0x161E18 with 3 readers (0x619E0, 0x6AB40, 0xA7E30), all of which look non-projection: an audio 0 to 127 volume scale, a vector interpolation, and a colour/alpha fade.
+  - Integer 640 and 480 immediates in game code are otherwise only struct strides.
+- **Projection setup, FOV and culling are not located yet.** Suggested route: the D3D wrapper cluster 0x398A0 to 0x3A760 (SetTransform-like calls) and the users of [0x4F2540] and [0x4F2544].
+
+### 14.10 What looks easy and hard
+
+**Easier than the reference title:**
+- Small: about 2,450 game functions, versus 22,095 for Burnout 3.
+- Few indirect calls.
+- One consistent library set, and no video codec, WMA, XOnline or XNet.
+- 113 kernel imports and 4 threads.
+- Fixed 60 Hz logic tick.
+- Plain `.wav` audio.
+- Data lives in `d:\crashdat`.
+
+**Harder:**
+- Almost no names to lean on. Strings are asset paths, func_id names 12 functions, and the engine is proprietary. Names will come from the recomp debug loop.
+- 75% of ABI entries are low-confidence defaults.
+- About 43,750 x87 instructions, so x87 precision behaviour matters.
+- D3D, DSOUND and XPP are statically linked and interrupt-driven, so the NV2A, APU and USB emulation layers matter. The notes already say the GPU is what takes the time.
+- Widescreen, 60+ fps and mouse look need work: 640×480 is hard-coded, the timer runs faster than real time if unlimited, and the camera and projection are not yet found.
+
+### 14.11 What the next two steps would need (not run)
+
+- **Lifter:** `py -3 -m tools.recomp ..\game_files\default.xbe --all --split 1000 --gen-dir <project>\src\recomp\gen` from `xboxrecomp/`. It needs the existing `functions.json` and `abi_functions.json`, and a game project copied from `xboxrecomp/templates/new-game` (for example `twoc/`). The generated `src/recomp/gen/` is gitignored, as is anything under `**/tools/*/output/`. The docs say 5 to 15 minutes for a large game, so expect less here. (LLVM is now installed and the lifter tests pass, see section 16.)
+- **Ghidra naming (optional):**
+  - Needs a Ghidra install unpacked under `C:\tools\ghidra\ghidra_*_PUBLIC`, or the `GHIDRA_ROOT` or `GHIDRA_HOME` environment variable set. None is present.
+  - Needs a compatible JDK. Java 25.0.1 is installed, but I did not check which JDK the chosen Ghidra requires.
+  - Runs through Git Bash: `XBE=game_files/default.xbe tools/ghidra_naming/run_ghidra.sh`, then `py -3 tools/ghidra_naming/merge_names.py --apply`.
+  - Expected yield is small (the docs measured 134 names on Burnout 3), and the FID `vsOlder_x86` database may or may not match XDK 4361 code. Do it before the lift, and re-apply after any re-run of `tools.disasm`.
+
+---
+
+## 15. Game project `twoc/`: lifted and compiling (Sep 21, 2026)
+
+The lifted C compiles and links into `twoc/build/Release/crash_twoc.exe` (14.9 MB). **It has not been run.** Running is the next milestone.
+
+### 15.1 Plan for D3D, DSOUND, XPP, D3DX, XGRPH
+
+The docs offer two routes for a library that is statically linked into the XBE: **replace it at its API entry points** with the toolkit's layers (`xbox_d3d8`, `xbox_dsound`, `xbox_input`), or **run the recompiled library over the toolkit's hardware emulation** (`xbox_nv2a`, `xbox_apu`, USB OHCI). My plan per library, with reasons. Nothing here has been run.
+
+| Library | Plan | Main reason |
+|---|---|---|
+| **D3D** (286 functions) | **Replace at the API entry points.** Write a bridge for each of the 91 entry points the game calls, reading the stack arguments and calling `xbox_d3d8`. | `docs/technical/gap-analysis.md` states this route ("D3D8 API intercept instead" of push-buffer parsing). `xbox_d3d8` covers fixed function, register combiners and NV2A vertex microcode. The alternative needs an xemu-captured device-context snapshot and push-buffer replay, which the docs only describe for Burnout 3's LTCG library. |
+| **DSOUND** (443 functions) | **Run the recompiled library over the emulated APU** (`RECOMP_AC97_READY`, `mcpx_apu_init_standalone`, VEH trap on 0xFE800000 to 0xFE880000), as the template is already wired. **Fallback:** replace the 28 entry points with `xbox_dsound`. | It keeps the original mixing, streaming and Xbox ADPCM behaviour with no per-call bridge. `xbox_dsound` is only 573 lines. |
+| **XPP** (222 functions) | **Replace at the API entry points.** About 10 entry points from about 14 game functions go to `xbox_input` (XInput). | The toolkit's OHCI model says in `src/usb/ohci.h` that it does not yet walk endpoint or transfer-descriptor lists, so a recompiled XPP would find a controller port and never receive a report. |
+| **D3DX, XGRPH** | **Lift and run as is.** | CPU-side math and texture helpers. Their calls into D3D reach the replaced entry points. |
+
+- **D3D bridging cost:** the 91 entry points are unnamed in this XDK 4361 build, so each has to be identified from disassembly before it can be bridged. Most of them are called from one wrapper cluster (about 0x398A0 to 0x3A760), which is where to start. Whether the game uses custom NV2A vertex or pixel shader programs (which `d3d8_vsh.c` and `d3d8_combiners.c` would need to handle) is not yet known.
+- **DSOUND caveats:**
+  - The APU's global and encode DSPs are stubbed (`src/apu/README.md`), so there are no effects and no AC-3 encode. Dolby Digital surround is therefore not available yet, and the surround-sound goal needs a custom multichannel backend in any case.
+  - The route is documented against another title (Half-Life 2, per comments in the template's `main.c`), not against XDK 4361.
+  - The library also relies on interrupts, DPCs and timers going through the kernel bridge.
+- **Mechanism for replacement:** `tools.recomp --exclude-manual <file>` skips generating bodies for the functions defined in a hand-written C file (here `twoc/src/recomp_manual.c`), so the hand-written definition links instead. `recomp_lookup_manual` covers indirect calls.
+- **Fallbacks:** if the APU route fails, use the `xbox_dsound` bridge. If the D3D API route hits something it can't express, the NV2A push-buffer route (a device-context snapshot from xemu, per `d3d8ltcg-device-context.md`) is the other option.
+
+### 15.2 What was created
+
+- **`twoc/`** (copied from `xboxrecomp/templates/new-game`):
+  - `CMakeLists.txt`: project `crash_twoc`, sibling `../xboxrecomp` pulled in with `add_subdirectory`, and `/MP` added so the five large generated files compile in parallel.
+  - `src/main.c`: entry point `0x000EF089`, XBE path `game_files\default.xbe` and data dir `game_files`, both relative to the working directory. **Run the exe from the repo root.**
+  - `src/recomp_manual.c`: the template plus the two data stubs from section 15.3.
+  - `lift.ps1`: regenerates `src/recomp/gen/` (runs the lifter with `--all --split 1000 --exclude-manual`). It needs the analysis outputs from section 14.2 to exist.
+  - `twoc/.gitignore` (from the template) and the outer `.gitignore` both exclude `src/recomp/gen/` and `build/`.
+- **Build commands:**
+  - `cmake -S twoc -B twoc/build`
+  - `cmake --build twoc/build --config Release --parallel`
+  - The first build also rebuilds the runtime libraries inside `twoc/build/xboxrecomp/`. Rebuilding the game after a re-lift took 53 seconds.
+
+### 15.3 Lifter and build results
+
+- **Lifter (15 seconds):** 4,610 of 4,610 functions translated, 0 failed, 764,567 lines of C in 5 files (about 190K lines each for the first 3) plus `recomp_types.h`, `recomp_funcs.h`, `recomp_dispatch.c` and `recomp_stubs_unresolved.c`.
+  - 65 call targets were not detected as functions and got stubs.
+  - 90 unimplemented instructions were emitted as no-op comments (31 distinct mnemonics, including `hlt` 24, `rcr` 10, `in` 6, `pushal` 6, `out` 5). The ones I sampled (`rcr` at 0x9A040, `rcl` at 0x12D70F) have nonsense operands and look like data tables inside function ranges. I did not check all 90.
+- **First build: 1 error.** `error C2065: 'dr2': undeclared identifier` at `recomp_0004.c(33766)`. The lifter had emitted `dr2 = eax` for a `mov dr2, eax` decoded from garbage.
+  - Cause: `sub_0014FF0C` (and `sub_0014726F`, 50 KB, which contains it) are data in the tail of the DSOUND section, found by the disassembler's `tail_jump_alias` heuristic. Neither has any xref (no call, jump or data reference). Real DSOUND code ends before 0x14726F.
+  - Fix: both are defined as empty stubs in `recomp_manual.c`, and `--exclude-manual` skips their bodies. No change to the vendored toolkit.
+- **Second build: 0 errors.** The generated-code warnings count was 0 in this incremental build. The runtime libraries' own warnings (the 68 from the first library build) are unchanged.
+- **Function count after the fix:** 4,608 generated.
+
+### 15.4 Open items
+
+- **Tests:** *(superseded on Sep 22, 2026: LLVM is installed and all tests pass, see section 16.)* When this section was written, LLVM was not installed and `pytest tools/` gave 364 passed, 24 skipped.
+- **Git:** the outer repo has no commits. `.gitignore` and this notes file are staged. Git has no author identity configured (`user.name` and `user.email` are unset), so the first commit is waiting on the user. The `twoc/` sources (`CMakeLists.txt`, `src/main.c`, `src/recomp_manual.c`, `lift.ps1`, `.gitignore`) are untracked and small; add them when committing if wanted.
+- **Not done, by design:** no run, no Ghidra naming pass, no CLAUDE.md.
+- **Next milestone (run and debug):** first boot will crash (README: expected). The first things to check are `sub_00087BF0`, which is the main loop, and the XAPI startup, then the D3D and XPP bridges.
+
+---
+
+## 16. LLVM installed, lifter tests enabled (Sep 22, 2026)
+
+- **Clang:** `clang --version` reports **23.1.1** (target `x86_64-pc-windows-msvc`), found at `C:\Program Files\LLVM\bin\clang.exe`. That directory is on PATH in the current shell. `gcc` is not installed, and the tests don't need it.
+- **Tests (from `xboxrecomp/`, `..\.venv\Scripts\python.exe -m pytest tools/ -q -rs`):** **388 passed, 0 failed, 0 skipped**, 94 subtests passed, 24.7 s. 364 + 24 = 388, so the 24 former skips all ran and passed. No skip lines appeared with `-rs`.
+- **Spot check that they really compile:** in `-v` output, clang-backed tests such as `test_fpu_branch.py::test_idiom_semantics_compiled`, `test_incdec_result.py::test_saved_incdec_result_compiled`, `test_lifter_sar_width`, `test_lifter_double_shift`, `test_lifter_result_clobber` and `test_dispatch_flat` show PASSED. These test the lifter's flag, shift, x87-branch and dispatch output against real x86 semantics.
+- **What it means:** no lifter bug was found by the newly enabled tests, so the earlier caution about trusting lifted output is lifted for the cases these tests cover (SAR/SHLD/SHRD widths, carry and overflow flags, result clobbering, FNSTSW branches, dispatch table). It does not prove that Crash's own lifted output is correct. Only running the game does that.
+- **Not re-run:** `python -m tools.conformance` (last result in section 14.1) and the `twoc/` lift and build. Neither the xboxrecomp commit (`766ecef…`) nor the lifter changed, so no reason to expect a different result.
+- **State of `twoc/`:** unchanged since Sep 21. Sources are `CMakeLists.txt`, `lift.ps1`, `src/main.c`, `src/recomp_manual.c` and `.gitignore`. The gitignored `src/recomp/gen/` holds the lifted C and `build/` holds the last build. The outer repo still has no commits (`.gitignore` and this file staged, `twoc/` untracked), and git identity is still unset.
+- **Next:** first run of `crash_twoc.exe` from the repo root (section 15.4).
+
+---
+
+## Appendix: links
+
+**Sent by the user:**
+- https://github.com/sp00nznet/xboxrecomp
+- https://github.com/rexglue/rexglue-sdk
+- https://github.com/ran-j/PS2Recomp *(unverified)*
+- https://github.com/dougchansan/suyu-v0.0.4 *(unverified)* and https://github.com/suyu-emu/suyu-v0.0.4
+- https://github.com/ExpansionPak/GCRecompiler
+- https://github.com/hedge-dev/XenonRecomp
+- https://github.com/YesterMester/TheSimpsonsGameRecomp
+- https://github.com/MaxDeadBear/NaughtyBear_ReStuff
+- https://github.com/masterspike52/redahm
+- https://github.com/sonicnext-dev/MarathonRecomp
+- https://github.com/birabittoh/KameoRePowered
+- https://github.com/patchzyy/wiicompiled
+- https://github.com/goliathret/EdgeOfTimeRecomp
+- https://github.com/doldecomp/melee
+- https://github.com/999sian/melee-pc
+- https://github.com/coccofresco/TriAevum
+
+**Found while researching:**
+- https://github.com/zeldaret/tp
+- https://github.com/TwilitRealm/dusklight
+- https://github.com/encounter/aurora
+- https://github.com/encounter/objdiff
+- https://github.com/doldecomp/sms
+- https://github.com/hedge-dev/UnleashedRecomp
+- https://github.com/TeamWheelWizard/WheelWizard
+- https://github.com/rexglue/rexglue-sdk/wiki
+- https://github.com/SolarRecomps/rexglue-ostentation
+- https://github.com/denzi-gh/crashwoc-decomp
+- https://github.com/calmsacibis995/crash-ps2
+- https://open-travelers.github.io/OpenCrashWOC/
+- https://github.com/NeoKesha/OpenSanityNeo
+- https://github.com/Smartkin/twinsanity-reversed
+- https://github.com/wurlyfox/c1
+- https://github.com/CTR-tools/ctr-native
+- https://github.com/Matteo842/CrashBandicoot-Launcher
+- https://consolemods.org/wiki/Xbox:Games_with_Alternate_Display_Modes
+- https://www.mobygames.com/game/5531/crash-bandicoot-the-wrath-of-cortex/specs/
+- https://tcrf.net/Crash_Bandicoot:_The_Wrath_of_Cortex
+- https://wiki.pcsx2.net/Crash_Bandicoot:_The_Wrath_of_Cortex
