@@ -693,3 +693,17 @@ Report: `step6_memcpy_run_report.md` in the session scratch folder. Changes in `
 - https://www.mobygames.com/game/5531/crash-bandicoot-the-wrath-of-cortex/specs/
 - https://tcrf.net/Crash_Bandicoot:_The_Wrath_of_Cortex
 - https://wiki.pcsx2.net/Crash_Bandicoot:_The_Wrath_of_Cortex
+
+---
+
+## Start here tomorrow (Sep 22, 2026)
+
+**Current state.** The recompiled game builds and runs (`twoc/build/Release/crash_twoc.exe`). Run it with `powershell -NoProfile -ExecutionPolicy Bypass -File twoc\run_twoc.ps1` (add `-DumpDir dumps` for framebuffer BMPs). It gets through XAPI/CRT startup, D3D and DSOUND init, the splash screen and the title/logo level loads (up to `logos2.cut`), and renders a first non-splash frame, a blocky full-screen green quad that never changes. Everything is committed (the last commit is the CRT memmove replacement and `run_twoc.ps1`). The fixes so far, all in `twoc/`: the D3D fence mirror in `main.c` (18.1), 52 seeded function starts in `seed_functions.json` (18.6), a hand-written D3D interrupt DPC `sub_00106E60` with vblank forced on (18.7), and a hand-written CRT memmove `sub_000F5DD0` (18.8). Nothing in `xboxrecomp/` is changed. To regenerate: `twoc\analyze.ps1` (disasm with the seeds), then `twoc\lift.ps1`, then `cmake --build twoc\build --config Release --parallel`.
+
+**The blocker.** About 30 s in, the game stops drawing and waits forever for a thread to finish. The main thread polls the XAPI `GetExitCodeThread` (`sub_000ECB2B`) with a `Sleep` (`sub_000ECCE5`), called from `sub_0002C020`, which creates the thread with start routine 0x2BF30 (handle in `[0x1BAA8C]`). The runtime's `ObReferenceObjectByHandle` (`kernel_bridge.c:3518`) always returns a null object, so the game always reads exit code 0x103 (STILL_ACTIVE), even though a worker thread does terminate. The wait on the 0x2BF30 thread is inferred from a return address, not confirmed.
+
+**Next step.**
+1. Find out what the thread at 0x2BF30 does, and confirm it is the one being waited for (for example, log which handle `sub_000ECB2B` is called with).
+2. Hand-write `sub_000ECB2B` in `twoc/src/recomp_manual.c` to return the real exit code of the host thread behind the handle. Check first that the guest handle (e.g. 0x48000002 in the log) is a host `HANDLE`; if not, keep a per-handle "finished" flag set by the thread wrapper. Re-lift with `lift.ps1` (`--exclude-manual`), rebuild, and rerun for 90 s.
+3. After that, the picture: the NV2A executor has no vertex-program support (the top unhandled methods are `SET_TRANSFORM_PROGRAM` / `_CONSTANT` uploads, viewport, clip), so world geometry is skipped (910 of 3,738 draws). That decides whether the D3D route in section 15.1 stays.
+4. Later: XPP input, DSOUND audio, then the wish list (60 fps, 16:9, surround, mouse look). Also still open: 13.8k+ unhandled NV2A methods, `NtFreeVirtualMemory` failures (18.4), the `in al, dx` in `sub_00106720`, and the executor's fixed 10 s dump cadence.
