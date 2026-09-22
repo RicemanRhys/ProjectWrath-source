@@ -357,3 +357,71 @@ void sub_000ECB2B(void)
     eax = 1;                                   /* TRUE */
     esp += 12;                                 /* ret 8 */
 }
+
+/* ── DSOUND 3D-listener maintenance: null-interface guard ─────────────── */
+
+/*
+ * sub_000B9890 (0xB9890..0xB9899, 9 bytes, one caller: sub_000EC470):
+ *
+ *   mov eax, [ecx]        ; ecx = 0x427A58 (a static "3D listener" cache --
+ *                          ; see notes 18.10-18.12); eax = the cached
+ *                          ; IDirectSound3DListener/Buffer-adjacent interface
+ *                          ; pointer this whole subsystem is built around
+ *   push eax
+ *   call sub_00136D09
+ *   ret
+ *
+ * sub_00136D09 adjusts eax by -8 (null-safe) into a C++ object pointer
+ * ("manager") and calls sub_001367B9, which reads BigObject = *(manager+0xc)
+ * and eventually calls sub_00139A36 -> sub_001388D6 -> sub_0013A35E, which
+ * writes a 40-byte block through *(BigObject+0x58) unconditionally once its
+ * own internal guard bit passes.
+ *
+ * Traced end to end (18.10-18.12): *(0x427A58) is still 0 by the time this
+ * runs. No code anywhere in the binary (all 7 disassembled sections
+ * checked, not just game code) writes it via a literal address, and
+ * sub_0013A107 -- the DSOUND/APU hardware init that connects the two
+ * interrupt vectors this library uses -- does not wait or block on
+ * anything; it connects, runs a short synchronous loop and returns, so it
+ * does not look like it is what is stuck. What real DSOUND call is
+ * supposed to populate 0x427A58 (a QueryInterface off a primary buffer
+ * created with DSBCAPS_CTRL3D, going by the shape of it) was not found in a
+ * time-boxed search of this pass.
+ *
+ * With eax == 0, the null-safe -8 adjuster still produces manager == 0 (0
+ * - 8, masked to 0 by the same idiom that also zeroes it for a genuinely
+ * null interface), so BigObject ends up reading near guest address 0, and
+ * *(BigObject+0x58) becomes MEM32(0x58) -- whatever unrelated bytes happen
+ * to sit at that low, but still mapped, address. That fixed value is what
+ * the whole chain was writing 40 bytes of a rotation matrix through.
+ *
+ * Fix (fallback -- see 18.13 in the notes for why the preferred fix, the
+ * real setup call or an interrupt pump, was not written instead): guard
+ * here, at the single, narrowest entry point into this whole chain. If the
+ * interface pointer is still null, treat this call as "no 3D listener yet,
+ * nothing to update" and return immediately -- a no-op, not a crash. Every
+ * other line above sub_00136D09 down to sub_0013A35E is untouched; this is
+ * the only place in the chain that changes.
+ *
+ * Known limitation this introduces: 3D audio positioning silently does not
+ * update for as long as 0x427A58 stays null. If the real cause turns out to
+ * be transient (the listener gets created a few seconds into a real level,
+ * say), this guard stops being relevant on its own once that happens --
+ * this call is reached every frame, so nothing needs to re-enable it. If
+ * the interface is never created at all in this recomp, 3D positional
+ * audio simply never updates; the sound itself (music, 2D/non-positional
+ * SFX) is unaffected, since none of that goes through this chain (see
+ * section 14.4: DSOUND's other ~35 game-side entry points, e.g. the
+ * 0xB8E00-0xB9C00 wrapper cluster this sits inside, are untouched by this
+ * guard).
+ */
+void sub_000B9890(void)
+{
+    uint32_t interfacePtr = MEM32(ecx);
+
+    if (interfacePtr) {
+        PUSH32(esp, interfacePtr);
+        PUSH32(esp, 0x000B9898u); RECOMP_ABI_CALL(0x00136D09u, sub_00136D09);
+    }
+    esp += 4;                                  /* this function's own bare ret */
+}
