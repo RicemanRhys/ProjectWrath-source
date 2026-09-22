@@ -79,15 +79,15 @@
  *       g_eax = result;
  *   }
  */
+extern void sub_001542AB(void);
+extern void sub_0015431A(void);
+
 recomp_func_t recomp_lookup_manual(uint32_t xbox_va)
 {
-    /*
-     * TODO: Add your overrides here. Examples:
-     *
-     * if (xbox_va == 0x00012345) return traced_sub_00012345;
-     * if (xbox_va == 0x00067890) return stub_00067890;
-     * if (xbox_va == 0x000ABCDE) return fixed_sub_000ABCDE;
-     */
+    /* XPP input entry points -> xbox_input. See the block comments above
+     * their definitions below for the traced ABI. */
+    if (xbox_va == 0x001542AB) return sub_001542AB;
+    if (xbox_va == 0x0015431A) return sub_0015431A;
 
     (void)xbox_va;
     return (recomp_func_t)0;
@@ -424,4 +424,126 @@ void sub_000B9890(void)
         PUSH32(esp, 0x000B9898u); RECOMP_ABI_CALL(0x00136D09u, sub_00136D09);
     }
     esp += 4;                                  /* this function's own bare ret */
+}
+
+/* ── XPP input: poll and vibration entry points -> xbox_input ─────────── */
+
+/*
+ * Rate-limited entry trace, same shape as recomp_icall_not_code_log: report
+ * at 1, 10, 100, 1000 ... calls, so a single line means "reached once" and a
+ * growing count means "reached every frame", without spamming a 90 s run.
+ * Temporary diagnostic for this step; remove once input is confirmed live.
+ */
+static void trace_hit(const char *tag, uint64_t *counter)
+{
+    uint64_t n = ++(*counter);
+    while (n >= 10 && n % 10 == 0)
+        n /= 10;
+    if (n == 1)
+        fprintf(stderr, "[XPP] %s hit #%llu\n", tag, (unsigned long long)*counter);
+}
+
+/*
+ * sub_001542AB (0x1542AB..0x154317, 111 bytes), the XPP poll entry:
+ *
+ *   DWORD Poll(void *devicePtr, XBOX_INPUT_STATE_shaped *outBuf)  ; ret 8
+ *
+ * Traced from both callers (sub_00036330, sub_000369F0) and the callee body:
+ *
+ *   arg1 (edx) = the device object pointer (both callers pass eax = their
+ *     [ebp+0], the field they null-check a few lines earlier to decide
+ *     whether a controller is open at all).
+ *   arg2       = pointer to a 0x16 (22)-byte output buffer. Both callers
+ *     build it by rep-movsd'ing 20+2 bytes of a local scratch area right
+ *     before the call, so its shape is whatever this function writes: 4
+ *     bytes at +0, then a variable-length copy at +4 whose length comes from
+ *     device[+0xa3]->[+8]->byte. That length is 0x16 in practice (22 - 4 =
+ *     18), and 18 bytes is exactly WORD wButtons + BYTE bAnalogButtons[8] +
+ *     4x SHORT thumb axes -- i.e. the output buffer is byte-for-byte
+ *     XBOX_INPUT_STATE (xinput_xbox.h): dwPacketNumber, then Gamepad.
+ *
+ * The original body: raises IRQL, reads ecx = device[+0xa3] (a dispatch
+ * context), and checks ecx[+4] against the fixed address 0x153500 -- an
+ * "is any driver actually bound to this port" sentinel (0x153500 sits at
+ * the very start of the XPP section, the address of the always-present
+ * default/no-op dispatch routine). If unbound: returns 0x57 with no copy.
+ * A second check (ecx[+0]==0, or bit 1 of ecx[+4] clear) sets a 0x48F
+ * (ERROR_DEVICE_NOT_CONNECTED) result code but still falls through to copy
+ * whatever is there. Then: *outBuf = device[+8] (a running packet/sequence
+ * dword), and the next dispatch-context-derived length of bytes are copied
+ * from device[+0x14] (the live gamepad-state sub-object embedded in the
+ * device) to outBuf+4.
+ *
+ * Replacement: skip the device-object/dispatch-table layer entirely and
+ * poll the host controller directly. Known simplification, not yet needed
+ * to fix: this hardcodes port 0 (xbox_input's XBOX_MAX_CONTROLLERS is 4,
+ * but nothing in the traced ABI cheaply tells us which port `devicePtr`
+ * is -- that lives in the enumeration cluster this step is not touching).
+ * The game is single-player, so this is expected to be enough.
+ */
+void sub_001542AB(void)
+{
+    static uint64_t hits;
+    uint32_t outBuf = MEM32(esp + 8);
+    XBOX_INPUT_STATE state;
+    DWORD result;
+
+    trace_hit("poll sub_001542AB", &hits);
+
+    result = xbox_InputGetState(0, &state);
+    if (outBuf) {
+        /* XBOX_INPUT_STATE is 22 bytes with no padding (DWORD, WORD,
+         * BYTE[8], 4x SHORT all fall on their natural alignment) -- the
+         * same 22 bytes the original copied from the device object. */
+        memcpy((void *)XBOX_PTR(outBuf), &state, sizeof(state));
+    }
+    eax = (result == ERROR_SUCCESS) ? 0 : 0x48F;  /* ERROR_DEVICE_NOT_CONNECTED */
+    esp += 12;                                     /* ret 8 */
+}
+
+/*
+ * sub_0015431A (0x15431A..0x154350, 54 bytes), the XPP vibration entry:
+ *
+ *   DWORD SetVibration(void *devicePtr, void *payload)  ; ret 8
+ *
+ * Traced from its one caller, sub_000362F0, and the callee body:
+ *
+ *   arg1 = ecx from the caller = *devicePtrWrapper (the real device object,
+ *     one dereference deeper than the wrapper struct sub_000362F0 itself
+ *     received).
+ *   arg2 = payload = (wrapper + 0x30), a sub-struct inside the *caller's*
+ *     wrapper (not the device object). The caller writes the two motor
+ *     values into this same wrapper just before the call, at wrapper+0x72
+ *     and wrapper+0x74 -- i.e. payload+0x42 (left) and payload+0x44
+ *     (right), each already replicated from a 0-255 byte to a 0-65535 word
+ *     (`imul v, 0x101`, the classic v | (v<<8)).
+ *
+ * The original body does the same dispatch-context/sentinel check as the
+ * poll entry (device[+0xa3]->[+4] against 0x153500 -> 0x57 if unbound),
+ * then, if bound, clears a status byte at payload+0x40, writes a derived
+ * status byte at payload+0x41, and calls sub_001551F9 (the actual
+ * IRP-queue/USB-write) to push the motor values already sitting in
+ * *payload out to hardware. It does not re-read the motor words itself --
+ * they're only ever consumed downstream, by the call we're replacing.
+ *
+ * Replacement: read the two motor words straight out of the caller's
+ * payload struct (their offsets are the only part of this we actually
+ * need) and hand them to xbox_InputSetState. Same port-0 simplification as
+ * the poll entry, same reasoning.
+ */
+void sub_0015431A(void)
+{
+    static uint64_t hits;
+    uint32_t payload = MEM32(esp + 8);
+
+    trace_hit("vibration sub_0015431A", &hits);
+
+    if (payload) {
+        XBOX_VIBRATION vib;
+        vib.wLeftMotorSpeed  = MEM16(payload + 0x42);
+        vib.wRightMotorSpeed = MEM16(payload + 0x44);
+        xbox_InputSetState(0, &vib);
+    }
+    eax = 0;
+    esp += 12;                                     /* ret 8 */
 }

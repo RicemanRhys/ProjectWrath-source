@@ -391,6 +391,12 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance,
     if (xbox_Nv2aMirrorFence(0x0010EBF0u, 0x30u, 0x34u) != 0)
         fprintf(stderr, "[BOOT] fence mirror table full\n");
 
+    /* Controller input. The game's own XPP init/enumeration code
+     * (sub_000EB7C0 and friends) still runs as normal lifted code; this
+     * just brings up the host side (XInput) that the hand-written XPP poll
+     * and vibration entry points (twoc/src/recomp_manual.c) forward to. */
+    xbox_InputInit();
+
     /* Step 7: Call the recompiled entry point */
     printf("\nStarting game...\n");
     fflush(stdout);
