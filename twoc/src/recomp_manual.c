@@ -22,6 +22,10 @@
 #include <stdint.h>
 #include <string.h>
 
+/* xbox_bridge_resolve_handle: resolves a guest handle token back to the real
+ * native HANDLE, for the hand-written GetExitCodeThread below. */
+#include <xbox/xboxrecomp.h>
+
 /* The generated-code headers: register aliases (eax, ecx, esp ...), MEM32/MEM8,
  * PUSH32, RECOMP_ABI_CALL and the declarations of every lifted function. The
  * hand-written sub_ functions below need them; they are only active with
@@ -291,4 +295,65 @@ void sub_000F5DD0(void)
         memmove((void *)XBOX_PTR(dst), (const void *)XBOX_PTR(src), n);
     eax = dst;
     esp += 4;                                /* ret (cdecl: the caller pops the args) */
+}
+
+/* ── GetExitCodeThread ─────────────────────────────────────── */
+
+/*
+ * sub_000ECB2B (0xECB2B..0xECB77), the XAPI GetExitCodeThread:
+ *
+ *   BOOL GetExitCodeThread(HANDLE hThread, LPDWORD lpExitCode)  ; ret 8
+ *
+ * From the disassembly: it resolves hThread through
+ * ObReferenceObjectByHandle(hThread, ObThreadObjectType, &Object) -- reusing
+ * the argument's own stack slot as the &Object out-parameter, so on return
+ * that slot holds the KTHREAD object pointer, not the handle any more. If the
+ * status is negative it fails (sets last-error via sub_000EDD61, returns
+ * FALSE). Otherwise it reads a "terminated" byte at Object+4: if set,
+ * *lpExitCode = *(Object+0x120) (the thread's real exit status); if clear,
+ * *lpExitCode = 0x103 (STILL_ACTIVE). Then ObfDereferenceObject(Object) and
+ * return TRUE.
+ *
+ * bridge_ObReferenceObjectByHandle (kernel_bridge.c) always writes Object =
+ * NULL, so Object+4 always reads as clear and this always reported
+ * STILL_ACTIVE -- confirmed in a diagnostic run (Sep 22 2026 notes, section
+ * "start here tomorrow"): every poll during the hang used the same handle
+ * token as the one written back for the thread spawned with start-context
+ * 0x2BF30, so this is the loop that never ends.
+ *
+ * Fix: skip the bridge's object layer entirely. Every thread handle this
+ * bridge ever hands out is a token over a *real* native HANDLE from
+ * CreateThread (see bridge_spawn_thread / s_handle_table in kernel_bridge.c),
+ * and PsTerminateSystemThread (ordinal 258) calls the real ExitThread with
+ * the game's own exit status for a spawned worker. So the real
+ * GetExitCodeThread on that real HANDLE already gives the exact right
+ * answer -- STILL_ACTIVE while running, the game's own status once it has
+ * called PsTerminateSystemThread -- with no need to reconstruct the KTHREAD
+ * object fields by hand.
+ *
+ * xbox_bridge_resolve_handle (xbox_memory_layout.h) is the new, additive,
+ * read-only accessor added for this. A handle that does not resolve (the
+ * main thread never gets a real spawned HANDLE; a stray/synthetic token)
+ * falls back to the bridge's old answer -- STILL_ACTIVE, success -- so every
+ * other call site of this function (sub_0002C020, sub_00087870,
+ * sub_000B9100, sub_000EC060) keeps its previous behavior unless the handle
+ * is one this fix can actually improve on.
+ */
+void sub_000ECB2B(void)
+{
+    uint32_t handle_va     = MEM32(esp + 4);   /* hThread */
+    uint32_t exitcode_va   = MEM32(esp + 8);   /* lpExitCode */
+    HANDLE   h             = xbox_bridge_resolve_handle(handle_va);
+    DWORD    code          = 0x103;            /* STILL_ACTIVE, the old fallback */
+
+    if (h) {
+        DWORD real_code;
+        if (GetExitCodeThread(h, &real_code))
+            code = real_code;
+    }
+
+    if (exitcode_va)
+        MEM32(exitcode_va) = (uint32_t)code;
+    eax = 1;                                   /* TRUE */
+    esp += 12;                                 /* ret 8 */
 }
