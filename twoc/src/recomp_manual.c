@@ -547,3 +547,84 @@ void sub_0015431A(void)
     eax = 0;
     esp += 12;                                     /* ret 8 */
 }
+
+/* ── XPP input: port-active gate, primed from a simulated insertion ───── */
+
+/*
+ * Time-boxed search first (this step), before writing anything below: is
+ * [0x1534B0]/[0x153434] serviced by an unserviced interrupt/DPC, the same
+ * shape as the D3D vblank gap (sub_00106E60 above)?
+ *
+ * Traced the ISR that would arm them: sub_00153600 (XPP's DriverEntry-like
+ * IoCreateDevice loop) calls xbox_KeInitializeInterrupt/xbox_KeConnectInterrupt
+ * at 0x153E96/0x153E9D with ServiceRoutine = sub_001596F4. That ISR reads a
+ * real OHCI HcInterruptStatus-shaped register pair (device[+0xc]/[+0x10]),
+ * tests bit 0x80000000 (master enable) and bit 0x20 (root-hub status change --
+ * the actual "something got plugged in" hardware bit), and only then queues
+ * the DPC that would eventually reach sub_00154AAD's gate fields. So this is
+ * not a case of "a DPC exists but nothing pumps it" like the vblank fix --
+ * it is gated behind a real root-hub-status-change interrupt that would have
+ * to come from this recomp's OHCI/USB host-controller emulation, which
+ * (14.4/15.1) does not walk the controller far enough to ever raise it.
+ * Servicing this faithfully means building real OHCI root-hub-status
+ * emulation, not writing a few lines here -- so per the "if not found
+ * quickly" fallback, this step does not attempt that and instead drives the
+ * game's own existing, already-correctly-lifted per-port insertion handler
+ * directly, once, from the host controller's real connection state.
+ *
+ * sub_000EB270 (0xEB270..0xEB29A, 42 bytes, called every frame from
+ * sub_00086D30 whenever the poll path is not already live -- see 18.15) is
+ * the read side of the gate: it scans the 4-slot table at 0x427598 (step
+ * 0xF0) for a slot whose first dword is nonzero and returns that slot's
+ * address in eax, or 0 if none are active. That returned pointer is stored
+ * into [0x23c2d8] and then dereferenced *again* one level deeper by
+ * sub_00036330 (ebp = *eax; then dword ptr [ebp], [ebp+0xa3], [ebp+0xd4] ...),
+ * so the slot's first dword has to be a real device-object pointer with a
+ * populated dispatch-context field, not just a truthy sentinel -- writing a
+ * bare 1 there (the originally-sketched override) would make sub_00036330
+ * dereference address 0x1 and crash. sub_000EB5A0 is exactly the function
+ * that builds that real device object (via sub_00154249/sub_001547DA, the
+ * same lookup the driver-init table at 0x153404-0x15340C feeds): it is the
+ * per-port insertion handler the notification pump would have called had the
+ * hardware interrupt fired.
+ *
+ * Fix: reimplement sub_000EB270's own trivial scan faithfully (unchanged
+ * behavior), but on its first call, if the host reports a controller
+ * connected on port 0, first hand-call the real sub_000EB5A0(0) to populate
+ * the slot the same way a genuine insertion notification would. If
+ * xbox_InputIsConnected(0) is false, or sub_000EB5A0's own device-lookup
+ * fails (no host-controller context registered -- the same failure it would
+ * hit if driven for real), the scan below simply finds nothing, same as
+ * today: no crash either way, this can only make the gate open, never open
+ * it incorrectly.
+ */
+extern void sub_000EB5A0(void);
+
+void sub_000EB270(void)
+{
+    static int primed;
+
+    if (!primed) {
+        primed = 1;
+        int connected = xbox_InputIsConnected(0);
+        fprintf(stderr, "[XPP] sub_000EB270 primed: xbox_InputIsConnected(0)=%d\n", connected);
+        if (connected) {
+            PUSH32(esp, 0);            /* port 0, the one stack arg (cdecl) */
+            PUSH32(esp, 0x000EB270u);  /* synthetic return address; unread */
+            RECOMP_ABI_CALL(0x000EB5A0u, sub_000EB5A0);
+            esp += 4;                  /* cdecl: pop our own pushed arg */
+            fprintf(stderr, "[XPP] sub_000EB5A0(0) returned, slot[0]=0x%08X\n",
+                    MEM32(0x427598u));
+        }
+    }
+
+    /* Original body, unchanged: first slot (step 0xF0) with a nonzero first
+     * dword, else 0. */
+    eax = 0;
+    for (uint32_t slot = 0x427598u; slot < 0x427958u; slot += 0xF0u) {
+        if (MEM32(slot) != 0) {
+            eax = slot;
+            break;
+        }
+    }
+}
