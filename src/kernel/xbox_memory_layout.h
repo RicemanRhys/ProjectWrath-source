@@ -500,4 +500,15 @@ void  *xbox_thread_debug_handle(void); /* the game thread, or NULL under inline 
 #define XBOX_THREAD_MODE_SPAWN  1
 void xbox_SetThreadMode(int mode);
 
+/* Resolve a bridge handle token (as stored in guest memory by
+ * bridge_write_handle -- CreateThread, CreateEvent, CreateFile, ...) back to
+ * the real native HANDLE behind it, for a hand-written game-side routine that
+ * needs the host object itself rather than another bridge call. Read-only:
+ * does not consume or alter the handle table slot (see bridge_resolve_handle
+ * in kernel_bridge.c, which this only exposes). An untagged/unknown token, or
+ * one with no live entry, returns NULL. Purely additive: no bridge behavior
+ * changes, this only makes an existing internal lookup reachable from
+ * outside kernel_bridge.c. */
+HANDLE xbox_bridge_resolve_handle(uint32_t token);
+
 #endif /* XBOX_MEMORY_LAYOUT_H */

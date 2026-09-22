@@ -2557,6 +2557,18 @@ static HANDLE bridge_resolve_handle(uint32_t token)
     return (HANDLE)(uintptr_t)token;
 }
 
+/* Public wrapper for bridge_resolve_handle (xbox_memory_layout.h). Additive:
+ * exposes this one existing lookup to callers outside this file, with no
+ * change to what it does or to any other bridge behavior. Added so a
+ * hand-written game-side routine (e.g. a title's GetExitCodeThread, which
+ * needs the real thread HANDLE, not another round trip through the bridge's
+ * own always-null ObReferenceObjectByHandle) can resolve a guest handle
+ * token without duplicating the handle table. */
+HANDLE xbox_bridge_resolve_handle(uint32_t token)
+{
+    return bridge_resolve_handle(token);
+}
+
 static HANDLE bridge_take_handle(uint32_t token)
 {
     if ((token & 0xFF000000u) == BRIDGE_HANDLE_TAG) {
