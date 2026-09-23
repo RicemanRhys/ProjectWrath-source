@@ -4,6 +4,9 @@
 #                            waits forever on the splash screen)
 #   RECOMP_PB_EXEC=1         run the recompiled D3D library's push buffers through the toolkit's NV2A
 #                            executor (without it nothing is drawn)
+#   RECOMP_AC97_READY=1      report the AC'97 codec ready and route APU registers to the emulated APU.
+#                            Without it DirectSoundCreate fails (DSERR_NODRIVER), no DSOUND stream is ever
+#                            created, and the title screen waits forever for its music (notes 18.24/18.25)
 #   RECOMP_WATCHDOG_SECS=N   the runtime ends the process after N seconds (exit code 3). This is the normal
 #                            way a run ends for now: there is no quit path yet
 #
@@ -29,6 +32,7 @@ if (-not (Test-Path (Join-Path $repo 'game_files\default.xbe'))) { throw "game_f
 
 $env:RECOMP_VBLANK        = '1'
 $env:RECOMP_PB_EXEC       = '1'
+$env:RECOMP_AC97_READY    = '1'
 $env:RECOMP_WATCHDOG_SECS = "$Seconds"
 if ($Window) { $env:RECOMP_FB_WINDOW = '1' }
 if ($DumpDir) {

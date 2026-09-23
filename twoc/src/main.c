@@ -182,6 +182,9 @@ extern bool apu_hook_handle_mmio(PCONTEXT ctx, uintptr_t fault_addr,
  * which is what the codec-ready bit needs. */
 #define APU_TRAP_BASE 0xFE800000u
 #define APU_TRAP_END  0xFE880000u
+/* Start of the GP DSP's memory window, offset from APU_TRAP_BASE. Below it
+ * are the registers the emulated APU models (global, FE, SE, VP). */
+#define GP_WINDOW     0x00030000u
 
 static LONG CALLBACK veh_handler(PEXCEPTION_POINTERS ep)
 {
@@ -320,6 +323,28 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance,
         g_apu_state = mcpx_apu_init_standalone((uint8_t *)xbox_GetMemoryBase());
         fprintf(stderr, "[BOOT] emulated APU %s\n",
                 g_apu_state ? "up" : "FAILED to initialise");
+
+        /* Hand the DSP memory windows back as plain memory.
+         *
+         * MemoryLayoutInit traps the APU's whole 512 KB, but the emulated
+         * APU only models the registers below GP_WINDOW: its dispatch drops
+         * every GP/EP write and reads the windows back as 0 (apu_core.c,
+         * "GP (0x30000) and EP (0x50000) regions ignored"). DirectSound
+         * block-copies DSP X memory with rep movsd, which the lifter turns
+         * into memcpy, and the trap's decoder can't step memcpy's vector
+         * loads, so the first copy was an access violation. As plain memory
+         * the copy works and what was written reads back, which is no less
+         * faithful than a model that ignores the region. */
+        {
+            DWORD old;
+            if (VirtualProtect((void *)(uintptr_t)(APU_TRAP_BASE + GP_WINDOW
+                                                   + g_xbox_mem_offset),
+                               APU_TRAP_END - APU_TRAP_BASE - GP_WINDOW,
+                               PAGE_READWRITE, &old))
+                fprintf(stderr, "[BOOT] APU GP/EP DSP memory 0x%08X..0x%08X"
+                        " left as plain memory\n",
+                        APU_TRAP_BASE + GP_WINDOW, APU_TRAP_END);
+        }
     }
 
     /* Step 3: Initialize Xbox kernel */
