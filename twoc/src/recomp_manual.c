@@ -443,6 +443,77 @@ static void trace_hit(const char *tag, uint64_t *counter)
         fprintf(stderr, "[XPP] %s hit #%llu\n", tag, (unsigned long long)*counter);
 }
 
+/* ── XPP input: open/close, handles are opaque per-port tokens ─────── */
+
+/*
+ * Traced in notes 18.22. The value XInputOpen returns lands in controller
+ * slot +0 (0x427598, stride 0xF0) and game code only ever null-tests it and
+ * passes it back to XPP: poll (sub_001542AB), vibration (sub_0015431A) and
+ * close (sub_0015429F). All three are hand-written here, so the handle never
+ * has to be a real device object. That lets open skip the whole USB stack
+ * below it (sub_001554A1 -> sub_00154B69's enumerated-node table ->
+ * sub_00155C28, the URB submit into the OHCI driver, and the completion
+ * wait), none of which this recomp can drive.
+ *
+ * Token = 0xC0DE0000 | port. Deliberately unmapped guest space: if anything
+ * unexpected ever dereferences a handle, it faults at an address that names
+ * itself instead of silently reading fabricated data.
+ */
+#define XPP_TOKEN_BASE  0xC0DE0000u
+#define XPP_GAMEPAD_TYPE 0x001534ACu    /* gamepad class-descriptor type key */
+
+static int xpp_token_port(uint32_t handle, DWORD *port)
+{
+    if ((handle & 0xFFFF0000u) != XPP_TOKEN_BASE ||
+        (handle & 0xFFFFu) >= XBOX_MAX_CONTROLLERS)
+        return 0;
+    *port = handle & 0xFFFFu;
+    return 1;
+}
+
+/*
+ * sub_00154249 (0x154249..0x15429F), XInputOpen:
+ *
+ *   HANDLE Open(type, portKey, slotFlag, cfg)  ; stdcall, ret 0x10
+ *
+ * portKey is the caller's [0x1B0AC8 + 4*port], a .data table verified from
+ * the XBE to be {0,1,2,3} and never written (only two readers, both loads),
+ * so portKey is the port number. slotFlag/cfg only select the real open's
+ * pipe configuration, which this replacement doesn't build.
+ *
+ * Returns a token if the type is the gamepad and the host reports a
+ * controller on that port, else 0 -- the same value the real failure path
+ * returns (its SetLastError is skipped; the one caller, sub_000EB5A0,
+ * discards GetLastError).
+ */
+void sub_00154249(void)
+{
+    uint32_t type    = MEM32(esp + 4);
+    uint32_t portKey = MEM32(esp + 8);
+    uint32_t handle  = 0;
+
+    if (type == XPP_GAMEPAD_TYPE && portKey < XBOX_MAX_CONTROLLERS &&
+        xbox_InputIsConnected(portKey))
+        handle = XPP_TOKEN_BASE | portKey;
+
+    fprintf(stderr, "[XPP] open type=0x%08X portKey=%u -> handle=0x%08X\n",
+            type, portKey, handle);
+    eax = handle;
+    esp += 20;                                     /* ret 0x10 */
+}
+
+/*
+ * sub_0015429F (0x15429F..0x1542AB), XInputClose: `ret 4`, one arg.
+ * The real body (sub_00155158) dereferences handle+0/+0xA3 and pushes the
+ * handle onto the [0x4350A0] free list -- memory corruption for a token.
+ * Tokens own nothing, so closing one is a no-op.
+ */
+void sub_0015429F(void)
+{
+    fprintf(stderr, "[XPP] close handle=0x%08X\n", MEM32(esp + 4));
+    esp += 8;                                      /* ret 4 */
+}
+
 /*
  * sub_001542AB (0x1542AB..0x154317, 111 bytes), the XPP poll entry:
  *
@@ -475,22 +546,39 @@ static void trace_hit(const char *tag, uint64_t *counter)
  * device) to outBuf+4.
  *
  * Replacement: skip the device-object/dispatch-table layer entirely and
- * poll the host controller directly. Known simplification, not yet needed
- * to fix: this hardcodes port 0 (xbox_input's XBOX_MAX_CONTROLLERS is 4,
- * but nothing in the traced ABI cheaply tells us which port `devicePtr`
- * is -- that lives in the enumeration cluster this step is not touching).
- * The game is single-player, so this is expected to be enough.
+ * poll the host controller directly. `devicePtr` is now always one of the
+ * port tokens handed out by the hand-written open (sub_00154249 below), so
+ * the port comes straight from it.
  */
 void sub_001542AB(void)
 {
     static uint64_t hits;
     uint32_t outBuf = MEM32(esp + 8);
     XBOX_INPUT_STATE state;
-    DWORD result;
+    DWORD result, port;
 
     trace_hit("poll sub_001542AB", &hits);
 
-    result = xbox_InputGetState(0, &state);
+    if (!xpp_token_port(MEM32(esp + 4), &port)) {
+        eax = 0x48F;                               /* ERROR_DEVICE_NOT_CONNECTED */
+        esp += 12;                                 /* ret 8 */
+        return;
+    }
+    result = xbox_InputGetState(port, &state);
+    if (result == ERROR_SUCCESS) {
+        /* Log digital/analog button changes (not thumbsticks, which drift),
+         * so a run shows whether real player input reached the game. */
+        static uint8_t last[XBOX_MAX_CONTROLLERS][10];
+        uint8_t now[10];
+        memcpy(now, &state.Gamepad.wButtons, 2);
+        memcpy(now + 2, state.Gamepad.bAnalogButtons, 8);
+        if (memcmp(now, last[port], sizeof(now)) != 0) {
+            memcpy(last[port], now, sizeof(now));
+            fprintf(stderr, "[XPP] port %u input: buttons=0x%04X analog=%02X %02X %02X %02X %02X %02X %02X %02X\n",
+                    (unsigned)port, state.Gamepad.wButtons,
+                    now[2], now[3], now[4], now[5], now[6], now[7], now[8], now[9]);
+        }
+    }
     if (outBuf) {
         /* XBOX_INPUT_STATE is 22 bytes with no padding (DWORD, WORD,
          * BYTE[8], 4x SHORT all fall on their natural alignment) -- the
@@ -528,21 +616,22 @@ void sub_001542AB(void)
  *
  * Replacement: read the two motor words straight out of the caller's
  * payload struct (their offsets are the only part of this we actually
- * need) and hand them to xbox_InputSetState. Same port-0 simplification as
- * the poll entry, same reasoning.
+ * need) and hand them to xbox_InputSetState, on the port named by the
+ * handle token (arg1).
  */
 void sub_0015431A(void)
 {
     static uint64_t hits;
     uint32_t payload = MEM32(esp + 8);
+    DWORD port;
 
     trace_hit("vibration sub_0015431A", &hits);
 
-    if (payload) {
+    if (payload && xpp_token_port(MEM32(esp + 4), &port)) {
         XBOX_VIBRATION vib;
         vib.wLeftMotorSpeed  = MEM16(payload + 0x42);
         vib.wRightMotorSpeed = MEM16(payload + 0x44);
-        xbox_InputSetState(0, &vib);
+        xbox_InputSetState(port, &vib);
     }
     eax = 0;
     esp += 12;                                     /* ret 8 */
@@ -592,11 +681,10 @@ void sub_0015431A(void)
  * behavior), but on its first call, if the host reports a controller
  * connected on port 0, first hand-call the real sub_000EB5A0(0) to populate
  * the slot the same way a genuine insertion notification would. If
- * xbox_InputIsConnected(0) is false, or sub_000EB5A0's own device-lookup
- * fails (no host-controller context registered -- the same failure it would
- * hit if driven for real), the scan below simply finds nothing, same as
- * today: no crash either way, this can only make the gate open, never open
- * it incorrectly.
+ * xbox_InputIsConnected(0) is false, the scan below simply finds nothing:
+ * no crash either way, this can only make the gate open, never open it
+ * incorrectly. (sub_000EB5A0's open, sub_00154249, is hand-written too --
+ * see "open/close" above -- because the real one can never succeed here.)
  */
 extern void sub_000EB5A0(void);
 
