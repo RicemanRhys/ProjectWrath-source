@@ -296,25 +296,39 @@ static void coop_park(coop_thread_t *t)
     InterlockedExchange(&t->state, COOP_GUEST);
 }
 
-/* Every guest kernel call, via recomp_lookup_manual. */
-static void coop_kernel_call(void)
+/* The kernel-call boundary. Hand-written kernel functions use these too. */
+static coop_thread_t *coop_enter(void)
 {
-    uint32_t va = t_coop_kernel_va;
     coop_thread_t *self = coop_self();
-    recomp_func_t fn;
 
     if (self && t_coop_depth == 0)
         coop_park(self);
-    fn = recomp_lookup_kernel(va);         /* also selects this thread's dispatch slot */
     if (++t_coop_depth == 1 && self)
         InterlockedExchange(&self->state, COOP_KERNEL);
-    fn();
+    return self;
+}
+
+static void coop_leave(coop_thread_t *self)
+{
     if (--t_coop_depth == 0 && self) {
         /* Publish "guest" before checking, so a suspend that lands in
          * between either sees guest and waits, or is seen here. */
         InterlockedExchange(&self->state, COOP_GUEST);
         coop_park(self);
     }
+}
+
+static void heap_watch(void);
+
+/* Every guest kernel call, via recomp_lookup_manual. */
+static void coop_kernel_call(void)
+{
+    uint32_t va = t_coop_kernel_va;
+    coop_thread_t *self = coop_enter();
+
+    recomp_lookup_kernel(va)();            /* the lookup also selects this thread's dispatch slot */
+    coop_leave(self);
+    heap_watch();
 }
 
 static void coop_log(const char *what, DWORD tid, LONG prev, uint32_t ret, const char *state)
@@ -415,12 +429,165 @@ static void coop_NtResumeThread(void)
     coop_log("resume", tid, prev, ret, NULL);
 }
 
+/* ── NtFreeVirtualMemory / guest heap watch ────────────────── */
+
+/*
+ * The runtime's NtAllocateVirtualMemory hands out xbox_HeapAlloc blocks, but
+ * its NtFreeVirtualMemory passes the guest PVOID* on as a 64-bit PVOID* and
+ * calls host VirtualFree on two guest dwords read as one pointer. That always
+ * fails, so every MEM_RELEASE leaked and every MEM_DECOMMIT failed. The intro
+ * level load ran the 48.5 MiB heap out at a live peak of ~24.5 MiB (notes
+ * 18.27). Only xbox_HeapFree can release those blocks.
+ *
+ * So, for [0x15AB0C] (ordinal 199):
+ *   MEM_RELEASE at the start of a heap block: xbox_HeapFree, and report the
+ *     block's size back through RegionSize, as NT does.
+ *   MEM_DECOMMIT: success, nothing done. The heap commits a block for its
+ *     whole life, and the guest heap's large-block path (sub_000F0D65)
+ *     decommits pages it will commit again (a MEM_COMMIT on a live block is
+ *     already a no-op in the bridge).
+ *   Anything else (a reservation above RAM, an interior address, a null base):
+ *     the bridge, as before.
+ * It runs inside the cooperative kernel-call boundary, like any other kernel
+ * call, so a suspended thread can't stop holding the heap.
+ */
+#define VM_NTALLOC_THUNK      0x0015AB08u      /* [thunk] = NtAllocateVirtualMemory (ordinal 184) */
+#define VM_NTFREE_THUNK       0x0015AB0Cu      /* [thunk] = NtFreeVirtualMemory (ordinal 199) */
+#define VM_MEM_DECOMMIT       0x4000u
+#define VM_MEM_RELEASE        0x8000u
+#define VM_WASTE_SLOTS        1024
+#define VM_WASTE_MIN          0x10000u         /* ignore reuse slack under 64 KiB */
+#define HEAP_WATCH_MS         2000             /* the [KERNEL] summary's cadence */
+
+static volatile LONG g_vm_released, g_vm_released_kb, g_vm_decommits, g_vm_bridged;
+
+/*
+ * The heap reuses a freed block first-fit without splitting it (notes 18.27),
+ * so a small request can take a whole multi-MB block. Watched, not fixed:
+ * each NtAllocateVirtualMemory that lands in a block at least 64 KiB bigger
+ * than it asked for is recorded here until that block is released.
+ */
+static struct { uint32_t base, waste; } g_vm_waste[VM_WASTE_SLOTS];
+static SRWLOCK g_vm_lock = SRWLOCK_INIT;
+static uint32_t g_vm_waste_live, g_vm_waste_max, g_vm_waste_events;
+
+static void vm_waste_forget(uint32_t base)
+{
+    int i;
+
+    AcquireSRWLockExclusive(&g_vm_lock);
+    for (i = 0; i < VM_WASTE_SLOTS; i++)
+        if (g_vm_waste[i].base == base) {
+            g_vm_waste_live -= g_vm_waste[i].waste;
+            g_vm_waste[i].base = 0;
+            break;
+        }
+    ReleaseSRWLockExclusive(&g_vm_lock);
+}
+
+/* NTSTATUS NtAllocateVirtualMemory(PVOID *BaseAddress, ULONG_PTR ZeroBits,
+ *     PSIZE_T RegionSize, ULONG AllocationType, ULONG Protect); ret 20.
+ * The bridge does the work; this only measures the block it got. */
+static void vm_NtAllocateVirtualMemory(void)
+{
+    uint32_t base_va = MEM32(esp + 4), size_va = MEM32(esp + 12), type = MEM32(esp + 16);
+    uint32_t hint = base_va ? MEM32(base_va) : 0;
+    uint32_t base, size, blk;
+
+    t_coop_kernel_va = MEM32(VM_NTALLOC_THUNK);
+    coop_kernel_call();
+    if (eax != 0 || !base_va || !size_va || (hint && !(type & 0x2000)))
+        return;                            /* failed, or a commit on an existing region */
+    base = MEM32(base_va);
+    size = (MEM32(size_va) + 0xFFFu) & ~0xFFFu;
+    blk = xbox_HeapBlockSize(base);
+    if (blk < size + VM_WASTE_MIN)
+        return;
+    AcquireSRWLockExclusive(&g_vm_lock);
+    {
+        int i;
+        for (i = 0; i < VM_WASTE_SLOTS && g_vm_waste[i].base; i++)
+            ;
+        if (i < VM_WASTE_SLOTS) {
+            g_vm_waste[i].base = base;
+            g_vm_waste[i].waste = blk - size;
+            g_vm_waste_live += blk - size;
+        }
+        if (blk - size > g_vm_waste_max)
+            g_vm_waste_max = blk - size;
+        g_vm_waste_events++;
+    }
+    ReleaseSRWLockExclusive(&g_vm_lock);
+}
+
+/* NTSTATUS NtFreeVirtualMemory(PVOID *BaseAddress, PSIZE_T RegionSize, ULONG FreeType); ret 12 */
+static void vm_NtFreeVirtualMemory(void)
+{
+    uint32_t base_va = MEM32(esp + 4), size_va = MEM32(esp + 8), type = MEM32(esp + 12);
+    uint32_t base = base_va ? MEM32(base_va) : 0;
+    uint32_t blk = xbox_HeapBlockSize(base);
+    coop_thread_t *self;
+
+    /* A block start: the byte before it isn't in the same block. */
+    int release = (type & VM_MEM_RELEASE) && blk && xbox_HeapBlockSize(base - 1) != blk + 1;
+    int decommit = !(type & VM_MEM_RELEASE) && (type & VM_MEM_DECOMMIT) && base;
+
+    if (!release && !decommit) {
+        InterlockedIncrement(&g_vm_bridged);
+        t_coop_kernel_va = MEM32(VM_NTFREE_THUNK);
+        coop_kernel_call();
+        return;
+    }
+    self = coop_enter();
+    if (release) {
+        xbox_HeapFree(base);
+        if (size_va)
+            MEM32(size_va) = blk;
+        InterlockedIncrement(&g_vm_released);
+        InterlockedExchangeAdd(&g_vm_released_kb, (LONG)(blk / 1024));
+    } else {
+        InterlockedIncrement(&g_vm_decommits);
+    }
+    eax = 0;                               /* STATUS_SUCCESS */
+    esp += 16;                             /* ret 12 */
+    coop_leave(self);
+    if (release)
+        vm_waste_forget(base);
+    heap_watch();
+}
+
+/* One [HEAPSTAT] line every 2 s, from whichever thread gets there. */
+static void heap_watch(void)
+{
+    static volatile LONG last;
+    LONG now = (LONG)GetTickCount(), prev = last;
+    xbox_heap_stats_t s;
+
+    if (prev && now - prev < HEAP_WATCH_MS)
+        return;
+    if (InterlockedCompareExchange(&last, now, prev) != prev)
+        return;
+    if (!prev)
+        return;                            /* start the clock */
+    xbox_HeapStats(&s);
+    fprintf(stderr, "[HEAPSTAT] used %u/%u KiB (%.1f%%); live %u KiB in %u blocks; "
+                    "free %u KiB in %u blocks, largest %u KiB; VM released %ld (%ld KiB), "
+                    "decommits %ld, bridged %ld; reuse slack %u KiB live, max %u KiB, %u events\n",
+            s.used / 1024, s.total / 1024, s.total ? 100.0 * s.used / s.total : 0.0,
+            s.live / 1024, s.live_blocks, s.free / 1024, s.free_blocks, s.largest_free / 1024,
+            (long)g_vm_released, (long)g_vm_released_kb, (long)g_vm_decommits, (long)g_vm_bridged,
+            g_vm_waste_live / 1024, g_vm_waste_max / 1024, g_vm_waste_events);
+    fflush(stderr);
+}
+
 recomp_func_t recomp_lookup_manual(uint32_t xbox_va)
 {
     /* Guest kernel calls: cooperative suspension, see above. */
     if (xbox_va >= COOP_KERNEL_VA_LO && xbox_va < COOP_KERNEL_VA_HI) {
         if (xbox_va == MEM32(COOP_NTSUSPEND_THUNK)) return coop_NtSuspendThread;
         if (xbox_va == MEM32(COOP_NTRESUME_THUNK))  return coop_NtResumeThread;
+        if (xbox_va == MEM32(VM_NTFREE_THUNK))      return vm_NtFreeVirtualMemory;
+        if (xbox_va == MEM32(VM_NTALLOC_THUNK))     return vm_NtAllocateVirtualMemory;
         if (recomp_lookup_kernel(xbox_va)) {
             t_coop_kernel_va = xbox_va;
             return coop_kernel_call;
