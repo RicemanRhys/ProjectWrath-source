@@ -456,6 +456,19 @@ void xbox_HeapFree(uint32_t xbox_va);
 uint32_t xbox_HeapBlockSize(uint32_t xbox_va);
 
 /**
+ * Heap occupancy, for diagnostics. used/total are the bump high-water mark and
+ * the heap size (the pair the out-of-memory message prints); live and free sum
+ * the block table below the mark. Read-only: exposes the allocator's existing
+ * state and changes nothing. Not synchronized, like the allocator itself.
+ */
+typedef struct {
+    uint32_t used, total;
+    uint32_t live, live_blocks;
+    uint32_t free, free_blocks, largest_free;
+} xbox_heap_stats_t;
+void xbox_HeapStats(xbox_heap_stats_t *out);
+
+/**
  * Get the file mapping handle for the Xbox memory region.
  * Used by the VEH handler to map additional mirror views on demand.
  * Returns NULL if file mapping is not available.

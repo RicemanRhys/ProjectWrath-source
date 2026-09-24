@@ -2681,6 +2681,32 @@ uint32_t xbox_HeapBlockSize(uint32_t xbox_va)
     return 0;
 }
 
+/* Heap occupancy for a caller's diagnostics: the bump high-water mark and the
+ * total, then what the block table says about the space below the mark. Read
+ * only; nothing here changes what the allocator does. */
+void xbox_HeapStats(xbox_heap_stats_t *out)
+{
+    int i;
+
+    memset(out, 0, sizeof *out);
+    out->used  = g_heap_next - XBOX_HEAP_BASE;
+    out->total = (uint32_t)(XBOX_HEAP_TOP - XBOX_HEAP_BASE);
+    for (i = 0; i < g_heap_block_count; i++) {
+        uint32_t size = g_heap_blocks[i].size;
+        if (!size)
+            continue;       /* merged into a neighbour */
+        if (!g_heap_blocks[i].free) {
+            out->live += size;
+            out->live_blocks++;
+        } else {
+            out->free += size;
+            out->free_blocks++;
+            if (size > out->largest_free)
+                out->largest_free = size;
+        }
+    }
+}
+
 void xbox_HeapFree(uint32_t xbox_va)
 {
     static int frees = 0, matched = 0;
