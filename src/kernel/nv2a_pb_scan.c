@@ -45,13 +45,21 @@ extern void nv2a_pb_exec_method(uint32_t subch, uint32_t method, uint32_t param)
 extern void nv2a_pb_exec_report(void);
 static int s_exec_enabled = -1;
 
+/* Where each (subchannel, method) pair sits in s_seen, plus one; 0 means not
+ * seen yet. note() runs on every method word, and a linear search over a few
+ * hundred pairs there was half the executor thread's time. s_seen keeps its
+ * insertion order, so the report is unchanged. The method part is 12 bits,
+ * not 11: an increasing run steps past 0x1FFC (up to 0x1FFC + 0x7FE * 4). */
+#define PB_SEEN_KEY(subch, method) (((subch) << 12) | ((method) >> 2))
+static uint16_t s_seen_index[8u << 12];
+
 static void note(uint32_t subch, uint32_t method)
 {
-    for (int i = 0; i < s_seen_count; i++) {
-        if (s_seen[i].method == method && s_seen[i].subch == subch) {
-            s_seen[i].count++;
-            return;
-        }
+    uint32_t key = PB_SEEN_KEY(subch, method);
+
+    if (s_seen_index[key]) {
+        s_seen[s_seen_index[key] - 1].count++;
+        return;
     }
     if (s_seen_count >= PB_MAX_METHODS) {
         /* Silently dropping past the cap is how a truncated inventory reads as
@@ -69,6 +77,7 @@ static void note(uint32_t subch, uint32_t method)
         s_seen[s_seen_count].subch  = subch;
         s_seen[s_seen_count].count  = 1;
         s_seen_count++;
+        s_seen_index[key] = (uint16_t)s_seen_count;
     }
 }
 

@@ -277,6 +277,28 @@ typedef struct { uint32_t method, count, last_param; } PbUnhandled;
 static PbUnhandled s_unhandled[PB_EXEC_MAX_UNHANDLED];
 static int s_unhandled_count;
 
+/* Where each method sits in s_unhandled, plus one; 0 means not there. The
+ * pushbuffer walk gives methods below 0x4000, 4-aligned; anything else falls
+ * back to a search. The report sorts s_unhandled in place, so it rebuilds
+ * this afterwards. */
+#define PB_UNHANDLED_INDEX_SIZE (0x4000 / 4)
+static uint16_t s_unhandled_index[PB_UNHANDLED_INDEX_SIZE];
+
+static int unhandled_indexable(uint32_t method)
+{
+    return method < 0x4000 && !(method & 3);
+}
+
+static void unhandled_reindex(void)
+{
+    int i;
+
+    memset(s_unhandled_index, 0, sizeof s_unhandled_index);
+    for (i = 0; i < s_unhandled_count; i++)
+        if (unhandled_indexable(s_unhandled[i].method))
+            s_unhandled_index[s_unhandled[i].method >> 2] = (uint16_t)(i + 1);
+}
+
 /* Every texture-stage register, as the title last set it.
  * Texturing is not implemented yet; knowing which formats and sizes a title
  * actually programs is what decides which ones are worth implementing. */
@@ -353,18 +375,27 @@ static void note_unhandled(uint32_t method, uint32_t param)
     int i;
 
     s_gpu.unhandled_total++;
-    for (i = 0; i < s_unhandled_count; i++) {
-        if (s_unhandled[i].method == method) {
-            s_unhandled[i].count++;
-            s_unhandled[i].last_param = param;
-            return;
-        }
+    if (unhandled_indexable(method)) {
+        i = s_unhandled_index[method >> 2] - 1;
+    } else {
+        for (i = 0; i < s_unhandled_count; i++)
+            if (s_unhandled[i].method == method)
+                break;
+        if (i == s_unhandled_count)
+            i = -1;
+    }
+    if (i >= 0) {
+        s_unhandled[i].count++;
+        s_unhandled[i].last_param = param;
+        return;
     }
     if (s_unhandled_count < PB_EXEC_MAX_UNHANDLED) {
         s_unhandled[s_unhandled_count].method = method;
         s_unhandled[s_unhandled_count].count = 1;
         s_unhandled[s_unhandled_count].last_param = param;
         s_unhandled_count++;
+        if (unhandled_indexable(method))
+            s_unhandled_index[method >> 2] = (uint16_t)s_unhandled_count;
     }
 }
 
@@ -2020,5 +2051,6 @@ void nv2a_pb_exec_report(void)
                     v.u, v.f);
         }
     }
+    unhandled_reindex();
     }    fflush(stderr);
 }
