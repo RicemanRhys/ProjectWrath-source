@@ -685,6 +685,9 @@ static void fence_mirrors_tick(void)
 }
 
 static int s_nv2a_trace = 0;
+/* RECOMP_NV2A_TRACE itself, as opposed to the trace being implied by the
+ * pushbuffer survey or executor. Only this asks for a DMA_PUT line per kick. */
+static int s_nv2a_trace_every_kick = 0;
 
 /* The display framebuffer, as reported by AvSetDisplayMode. Checksummed once a
  * second so a run can answer the only question that matters before building a
@@ -838,12 +841,21 @@ static DWORD WINAPI nv2a_ack_thread(LPVOID param)
                  * in its device struct rather than assuming 0xFD800000, and
                  * mirroring the wrong block leaves it spinning on a GET that
                  * never moves. */
-                if (s_nv2a_trace) {
+                /* One line per kick is hundreds a second once a title is
+                 * drawing, and writing them was a third of this thread's
+                 * time under RECOMP_PB_EXEC (Crash tWoC's intro). So
+                 * unless RECOMP_NV2A_TRACE asked for every kick, at most
+                 * one a second: a stuck GET still shows, since a PUT that
+                 * stops moving is reported every 2 s anyway. */
+                static DWORD last_put_line_ms;
+                if (s_nv2a_trace && (s_nv2a_trace_every_kick
+                        || now_ms - last_put_line_ms >= 1000)) {
                     uint32_t g = *(volatile uint32_t *)
                                  ((char *)regs + NV2A_USER_DMA_GET);
                     fprintf(stderr, "  [NV2A] DMA_PUT = 0x%08X  DMA_GET = "
                             "0x%08X%s\n", put, g,
                             g == put ? "" : "  (GPU behind)");
+                    last_put_line_ms = now_ms;
                 }
                 fflush(stderr);
             }
@@ -1881,7 +1893,8 @@ BOOL xbox_MemoryLayoutInit(const void *xbe_data, size_t xbe_size)
         );
         /* The pushbuffer survey rides on the same poll, so either
          * variable arms it. */
-        s_nv2a_trace = getenv("RECOMP_NV2A_TRACE") != NULL
+        s_nv2a_trace_every_kick = getenv("RECOMP_NV2A_TRACE") != NULL;
+        s_nv2a_trace = s_nv2a_trace_every_kick
                     || getenv("RECOMP_PB_SCAN") != NULL
                     || getenv("RECOMP_PB_EXEC") != NULL;
         if (g_nv2a_memory) {
