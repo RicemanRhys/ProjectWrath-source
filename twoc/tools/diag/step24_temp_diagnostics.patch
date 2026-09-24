@@ -1,0 +1,262 @@
+diff --git a/twoc/CMakeLists.txt b/twoc/CMakeLists.txt
+index cbe9184..4a195a6 100644
+--- a/twoc/CMakeLists.txt
++++ b/twoc/CMakeLists.txt
+@@ -94,6 +94,7 @@ target_link_libraries(${PROJECT_NAME} PRIVATE
+ if(MSVC)
+     target_link_options(${PROJECT_NAME} PRIVATE
+         /LARGEADDRESSAWARE
++        /MAP   # TMP step 24
+     )
+     # The generated code files can be very large. Increase object file section limit.
+     # /MP: compile the five ~190K-line generated files in parallel.
+diff --git a/twoc/src/main.c b/twoc/src/main.c
+index 2eb548d..b7444db 100644
+--- a/twoc/src/main.c
++++ b/twoc/src/main.c
+@@ -264,6 +264,184 @@ static LONG CALLBACK veh_handler(PEXCEPTION_POINTERS ep)
+ 
+ /* ── WinMain ───────────────────────────────────────────────── */
+ 
++/* ── TMP step 24: stream-thread hang sampler (NOT committed) ─────────────
++ *
++ * Every 3 s, with WriteFile + wvsprintfA only (no CRT locks):
++ *   - every other host thread: suspend, unwind up to 16 native frames with
++ *     RtlLookupFunctionEntry/RtlVirtualUnwind, resume, then symbolize (the
++ *     lifted functions are real sub_XXXXXXXX symbols);
++ *   - the stream thread's guest stack 0x01B4EE00..0x01B4F000: every dword
++ *     raw for 0x01B4EF00.., code-range words for the whole window, '*' if
++ *     changed since the last snapshot;
++ *   - DSOUND's lock 0x152BB0 (8 dwords) and the 6 stream voices' flags.
++ */
++#include <tlhelp32.h>
++#include <stdarg.h>
++
++static HANDLE tmp_f;
++
++static void tmp_w(const char *fmt, ...)
++{
++    char b[1024];
++    va_list ap;
++    DWORD w;
++    int n;
++    va_start(ap, fmt);
++    n = wvsprintfA(b, fmt, ap);
++    va_end(ap);
++    if (n > 0) WriteFile(tmp_f, b, (DWORD)n, &w, NULL);
++}
++
++static uint32_t tmp_g32(uint32_t va)
++{
++    return *(volatile uint32_t *)((uintptr_t)va + g_xbox_mem_offset);
++}
++
++static void tmp_sym(DWORD64 a)
++{
++    char buf[sizeof(SYMBOL_INFO) + 256];
++    SYMBOL_INFO *si = (SYMBOL_INFO *)buf;
++    DWORD64 disp = 0;
++    memset(buf, 0, sizeof(buf));
++    si->SizeOfStruct = sizeof(SYMBOL_INFO);
++    si->MaxNameLen = 255;
++    if (SymFromAddr(GetCurrentProcess(), a, &disp, si))
++        tmp_w(" %s+0x%X", si->Name, (unsigned)disp);
++    else
++        tmp_w(" %08X%08X", (unsigned)(a >> 32), (unsigned)a);
++}
++
++#define TMP_STK_LO 0x01B4EE00u
++#define TMP_STK_HI 0x01B4F000u
++
++static DWORD WINAPI tmp_sampler(LPVOID unused)
++{
++    static uint32_t prev[(TMP_STK_HI - TMP_STK_LO) / 4];
++    DWORD self = GetCurrentThreadId(), pid = GetCurrentProcessId();
++    DWORD t0 = GetTickCount();
++    (void)unused;
++
++    tmp_f = CreateFileA("hang_sampler.log", GENERIC_WRITE, FILE_SHARE_READ, NULL,
++                        CREATE_ALWAYS, FILE_ATTRIBUTE_NORMAL, NULL);
++    tmp_w("stderr handle type %u, stdout %u (1 disk, 2 char, 3 pipe)\r\n",
++          GetFileType(GetStdHandle(STD_ERROR_HANDLE)), GetFileType(GetStdHandle(STD_OUTPUT_HANDLE)));
++    for (;;) {
++        DWORD64 fr[48][24];
++        DWORD tid[48], susp[48], cpu[48];
++        int nfr[48], nt = 0, i, j;
++        HANDLE snap;
++        THREADENTRY32 te;
++
++        Sleep(3000);
++        tmp_w("=== t=%u ms exe base %08X%08X\r\n", GetTickCount() - t0,
++              (unsigned)((uintptr_t)GetModuleHandleA(NULL) >> 32), (unsigned)(uintptr_t)GetModuleHandleA(NULL));
++
++        snap = CreateToolhelp32Snapshot(TH32CS_SNAPTHREAD, 0);
++        te.dwSize = sizeof(te);
++        for (BOOL ok = Thread32First(snap, &te); ok; ok = Thread32Next(snap, &te)) {
++            HANDLE h;
++            CONTEXT c;
++            if (te.th32OwnerProcessID != pid || te.th32ThreadID == self || nt == 48)
++                continue;
++            h = OpenThread(THREAD_SUSPEND_RESUME | THREAD_GET_CONTEXT | THREAD_QUERY_INFORMATION, FALSE, te.th32ThreadID);
++            if (!h) continue;
++            memset(&c, 0, sizeof(c));
++            c.ContextFlags = CONTEXT_FULL;
++            DWORD prev_susp;
++            FILETIME ct, et, kt, ut;
++            if ((prev_susp = SuspendThread(h)) != (DWORD)-1) {
++                if (GetThreadContext(h, &c)) {
++                    int k = 0;
++                    tid[nt] = te.th32ThreadID;
++                    susp[nt] = prev_susp;
++                    cpu[nt] = GetThreadTimes(h, &ct, &et, &kt, &ut)
++                        ? (DWORD)(((((ULONGLONG)kt.dwHighDateTime << 32) | kt.dwLowDateTime) +
++                                   (((ULONGLONG)ut.dwHighDateTime << 32) | ut.dwLowDateTime)) / 10000) : 0;
++                    while (k < 24 && c.Rip) {
++                        DWORD64 base, est;
++                        PRUNTIME_FUNCTION rf;
++                        void *hd;
++                        fr[nt][k++] = c.Rip;
++                        rf = RtlLookupFunctionEntry(c.Rip, &base, NULL);
++                        if (!rf) { c.Rip = *(DWORD64 *)c.Rsp; c.Rsp += 8; continue; }
++                        RtlVirtualUnwind(UNW_FLAG_NHANDLER, base, c.Rip, rf, &c, &hd, &est, NULL);
++                    }
++                    nfr[nt++] = k;
++                }
++                ResumeThread(h);
++            }
++            CloseHandle(h);
++        }
++        CloseHandle(snap);
++        for (i = 0; i < nt; i++) {
++            /* skip idle threads: frame 0 in ntdll wait with nothing of ours */
++            int ours = 0;
++            for (j = 0; j < nfr[i]; j++) {
++                char buf[sizeof(SYMBOL_INFO) + 64];
++                SYMBOL_INFO *si = (SYMBOL_INFO *)buf;
++                DWORD64 d;
++                memset(buf, 0, sizeof(buf));
++                si->SizeOfStruct = sizeof(SYMBOL_INFO);
++                si->MaxNameLen = 63;
++                if (SymFromAddr(GetCurrentProcess(), fr[i][j], &d, si) &&
++                    si->Name[0] == 's' && si->Name[1] == 'u' && si->Name[2] == 'b')
++                    ours = 1;
++            }
++            (void)ours;
++            tmp_w("tid %u [susp %u cpu %u ms]:", tid[i], susp[i], cpu[i]);
++            for (j = 0; j < nfr[i]; j++) tmp_sym(fr[i][j]);
++            tmp_w("\r\n");
++        }
++
++        tmp_w("stack raw 0x01B4EF00..:");
++        for (uint32_t a = 0x01B4EF00u; a < TMP_STK_HI; a += 4) {
++            if ((a & 0x1F) == 0) tmp_w("\r\n  %08X:", a);
++            tmp_w(" %08X", tmp_g32(a));
++        }
++        tmp_w("\r\nstack code words:");
++        for (uint32_t a = TMP_STK_LO; a < TMP_STK_HI; a += 4) {
++            uint32_t v = tmp_g32(a), idx = (a - TMP_STK_LO) / 4;
++            if (v >= 0x11000u && v < 0x15AA48u)
++                tmp_w(" %08X=%08X%s", a, v, v != prev[idx] ? "*" : "");
++            prev[idx] = v;
++        }
++        {
++            extern struct tmp_kqst_s { uint32_t ret, esp, arg, esi, ecx, ebp_, lo, hi; DWORD tid; volatile LONG n; } g_tmp_kqst[16];
++            extern volatile LONG g_tmp_kqst_used;
++            tmp_w("\r\nKeQuerySystemTime callers:");
++            for (i = 0; i < g_tmp_kqst_used; i++)
++                tmp_w("\r\n  ret=%08X n=%u esp=%08X arg=%08X time=%08X:%08X esi=%08X ecx=%08X ebp=%08X tid=%u",
++                      g_tmp_kqst[i].ret, (unsigned)g_tmp_kqst[i].n, g_tmp_kqst[i].esp, g_tmp_kqst[i].arg,
++                      g_tmp_kqst[i].hi, g_tmp_kqst[i].lo, g_tmp_kqst[i].esi, g_tmp_kqst[i].ecx,
++                      g_tmp_kqst[i].ebp_, g_tmp_kqst[i].tid);
++            /* the object (esi) of the busiest caller, 0xA0 bytes */
++            {
++                int best = -1;
++                for (i = 0; i < g_tmp_kqst_used; i++)
++                    if (best < 0 || g_tmp_kqst[i].n > g_tmp_kqst[best].n) best = i;
++                if (best >= 0 && g_tmp_kqst[best].esi >= 0x10000u && g_tmp_kqst[best].esi < 0x04000000u) {
++                    uint32_t o = g_tmp_kqst[best].esi;
++                    tmp_w("\r\n  esi object %08X:", o);
++                    for (uint32_t a = 0; a < 0xA0u; a += 4) {
++                        if ((a & 0x1F) == 0) tmp_w("\r\n    +%02X:", a);
++                        tmp_w(" %08X", tmp_g32(o + a));
++                    }
++                }
++            }
++        }
++        tmp_w("\r\nlock 0x152BB0:");
++        for (uint32_t a = 0x152BB0u; a < 0x152BD0u; a += 4) tmp_w(" %08X", tmp_g32(a));
++        tmp_w("\r\nvoices:");
++        for (i = 0; i < 6; i++) {
++            uint32_t v = 0x431ED8u + (uint32_t)i * 0x44u;
++            tmp_w(" [%d obj=%08X play=%02X stop=%02X start=%02X]", i, tmp_g32(v + 4),
++                  tmp_g32(v + 0x24) & 0xFF, tmp_g32(v + 0x38) & 0xFF, (tmp_g32(v + 0x38) >> 8) & 0xFF);
++        }
++        tmp_w("\r\n");
++    }
++}
++/* ── end TMP ─────────────────────────────────────────────────────────── */
++
+ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance,
+                    LPSTR lpCmdLine, int nCmdShow)
+ {
+@@ -406,6 +584,7 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance,
+      * silently inert, and the one diagnostic that tells a hang from slowness
+      * does nothing while appearing to be set. */
+     xbox_WatchdogStart();
++    CreateThread(NULL, 0, tmp_sampler, NULL, 0, NULL); /* TMP step 24 */
+ 
+     /* GPU completion fence. The statically linked D3D's fence wait
+      * (sub_001034D0) spins until *MEM32(dev + 0x34) reaches the fence value,
+diff --git a/twoc/src/recomp_manual.c b/twoc/src/recomp_manual.c
+index 3325aea..3054b66 100644
+--- a/twoc/src/recomp_manual.c
++++ b/twoc/src/recomp_manual.c
+@@ -201,8 +201,48 @@ static void traced_sub_0002BCC0(void)
+     sub_0002BCC0();
+ }
+ 
++/* ── TMP step 24: KeQuerySystemTime tap (NOT committed) ── */
++typedef struct { uint32_t ret, esp, arg, esi, ecx, ebp_, lo, hi; DWORD tid; volatile LONG n; } tmp_kqst_t;
++tmp_kqst_t g_tmp_kqst[16];
++volatile LONG g_tmp_kqst_used;
++static uint32_t g_tmp_kqst_va;
++static void tmp_kqst_tap(void)
++{
++    uint32_t sp = esp, ret = MEM32(esp), a = MEM32(esp + 4);
++    int i;
++    for (i = 0; i < g_tmp_kqst_used; i++)
++        if (g_tmp_kqst[i].ret == ret) break;
++    if (i == g_tmp_kqst_used && i < 16) g_tmp_kqst_used++;
++    recomp_lookup_kernel(g_tmp_kqst_va)();
++    if (i < 16) {
++        tmp_kqst_t *e = &g_tmp_kqst[i];
++        e->ret = ret; e->esp = sp; e->arg = a; e->esi = esi; e->ecx = ecx;
++        e->ebp_ = g_ebp; e->lo = a ? MEM32(a) : 0; e->hi = a ? MEM32(a + 4) : 0;
++        e->tid = GetCurrentThreadId();
++        InterlockedIncrement(&e->n);
++    }
++}
++static uint32_t g_tmp_nsus_va;
++static void tmp_nsuspend_tap(void)
++{
++    uint32_t ret = MEM32(esp);
++    _lock_file(stderr);          /* target can't be frozen inside stderr */
++    recomp_lookup_kernel(g_tmp_nsus_va)();
++    _unlock_file(stderr);
++    fprintf(stderr, "[TMP] NtSuspendThread from 0x%08X ran under the stderr lock\n", ret);
++}
++/* ── end TMP ── */
++
+ recomp_func_t recomp_lookup_manual(uint32_t xbox_va)
+ {
++    if (!g_tmp_kqst_va) g_tmp_kqst_va = MEM32(0x15AAA4);   /* TMP step 24 */
++    if (xbox_va == g_tmp_kqst_va) return tmp_kqst_tap;     /* TMP step 24 */
++    if (!g_tmp_nsus_va) g_tmp_nsus_va = MEM32(0x15AA7C);   /* TMP step 24 */
++    {
++        static int safe = -1;
++        if (safe < 0) safe = getenv("TMP_SAFE_SUSPEND") != NULL;
++        if (safe && xbox_va == g_tmp_nsus_va) return tmp_nsuspend_tap;
++    }
+     /* XPP input entry points -> xbox_input. See the block comments above
+      * their definitions below for the traced ABI. */
+     if (xbox_va == 0x001542AB) return sub_001542AB;
