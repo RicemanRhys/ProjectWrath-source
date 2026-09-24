@@ -20,6 +20,7 @@
 
 #include <stdio.h>
 #include <stdint.h>
+#include <stdlib.h>
 #include <string.h>
 
 /* xbox_bridge_resolve_handle: resolves a guest handle token back to the real
@@ -42,6 +43,96 @@
  * xbox_memory_layout.c) and recomp_types.h declares them extern, so nothing is
  * defined or declared here: a second definition is a duplicate symbol (LNK2005).
  */
+
+/* ── Test-only options ─────────────────────────────────────── */
+
+/*
+ * Two switches that get a run to the level load in about a minute with nobody
+ * at the controller, instead of ~13 minutes with someone there. Each is off
+ * unless its variable is set to something other than "" or "0"
+ * (run_twoc.ps1 -FastTitle / -AutoStart). With both off, nothing below
+ * writes guest memory or changes what the game reads.
+ *
+ * RECOMP_DEV_FAST_TITLE: the title animation (notes 18.24) steps
+ * time += speed once per update and calls the main-menu callback
+ * (sub_0002BCC0) once time >= 961. Its speed setter sub_0002C2C0 writes 0.5
+ * every frame, then uses the float at 0x1BAA98 instead if that is nonzero.
+ * Nothing in the binary writes 0x1BAA98 (BSS, 0 at boot; that setter is its
+ * only reader), so it reads as a leftover tuning knob. Seeding it with
+ * DEV_TITLE_SPEED finishes the ~660 remaining units in about a dozen updates
+ * instead of ~1300. The pause while the title music isn't playing
+ * (sub_0002C330 sets speed 0 and skips the setter) still applies. The knob is
+ * cleared when the menu opens, so only the title runs fast.
+ *
+ * RECOMP_DEV_AUTOSTART: injects A on port 0 at +5 s and +20 s after the main
+ * menu opens: menu 0 -> menu 4 -> "start game" (notes 18.25). If no real
+ * pad is on port 0, a virtual one (neutral state) is reported there. The game
+ * only opens a slot for a connected port, and the presses need a slot.
+ */
+#define DEV_TITLE_SPEED_VA  0x001BAA98u
+#define DEV_TITLE_SPEED     64.0f
+
+static int g_dev_fast_title;
+static int g_dev_autostart;
+static ULONGLONG g_dev_start_ms;
+static ULONGLONG g_dev_menu_ms;     /* when the main menu opened; 0 = not yet */
+
+static int dev_flag(const char *name)
+{
+    const char *v = getenv(name);
+    return v && *v && strcmp(v, "0") != 0;
+}
+
+/* Called once from main.c, before the guest runs. */
+void twoc_dev_options_init(void)
+{
+    g_dev_fast_title = dev_flag("RECOMP_DEV_FAST_TITLE");
+    g_dev_autostart  = dev_flag("RECOMP_DEV_AUTOSTART");
+    g_dev_start_ms   = GetTickCount64();
+
+    if (g_dev_fast_title) {
+        MEMF(DEV_TITLE_SPEED_VA) = DEV_TITLE_SPEED;
+        fprintf(stderr, "[DEV] fast title: title speed knob 0x%08X = %.1f (normal 0.5)\n",
+                DEV_TITLE_SPEED_VA, DEV_TITLE_SPEED);
+    }
+    if (g_dev_autostart)
+        fprintf(stderr, "[DEV] autostart: A on port 0 at +5 s and +20 s after the main menu opens\n");
+}
+
+/* A port the game may open: really connected, or port 0 under autostart. */
+static int dev_port_connected(DWORD port)
+{
+    return xbox_InputIsConnected(port) || (g_dev_autostart && port == 0);
+}
+
+/* Autostart's part of the poll: stand in a neutral virtual pad if port 0 has
+ * no real one, then hold A for 500 ms at +5 s and +20 s after the menu. */
+static void dev_autostart_poll(DWORD port, XBOX_INPUT_STATE *state, DWORD *result)
+{
+    static DWORD packet;
+    static int a_down;
+    int want_a = 0;
+
+    if (!g_dev_autostart || port != 0)
+        return;
+    if (*result != ERROR_SUCCESS) {
+        memset(state, 0, sizeof(*state));
+        *result = ERROR_SUCCESS;
+    }
+    if (g_dev_menu_ms) {
+        ULONGLONG dt = GetTickCount64() - g_dev_menu_ms;
+        want_a = (dt >= 5000 && dt < 5500) || (dt >= 20000 && dt < 20500);
+    }
+    if (want_a != a_down) {
+        a_down = want_a;
+        packet++;
+        fprintf(stderr, "[DEV] autostart: A %s (+%.1f s after the menu)\n",
+                a_down ? "down" : "up", (GetTickCount64() - g_dev_menu_ms) / 1000.0);
+    }
+    if (a_down)
+        state->Gamepad.bAnalogButtons[XBOX_BUTTON_A] = 0xFF;
+    state->dwPacketNumber += packet;
+}
 
 /* ── Manual function overrides ─────────────────────────────── */
 
@@ -84,9 +175,10 @@ extern void sub_0015431A(void);
 
 /* The title animation's end callback (notes 18.24): sub_0002C020 stores it at
  * anim+0x90 and the animation engine calls it indirectly at 0x7AA35, so this
- * lookup sees it. It is set_menu(0), the main menu. The wrapper only
- * announces that moment so a person at the controller knows when to press;
- * the lifted function runs unchanged. */
+ * lookup sees it. It is set_menu(0), the main menu. The wrapper announces
+ * that moment so a person at the controller knows when to press, and under
+ * the test-only options records it and ends the fast title; the lifted
+ * function runs unchanged. */
 extern void sub_0002BCC0(void);
 static void traced_sub_0002BCC0(void)
 {
@@ -97,6 +189,13 @@ static void traced_sub_0002BCC0(void)
 
     fputs(banner, stderr);
     fputs(banner, stdout);
+    if (g_dev_fast_title || g_dev_autostart) {
+        g_dev_menu_ms = GetTickCount64();
+        fprintf(stderr, "[DEV] main menu opened %.1f s after start\n",
+                (g_dev_menu_ms - g_dev_start_ms) / 1000.0);
+        if (g_dev_fast_title)
+            MEMF(DEV_TITLE_SPEED_VA) = 0.0f;   /* title done: back to normal speed */
+    }
     fflush(stderr);
     fflush(stdout);
     sub_0002BCC0();
@@ -813,7 +912,7 @@ void sub_00154249(void)
     uint32_t handle  = 0;
 
     if (type == XPP_GAMEPAD_TYPE && portKey < XBOX_MAX_CONTROLLERS &&
-        xbox_InputIsConnected(portKey))
+        dev_port_connected(portKey))
         handle = XPP_TOKEN_BASE | portKey;
 
     fprintf(stderr, "[XPP] open type=0x%08X portKey=%u -> handle=0x%08X\n",
@@ -885,6 +984,7 @@ void sub_001542AB(void)
         return;
     }
     result = xbox_InputGetState(port, &state);
+    dev_autostart_poll(port, &state, &result);
     if (result == ERROR_SUCCESS) {
         /* Log digital/analog button changes (not thumbsticks, which drift),
          * so a run shows whether real player input reached the game. */
@@ -1014,8 +1114,11 @@ void sub_000EB270(void)
 
     if (!primed) {
         primed = 1;
-        int connected = xbox_InputIsConnected(0);
-        fprintf(stderr, "[XPP] sub_000EB270 primed: xbox_InputIsConnected(0)=%d\n", connected);
+        int connected = dev_port_connected(0);
+        fprintf(stderr, "[XPP] sub_000EB270 primed: xbox_InputIsConnected(0)=%d\n",
+                xbox_InputIsConnected(0));
+        if (connected && !xbox_InputIsConnected(0))
+            fprintf(stderr, "[DEV] autostart: no pad on port 0, using a virtual one\n");
         if (connected) {
             PUSH32(esp, 0);            /* port 0, the one stack arg (cdecl) */
             PUSH32(esp, 0x000EB270u);  /* synthetic return address; unread */

@@ -422,6 +422,13 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance,
      * and vibration entry points (twoc/src/recomp_manual.c) forward to. */
     xbox_InputInit();
 
+    /* Test-only options (RECOMP_DEV_FAST_TITLE, RECOMP_DEV_AUTOSTART; see
+     * recomp_manual.c). Inert unless one is set. */
+    {
+        extern void twoc_dev_options_init(void);
+        twoc_dev_options_init();
+    }
+
     /* Step 7: Call the recompiled entry point */
     printf("\nStarting game...\n");
     fflush(stdout);
