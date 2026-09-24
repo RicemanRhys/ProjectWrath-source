@@ -1,6 +1,6 @@
 # Diagnostics
 
-These are debugging tools from steps 24 to 26 (notes 18.26 to 18.28). None of them are part of the build.
+These are debugging tools from steps 24 to 27 (notes 18.26 to 18.29). None of them are part of the build.
 
 | File | What it does |
 |---|---|
@@ -12,6 +12,9 @@ These are debugging tools from steps 24 to 26 (notes 18.26 to 18.28). None of th
 | `step26_profile_sampler.patch` | A temporary time profiler against `145f8ef` (notes 18.28). It adds `/MAP` and a sampler thread in `main.c` that every 100 ms suspends each host thread, unwinds 12 native frames, and writes `prof_sampler.log` with the raw frames, each thread's CPU time, and a header with USER `DMA_PUT`/`GET`, the D3D fence pair, the PFB flush register and the vblank count. Unlike the step 24 sampler, it's meant for "where does the time go", not "where is it stuck". |
 | `prof.py` | `python prof.py crash_twoc.map prof_sampler.log [t_from_ms] [t_to_ms]`. It aggregates that log: CPU use per thread, the main and NV2A ack threads' leaf functions and marker functions on their stacks, and the GPU state once a second. System DLL frames show as `<sys>`; they share one base per boot, so resolve them from another process (ctypes `GetProcAddress`) if needed. |
 | `vmacct.py` | `python vmacct.py run.err.log ...`. It sums the `[TMPVM]` lines: new regions, bytes released, the live peak, and the biggest callers. |
+| `fpsrun.py` | Step 27 (notes 18.29). `python fpsrun.py TAG --stderr file\|nul\|pipe [--fast] [--auto] [--seconds N] [--stop-at-menu]`. It launches the game with `run_twoc.ps1`'s variables (`--fast`/`--auto` are `-FastTitle`/`-AutoStart`) and reads guest memory from outside the process every 0.5 s, so a frame rate needs no log and works with stderr to NUL. The frame counter is the game's `0x25A660` (one `inc` per main-loop pass, `sub_0009A670`); D3D's `0x10EBD4` moves with it. `--stop-at-menu` ends the run 3 s after the menu banner (title timing). |
+| `fps.py` | `python fps.py TAG ...`. It summarises `fpsrun.py` samples: menu time, the intro-load gap, fps from the end of that gap (the intro cutscene) in 10 s buckets and on average, and the time to reach cutscene frame N. |
+| `discover.py` | `python discover.py TAG.disc.bin [t_from] [t_to] [min_rate] [max_rate]`. It lists guest dwords that rose at a steady rate in an `fpsrun.py --discover` dump. That's how `0x25A660` was found. |
 
 Using the patch:
 
