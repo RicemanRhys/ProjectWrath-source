@@ -201,8 +201,232 @@ static void traced_sub_0002BCC0(void)
     sub_0002BCC0();
 }
 
+/* ── Cooperative NtSuspendThread / NtResumeThread ──────────── */
+
+/*
+ * The level setup (sub_0002C020, notes 18.26) suspends the stream thread at
+ * 0x2C032 and resumes it at 0x2C245. The runtime's NtSuspendThread is a real
+ * SuspendThread, so the thread stops wherever it happens to be. That can be
+ * inside host code holding a host lock. In step 24 it was the runtime's
+ * `[CS]` contention fprintf holding the CRT stderr lock. Every thread that
+ * logs then blocks, the watchdog too. The heap lock and the runtime's own
+ * locks are exposed the same way.
+ *
+ * Here a suspend only marks the target. The target parks itself at its next
+ * kernel-call boundary, where it holds no host lock. Every guest kernel call
+ * is an indirect call through a thunk VA, and RECOMP_ICALL asks
+ * recomp_lookup_manual first. So kernel VAs are routed through
+ * coop_kernel_call, which checks for a pending suspend on entry and again on
+ * return. Only the outermost call parks. Kernel code that calls back into
+ * guest code (APCs, DPCs) may hold host locks, so a nested call never parks.
+ *
+ * Suspend returns once the target is parked or inside a kernel call. In both
+ * cases it runs no more guest code until it is resumed, as with a real
+ * suspend. A thread spinning in guest code with no kernel calls gets 100 ms
+ * and is then left to park at its next kernel call. That is logged.
+ *
+ * Handles that don't resolve to a spawned thread go to the real bridge (the
+ * main thread never has a spawned HANDLE). So does a resume of a thread with
+ * no cooperative suspend count, such as one created suspended.
+ */
+#define COOP_NTSUSPEND_THUNK  0x0015AA7Cu      /* [thunk] = NtSuspendThread (ordinal 231) */
+#define COOP_NTRESUME_THUNK   0x0015AA80u      /* [thunk] = NtResumeThread (ordinal 224) */
+#define COOP_KERNEL_VA_LO     0xFE000000u      /* the bridge's synthetic thunk VAs */
+#define COOP_KERNEL_VA_HI     0xFF000000u      /* (kernel_bridge.c KERNEL_VA_BASE) */
+#define COOP_MAX_THREADS      64
+#define COOP_SETTLE_MS        100
+#define COOP_LOG_MAX          64
+
+enum { COOP_GUEST, COOP_KERNEL, COOP_PARKED };
+
+typedef struct {
+    DWORD         tid;                 /* 0 = free slot */
+    volatile LONG suspend;             /* cooperative suspend count */
+    volatile LONG state;               /* COOP_GUEST / COOP_KERNEL / COOP_PARKED */
+    HANDLE        wake;                /* manual-reset, signaled while suspend == 0 */
+} coop_thread_t;
+
+static coop_thread_t g_coop[COOP_MAX_THREADS];
+static SRWLOCK g_coop_lock = SRWLOCK_INIT;
+static volatile LONG g_coop_logged;
+static RECOMP_TLS coop_thread_t *t_coop;
+static RECOMP_TLS uint32_t t_coop_kernel_va;   /* set by the lookup, read by the call */
+static RECOMP_TLS int t_coop_depth;            /* nesting of kernel calls */
+
+static const char *const coop_state_name[] = { "in guest code", "in a kernel call", "parked" };
+
+/* The record for a thread id, created if asked. NULL if the table is full. */
+static coop_thread_t *coop_find(DWORD tid, int create)
+{
+    coop_thread_t *t = NULL;
+    int i;
+
+    AcquireSRWLockExclusive(&g_coop_lock);
+    for (i = 0; i < COOP_MAX_THREADS && g_coop[i].tid; i++)
+        if (g_coop[i].tid == tid) {
+            t = &g_coop[i];
+            break;
+        }
+    if (!t && create && i < COOP_MAX_THREADS) {
+        t = &g_coop[i];
+        t->suspend = 0;
+        t->state = COOP_GUEST;
+        t->wake = CreateEventA(NULL, TRUE, TRUE, NULL);
+        t->tid = tid;
+    }
+    ReleaseSRWLockExclusive(&g_coop_lock);
+    return t;
+}
+
+static coop_thread_t *coop_self(void)
+{
+    if (!t_coop)
+        t_coop = coop_find(GetCurrentThreadId(), 1);
+    return t_coop;
+}
+
+/* Called only at depth 0, where this thread holds no host lock. */
+static void coop_park(coop_thread_t *t)
+{
+    if (t->suspend <= 0)
+        return;
+    InterlockedExchange(&t->state, COOP_PARKED);
+    while (InterlockedCompareExchange(&t->suspend, 0, 0) > 0)
+        WaitForSingleObject(t->wake, INFINITE);
+    InterlockedExchange(&t->state, COOP_GUEST);
+}
+
+/* Every guest kernel call, via recomp_lookup_manual. */
+static void coop_kernel_call(void)
+{
+    uint32_t va = t_coop_kernel_va;
+    coop_thread_t *self = coop_self();
+    recomp_func_t fn;
+
+    if (self && t_coop_depth == 0)
+        coop_park(self);
+    fn = recomp_lookup_kernel(va);         /* also selects this thread's dispatch slot */
+    if (++t_coop_depth == 1 && self)
+        InterlockedExchange(&self->state, COOP_KERNEL);
+    fn();
+    if (--t_coop_depth == 0 && self) {
+        /* Publish "guest" before checking, so a suspend that lands in
+         * between either sees guest and waits, or is seen here. */
+        InterlockedExchange(&self->state, COOP_GUEST);
+        coop_park(self);
+    }
+}
+
+static void coop_log(const char *what, DWORD tid, LONG prev, uint32_t ret, const char *state)
+{
+    if (InterlockedIncrement(&g_coop_logged) > COOP_LOG_MAX)
+        return;
+    fprintf(stderr, "[SUSPEND] %s thread %lu from 0x%08X: count %ld -> %ld%s%s\n",
+            what, (unsigned long)tid, ret, (long)prev,
+            (long)(what[0] == 's' ? prev + 1 : prev - 1),
+            state ? ", target " : "", state ? state : "");
+    fflush(stderr);
+}
+
+/* Resolve a guest thread handle to its record. NULL: not a spawned thread. */
+static coop_thread_t *coop_target(uint32_t handle, DWORD *tid)
+{
+    HANDLE h = xbox_bridge_resolve_handle(handle);
+
+    *tid = h ? GetThreadId(h) : 0;
+    return *tid ? coop_find(*tid, 1) : NULL;
+}
+
+/* NTSTATUS NtSuspendThread(HANDLE ThreadHandle, PULONG PreviousSuspendCount); ret 8 */
+static void coop_NtSuspendThread(void)
+{
+    uint32_t ret     = MEM32(esp);
+    uint32_t handle  = MEM32(esp + 4);
+    uint32_t prev_va = MEM32(esp + 8);
+    DWORD tid;
+    coop_thread_t *t = coop_target(handle, &tid);
+    coop_thread_t *self = coop_self();
+    LONG prev;
+
+    if (!t) {
+        t_coop_kernel_va = MEM32(COOP_NTSUSPEND_THUNK);
+        coop_kernel_call();
+        return;
+    }
+    if (self && t_coop_depth == 0)
+        coop_park(self);                   /* a kernel-call boundary for the caller too */
+
+    AcquireSRWLockExclusive(&g_coop_lock);
+    prev = t->suspend;
+    InterlockedIncrement(&t->suspend);
+    if (prev == 0)
+        ResetEvent(t->wake);
+    ReleaseSRWLockExclusive(&g_coop_lock);
+
+    if (prev_va)
+        MEM32(prev_va) = (uint32_t)prev;
+    eax = 0;                               /* STATUS_SUCCESS */
+    esp += 12;                             /* ret 8 */
+
+    if (t == self) {
+        coop_log("suspend (self)", tid, prev, ret, NULL);
+        if (t_coop_depth == 0)
+            coop_park(self);
+        return;
+    }
+    {
+        ULONGLONG until = GetTickCount64() + COOP_SETTLE_MS;
+        LONG st;
+        while ((st = InterlockedCompareExchange(&t->state, 0, 0)) == COOP_GUEST &&
+               t->suspend > 0 && GetTickCount64() < until)
+            Sleep(1);
+        coop_log("suspend", tid, prev, ret,
+                 st == COOP_GUEST ? "still in guest code, parks at its next kernel call"
+                                  : coop_state_name[st]);
+    }
+}
+
+/* NTSTATUS NtResumeThread(HANDLE ThreadHandle, PULONG PreviousSuspendCount); ret 8 */
+static void coop_NtResumeThread(void)
+{
+    uint32_t ret     = MEM32(esp);
+    uint32_t handle  = MEM32(esp + 4);
+    uint32_t prev_va = MEM32(esp + 8);
+    DWORD tid;
+    coop_thread_t *t = coop_target(handle, &tid);
+    LONG prev = 0;
+
+    if (t) {
+        AcquireSRWLockExclusive(&g_coop_lock);
+        prev = t->suspend;
+        if (prev > 0 && InterlockedDecrement(&t->suspend) == 0)
+            SetEvent(t->wake);
+        ReleaseSRWLockExclusive(&g_coop_lock);
+    }
+    if (prev <= 0) {                       /* not ours: e.g. created suspended */
+        t_coop_kernel_va = MEM32(COOP_NTRESUME_THUNK);
+        coop_kernel_call();
+        return;
+    }
+    if (prev_va)
+        MEM32(prev_va) = (uint32_t)prev;
+    eax = 0;                               /* STATUS_SUCCESS */
+    esp += 12;                             /* ret 8 */
+    coop_log("resume", tid, prev, ret, NULL);
+}
+
 recomp_func_t recomp_lookup_manual(uint32_t xbox_va)
 {
+    /* Guest kernel calls: cooperative suspension, see above. */
+    if (xbox_va >= COOP_KERNEL_VA_LO && xbox_va < COOP_KERNEL_VA_HI) {
+        if (xbox_va == MEM32(COOP_NTSUSPEND_THUNK)) return coop_NtSuspendThread;
+        if (xbox_va == MEM32(COOP_NTRESUME_THUNK))  return coop_NtResumeThread;
+        if (recomp_lookup_kernel(xbox_va)) {
+            t_coop_kernel_va = xbox_va;
+            return coop_kernel_call;
+        }
+    }
+
     /* XPP input entry points -> xbox_input. See the block comments above
      * their definitions below for the traced ABI. */
     if (xbox_va == 0x001542AB) return sub_001542AB;
