@@ -1,0 +1,1361 @@
+[
+ {
+  "addr": 1037952,
+  "tier": "D-small",
+  "sites": 1,
+  "name": "Direct3D_* query returning 1 (likely GetAdapterModeCount-style)",
+  "disp": "Q",
+  "target": "-",
+  "methods": [],
+  "callers": [
+   "0x3ae80"
+  ]
+ },
+ {
+  "addr": 1037968,
+  "tier": "D-small",
+  "sites": 1,
+  "name": "Direct3D_GetDeviceCaps(Adapter,DevType,pCaps)",
+  "disp": "Q",
+  "target": "-",
+  "methods": [],
+  "callers": [
+   "0x3ae80"
+  ]
+ },
+ {
+  "addr": 1038016,
+  "tier": "D-small",
+  "sites": 1,
+  "name": "Direct3D_SetPushBufferSize(Size,KickOff)",
+  "disp": "Q",
+  "target": "-",
+  "methods": [],
+  "callers": [
+   "0x39a80"
+  ]
+ },
+ {
+  "addr": 1038048,
+  "tier": "A",
+  "sites": 1,
+  "name": "Direct3D_CreateDevice",
+  "disp": "W",
+  "target": "xbox_Direct3DCreate8 + CreateDevice; host device stays host-side",
+  "methods": [],
+  "callers": [
+   "0x39a80"
+  ]
+ },
+ {
+  "addr": 1038240,
+  "tier": "D-big",
+  "sites": 1,
+  "name": "SetRenderState_MultiSampleMode",
+  "disp": "N",
+  "target": "none (re-applies SetRenderTarget natively)",
+  "methods": [],
+  "callers": [
+   "0x3a830"
+  ]
+ },
+ {
+  "addr": 1038288,
+  "tier": "D-big",
+  "sites": 1,
+  "name": "SetRenderState_MultiSampleRenderTargetMode",
+  "disp": "N",
+  "target": "none (as above)",
+  "methods": [],
+  "callers": [
+   "0x3a830"
+  ]
+ },
+ {
+  "addr": 1038336,
+  "tier": "D-small",
+  "sites": 1,
+  "name": "SetRenderState_PSTextureModes",
+  "disp": "N",
+  "target": "RS[117] -> D3DRS_PSTEXTUREMODES",
+  "methods": [],
+  "callers": [
+   "0x3a830"
+  ]
+ },
+ {
+  "addr": 1038384,
+  "tier": "C",
+  "sites": 1,
+  "name": "SetRenderState_Simple(method,value) __fastcall",
+  "disp": "N",
+  "target": "value also stored in RS[State] by game dispatcher 0x3A830",
+  "methods": [],
+  "callers": [
+   "0x3a830"
+  ]
+ },
+ {
+  "addr": 1038848,
+  "tier": "C",
+  "sites": 1,
+  "name": "SetRenderState_EdgeAntialias",
+  "disp": "N",
+  "target": "RS -> D3DRS_EDGEANTIALIAS (no-op in D3D11)",
+  "methods": [
+   "SET_LINE_SMOOTH_ENABLE"
+  ],
+  "callers": [
+   "0x3a830"
+  ]
+ },
+ {
+  "addr": 1038912,
+  "tier": "C",
+  "sites": 1,
+  "name": "SetRenderState_ShadowFunc",
+  "disp": "N",
+  "target": "no host equivalent; log if used",
+  "methods": [
+   "SET_SHADOW_DEPTH_FUNC"
+  ],
+  "callers": [
+   "0x3a830"
+  ]
+ },
+ {
+  "addr": 1038976,
+  "tier": "C",
+  "sites": 1,
+  "name": "SetRenderState_FogColor",
+  "disp": "N",
+  "target": "RS -> D3DRS_FOGCOLOR",
+  "methods": [
+   "SET_FOG_COLOR"
+  ],
+  "callers": [
+   "0x3a830"
+  ]
+ },
+ {
+  "addr": 1039056,
+  "tier": "C",
+  "sites": 1,
+  "name": "SetRenderState_CullMode",
+  "disp": "N",
+  "target": "RS -> D3DRS_CULLMODE (0/0x900/0x901 -> 1/2/3)",
+  "methods": [
+   "SET_CULL_FACE",
+   "SET_CULL_FACE_ENABLE"
+  ],
+  "callers": [
+   "0x3a830"
+  ]
+ },
+ {
+  "addr": 1039168,
+  "tier": "C",
+  "sites": 1,
+  "name": "SetRenderState_FrontFace",
+  "disp": "N",
+  "target": "folded into CULLMODE",
+  "methods": [
+   "SET_FRONT_FACE"
+  ],
+  "callers": [
+   "0x3a830"
+  ]
+ },
+ {
+  "addr": 1039232,
+  "tier": "C",
+  "sites": 1,
+  "name": "SetRenderState_NormalizeNormals",
+  "disp": "N",
+  "target": "RS -> D3DRS_NORMALIZENORMALS",
+  "methods": [
+   "SET_NORMALIZATION_ENABLE"
+  ],
+  "callers": [
+   "0x3a830"
+  ]
+ },
+ {
+  "addr": 1039296,
+  "tier": "C",
+  "sites": 1,
+  "name": "SetRenderState_TextureFactor",
+  "disp": "N",
+  "target": "RS -> D3DRS_TEXTUREFACTOR",
+  "methods": [
+   "SET_COMBINER_FACTOR0"
+  ],
+  "callers": [
+   "0x3a830"
+  ]
+ },
+ {
+  "addr": 1039392,
+  "tier": "D-small",
+  "sites": 1,
+  "name": "SetRenderState_LineWidth",
+  "disp": "N",
+  "target": "ignored (D3D11 lines are 1 px)",
+  "methods": [
+   "SET_SHADE_MODE+0x4"
+  ],
+  "callers": [
+   "0x3a830"
+  ]
+ },
+ {
+  "addr": 1039504,
+  "tier": "C",
+  "sites": 1,
+  "name": "SetRenderState_Dxt1NoiseEnable",
+  "disp": "N",
+  "target": "ignored",
+  "methods": [
+   "NO_OPERATION",
+   "SET_ZSTENCIL_CLEAR_VALUE",
+   "WAIT_FOR_IDLE"
+  ],
+  "callers": [
+   "0x3a830"
+  ]
+ },
+ {
+  "addr": 1039632,
+  "tier": "D-small",
+  "sites": 1,
+  "name": "SetRenderState_ZBias",
+  "disp": "N",
+  "target": "RS -> rasterizer DepthBias (xbox_d3d8 gap)",
+  "methods": [],
+  "callers": [
+   "0x3a830"
+  ]
+ },
+ {
+  "addr": 1039760,
+  "tier": "C",
+  "sites": 1,
+  "name": "SetRenderState_LogicOp",
+  "disp": "N",
+  "target": "ignored unless nonzero (log)",
+  "methods": [
+   "SET_LOGIC_OP_ENABLE"
+  ],
+  "callers": [
+   "0x3a830"
+  ]
+ },
+ {
+  "addr": 1039856,
+  "tier": "C",
+  "sites": 2,
+  "name": "SetRenderState_FillMode",
+  "disp": "N",
+  "target": "RS -> D3DRS_FILLMODE (0x1B00-2 -> 1-3)",
+  "methods": [
+   "SET_FRONT_POLYGON_MODE"
+  ],
+  "callers": [
+   "0x3a830",
+   "0x3b010"
+  ]
+ },
+ {
+  "addr": 1039936,
+  "tier": "C",
+  "sites": 1,
+  "name": "SetRenderState_BackFillMode",
+  "disp": "N",
+  "target": "ignored",
+  "methods": [
+   "SET_FRONT_POLYGON_MODE"
+  ],
+  "callers": [
+   "0x3a830"
+  ]
+ },
+ {
+  "addr": 1040032,
+  "tier": "C",
+  "sites": 1,
+  "name": "SetRenderState_TwoSidedLighting",
+  "disp": "N",
+  "target": "ignored at first",
+  "methods": [
+   "SET_FRONT_POLYGON_MODE"
+  ],
+  "callers": [
+   "0x3a830"
+  ]
+ },
+ {
+  "addr": 1040144,
+  "tier": "C",
+  "sites": 1,
+  "name": "SetRenderState_VertexBlend",
+  "disp": "N",
+  "target": "RS -> D3DRS_VERTEXBLEND",
+  "methods": [
+   "SET_SKIN_MODE"
+  ],
+  "callers": [
+   "0x3a830"
+  ]
+ },
+ {
+  "addr": 1040224,
+  "tier": "C",
+  "sites": 1,
+  "name": "SetTextureState_TexCoordIndex(Stage,Value)",
+  "disp": "N",
+  "target": "TSS[s][28] -> D3DTSS_TEXCOORDINDEX",
+  "methods": [],
+  "callers": [
+   "0x3ac60"
+  ]
+ },
+ {
+  "addr": 1040512,
+  "tier": "C",
+  "sites": 1,
+  "name": "SetTextureState_BumpEnv(Stage,Type,Value)",
+  "disp": "N",
+  "target": "TSS[s][22..27] -> D3DTSS_BUMPENVMAT*",
+  "methods": [],
+  "callers": [
+   "0x3ac60"
+  ]
+ },
+ {
+  "addr": 1040624,
+  "tier": "C",
+  "sites": 1,
+  "name": "SetTextureState_BorderColor(Stage,Value)",
+  "disp": "N",
+  "target": "TSS[s][29] -> D3DTSS_BORDERCOLOR",
+  "methods": [],
+  "callers": [
+   "0x3ac60"
+  ]
+ },
+ {
+  "addr": 1040688,
+  "tier": "C",
+  "sites": 1,
+  "name": "SetTextureState_ColorKeyColor(Stage,Value)",
+  "disp": "N",
+  "target": "TSS[s][30]; no host equivalent",
+  "methods": [],
+  "callers": [
+   "0x3ac60"
+  ]
+ },
+ {
+  "addr": 1041856,
+  "tier": "D-small",
+  "sites": 1,
+  "name": "SetRenderState_ZEnable",
+  "disp": "N",
+  "target": "RS -> D3DRS_ZENABLE",
+  "methods": [
+   "SET_DEPTH_TEST_ENABLE",
+   "SET_ZMIN_MAX_CONTROL"
+  ],
+  "callers": [
+   "0x3a830"
+  ]
+ },
+ {
+  "addr": 1042016,
+  "tier": "C",
+  "sites": 1,
+  "name": "SetRenderState_StencilEnable",
+  "disp": "N",
+  "target": "RS -> D3DRS_STENCILENABLE",
+  "methods": [
+   "SET_ANTI_ALIASING_CONTROL+0x8",
+   "SET_STENCIL_TEST_ENABLE"
+  ],
+  "callers": [
+   "0x3a830"
+  ]
+ },
+ {
+  "addr": 1042160,
+  "tier": "C",
+  "sites": 1,
+  "name": "SetRenderState_StencilFail",
+  "disp": "N",
+  "target": "RS -> D3DRS_STENCILFAIL (GL op -> D3DSTENCILOP)",
+  "methods": [
+   "SET_ANTI_ALIASING_CONTROL+0x8",
+   "SET_STENCIL_OP_FAIL"
+  ],
+  "callers": [
+   "0x3a830"
+  ]
+ },
+ {
+  "addr": 1042272,
+  "tier": "D-small",
+  "sites": 1,
+  "name": "SetRenderState_YuvEnable",
+  "disp": "N",
+  "target": "ignored unless set (log)",
+  "methods": [],
+  "callers": [
+   "0x3a830"
+  ]
+ },
+ {
+  "addr": 1042320,
+  "tier": "C",
+  "sites": 1,
+  "name": "SetRenderState_OcclusionCullEnable",
+  "disp": "N",
+  "target": "ignored (NV2A z-cull)",
+  "methods": [
+   "SET_ANTI_ALIASING_CONTROL+0x8"
+  ],
+  "callers": [
+   "0x3a830"
+  ]
+ },
+ {
+  "addr": 1042432,
+  "tier": "C",
+  "sites": 1,
+  "name": "SetRenderState_StencilCullEnable",
+  "disp": "N",
+  "target": "ignored (NV2A z-cull)",
+  "methods": [
+   "SET_ANTI_ALIASING_CONTROL+0x8"
+  ],
+  "callers": [
+   "0x3a830"
+  ]
+ },
+ {
+  "addr": 1042544,
+  "tier": "D-small",
+  "sites": 1,
+  "name": "SetRenderState_RopZCmpAlwaysRead",
+  "disp": "N",
+  "target": "ignored",
+  "methods": [],
+  "callers": [
+   "0x3a830"
+  ]
+ },
+ {
+  "addr": 1042576,
+  "tier": "D-small",
+  "sites": 1,
+  "name": "SetRenderState_RopZRead",
+  "disp": "N",
+  "target": "ignored",
+  "methods": [],
+  "callers": [
+   "0x3a830"
+  ]
+ },
+ {
+  "addr": 1042608,
+  "tier": "D-small",
+  "sites": 1,
+  "name": "SetRenderState_DoNotCullUncompressed",
+  "disp": "N",
+  "target": "ignored",
+  "methods": [],
+  "callers": [
+   "0x3a830"
+  ]
+ },
+ {
+  "addr": 1042640,
+  "tier": "D-small",
+  "sites": 1,
+  "name": "SetRenderState_MultiSampleAntiAlias",
+  "disp": "N",
+  "target": "ignored",
+  "methods": [
+   "SET_ANTI_ALIASING_CONTROL"
+  ],
+  "callers": [
+   "0x3a830"
+  ]
+ },
+ {
+  "addr": 1042736,
+  "tier": "D-small",
+  "sites": 1,
+  "name": "SetRenderState_MultiSampleMask",
+  "disp": "N",
+  "target": "ignored",
+  "methods": [
+   "SET_ANTI_ALIASING_CONTROL"
+  ],
+  "callers": [
+   "0x3a830"
+  ]
+ },
+ {
+  "addr": 1042832,
+  "tier": "D-small",
+  "sites": 3,
+  "name": "D3DDevice_GetDirect3D (writes 1)",
+  "disp": "Q",
+  "target": "-",
+  "methods": [],
+  "callers": [
+   "0x114e1e",
+   "0x114f38",
+   "0x116e4c"
+  ]
+ },
+ {
+  "addr": 1042848,
+  "tier": "D-small",
+  "sites": 4,
+  "name": "D3DDevice_GetDeviceCaps (copies 0xD4 bytes)",
+  "disp": "Q",
+  "target": "-",
+  "methods": [],
+  "callers": [
+   "0x3a720",
+   "0x3a740",
+   "0x3a760",
+   "0x116e4c"
+  ]
+ },
+ {
+  "addr": 1042880,
+  "tier": "D-small",
+  "sites": 6,
+  "name": "D3DDevice_CreateTexture",
+  "disp": "N",
+  "target": "host texture made lazily from the header at first bind",
+  "methods": [],
+  "callers": [
+   "0x3cee0",
+   "0x3cfe0",
+   "0x117325",
+   "0x11776f"
+  ]
+ },
+ {
+  "addr": 1042928,
+  "tier": "D-small",
+  "sites": 1,
+  "name": "D3DDevice_CreateCubeTexture",
+  "disp": "N",
+  "target": "lazy -> CreateCubeTexture",
+  "methods": [],
+  "callers": [
+   "0x117ae3"
+  ]
+ },
+ {
+  "addr": 1042976,
+  "tier": "D-small",
+  "sites": 1,
+  "name": "D3DDevice_SetTransform(State,pMatrix)",
+  "disp": "N",
+  "target": "device+0x750+State*64 -> SetTransform (index remap)",
+  "methods": [],
+  "callers": [
+   "0x3ad30"
+  ]
+ },
+ {
+  "addr": 1043248,
+  "tier": "D-small",
+  "sites": 1,
+  "name": "D3DDevice_GetViewport",
+  "disp": "Q",
+  "target": "-",
+  "methods": [],
+  "callers": [
+   "0x39ea0"
+  ]
+ },
+ {
+  "addr": 1043280,
+  "tier": "D-small",
+  "sites": 1,
+  "name": "D3DDevice_SetMaterial",
+  "disp": "N",
+  "target": "device+0x9F0 -> SetMaterial",
+  "methods": [],
+  "callers": [
+   "0x3a6e0"
+  ]
+ },
+ {
+  "addr": 1043456,
+  "tier": "C",
+  "sites": 1,
+  "name": "push 3 dwords __fastcall (game SetTexture fast path)",
+  "disp": "W",
+  "target": "decode TEXTURE_OFFSET(stage): stage texture = (Data,Format)",
+  "methods": [],
+  "callers": [
+   "0x3aae0"
+  ]
+ },
+ {
+  "addr": 1043504,
+  "tier": "D-small",
+  "sites": 3,
+  "name": "D3DDevice_AddRef",
+  "disp": "Q",
+  "target": "-",
+  "methods": [],
+  "callers": [
+   "0x10f9dd",
+   "0x114e1e",
+   "0x114f38"
+  ]
+ },
+ {
+  "addr": 1043536,
+  "tier": "D-big",
+  "sites": 2,
+  "name": "D3DDevice_Release",
+  "disp": "N",
+  "target": "host teardown only at the real last ref",
+  "methods": [],
+  "callers": [
+   "0x10f96e",
+   "0x111177"
+  ]
+ },
+ {
+  "addr": 1043600,
+  "tier": "D-small",
+  "sites": 1,
+  "name": "SetVerticalBlankCallback or SetSwapCallback",
+  "disp": "Q",
+  "target": "-",
+  "methods": [],
+  "callers": [
+   "0x3b0c0"
+  ]
+ },
+ {
+  "addr": 1043856,
+  "tier": "D-small",
+  "sites": 1,
+  "name": "D3DDevice_InsertFence",
+  "disp": "Q",
+  "target": "-",
+  "methods": [],
+  "callers": [
+   "0x3af90"
+  ]
+ },
+ {
+  "addr": 1044096,
+  "tier": "D-small",
+  "sites": 1,
+  "name": "D3DDevice_GetDisplayMode",
+  "disp": "Q",
+  "target": "-",
+  "methods": [],
+  "callers": [
+   "0x116e4c"
+  ]
+ },
+ {
+  "addr": 1044256,
+  "tier": "D-big",
+  "sites": 4,
+  "name": "D3DDevice_SetRenderTarget(pRT,pZ)",
+  "disp": "N",
+  "target": "device+0x2070/0x2074 -> host RT",
+  "methods": [
+   "FLIP_STALL",
+   "SET_DEPTH_TEST_ENABLE",
+   "SET_STENCIL_TEST_ENABLE",
+   "SET_SURFACE_CLIP_HORIZONTAL",
+   "SET_SURFACE_COLOR_OFFSET",
+   "SET_SURFACE_FORMAT",
+   "SET_SURFACE_PITCH",
+   "SET_SURFACE_ZETA_OFFSET"
+  ],
+  "callers": [
+   "0x39ba0",
+   "0x39cc0",
+   "0x39d40"
+  ]
+ },
+ {
+  "addr": 1045584,
+  "tier": "D-small",
+  "sites": 3,
+  "name": "D3DDevice_GetBackBuffer",
+  "disp": "Q",
+  "target": "-",
+  "methods": [],
+  "callers": [
+   "0x39970",
+   "0x399f0",
+   "0x39e00"
+  ]
+ },
+ {
+  "addr": 1045888,
+  "tier": "D-small",
+  "sites": 2,
+  "name": "D3DDevice_CopyRects",
+  "disp": "W",
+  "target": "host copy (xbox_d3d8 gap)",
+  "methods": [],
+  "callers": [
+   "0x39970",
+   "0x39e00"
+  ]
+ },
+ {
+  "addr": 1046576,
+  "tier": "D-small",
+  "sites": 2,
+  "name": "D3DDevice_GetDepthStencilSurface",
+  "disp": "Q",
+  "target": "-",
+  "methods": [],
+  "callers": [
+   "0x399f0"
+  ]
+ },
+ {
+  "addr": 1046624,
+  "tier": "D-small",
+  "sites": 2,
+  "name": "D3DDevice_SetViewport",
+  "disp": "N",
+  "target": "device+0x9D0 -> SetViewport",
+  "methods": [],
+  "callers": [
+   "0x39a80",
+   "0x39eb0"
+  ]
+ },
+ {
+  "addr": 1046976,
+  "tier": "D-small",
+  "sites": 1,
+  "name": "D3DDevice_SetLight",
+  "disp": "N",
+  "target": "device+0x390 array -> SetLight",
+  "methods": [],
+  "callers": [
+   "0x3a700"
+  ]
+ },
+ {
+  "addr": 1047456,
+  "tier": "D-small",
+  "sites": 1,
+  "name": "D3DDevice_LightEnable",
+  "disp": "N",
+  "target": "light +0x68 flag -> LightEnable",
+  "methods": [],
+  "callers": [
+   "0x3a710"
+  ]
+ },
+ {
+  "addr": 1047696,
+  "tier": "D-small",
+  "sites": 3,
+  "name": "D3DDevice_SetTexture(Stage,pTex)",
+  "disp": "N",
+  "target": "device+0xA78[stage] -> host SetTexture",
+  "methods": [],
+  "callers": [
+   "0x3aae0"
+  ]
+ },
+ {
+  "addr": 1048080,
+  "tier": "D-small",
+  "sites": 1,
+  "name": "D3DDevice_SetPalette(Stage,pPal)",
+  "disp": "N",
+  "target": "device+0xA88[stage] -> host SetPalette",
+  "methods": [],
+  "callers": [
+   "0x3ac40"
+  ]
+ },
+ {
+  "addr": 1048224,
+  "tier": "D-small",
+  "sites": 2,
+  "name": "D3DDevice_SetIndices(pIB,Base)",
+  "disp": "N",
+  "target": "[0x10EC0C], device+0x1C read at draw",
+  "methods": [],
+  "callers": [
+   "0x3b010",
+   "0x11199e"
+  ]
+ },
+ {
+  "addr": 1051712,
+  "tier": "D-big",
+  "sites": 1,
+  "name": "D3DDevice_Swap(Flags)",
+  "disp": "W",
+  "target": "host Swap after native",
+  "methods": [],
+  "callers": [
+   "0x39e00"
+  ]
+ },
+ {
+  "addr": 1051904,
+  "tier": "D-small",
+  "sites": 2,
+  "name": "D3DDevice_CreateIndexBuffer",
+  "disp": "Q",
+  "target": "no host IB (indices via ...UP)",
+  "methods": [],
+  "callers": [
+   "0x3a140",
+   "0x111cc7"
+  ]
+ },
+ {
+  "addr": 1051968,
+  "tier": "D-small",
+  "sites": 2,
+  "name": "D3DPalette_Lock",
+  "disp": "N",
+  "target": "palette re-uploaded on content change",
+  "methods": [],
+  "callers": [
+   "0x3cec0",
+   "0x3cfe0"
+  ]
+ },
+ {
+  "addr": 1052016,
+  "tier": "D-small",
+  "sites": 4,
+  "name": "D3DDevice_CreateVertexBuffer",
+  "disp": "Q",
+  "target": "no host VB (vertices copied per draw)",
+  "methods": [],
+  "callers": [
+   "0x39ed0",
+   "0x3a450",
+   "0x1116a4",
+   "0x111cc7"
+  ]
+ },
+ {
+  "addr": 1052112,
+  "tier": "B",
+  "sites": 24,
+  "name": "D3DVertexBuffer_Lock",
+  "disp": "Q",
+  "target": "-",
+  "methods": [
+   "SET_WEIGHT4F+0x50"
+  ],
+  "callers": [
+   "0x3a310",
+   "0x3a360",
+   "0x3a3c0",
+   "0x3a4f0"
+  ]
+ },
+ {
+  "addr": 1052208,
+  "tier": "D-small",
+  "sites": 2,
+  "name": "D3DDevice_CreatePalette",
+  "disp": "Q",
+  "target": "-",
+  "methods": [],
+  "callers": [
+   "0x3ce90",
+   "0x3cfe0"
+  ]
+ },
+ {
+  "addr": 1052320,
+  "tier": "D-small",
+  "sites": 5,
+  "name": "D3DDevice_Clear",
+  "disp": "W",
+  "target": "host Clear",
+  "methods": [
+   "SET_SURFACE_FORMAT"
+  ],
+  "callers": [
+   "0x39a80",
+   "0x39dc0",
+   "0x39e00"
+  ]
+ },
+ {
+  "addr": 1053388,
+  "tier": "D-small",
+  "sites": 1,
+  "name": "D3DDevice_BeginStateBlock (probable)",
+  "disp": "N",
+  "target": "-",
+  "methods": [],
+  "callers": [
+   "0x3a780"
+  ]
+ },
+ {
+  "addr": 1054469,
+  "tier": "D-big",
+  "sites": 1,
+  "name": "D3DDevice_ApplyStateBlock",
+  "disp": "N",
+  "target": "callees update native shadows",
+  "methods": [],
+  "callers": [
+   "0x3a7f0"
+  ]
+ },
+ {
+  "addr": 1054861,
+  "tier": "D-small",
+  "sites": 1,
+  "name": "D3DDevice_DeleteStateBlock",
+  "disp": "Q",
+  "target": "-",
+  "methods": [],
+  "callers": [
+   "0x3a7c0"
+  ]
+ },
+ {
+  "addr": 1055006,
+  "tier": "D-small",
+  "sites": 1,
+  "name": "D3DDevice_EndStateBlock (probable)",
+  "disp": "N",
+  "target": "-",
+  "methods": [],
+  "callers": [
+   "0x3a7a0"
+  ]
+ },
+ {
+  "addr": 1055168,
+  "tier": "D-big",
+  "sites": 2,
+  "name": "D3DDevice_DrawVerticesUP(Prim,Count,pData,Stride)",
+  "disp": "W",
+  "target": "scrape + DrawPrimitiveUP",
+  "methods": [
+   "SET_BEGIN_END"
+  ],
+  "callers": [
+   "0x398d0",
+   "0x11127a"
+  ]
+ },
+ {
+  "addr": 1055520,
+  "tier": "D-big",
+  "sites": 1,
+  "name": "D3DDevice_DrawVertices(Prim,Start,Count)",
+  "disp": "W",
+  "target": "scrape + stream fetch + DrawPrimitiveUP",
+  "methods": [
+   "SET_BEGIN_END"
+  ],
+  "callers": [
+   "0x3af90"
+  ]
+ },
+ {
+  "addr": 1055680,
+  "tier": "D-big",
+  "sites": 3,
+  "name": "D3DDevice_DrawIndexedVertices(Prim,Count,pIdx)",
+  "disp": "W",
+  "target": "scrape + fetch + DrawIndexedPrimitiveUP",
+  "methods": [
+   "ARRAY_ELEMENT32",
+   "SET_BEGIN_END"
+  ],
+  "callers": [
+   "0x3b010",
+   "0x11199e"
+  ]
+ },
+ {
+  "addr": 1056288,
+  "tier": "C",
+  "sites": 1,
+  "name": "D3DDevice_SetVertexData2f(Reg,a,b)",
+  "disp": "W",
+  "target": "immediate-mode accumulator",
+  "methods": [],
+  "callers": [
+   "0x3ae60"
+  ]
+ },
+ {
+  "addr": 1056352,
+  "tier": "C",
+  "sites": 1,
+  "name": "D3DDevice_SetVertexData4f(Reg,a,b,c,d)",
+  "disp": "W",
+  "target": "immediate-mode accumulator",
+  "methods": [],
+  "callers": [
+   "0x3ae40"
+  ]
+ },
+ {
+  "addr": 1056448,
+  "tier": "D-big",
+  "sites": 1,
+  "name": "D3DDevice_Begin(Prim)",
+  "disp": "W",
+  "target": "immediate-mode start",
+  "methods": [
+   "SET_BEGIN_END"
+  ],
+  "callers": [
+   "0x3ae20"
+  ]
+ },
+ {
+  "addr": 1056512,
+  "tier": "new",
+  "sites": 1,
+  "name": "D3DDevice_End (tail jmp from 0x3AE30)",
+  "disp": "W",
+  "target": "scrape + DrawPrimitiveUP",
+  "methods": [
+   "SET_BEGIN_END"
+  ],
+  "callers": [
+   "0x3ae30"
+  ]
+ },
+ {
+  "addr": 1057856,
+  "tier": "B",
+  "sites": 12,
+  "name": "D3DDevice_CreateVertexShader",
+  "disp": "N",
+  "target": "host shader built lazily from native object",
+  "methods": [],
+  "callers": [
+   "0xb6780",
+   "0xb6850"
+  ]
+ },
+ {
+  "addr": 1058176,
+  "tier": "D-small",
+  "sites": 6,
+  "name": "D3DDevice_SetStreamSource",
+  "disp": "N",
+  "target": "table 0x10F280 read at draw",
+  "methods": [],
+  "callers": [
+   "0x3a6a0",
+   "0xb7040",
+   "0x11199e"
+  ]
+ },
+ {
+  "addr": 1058544,
+  "tier": "D-small",
+  "sites": 1,
+  "name": "D3DDevice_SetShaderConstantMode",
+  "disp": "N",
+  "target": "device+0x2018 read at draw",
+  "methods": [
+   "SET_FOG_PLANE",
+   "SET_TRANSFORM_CONSTANT",
+   "SET_TRANSFORM_CONSTANT_LOAD"
+  ],
+  "callers": [
+   "0x398c0"
+  ]
+ },
+ {
+  "addr": 1058864,
+  "tier": "D-small",
+  "sites": 1,
+  "name": "D3DDevice_DeleteVertexShader",
+  "disp": "N",
+  "target": "host cache entry dropped lazily",
+  "methods": [],
+  "callers": [
+   "0xb6800"
+  ]
+ },
+ {
+  "addr": 1059136,
+  "tier": "D-small",
+  "sites": 4,
+  "name": "D3DDevice_SetVertexShader",
+  "disp": "N",
+  "target": "device+0x380/0x384 read at draw",
+  "methods": [
+   "SET_TRANSFORM_EXECUTION_MODE",
+   "SET_TRANSFORM_PROGRAM_START",
+   "SET_VERTEX_DATA4UB+0x10",
+   "SET_VERTEX_DATA4UB+0x1C",
+   "SET_VERTEX_DATA4UB+0x20",
+   "SET_VERTEX_DATA4UB+0xC"
+  ],
+  "callers": [
+   "0x398a0",
+   "0xb6800",
+   "0x11127a",
+   "0x11199e"
+  ]
+ },
+ {
+  "addr": 1059488,
+  "tier": "D-small",
+  "sites": 1,
+  "name": "D3DDevice_SetVertexShaderConstant",
+  "disp": "W",
+  "target": "host SetVertexShaderConstant",
+  "methods": [
+   "SET_TRANSFORM_CONSTANT",
+   "SET_TRANSFORM_CONSTANT_LOAD"
+  ],
+  "callers": [
+   "0x3ad50"
+  ]
+ },
+ {
+  "addr": 1059648,
+  "tier": "D-small",
+  "sites": 2,
+  "name": "D3DDevice_CreatePixelShader",
+  "disp": "Q",
+  "target": "-",
+  "methods": [],
+  "callers": [
+   "0xb6780",
+   "0xb6850"
+  ]
+ },
+ {
+  "addr": 1059728,
+  "tier": "D-small",
+  "sites": 1,
+  "name": "D3DDevice_DeletePixelShader",
+  "disp": "Q",
+  "target": "-",
+  "methods": [],
+  "callers": [
+   "0xb6800"
+  ]
+ },
+ {
+  "addr": 1059760,
+  "tier": "D-small",
+  "sites": 1,
+  "name": "D3DDevice_SetPixelShader",
+  "disp": "N",
+  "target": "def copied into RS[0..56] -> host RS 200-253",
+  "methods": [
+   "SET_COMBINER_ALPHA_ICW",
+   "SET_COMBINER_COLOR_OCW",
+   "SET_COMBINER_FACTOR0",
+   "SET_COMBINER_SPECULAR_FOG_CW0",
+   "SET_SHADER_CLIP_PLANE_MODE",
+   "SET_SHADER_OTHER_STAGE_INPUT",
+   "SET_SHADER_STAGE_PROGRAM+0x4",
+   "SET_SPECULAR_FOG_FACTOR"
+  ],
+  "callers": [
+   "0x3add0"
+  ]
+ },
+ {
+  "addr": 1060224,
+  "tier": "D-small",
+  "sites": 1,
+  "name": "D3DDevice_SetPixelShaderConstant",
+  "disp": "N",
+  "target": "lands in RS PSCONSTANT*",
+  "methods": [
+   "SET_EYE_VECTOR"
+  ],
+  "callers": [
+   "0x3ad90"
+  ]
+ },
+ {
+  "addr": 1063120,
+  "tier": "D-small",
+  "sites": 1,
+  "name": "D3DResource_GetType",
+  "disp": "Q",
+  "target": "-",
+  "methods": [],
+  "callers": [
+   "0x3cde0"
+  ]
+ },
+ {
+  "addr": 1063568,
+  "tier": "B",
+  "sites": 11,
+  "name": "D3DResource_AddRef",
+  "disp": "Q",
+  "target": "-",
+  "methods": [],
+  "callers": [
+   "0x3a550",
+   "0x10fa89",
+   "0x1113f1",
+   "0x115052"
+  ]
+ },
+ {
+  "addr": 1063632,
+  "tier": "B",
+  "sites": 34,
+  "name": "D3DResource_Release",
+  "disp": "Q",
+  "target": "host cache validated by signature",
+  "methods": [],
+  "callers": [
+   "0x39970",
+   "0x39ba0",
+   "0x39e00",
+   "0x39fe0"
+  ]
+ },
+ {
+  "addr": 1063712,
+  "tier": "D-small",
+  "sites": 2,
+  "name": "D3DResource_IsBusy",
+  "disp": "Q",
+  "target": "-",
+  "methods": [],
+  "callers": [
+   "0x3a310",
+   "0x3a360"
+  ]
+ },
+ {
+  "addr": 1063968,
+  "tier": "D-small",
+  "sites": 4,
+  "name": "D3DTexture_GetLevelDesc",
+  "disp": "Q",
+  "target": "-",
+  "methods": [],
+  "callers": [
+   "0x3aae0",
+   "0x3cf70",
+   "0x1174d4",
+   "0x11760e"
+  ]
+ },
+ {
+  "addr": 1063984,
+  "tier": "D-small",
+  "sites": 6,
+  "name": "D3DTexture_GetSurfaceLevel",
+  "disp": "Q",
+  "target": "-",
+  "methods": [],
+  "callers": [
+   "0x39ba0",
+   "0x3cfb0",
+   "0x1174d4",
+   "0x11776f"
+  ]
+ },
+ {
+  "addr": 1064064,
+  "tier": "D-small",
+  "sites": 4,
+  "name": "D3DTexture_LockRect",
+  "disp": "W",
+  "target": "mark host texture dirty",
+  "methods": [],
+  "callers": [
+   "0x3cf90",
+   "0x3cfe0"
+  ]
+ },
+ {
+  "addr": 1064112,
+  "tier": "D-small",
+  "sites": 4,
+  "name": "D3DCubeTexture_GetCubeMapSurface",
+  "disp": "Q",
+  "target": "-",
+  "methods": [],
+  "callers": [
+   "0x11760e",
+   "0x117ae3"
+  ]
+ },
+ {
+  "addr": 1064400,
+  "tier": "D-small",
+  "sites": 3,
+  "name": "D3DBaseTexture_GetLevelCount",
+  "disp": "Q",
+  "target": "-",
+  "methods": [],
+  "callers": [
+   "0x3cfe0",
+   "0x1174d4",
+   "0x11760e"
+  ]
+ },
+ {
+  "addr": 1064416,
+  "tier": "D-small",
+  "sites": 4,
+  "name": "D3DSurface_GetDesc",
+  "disp": "Q",
+  "target": "-",
+  "methods": [],
+  "callers": [
+   "0xf2aef",
+   "0x1170fc",
+   "0x1173b1",
+   "0x133960"
+  ]
+ },
+ {
+  "addr": 1064448,
+  "tier": "D-small",
+  "sites": 4,
+  "name": "D3DSurface_LockRect",
+  "disp": "W",
+  "target": "mark parent dirty; readback if host RT",
+  "methods": [],
+  "callers": [
+   "0xf2aef",
+   "0x1170fc",
+   "0x1173b1",
+   "0x133960"
+  ]
+ }
+]
