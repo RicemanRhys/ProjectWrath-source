@@ -1,0 +1,37 @@
+diff --git a/twoc/src/recomp_manual.c b/twoc/src/recomp_manual.c
+index 825f59b..2fb5387 100644
+--- a/twoc/src/recomp_manual.c
++++ b/twoc/src/recomp_manual.c
+@@ -160,6 +160,7 @@ static int dev_input_file_read(XBOX_GAMEPAD *pad)
+                 else if (!strcmp(tok, "ly")) cur.sThumbLY = (SHORT)v;
+                 else if (!strcmp(tok, "rx")) cur.sThumbRX = (SHORT)v;
+                 else if (!strcmp(tok, "ry")) cur.sThumbRY = (SHORT)v;
++                else if (!strcmp(tok, "ktrace")) { extern volatile int *tmp_ktrace_flag(void); *tmp_ktrace_flag() = (int)v; }
+                 else
+                     for (i = 0; i < 8; i++)
+                         if (!strcmp(tok, analog[i]))
+@@ -404,12 +405,24 @@ static void coop_leave(coop_thread_t *self)
+ static void heap_watch(void);
+ 
+ /* Every guest kernel call, via recomp_lookup_manual. */
++/* TMP step 28: kernel-call tap, armed by "ktrace=1" in the input file. Logs
++ * each call with its args and result, at most 20 per thunk slot while armed. */
++static volatile int g_tmp_ktrace;
++volatile int *tmp_ktrace_flag(void) { return &g_tmp_ktrace; }
+ static void coop_kernel_call(void)
+ {
+     uint32_t va = t_coop_kernel_va;
+     coop_thread_t *self = coop_enter();
++    static LONG per_slot[512], total;
++    uint32_t slot = (va - 0xFE000000u) / 4, ret = MEM32(esp);
++    uint32_t a1 = MEM32(esp + 4), a2 = MEM32(esp + 8), a3 = MEM32(esp + 12), a4 = MEM32(esp + 16);
++    int log_it = g_tmp_ktrace && slot < 512 && InterlockedIncrement(&per_slot[slot]) <= 20
++              && InterlockedIncrement(&total) <= 3000;
+ 
+     recomp_lookup_kernel(va)();            /* the lookup also selects this thread's dispatch slot */
++    if (log_it)
++        fprintf(stderr, "[KTAP] tid %lu slot %u ret 0x%08X args %08X %08X %08X %08X -> eax %08X\n",
++                (unsigned long)GetCurrentThreadId(), slot, ret, a1, a2, a3, a4, eax);
+     coop_leave(self);
+     heap_watch();
+ }
