@@ -1,6 +1,6 @@
 # Diagnostics
 
-These are debugging tools from steps 24 and 25 (notes 18.26 and 18.27). None of them are part of the build.
+These are debugging tools from steps 24 to 26 (notes 18.26 to 18.28). None of them are part of the build.
 
 | File | What it does |
 |---|---|
@@ -9,6 +9,8 @@ These are debugging tools from steps 24 and 25 (notes 18.26 and 18.27). None of 
 | `fnof.py` | `python fnof.py 2C032 1241B3 ...`. It finds the lifted function that contains each guest address, using the headers in `src/recomp/gen/recomp_*.c`. Set `RECOMP_GEN_DIR` to use a different directory. |
 | `compare_runs.py` | `python compare_runs.py a.err.log b.err.log`. It compares two `run_twoc.err.log` files on behaviour and ignores timing: CdRom file-open order, `[BOOT]/[DSP]/[XPP]/[DEV]/[ICALL]/[GAME]/[APU]` event lines, and exceptions. Use it to check that an option or fix is inert when unset. |
 | `step25_vm_tap.patch` | A temporary tap against `6f51e4b` (notes 18.27). It logs every guest `NtAllocateVirtualMemory` (`[0x15AB08]`) and `NtFreeVirtualMemory` (`[0x15AB0C]`) as `[TMPVM]` lines. With `TMP_FIX_FREE=1`, `MEM_RELEASE` really frees the block (`xbox_HeapFree`) and a decommit is a successful no-op. That was the leak-against-size experiment. |
+| `step26_profile_sampler.patch` | A temporary time profiler against `145f8ef` (notes 18.28). It adds `/MAP` and a sampler thread in `main.c` that every 100 ms suspends each host thread, unwinds 12 native frames, and writes `prof_sampler.log` with the raw frames, each thread's CPU time, and a header with USER `DMA_PUT`/`GET`, the D3D fence pair, the PFB flush register and the vblank count. Unlike the step 24 sampler, it's meant for "where does the time go", not "where is it stuck". |
+| `prof.py` | `python prof.py crash_twoc.map prof_sampler.log [t_from_ms] [t_to_ms]`. It aggregates that log: CPU use per thread, the main and NV2A ack threads' leaf functions and marker functions on their stacks, and the GPU state once a second. System DLL frames show as `<sys>`; they share one base per boot, so resolve them from another process (ctypes `GetProcAddress`) if needed. |
 | `vmacct.py` | `python vmacct.py run.err.log ...`. It sums the `[TMPVM]` lines: new regions, bytes released, the live peak, and the biggest callers. |
 
 Using the patch:
