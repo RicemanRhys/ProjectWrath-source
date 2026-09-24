@@ -1,0 +1,48 @@
+diff --git a/twoc/src/recomp_manual.c b/twoc/src/recomp_manual.c
+index e442bda..c834900 100644
+--- a/twoc/src/recomp_manual.c
++++ b/twoc/src/recomp_manual.c
+@@ -415,8 +415,43 @@ static void coop_NtResumeThread(void)
+     coop_log("resume", tid, prev, ret, NULL);
+ }
+ 
++/* ── TMP step 25: virtual-memory tap (NOT committed) ── */
++static void tmp_vm_alloc(void)
++{
++    uint32_t ret = MEM32(esp), bp = MEM32(esp + 4), sp = MEM32(esp + 12), type = MEM32(esp + 16);
++    uint32_t hint = bp ? MEM32(bp) : 0, req = sp ? MEM32(sp) : 0;
++    t_coop_kernel_va = MEM32(0x15AB08);
++    coop_kernel_call();
++    fprintf(stderr, "[TMPVM] alloc ret=0x%08X hint=0x%08X req=%u type=0x%X -> st=0x%08X base=0x%08X size=%u blk=%u\n",
++            ret, hint, req, type, eax, bp ? MEM32(bp) : 0, sp ? MEM32(sp) : 0,
++            bp ? xbox_HeapBlockSize(MEM32(bp)) : 0);
++}
++static void tmp_vm_free(void)
++{
++    static int fix = -1;
++    uint32_t ret = MEM32(esp), bp = MEM32(esp + 4), sp = MEM32(esp + 8), type = MEM32(esp + 12);
++    uint32_t base = bp ? MEM32(bp) : 0, size = sp ? MEM32(sp) : 0, blk = xbox_HeapBlockSize(base);
++    if (fix < 0) fix = getenv("TMP_FIX_FREE") != NULL;
++    fprintf(stderr, "[TMPVM] free ret=0x%08X base=0x%08X size=%u type=0x%X blk=%u%s\n",
++            ret, base, size, type, blk, fix ? " (fixed)" : "");
++    if (!fix) {
++        t_coop_kernel_va = MEM32(0x15AB0C);
++        coop_kernel_call();
++        return;
++    }
++    if ((type & 0x8000) && blk && xbox_HeapBlockSize(base) == blk) {
++        xbox_HeapFree(base);
++        if (sp) MEM32(sp) = blk;
++    }
++    eax = 0;
++    esp += 16;                             /* ret 12 */
++}
++/* ── end TMP ── */
++
+ recomp_func_t recomp_lookup_manual(uint32_t xbox_va)
+ {
++    if (xbox_va == MEM32(0x15AB08) && xbox_va) return tmp_vm_alloc;   /* TMP step 25 */
++    if (xbox_va == MEM32(0x15AB0C) && xbox_va) return tmp_vm_free;    /* TMP step 25 */
+     /* Guest kernel calls: cooperative suspension, see above. */
+     if (xbox_va >= COOP_KERNEL_VA_LO && xbox_va < COOP_KERNEL_VA_HI) {
+         if (xbox_va == MEM32(COOP_NTSUSPEND_THUNK)) return coop_NtSuspendThread;
