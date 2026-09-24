@@ -257,6 +257,18 @@ static struct {
     Texture  tex;
 } s_gpu;
 
+/* RECOMP_PB_EXEC_VERBOSE, read once. The checks below sit on the per-method
+ * and per-draw paths, and getenv there was over half of the executor's time
+ * (measured on Crash tWoC's intro cutscene). Nothing sets the variable
+ * after startup, so the cached answer is the one getenv would give. */
+static int pb_exec_verbose(void)
+{
+    static int verbose = -1;
+    if (verbose < 0)
+        verbose = getenv("RECOMP_PB_EXEC_VERBOSE") != NULL;
+    return verbose;
+}
+
 /* Unhandled methods, ranked. The interesting output is not that something was
  * skipped but which things dominate, because that is the order to implement
  * them in. */
@@ -1272,7 +1284,7 @@ static void draw_primitive(void)
 
     raster_batch();
 
-    if (getenv("RECOMP_PB_EXEC_VERBOSE")) {
+    if (pb_exec_verbose()) {
         static int shown;
         if (shown++ < 6) {
             fprintf(stderr, "  [GPU] prim %u, %u indices, pos attr:"
@@ -1548,7 +1560,7 @@ void nv2a_pb_exec_method(uint32_t subch, uint32_t method, uint32_t param)
     /* Bring-up: the first parameters each surface method carries. A wrong
      * pitch or clip is indistinguishable from a method never arriving unless
      * the values are visible. */
-    if (getenv("RECOMP_PB_EXEC_VERBOSE")) {
+    if (pb_exec_verbose()) {
         static int shown[8];
         int slot = -1;
         switch (method) {
@@ -1685,7 +1697,7 @@ void nv2a_pb_exec_method(uint32_t subch, uint32_t method, uint32_t param)
         /* And this is a completed swap, which is what a title's own swap
          * counter counts -- see xbox_Nv2aFrameCounterFlip. */
         xbox_Nv2aFrameCounterFlip();
-        if (getenv("RECOMP_PB_EXEC_VERBOSE")) {
+        if (pb_exec_verbose()) {
             static unsigned n;
             if (n++ < 8) {
                 fprintf(stderr, "  [GPU] flip %u: read=%u write=%u\n",
