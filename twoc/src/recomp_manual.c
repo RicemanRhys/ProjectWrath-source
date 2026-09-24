@@ -68,12 +68,21 @@
  * menu opens: menu 0 -> menu 4 -> "start game" (notes 18.25). If no real
  * pad is on port 0, a virtual one (neutral state) is reported there. The game
  * only opens a slot for a connected port, and the presses need a slot.
+ *
+ * RECOMP_DEV_INPUT_FILE=<path>: port 0 also takes input from a one-line text
+ * file, reread at most every 50 ms, so a test can drive the pad from outside
+ * the process while the game runs. Tokens are key=value: buttons=<hex
+ * wButtons>, a b x y black white lt rt (0-255), lx ly rx ry (-32768..32767).
+ * A missing or empty file adds nothing. Like autostart, it stands in a virtual
+ * pad on port 0 if no real one is there. Buttons are ORed onto the real pad's
+ * and autostart's; a nonzero stick value replaces the real one.
  */
 #define DEV_TITLE_SPEED_VA  0x001BAA98u
 #define DEV_TITLE_SPEED     64.0f
 
 static int g_dev_fast_title;
 static int g_dev_autostart;
+static const char *g_dev_input_file;
 static ULONGLONG g_dev_start_ms;
 static ULONGLONG g_dev_menu_ms;     /* when the main menu opened; 0 = not yet */
 
@@ -97,12 +106,72 @@ void twoc_dev_options_init(void)
     }
     if (g_dev_autostart)
         fprintf(stderr, "[DEV] autostart: A on port 0 at +5 s and +20 s after the main menu opens\n");
+    g_dev_input_file = getenv("RECOMP_DEV_INPUT_FILE");
+    if (g_dev_input_file && !*g_dev_input_file)
+        g_dev_input_file = NULL;
+    if (g_dev_input_file)
+        fprintf(stderr, "[DEV] input file: port 0 also reads %s\n", g_dev_input_file);
 }
 
-/* A port the game may open: really connected, or port 0 under autostart. */
+/* A port the game may open: really connected, or port 0 under autostart or
+ * the input file. */
 static int dev_port_connected(DWORD port)
 {
-    return xbox_InputIsConnected(port) || (g_dev_autostart && port == 0);
+    return xbox_InputIsConnected(port)
+        || ((g_dev_autostart || g_dev_input_file) && port == 0);
+}
+
+/* The input file's pad, reread at most every 50 ms. Returns 1 if it changed
+ * since the last call, so the caller can advance the packet number. */
+static int dev_input_file_read(XBOX_GAMEPAD *pad)
+{
+    static const char *const analog[8] = { "a", "b", "x", "y", "black", "white", "lt", "rt" };
+    static XBOX_GAMEPAD cur;
+    static ULONGLONG last_ms;
+    static char last_line[256];
+    ULONGLONG now = GetTickCount64();
+    char line[256] = "";
+    int changed = 0;
+
+    if (now - last_ms >= 50) {
+        FILE *f = fopen(g_dev_input_file, "r");
+        last_ms = now;
+        if (f) {
+            if (!fgets(line, sizeof(line), f))
+                line[0] = '\0';
+            fclose(f);
+        }
+        line[strcspn(line, "\r\n")] = '\0';
+        if (strcmp(line, last_line) != 0) {
+            char buf[256], *tok, *ctx = NULL;
+            strcpy(last_line, line);
+            strcpy(buf, line);
+            memset(&cur, 0, sizeof(cur));
+            for (tok = strtok_s(buf, " \t", &ctx); tok; tok = strtok_s(NULL, " \t", &ctx)) {
+                char *eq = strchr(tok, '=');
+                long v;
+                int i;
+                if (!eq)
+                    continue;
+                *eq = '\0';
+                v = strtol(eq + 1, NULL, 0);
+                if (!strcmp(tok, "buttons")) cur.wButtons = (WORD)v;
+                else if (!strcmp(tok, "lx")) cur.sThumbLX = (SHORT)v;
+                else if (!strcmp(tok, "ly")) cur.sThumbLY = (SHORT)v;
+                else if (!strcmp(tok, "rx")) cur.sThumbRX = (SHORT)v;
+                else if (!strcmp(tok, "ry")) cur.sThumbRY = (SHORT)v;
+                else
+                    for (i = 0; i < 8; i++)
+                        if (!strcmp(tok, analog[i]))
+                            cur.bAnalogButtons[i] = (BYTE)v;
+            }
+            fprintf(stderr, "[DEV] input file (+%.1f s): \"%s\"\n",
+                    (now - g_dev_start_ms) / 1000.0, line);
+            changed = 1;
+        }
+    }
+    *pad = cur;
+    return changed;
 }
 
 /* Autostart's part of the poll: stand in a neutral virtual pad if port 0 has
@@ -113,13 +182,27 @@ static void dev_autostart_poll(DWORD port, XBOX_INPUT_STATE *state, DWORD *resul
     static int a_down;
     int want_a = 0;
 
-    if (!g_dev_autostart || port != 0)
+    if (!(g_dev_autostart || g_dev_input_file) || port != 0)
         return;
     if (*result != ERROR_SUCCESS) {
         memset(state, 0, sizeof(*state));
         *result = ERROR_SUCCESS;
     }
-    if (g_dev_menu_ms) {
+    if (g_dev_input_file) {
+        XBOX_GAMEPAD f;
+        int i;
+        if (dev_input_file_read(&f))
+            packet++;
+        state->Gamepad.wButtons |= f.wButtons;
+        for (i = 0; i < 8; i++)
+            if (f.bAnalogButtons[i] > state->Gamepad.bAnalogButtons[i])
+                state->Gamepad.bAnalogButtons[i] = f.bAnalogButtons[i];
+        if (f.sThumbLX) state->Gamepad.sThumbLX = f.sThumbLX;
+        if (f.sThumbLY) state->Gamepad.sThumbLY = f.sThumbLY;
+        if (f.sThumbRX) state->Gamepad.sThumbRX = f.sThumbRX;
+        if (f.sThumbRY) state->Gamepad.sThumbRY = f.sThumbRY;
+    }
+    if (g_dev_autostart && g_dev_menu_ms) {
         ULONGLONG dt = GetTickCount64() - g_dev_menu_ms;
         want_a = (dt >= 5000 && dt < 5500) || (dt >= 20000 && dt < 20500);
     }
@@ -965,8 +1048,8 @@ void sub_000B9890(void)
  * Fix: the lifted function unchanged, except that the spin becomes the
  * DSP's answer: clear the word and go on. The effects image is not run (no
  * reverb or other GP effects). Voices still mix through the APU's
- * passthrough. It is the only DSP wait in DSOUND (checked: no other loop
- * polls a scratch command word).
+ * passthrough. It is not the only DSP wait in DSOUND: sub_0013937A below
+ * waits on the same word before posting command 2 (notes 18.30).
  */
 void sub_001391DE(void)
 {
@@ -1234,6 +1317,63 @@ loc_0013934C: ;
     POP32(esp, ebp); /* leave */
     esp += 8; return; /* ret 4 */
 
+}
+
+/*
+ * sub_0013937A (0x13937A..0x1393DF, thiscall, ret 8): post a GP DSP command
+ * 2 through the same scratch command word, scratch+0x810. One caller,
+ * sub_00139A36 at 0x139AE2, with both args 0, so the size and offset come
+ * from the pending update at this+0x18/this+0x1C. It waits for the previous
+ * command to be taken first:
+ *
+ *   0x1393A8  cmp dword [eax+0x10], 0 ; eax = scratch+0x800
+ *   0x1393AC  jne 0x1393A8
+ *
+ * then writes the command block at scratch+0x800/+0x808/+0x80C and 2 at
+ * +0x810. With no DSP, the first command 2 (in the intro) stays posted, and
+ * the next call spins forever: the hub hang after its load (notes 18.30),
+ * reached from the sound manager sub_000B9700 via sub_00137516. 18.25 missed
+ * this wait: the loop polls [eax+0x10], not the word's own address.
+ *
+ * Fix: the same function in C, with the same answer as sub_001391DE: a
+ * command still pending is taken as consumed, the word cleared. Registers
+ * and memory otherwise as the original (eax = scratch+0x800, edx = size>>2
+ * on the posting path).
+ */
+void sub_0013937A(void)
+{
+    static uint64_t answered;
+    uint32_t self = ecx, arg1 = MEM32(esp + 4), arg2 = MEM32(esp + 8);
+    uint32_t start, size, mbox;
+
+    edx = arg2;
+    if (arg2) {
+        start = arg1;
+        size = arg2;
+    } else {
+        start = MEM32(self + 0x18);
+        edx = size = MEM32(self + 0x1C);
+        if (start == 0x8000 || !size) {
+            esp += 12;                             /* ret 8 */
+            return;
+        }
+    }
+    mbox = MEM32(MEM32(MEM32(self + 8) + 0x10)) + 0x800;
+    eax = mbox;
+    if (MEM32(mbox + 0x10)) {
+        if (++answered <= 4 || (answered & (answered - 1)) == 0)
+            fprintf(stderr, "[DSP] GP command %u at 0x%08X taken as done"
+                    " before the next post (no DSP; %llu so far)\n",
+                    MEM32(mbox + 0x10), mbox + 0x10, (unsigned long long)answered);
+        MEM32(mbox + 0x10) = 0;
+    }
+    MEM32(mbox) = (start >> 2) - MEM32(mbox + 4) - 0x206;
+    MEM32(mbox + 8) = start;
+    MEM32(mbox + 0xC) = edx = size >> 2;
+    MEM32(mbox + 0x10) = 2;
+    MEM32(self + 0x1C) = 0;
+    MEM32(self + 0x18) = 0x8000;
+    esp += 12;                                     /* ret 8 */
 }
 
 /* ── XPP input: poll and vibration entry points -> xbox_input ─────────── */
@@ -1509,7 +1649,8 @@ void sub_000EB270(void)
         fprintf(stderr, "[XPP] sub_000EB270 primed: xbox_InputIsConnected(0)=%d\n",
                 xbox_InputIsConnected(0));
         if (connected && !xbox_InputIsConnected(0))
-            fprintf(stderr, "[DEV] autostart: no pad on port 0, using a virtual one\n");
+            fprintf(stderr, "[DEV] %s: no pad on port 0, using a virtual one\n",
+                    g_dev_autostart ? "autostart" : "input file");
         if (connected) {
             PUSH32(esp, 0);            /* port 0, the one stack arg (cdecl) */
             PUSH32(esp, 0x000EB270u);  /* synthetic return address; unread */
