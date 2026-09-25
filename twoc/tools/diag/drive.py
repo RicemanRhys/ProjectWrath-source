@@ -1,7 +1,7 @@
 """One unattended run through splash, title, menu, intro and hub (notes 18.32).
 
-  python drive.py TAG SECONDS [--bridge] [--tint] [--census] [--no-pbexec] [--no-input] [--intro=S]
-                  [--dump=DIR] [--outdir=DIR]
+  python drive.py TAG SECONDS [--bridge] [--tint] [--point] [--census] [--no-pbexec] [--no-input] [--intro=S]
+                  [--dump=DIR] [--dump-every=N] [--outdir=DIR]
 
 Environment as run_twoc.ps1 -FastTitle -AutoStart, plus RECOMP_DEV_INPUT_FILE
 (TAG.pad.txt). Input is keyed off the stderr log: Start S seconds (default 6)
@@ -10,8 +10,10 @@ the hub, A once, stick up 5 s, stick right 5 s.
 
   --bridge   RECOMP_D3D_BRIDGE=1, the host mirror (S2, step 31)
   --tint     RECOMP_D3D_BRIDGE_TINT=1, mirrored clears show the frame index
+  --point    RECOMP_D3D_BRIDGE_POINT=1, point sampling as the executor does (a check, S3)
   --census   RECOMP_D3D_CENSUS=1, the S1 census (step 30's --bridge)
   --dump     RECOMP_FB_DUMP=DIR/shot, as run_twoc.ps1 -DumpDir does
+  --dump-every=N  RECOMP_D3D_BRIDGE_DUMP_EVERY=N: a host dump every Nth guest swap too (S3)
   --no-pbexec leaves RECOMP_PB_EXEC unset.
 
 Every other RECOMP_* variable from the calling shell is cleared.
@@ -47,11 +49,15 @@ if "--bridge" in flags:
     env["RECOMP_D3D_BRIDGE"] = "1"
 if "--tint" in flags:
     env["RECOMP_D3D_BRIDGE_TINT"] = "1"
+if "--point" in flags:
+    env["RECOMP_D3D_BRIDGE_POINT"] = "1"
 if "--census" in flags:
     env["RECOMP_D3D_CENSUS"] = "1"
 if "dump" in opts:
     os.makedirs(opts["dump"], exist_ok=True)
     env["RECOMP_FB_DUMP"] = os.path.join(os.path.abspath(opts["dump"]), "shot")
+if "dump-every" in opts:
+    env["RECOMP_D3D_BRIDGE_DUMP_EVERY"] = opts["dump-every"]
 
 errp = os.path.join(outdir, tag + ".err.log")
 evf = open(os.path.join(outdir, tag + ".events.txt"), "w")
