@@ -111,7 +111,8 @@ for i, l in enumerate(lines):
     while j < len(lines) and not lines[j].startswith("[D3DB] census +"):
         if lines[j].startswith(tag):
             parts = lines[j].split(" ", 5)
-            keys[parts[5]] = int(parts[3])
+            if len(parts) == 6:         # a line cut short by another thread's output is dropped
+                keys[parts[5]] = int(parts[3])
         j += 1
     p0, p1 = phase_at(prev_hdr + 1), phase_at(i)
     # A mark line right before the header closes the block at the mark.

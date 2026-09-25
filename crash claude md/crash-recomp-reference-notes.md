@@ -1261,7 +1261,7 @@ Report: `step32_report.md` in the session scratch folder, with every run in `run
   - hub music at 163.4 s, exit 3;
   - presents = swaps = 2,050;
   - 6,918 UP draws mirrored, 0 failures, 0 translation gaps;
-  - 14,103 not mirrored, all render-to-texture.
+  - 14,103 not mirrored, all render-to-texture. *(Corrected by 18.35: this line counted DrawVerticesUP only. The title and menu's indexed, immediate and vertex-program draws weren't counted at all; now every path is.)*
 - **Frame rate:** identical runs varied 20-30% today (intro 29-39/s and 36-47/s with the bridge on). The mirror's own time is under 1%, so S3-vs-S2 fps differences from single runs aren't meaningful.
 - **Contiguous memory (`dd4be13`, `recomp_manual.c`; the 18.28 pattern, twoc-only because the arena's state is internal):**
   - `MmAllocateContiguousMemory` `[0x15AAC8]`/`Ex` `[0x15AB18]` first reuse blocks the game freed: first fit, aligned, split, zeroed. Otherwise they fall back to the bridge's bump arena. Every block's page-rounded extent is recorded.
@@ -1280,6 +1280,81 @@ Report: `step32_report.md` in the session scratch folder, with every run in `run
 - **Files changed:**
   - Code commits: `twoc/src/d3d_bridge.c`, `twoc/src/d3d_host.{c,h}` (`498f321`); `twoc/src/recomp_manual.c` (`dd4be13`).
   - Notes commit: `twoc/tools/diag/splashcheck.py` (new), `twoc/tools/diag/{drive.py,README.md}`, the 18.33 pointer, this entry and "Start here tomorrow".
+
+### 18.35 Step 33: Option B S4 part 1. Render-to-texture, pixel shaders and P8 are in and checked, but the title and menu still show black on the real window: every draw that reaches their back buffer is indexed (fixed-function 3D), immediate, or uses a vertex program.
+
+Report: `step33_report.md` in the session scratch folder, with every run in `runs/` and montages in `view/`. Commits: `107ebcf` (S4 part 1), `twoc/` only. No `xboxrecomp/` change.
+
+- **What the title and menu draw** (a new census key, `combo`: path, target, vertex shader, pixel shader, texture formats):
+  - The title load renders the six 128x128 A8R8G8B8 targets once, at ~5.3 s. That's 1,164 fixed-function UP draws plus 1,560 UP strips with a pixel shader, and all 1,560 also use a vertex program.
+  - After that, everything on the back buffer is one of these:
+    - indexed draws with FVF `0x152` (XYZ|NORMAL|DIFFUSE|TEX1): fixed-function 3D with transforms and lighting;
+    - indexed draws with a vertex program;
+    - immediate-mode QUADLISTs (P8 and render-target textures);
+    - a few untextured UP quads that leave the frame black in both renderers.
+  - P8 textures appear only in indexed and immediate draws. The render targets are sampled only by vertex-program, immediate and indexed draws.
+  - **So none of part 1 reaches the real window during the title or menu**, even though each piece works.
+- **Render targets (`d3d_host.c`):**
+  - A draw or clear to a texture level gets a host render-target texture for that Data (level 0; the game never renders the others). It comes with a depth buffer of the same size: D3D11 won't pair a render target with a depth view of another size, and `xbox_d3d8` falls back to its 640x480 one.
+  - A guest texture with that Data samples the host target.
+  - No guest depth surface means depth and stencil off, as the XDK's SetRenderTarget does.
+- **Two `xbox_d3d8` gaps found and worked around in `twoc/`:**
+  1. Its fixed-function VS maps XYZRHW x/y through the back buffer's size, not the viewport. A 128x128 target got its quads in the top-left fifth. The bridge copies and rescales pre-transformed vertices (`rescale_rhw`); this is identity for the splash.
+  2. MIPFILTER NONE still walks the mip chain (MIP_POINT, MaxLOD unbounded). The bridge gives such a stage level 0 alone. The game does use NONE (census: TSS 0.05 and 3.05 switch between 0 and 2).
+- **Render-target check (`tools/diag/rtcheck.py`, `--rtlog`):**
+  - The executor can't be compared here. It rasterises the swizzled target as linear rows at a wrong pitch; the guest memory is scrambled.
+  - Instead, all 1,164 draws and the 2 clears are replayed in software from the log, with the sprite's own guest bytes.
+  - Clears: `FF808080`. Draws: 32x32 sprite, MODULATE(texture, diffuse), SRCALPHA/ONE, alpha test GREATER 0.
+  - **Game's trilinear filtering: 100% within 8 and 99.99% within 3 on all three targets, largest difference 4.**
+  - Point sampling (`--point`): 99.06% and 97.99% within 8. The rest are texel ties: an 8- or 16-pixel quad over 32 texels puts every sample on a boundary.
+  - Three of the six targets are only ever drawn by vertex-program draws, so the host never creates them.
+- **Pixel shaders (`translate_ps`):**
+  - SetPixelShader `0x102BB0` copies the def into `D3D__RenderState[0..56]` (unless device flag 0x10 is set) and PSTextureModes into RS[117].
+  - `xbox_d3d8`'s combiner translator (`d3d8_combiners.c`) uses its own field order, so the bridge re-encodes. Differences:
+    - inputs A-D in reverse byte order;
+    - AB and CD destinations swapped;
+    - registers 14/15 (V1R0_SUM, EF_PROD) swapped;
+    - SHIFTRIGHT_1 is 5, not 6;
+    - its mux picks AB where the hardware picks CD, so a muxing stage has AB and CD exchanged;
+    - the final combiner takes the last stage's constants, so RS 43/44 go into one extra stage that writes nothing;
+    - no final combiner (ABCD = EFG = 0) outputs r0;
+    - 4-bit texture modes where the XDK uses 5-bit ones;
+    - SAME_C0/C1 expanded per stage.
+  - What it can't express is counted as "pixel-shader gaps":
+    - blue reads in the alpha portion;
+    - blue-to-alpha;
+    - a mux on the LSB;
+    - texture modes past CUBEMAP;
+    - final constants with 8 stages;
+    - V1R0 complement.
+- **Pixel-shader check (`tools/diag/pscheck.py`, `--psprobe`):**
+  - Each distinct shader is drawn once per input set (4 sets) into a 4x4 host target, read back, and compared with a CPU evaluation of the XDK def by the NV2A combiner rules.
+  - **The title's 6 shaders: 24/24 probes exact (largest difference 0).**
+  - All six are 1-8 stage image-processing kernels with no final combiner, reading textures as PROJECT2D.
+  - One gap: shader 5 uses blue-to-alpha, which `xbox_d3d8` can't do. It's harmless there: stage 7 multiplies that alpha by `c0.a` = 0.
+  - None of the 1,560 pixel-shader draws is mirrored yet: all use vertex programs (S5).
+- **P8:**
+  - The stage's palette is at device `+0xA88`. Its Common holds the size in [31:30] (256 >> n entries) and the type 3 in [18:16]; every one seen is `010B0001` (256 entries).
+  - The host expands the indices to A8R8G8B8 through the palette, keeping the swizzle, and the palette's signature is part of the cache key.
+  - **Check (`--texcheck`): the 19 P8 textures the title and menu bind, uploaded without drawing, all decode to correct art**: the copyright text with its alpha, two planets, fur and wood.
+  - No P8 draw is mirrored yet: all are indexed or immediate.
+- **Texture ops above 11: none, splash to hub** (census: COLOROP/ALPHAOP only 1, 4, 7). The 12+ table stays unverified and unused.
+- **The real window (`tools/diag/wgcgrab.cpp`, Windows Graphics Capture):**
+  - It grabs the bridge window's own content while other windows cover it, so no topmost window and no focus change are needed.
+  - This time the old corner grab caught another application on top.
+  - Splash: the logo fading in on white (1-3 s). **Title and menu (5.5-30 s): black**, matching the host dumps.
+  - One capture frame per guest present (290 by frame counter 289).
+- **Not mirrored in the title and menu, per 34 s run (`[D3DB] host draws`):**
+  - 14,530 vertex-program draws (S5);
+  - 18,083 indexed FVF draws (fixed-function 3D: transforms, lights, material);
+  - 2,101 immediate draws (part 2);
+  - against 2,056 mirrored (1,164 of them to render targets).
+  - **The draw counters now cover every path.** Before, only DrawVerticesUP was counted, so 18.34's "14,103 not mirrored, all by render target" was the UP draws only.
+- **Bridge off, identical:** `off35` = `off34b` (231 opens in order, 39 event lines apart from timestamps, 94 `[HEAPSTAT]`, exit 3, no `[D3DB]`).
+- **Bridge on, to the hub:** `on35` reaches the hub (music at 161.2 s, exit 3). Presents = swaps = 2,323; 13,861 draws mirrored, 6,226 of them to 5 host render targets (the hub renders to textures every frame); 0 draw, upload or render-target failures. The mirror's own time is 0.3-0.4% of each interval. Both runs were slower than step 32's (hub music 18 s later with the bridge off too): another application was running on the machine.
+- **Files changed:**
+  - Code commit: `twoc/src/d3d_bridge.c`, `twoc/src/d3d_host.{c,h}`.
+  - Notes commit: `twoc/tools/diag/{pscheck.py,rtcheck.py,wgcgrab.cpp,wgcgrab_build.bat}` (new), `twoc/tools/diag/{drive.py,census.py,README.md}`, the 18.32 and 18.34 corrections, this entry and "Start here tomorrow".
 
 ---
 
@@ -1328,9 +1403,9 @@ Report: `step32_report.md` in the session scratch folder, with every run in `run
 
 ---
 
-## Start here tomorrow (Sep 25, 2026; updated after step 32)
+## Start here tomorrow (Sep 25, 2026; updated after step 33)
 
-**Current state.** The recompiled game builds and runs (`twoc/build/Release/crash_twoc.exe`). Run it with `powershell -NoProfile -ExecutionPolicy Bypass -File twoc\run_twoc.ps1` (add `-DumpDir dumps` for framebuffer BMPs). It gets through XAPI/CRT startup, D3D and DSOUND init, the splash screen, and the title/logo level loads, past `logos2.cut` into particle-system and cubemap loading, and runs a full 240 s with no crash and no freeze (exit code 3, the normal watchdog end). **Audio now initialises for real (18.25):** `run_twoc.ps1` sets `RECOMP_AC97_READY`, DirectSoundCreate succeeds and DSOUND streams exist. The title animation finishes, the main menu opens (129 s in since 18.29; banner `[GAME] MAIN MENU OPEN`), and a real controller drives it into the next level. **The 18.26 level-load deadlock is fixed (18.27, `6f51e4b`):** `NtSuspendThread`/`NtResumeThread` are cooperative, so a suspended thread parks only at a kernel-call boundary and never holds a host lock. **The 18.32 hub-load deadlock is fixed too (18.33, `800f27b`):** a suspended thread also parks only once it owns no guest critical section. **The intro-load heap exhaustion is fixed (18.28, `145f8ef`):** a hand-written `NtFreeVirtualMemory` returns released blocks to the guest heap. The intro level loads and its cutscene renders (~47-50 fps since 18.30; ~24 after 18.29, ~6.8 before). **The intro plays to its end (~10 min) and loads the hub (18.30); Start skips it.** The hub hung on a second GP DSP mailbox wait, now fixed (`sub_0013937A`, `c262d7d`). **Crash walks in the hub:** pushing the stick moves the player object `0x8F5120` (position at `+0x6C`) at ~0.3 units/frame, and he stops at walls. The screen is still garbage, and the hub runs ~10 fps; a `[HEAPSTAT]` line every 2 s watches the heap (93.5% bump high-water, flat once the cutscene runs). **Fast unattended testing (18.26):** `run_twoc.ps1 -FastTitle -AutoStart` opens the menu ~10.5 s after launch (~21 s before 18.29), presses "start game" by itself (virtual pad if none is connected), and reaches the intro load ~35 s after launch, then the intro cutscene at ~45 s (18.28, 18.29); one Start press then skips to the hub. `RECOMP_DEV_INPUT_FILE=<path>` (18.30, test-only) drives port 0 from a one-line text file while the game runs, and `twoc/tools/diag/crashpos.py` prints Crash's position under scripted input; both switches are off by default and inert when unset. **Input now reaches the game (18.23):** a hand-written `XInputOpen`/`XInputClose` pair (`sub_00154249`/`sub_0015429F`) arms controller slots with per-port tokens, and real button presses arrive in the game's state buffer every frame. The `twoc/` fixes so far: the D3D fence mirror in `main.c` (18.1), 52 seeded function starts in `seed_functions.json` (18.6), a hand-written D3D interrupt DPC `sub_00106E60` with vblank forced on (18.7), a hand-written CRT memmove `sub_000F5DD0` (18.8), a hand-written `GetExitCodeThread` (`sub_000ECB2B`, 18.9), a hand-written null-interface guard on `sub_000B9890` for the DSOUND 3D-listener chain (18.13), hand-written XPP poll/vibration entries `sub_001542AB`/`sub_0015431A` plus one `xbox_InputInit()` call (18.15), a hand-written `sub_000EB270` port-arming gate (18.16), hand-written XPP open/close with port-aware poll/vibration (18.23), and the DSOUND bring-up (18.25): `RECOMP_AC97_READY` in the run script, a hand-written GP DSP handshake `sub_001391DE`, GP/EP DSP memory left as plain RAM in `main.c`, and a main-menu banner wrapper on `sub_0002BCC0`, plus the test-only `-FastTitle`/`-AutoStart` options (18.26), cooperative `NtSuspendThread`/`NtResumeThread` (18.27; no park while owning a guest critical section, 18.33), and a hand-written `NtFreeVirtualMemory` plus the `[HEAPSTAT]` heap watch (18.28), and a hand-written GP DSP post `sub_0013937A` (18.30), and hand-written contiguous memory (`MmAllocateContiguousMemory[Ex]`/`MmFreeContiguousMemory`/`MmQueryAllocationSize`, 18.34: freed blocks are reused, with a `[CONTIGSTAT]` line next to `[HEAPSTAT]`). Reusable diagnostics (hang sampler patch, map symbolizer, run comparer, VM tap, time-profile sampler) are in `twoc/tools/diag/` with a README. `xboxrecomp/` has two small additive read-only accessors, committed locally only in that clone and not pushed: `xbox_bridge_resolve_handle` (`52531ac` on `766ecef`) and `xbox_HeapStats` (`f8da7ec`, 18.28), plus two perf-only changes with identical output, `694cb98` (cached `RECOMP_PB_EXEC_VERBOSE`) and `5012b2d` (rate-limited `[NV2A] DMA_PUT` line), 18.29, and `fe406e4` (O(1) survey lookups), 18.30 (see the two rule refinements at the top of section 18). Frame rate: `twoc/tools/diag/fpsrun.py` + `fps.py` read the game's frame counter `0x25A660` from outside the process. **Option B: S1, S2 and S3 done (18.32-18.34):** 24 D3D wrappers in `recomp_manual.c` (`sub_X` → lifted `sub_X_gen`) feed `twoc/src/d3d_bridge.c` (guest side) and `twoc/src/d3d_host.c` (host side). All of it is inert unless switched on. `RECOMP_D3D_BRIDGE=1` opens a second window, "Crash TWOC - D3D bridge (host)", with an `xbox_d3d8` device. It mirrors the game's back-buffer clears and, since 18.34, its DrawVerticesUP draws (state translated from XDK to PC values, textures cached and uploaded): **the splash's Universal logo fades in and out on that window.** Draws to render-to-texture targets, with pixel shaders or vertex programs, and every other draw path aren't mirrored yet (counted on a `[D3DB] host draws` line). With `-DumpDir` it writes `hostNNN.bmp` next to the executor's `shotNNN.bmp`. `RECOMP_D3D_BRIDGE_TINT=1` clears to the frame index as a check, `RECOMP_D3D_BRIDGE_POINT=1` point-samples as the executor does, `RECOMP_D3D_BRIDGE_DUMP_EVERY=N` adds host dumps, and `RECOMP_D3D_CENSUS=1` is 18.32's census. `twoc/tools/diag/drive.py` runs splash → hub unattended (`--bridge`, `--tint`, `--point`, `--census`, `--dump=DIR`, `--dump-every=N`), `census.py` summarises a census, `fbcompare.py` compares host dumps with executor dumps, and `splashcheck.py` is S3's per-frame splash check. To regenerate: `twoc\analyze.ps1` (disasm with the seeds), then `twoc\lift.ps1` (it now also runs `twoc\tools\wrap_callers.py`, without which callers bypass the wrappers), then `cmake --build twoc\build --config Release --parallel`.
+**Current state.** The recompiled game builds and runs (`twoc/build/Release/crash_twoc.exe`). Run it with `powershell -NoProfile -ExecutionPolicy Bypass -File twoc\run_twoc.ps1` (add `-DumpDir dumps` for framebuffer BMPs). It gets through XAPI/CRT startup, D3D and DSOUND init, the splash screen, and the title/logo level loads, past `logos2.cut` into particle-system and cubemap loading, and runs a full 240 s with no crash and no freeze (exit code 3, the normal watchdog end). **Audio now initialises for real (18.25):** `run_twoc.ps1` sets `RECOMP_AC97_READY`, DirectSoundCreate succeeds and DSOUND streams exist. The title animation finishes, the main menu opens (129 s in since 18.29; banner `[GAME] MAIN MENU OPEN`), and a real controller drives it into the next level. **The 18.26 level-load deadlock is fixed (18.27, `6f51e4b`):** `NtSuspendThread`/`NtResumeThread` are cooperative, so a suspended thread parks only at a kernel-call boundary and never holds a host lock. **The 18.32 hub-load deadlock is fixed too (18.33, `800f27b`):** a suspended thread also parks only once it owns no guest critical section. **The intro-load heap exhaustion is fixed (18.28, `145f8ef`):** a hand-written `NtFreeVirtualMemory` returns released blocks to the guest heap. The intro level loads and its cutscene renders (~47-50 fps since 18.30; ~24 after 18.29, ~6.8 before). **The intro plays to its end (~10 min) and loads the hub (18.30); Start skips it.** The hub hung on a second GP DSP mailbox wait, now fixed (`sub_0013937A`, `c262d7d`). **Crash walks in the hub:** pushing the stick moves the player object `0x8F5120` (position at `+0x6C`) at ~0.3 units/frame, and he stops at walls. The screen is still garbage, and the hub runs ~10 fps; a `[HEAPSTAT]` line every 2 s watches the heap (93.5% bump high-water, flat once the cutscene runs). **Fast unattended testing (18.26):** `run_twoc.ps1 -FastTitle -AutoStart` opens the menu ~10.5 s after launch (~21 s before 18.29), presses "start game" by itself (virtual pad if none is connected), and reaches the intro load ~35 s after launch, then the intro cutscene at ~45 s (18.28, 18.29); one Start press then skips to the hub. `RECOMP_DEV_INPUT_FILE=<path>` (18.30, test-only) drives port 0 from a one-line text file while the game runs, and `twoc/tools/diag/crashpos.py` prints Crash's position under scripted input; both switches are off by default and inert when unset. **Input now reaches the game (18.23):** a hand-written `XInputOpen`/`XInputClose` pair (`sub_00154249`/`sub_0015429F`) arms controller slots with per-port tokens, and real button presses arrive in the game's state buffer every frame. The `twoc/` fixes so far: the D3D fence mirror in `main.c` (18.1), 52 seeded function starts in `seed_functions.json` (18.6), a hand-written D3D interrupt DPC `sub_00106E60` with vblank forced on (18.7), a hand-written CRT memmove `sub_000F5DD0` (18.8), a hand-written `GetExitCodeThread` (`sub_000ECB2B`, 18.9), a hand-written null-interface guard on `sub_000B9890` for the DSOUND 3D-listener chain (18.13), hand-written XPP poll/vibration entries `sub_001542AB`/`sub_0015431A` plus one `xbox_InputInit()` call (18.15), a hand-written `sub_000EB270` port-arming gate (18.16), hand-written XPP open/close with port-aware poll/vibration (18.23), and the DSOUND bring-up (18.25): `RECOMP_AC97_READY` in the run script, a hand-written GP DSP handshake `sub_001391DE`, GP/EP DSP memory left as plain RAM in `main.c`, and a main-menu banner wrapper on `sub_0002BCC0`, plus the test-only `-FastTitle`/`-AutoStart` options (18.26), cooperative `NtSuspendThread`/`NtResumeThread` (18.27; no park while owning a guest critical section, 18.33), and a hand-written `NtFreeVirtualMemory` plus the `[HEAPSTAT]` heap watch (18.28), and a hand-written GP DSP post `sub_0013937A` (18.30), and hand-written contiguous memory (`MmAllocateContiguousMemory[Ex]`/`MmFreeContiguousMemory`/`MmQueryAllocationSize`, 18.34: freed blocks are reused, with a `[CONTIGSTAT]` line next to `[HEAPSTAT]`). Reusable diagnostics (hang sampler patch, map symbolizer, run comparer, VM tap, time-profile sampler) are in `twoc/tools/diag/` with a README. `xboxrecomp/` has two small additive read-only accessors, committed locally only in that clone and not pushed: `xbox_bridge_resolve_handle` (`52531ac` on `766ecef`) and `xbox_HeapStats` (`f8da7ec`, 18.28), plus two perf-only changes with identical output, `694cb98` (cached `RECOMP_PB_EXEC_VERBOSE`) and `5012b2d` (rate-limited `[NV2A] DMA_PUT` line), 18.29, and `fe406e4` (O(1) survey lookups), 18.30 (see the two rule refinements at the top of section 18). Frame rate: `twoc/tools/diag/fpsrun.py` + `fps.py` read the game's frame counter `0x25A660` from outside the process. **Option B: S1, S2 and S3 done (18.32-18.34):** 24 D3D wrappers in `recomp_manual.c` (`sub_X` → lifted `sub_X_gen`) feed `twoc/src/d3d_bridge.c` (guest side) and `twoc/src/d3d_host.c` (host side). All of it is inert unless switched on. `RECOMP_D3D_BRIDGE=1` opens a second window, "Crash TWOC - D3D bridge (host)", with an `xbox_d3d8` device. It mirrors the game's back-buffer clears and, since 18.34, its DrawVerticesUP draws (state translated from XDK to PC values, textures cached and uploaded): **the splash's Universal logo fades in and out on that window.** Since 18.35 (S4 part 1) it also mirrors render-to-texture, pixel shaders (re-encoded for `xbox_d3d8`'s combiners) and P8 textures on those UP draws. Indexed, immediate and vertex-program draws aren't mirrored yet, so the title and menu are still black there. Every path is counted on a `[D3DB] host draws` line. With `-DumpDir` it writes `hostNNN.bmp` next to the executor's `shotNNN.bmp`. `RECOMP_D3D_BRIDGE_TINT=1` clears to the frame index as a check, `RECOMP_D3D_BRIDGE_POINT=1` point-samples as the executor does, `RECOMP_D3D_BRIDGE_DUMP_EVERY=N` adds host dumps, and `RECOMP_D3D_CENSUS=1` is 18.32's census. `twoc/tools/diag/drive.py` runs splash → hub unattended (`--bridge`, `--tint`, `--point`, `--census`, `--dump=DIR`, `--dump-every=N`), `census.py` summarises a census, `fbcompare.py` compares host dumps with executor dumps, and `splashcheck.py` is S3's per-frame splash check. To regenerate: `twoc\analyze.ps1` (disasm with the seeds), then `twoc\lift.ps1` (it now also runs `twoc\tools\wrap_callers.py`, without which callers bypass the wrappers), then `cmake --build twoc\build --config Release --parallel`.
 
 **Resolved (18.25): the `*(0x427A58)` "3D listener" gap.** It was never a listener: it is the sound manager's `IDirectSound*`, null only because DirectSoundCreate failed with DSERR_NODRIVER (no AC'97 codec reported). With `RECOMP_AC97_READY` it is populated and the 18.13 guard is inert. Remaining audio limits: no DSP, so the effects image (reverb) does not run; the GP handshake is acknowledged, not executed.
 
@@ -1339,14 +1414,31 @@ Report: `step32_report.md` in the session scratch folder, with every run in `run
 **Also known, now well-scoped — and confirmed to need a full swap, not incremental bridging.** *(Corrected by 18.31: the all-or-nothing constraint only applies to replacing the native device. A mirror bridge that calls the lifted body first and never writes guest memory is incremental. See item 1 of "Next step".)* The NV2A executor (`nv2a_pgraph_d3d11.c`, driven by `RECOMP_PB_EXEC=1`) is a hard-coded 2D-only renderer built for a different title's menus (Burnout 3 — hard-coded texture names, a fixed 5-dword pre-transformed vertex layout, `NV097_SET_TRANSFORM_PROGRAM`/`_CONSTANT` and vertex-array-format uploads all silently ignored) — this is why 91% of triangles are "fully off-surface" (18.14): real 3D vertices get reinterpreted as already-in-screen-space pixels. **18.19 found the toolkit already has a full, working, tested fix for this sitting unused**: `xbox_d3d8`'s `d3d8_vsh.c` is a complete, already-wired-up NV2A vertex-microcode-to-HLSL translator (validated by `tests/d3d8_smoke`), reachable only via 15.1's *original*, not-yet-taken plan (replace the game's ~91-99 D3D calls at their API entry points, rather than running over the push-buffer executor). That route turns out cheaper than 15.1 feared — Crash's D3D library is a normal, cleanly-bounded library, not the harder LTCG case `d3d8ltcg-device-context.md` warns about — and would fix the vertex-program gap as a side effect, with no new toolkit code. **18.20 tried the incremental version of this plan (bridge `CreateDevice`, leave the other ~90 entry points on the old push-buffer path) and confirmed by direct observation that it cannot work**: `CreateDevice` succeeded (real `xbox_d3d8` device, vertex-shader translator initialized), but the very next unbridged D3D call crashed immediately, because a host-shaped `xbox_d3d8` device object and the native, push-buffer-shaped object every other D3D function still expects cannot coexist at the same address, and unbridged code dereferences raw offsets directly rather than through an accessor a handle layer could intercept. **Option B is therefore an all-or-nothing swap**: `CreateDevice` plus the entire wrapper cluster (all ~91-99 entry points) have to be bridged together in one batch before any of it can be tested, not incrementally a few functions at a time. **18.21 then did the scoping pass this implies, over all 99 entries via the disassembler's own full xref database rather than by hand**: they split cleanly into 4 cost tiers -- CreateDevice itself (done once, 18.20); 4 shared-plumbing entries covering 33% of call sites that gate one object/refcount-model design decision; 36 confirmed (+48 probable) simple single-push-buffer-opcode writers that become ~1 line of C each once an NV097 method-number table is built (extending the 21 constants `nv2a_pgraph_d3d11.c` already has); and 10 large entries (30-85-function closures each, CreateDevice-class effort) that are the real cost driver despite being only 7% of call sites. Real-size estimate: roughly **10-15x what CreateDevice alone took in 18.20**, concentrated in those 10 functions and the object-model decision, not spread evenly across all 99.
 
 **Next step.**
-1. **Seeing the game: Option B as a mirror bridge (18.31). S1 (18.32), S2 (18.33) and S3 (18.34) done; S4 is next.**
-   - **S4 (next, title and menu):**
-     - render-to-texture: the six 128x128 A8R8G8B8 targets, their clears and draws;
-     - pixel shaders, through `xbox_d3d8`'s combiner path from `D3D__RenderState` 0-56;
-     - P8 textures (a palette upload) and CopyRects;
-     - immediate mode (Begin/SetVertexData/End, buffered in the wrappers).
-     - In `on34` (18.34) the title and menu skip 14,103 draws, all by render target.
-     - Check against the executor's title/menu dumps. There's no fade there, but its point sampling still applies, so compare with `--point`.
+1. **Seeing the game: Option B as a mirror bridge (18.31). S1 (18.32), S2 (18.33), S3 (18.34) and S4 part 1 (18.35) done.**
+   - **S4 part 1 (18.35, `107ebcf`): render targets, pixel shaders and P8, each checked, but the title and menu still show black on the real window.** Every draw that reaches their back buffer is indexed, immediate, or uses a vertex program.
+   - **What the title and menu need next** (`[D3DB] host draws` over 34 s, splash to menu):
+     - **Indexed draws with FVF `0x152`** (XYZ|NORMAL|DIFFUSE|TEX1), 18,083.
+       - Fixed-function 3D: world/view/projection (device `+0x750`, XDK order), lights (`+0x390`) and material (`+0x9F0`), stream 0 from `0x10F280` plus base vertex device `+0x1C`.
+       - These carry the menu's P8 and most of its scene.
+       - They weren't on the S4 list. Decide whether they join part 2 or go with S5-S6.
+     - **Immediate mode** (S4 part 2), 2,101 QUADLISTs: P8 text, and render-target textures.
+     - **Vertex programs** (S5), 14,530. That includes every pixel-shader draw, and all the draws into three of the six targets.
+     - **CopyRects** (part 2): the hub only.
+   - **S4 facts to build on (18.35):**
+     - A host render target per guest Data: level 0 plus a same-size depth buffer; a texture with that Data samples it.
+     - Two `xbox_d3d8` gaps are worked around in `twoc/`:
+       - XYZRHW is mapped through the back buffer's size, so pre-transformed vertices are rescaled to the viewport;
+       - MIPFILTER NONE still mips, so such a stage gets level 0 alone.
+     - `translate_ps` re-encodes the XDK combiner def for `xbox_d3d8` (its field order differs in eight ways, listed in 18.35).
+     - Blue-to-alpha has no route there (it's counted). It's the first candidate for a local `xbox_d3d8` fix under the 18.32 rule once a mirrored draw needs it; shader 5's use of it is harmless.
+     - P8 is expanded through the stage palette (device `+0xA88`) on upload.
+     - Checks:
+       - `pscheck.py` (`--psprobe`): the title's 6 shaders, 24/24 exact;
+       - `rtcheck.py` (`--rtlog`, `--dump-rt`): 100% within 8 in trilinear;
+       - `--texcheck`: the 19 P8 textures decode correctly.
+     - The executor isn't a reference for render targets or the title/menu: it rasterises swizzled targets as linear rows, and 3D as screen space.
+     - Real-window grabs: `tools/diag/wgcgrab.cpp` (Windows Graphics Capture). It works while other windows cover the bridge window and takes no focus.
+     - No texture op above 11 is used from splash to hub.
    - S3 facts to build on (18.34):
      - The state translator (`translate_rs`/`translate_tss`, `xl_*` in `d3d_bridge.c`) covers every state `xbox_d3d8` reads. Texture ops above 11 follow the XDK order from memory, not verified: each use is counted as a "texop" gap, so check the first one seen.
      - `xbox_d3d8` reads a texture argument of 0 as "default", so plain `D3DTA_DIFFUSE` on stage > 0 has no route yet (counted).
@@ -1356,13 +1448,13 @@ Report: `step32_report.md` in the session scratch folder, with every run in `run
      - One bridge lock around every host call, and a window thread that owns the window and pumps its messages.
      - Presents go through a flip-model swap chain of the bridge's own, because blt-model presents never reach the screen on this machine. `xbox_d3d8` renders into its own swap chain on a hidden window, and each present copies its back buffer across.
      - Threads: the loading screens hold `0x4EA440` for all their D3D calls, and nothing interleaves with them. No D3DX draw ran from splash to hub.
-     - Clears of the 128x128 render-to-texture targets are skipped until S4, and the gamma ramp isn't mirrored.
+     - The gamma ramp isn't mirrored. (Render-target clears are, since 18.35.)
    - **S7 needs (measured in 18.33):**
      - A ~59.94 Hz limiter at the host present. Host vsync paces to the monitor: 240 swaps/s on this 239 Hz display with the executor off.
      - ~~A real `MmFreeContiguousMemory`~~ done (18.34, `dd4be13`): with the executor off the arena stays at 30.5 MB over 5 menu → demo cycles.
      - **A general-heap leak of 1,200 KiB (640×480×4) per level load** (18.34). With the executor off, menu → demo cycles then run the 48.5 MiB heap out at ~112 s: a 1,228,848-byte request fails, then a null function-pointer loop and a stack overflow. The game never frees the block through `NtFreeVirtualMemory`. Find what allocates it.
    - Census facts to plan around (18.32):
-     - render-to-texture (six 128x128 targets) every frame from the title on, and CopyRects back buffer → texture in the hub. Both move up to S4.
+     - render-to-texture (six 128x128 targets) every frame from the title on, and CopyRects back buffer → texture in the hub. Both move up to S4. *(Corrected by 18.35: in the title and menu the targets are drawn once, at the title load, and again at each level load; the hub draws to them every frame.)*
      - streams 0+1 from the intro on;
      - DrawVertices and the `0xFEC00` fast path never ran;
      - no readback needed;

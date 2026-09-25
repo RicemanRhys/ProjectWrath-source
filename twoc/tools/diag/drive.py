@@ -1,7 +1,7 @@
 """One unattended run through splash, title, menu, intro and hub (notes 18.32).
 
   python drive.py TAG SECONDS [--bridge] [--tint] [--point] [--census] [--no-pbexec] [--no-input] [--intro=S]
-                  [--dump=DIR] [--dump-every=N] [--outdir=DIR]
+                  [--dump=DIR] [--dump-every=N] [--dump-rt] [--rtlog] [--psprobe] [--texcheck] [--outdir=DIR] [--exe=PATH]
 
 Environment as run_twoc.ps1 -FastTitle -AutoStart, plus RECOMP_DEV_INPUT_FILE
 (TAG.pad.txt). Input is keyed off the stderr log: Start S seconds (default 6)
@@ -14,7 +14,13 @@ the hub, A once, stick up 5 s, stick right 5 s.
   --census   RECOMP_D3D_CENSUS=1, the S1 census (step 30's --bridge)
   --dump     RECOMP_FB_DUMP=DIR/shot, as run_twoc.ps1 -DumpDir does
   --dump-every=N  RECOMP_D3D_BRIDGE_DUMP_EVERY=N: a host dump every Nth guest swap too (S3)
+  --dump-rt  RECOMP_D3D_BRIDGE_DUMP_RT=1: each host dump also writes the host render targets (S4)
+  --rtlog    RECOMP_D3D_BRIDGE_RTLOG=1: log render-target draws in full (S4; rtcheck.py re-renders them)
+  --psprobe  RECOMP_D3D_BRIDGE_PSPROBE=1: probe each pixel shader once (S4; pscheck.py checks the log)
+  --texcheck RECOMP_D3D_BRIDGE_TEXCHECK=1: write each P8 texture once, as uploaded (S4; needs --dump)
   --no-pbexec leaves RECOMP_PB_EXEC unset.
+  --exe=PATH runs a copy of crash_twoc.exe (so the build can be relinked meanwhile);
+             the game still runs in the repo root.
 
 Every other RECOMP_* variable from the calling shell is cleared.
 
@@ -35,6 +41,8 @@ opts = dict(a[2:].split("=", 1) for a in sys.argv[3:] if "=" in a)
 flags = {a for a in sys.argv[3:] if "=" not in a}
 intro_s = float(opts.get("intro", "6"))
 outdir = os.path.abspath(opts.get("outdir", "."))
+if "exe" in opts:
+    EXE = os.path.abspath(opts["exe"])
 
 pad = os.path.join(outdir, tag + ".pad.txt")
 open(pad, "w").write("\n")
@@ -58,6 +66,11 @@ if "dump" in opts:
     env["RECOMP_FB_DUMP"] = os.path.join(os.path.abspath(opts["dump"]), "shot")
 if "dump-every" in opts:
     env["RECOMP_D3D_BRIDGE_DUMP_EVERY"] = opts["dump-every"]
+for flag, var in (("--dump-rt", "RECOMP_D3D_BRIDGE_DUMP_RT"), ("--rtlog", "RECOMP_D3D_BRIDGE_RTLOG"),
+                  ("--psprobe", "RECOMP_D3D_BRIDGE_PSPROBE"),
+                  ("--texcheck", "RECOMP_D3D_BRIDGE_TEXCHECK")):
+    if flag in flags:
+        env[var] = "1"
 
 errp = os.path.join(outdir, tag + ".err.log")
 evf = open(os.path.join(outdir, tag + ".events.txt"), "w")
