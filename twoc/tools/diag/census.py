@@ -1,4 +1,4 @@
-"""Summarise a RECOMP_D3D_BRIDGE=1 census log by game phase (notes 18.32).
+"""Summarise a RECOMP_D3D_CENSUS=1 log (RECOMP_D3D_BRIDGE=1 before step 31) by game phase (notes 18.32).
 
   python census.py run.err.log [--keys]
 

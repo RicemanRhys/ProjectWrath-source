@@ -1,0 +1,78 @@
+diff --git a/twoc/src/recomp_manual.c b/twoc/src/recomp_manual.c
+index 735805e..4002b8a 100644
+--- a/twoc/src/recomp_manual.c
++++ b/twoc/src/recomp_manual.c
+@@ -344,6 +344,7 @@ typedef struct {
+     volatile LONG locks;               /* guest critical sections held (enters - leaves) */
+     volatile LONG acquiring;           /* inside RtlEnterCriticalSection */
+     LONG          deferred;            /* boundaries passed holding a lock, this suspend */
++    volatile uint32_t tmp_top_cs;      /* TMP stress patch: innermost CS owned */
+     HANDLE        wake;                /* manual-reset, signaled while suspend == 0 */
+ } coop_thread_t;
+ 
+@@ -404,7 +405,9 @@ static void coop_park(coop_thread_t *t)
+ {
+     if (t->suspend <= 0)
+         return;
+-    if (InterlockedCompareExchange(&t->locks, 0, 0) > 0) {
++    static int tmp_no_defer = -1;          /* TMP stress patch */
++    if (tmp_no_defer < 0) tmp_no_defer = getenv("TMP_NO_CS_DEFER") != NULL;
++    if (!tmp_no_defer && InterlockedCompareExchange(&t->locks, 0, 0) > 0) {
+         t->deferred++;
+         return;
+     }
+@@ -479,6 +482,7 @@ static void coop_kernel_call(void)
+             InterlockedDecrement(&g_cs_watch_holders);
+     }
+     if (self && (enter || leave)) {
++        self->tmp_top_cs = (t_cs_n > 0 && t_cs_n <= COOP_CS_TRACK) ? t_cs_held[t_cs_n - 1] : 0;
+         InterlockedExchange(&self->locks, t_cs_n);
+         InterlockedExchange(&self->acquiring, 0);
+     }
+@@ -554,12 +558,27 @@ static void coop_NtSuspendThread(void)
+     if (self && t_coop_depth == 0)
+         coop_park(self);                   /* a kernel-call boundary for the caller too */
+ 
++    {   /* TMP stress patch: mark the suspend only while the target owns a guest lock */
++        static int w = -1;
++        LONG seen = -1, st = -1;
++        if (w < 0) w = getenv("TMP_SUSPEND_WHEN_LOCKED") != NULL;
++        if (w && t != self) {
++            ULONGLONG u = GetTickCount64() + 3000;
++            while (t->tmp_top_cs != 0x00152BB0u && GetTickCount64() < u)
++                ;
++            seen = InterlockedCompareExchange(&t->locks, 0, 0);
++            st = t->state;
++        }
+     AcquireSRWLockExclusive(&g_coop_lock);
+     prev = t->suspend;
+     InterlockedIncrement(&t->suspend);
+     if (prev == 0)
+         ResetEvent(t->wake);
+     ReleaseSRWLockExclusive(&g_coop_lock);
++        if (seen >= 0)
++            fprintf(stderr, "[TMPSTRESS] suspend marked with target locks=%ld state=%ld, now locks=%ld\n",
++                    (long)seen, (long)st, (long)t->locks);
++    }
+ 
+     if (prev_va)
+         MEM32(prev_va) = (uint32_t)prev;
+@@ -598,6 +617,18 @@ static void coop_NtSuspendThread(void)
+                     : coop_state_name[st]);
+         coop_log("suspend", tid, prev, ret, why);
+     }
++    if (getenv("TMP_SUSPENDER_TAKES")) {   /* TMP stress patch: level setup's DSOUND call */
++        extern void __stdcall xbox_RtlEnterCriticalSection(void *cs);
++        extern void __stdcall xbox_RtlLeaveCriticalSection(void *cs);
++        ULONGLONG t0 = GetTickCount64();
++        fprintf(stderr, "[TMPSTRESS] suspender takes 0x00152BB0 (target top cs %08X)\n", t->tmp_top_cs);
++        fflush(stderr);
++        xbox_RtlEnterCriticalSection((void *)XBOX_PTR(0x00152BB0u));
++        fprintf(stderr, "[TMPSTRESS] suspender got 0x00152BB0 after %llu ms\n",
++                (unsigned long long)(GetTickCount64() - t0));
++        fflush(stderr);
++        xbox_RtlLeaveCriticalSection((void *)XBOX_PTR(0x00152BB0u));
++    }
+ }
+ 
+ /* NTSTATUS NtResumeThread(HANDLE ThreadHandle, PULONG PreviousSuspendCount); ret 8 */

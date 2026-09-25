@@ -1,17 +1,24 @@
 """One unattended run through splash, title, menu, intro and hub (notes 18.32).
 
-  python drive.py TAG SECONDS [--bridge] [--no-pbexec] [--no-input] [--intro=S] [--outdir=DIR]
+  python drive.py TAG SECONDS [--bridge] [--tint] [--census] [--no-pbexec] [--no-input] [--intro=S]
+                  [--dump=DIR] [--outdir=DIR]
 
 Environment as run_twoc.ps1 -FastTitle -AutoStart, plus RECOMP_DEV_INPUT_FILE
 (TAG.pad.txt). Input is keyed off the stderr log: Start S seconds (default 6)
 after INTRO1.wav opens, which skips the intro; then, once THEMEL.wav opens in
-the hub, A once, stick up 5 s, stick right 5 s. --bridge sets
-RECOMP_D3D_BRIDGE=1, --no-pbexec leaves RECOMP_PB_EXEC unset. Every other
-RECOMP_* variable from the calling shell is cleared.
+the hub, A once, stick up 5 s, stick right 5 s.
+
+  --bridge   RECOMP_D3D_BRIDGE=1, the host mirror (S2, step 31)
+  --tint     RECOMP_D3D_BRIDGE_TINT=1, mirrored clears show the frame index
+  --census   RECOMP_D3D_CENSUS=1, the S1 census (step 30's --bridge)
+  --dump     RECOMP_FB_DUMP=DIR/shot, as run_twoc.ps1 -DumpDir does
+  --no-pbexec leaves RECOMP_PB_EXEC unset.
+
+Every other RECOMP_* variable from the calling shell is cleared.
 
 Writes TAG.out.log, TAG.err.log and TAG.events.txt (the driver's own
 timeline) to --outdir (default: the current directory). compare_runs.py
-compares two err logs; census.py summarises a --bridge one.
+compares two err logs; census.py summarises a --census one.
 """
 import os
 import subprocess
@@ -38,6 +45,13 @@ if "--no-input" not in flags:
     env["RECOMP_DEV_INPUT_FILE"] = pad
 if "--bridge" in flags:
     env["RECOMP_D3D_BRIDGE"] = "1"
+if "--tint" in flags:
+    env["RECOMP_D3D_BRIDGE_TINT"] = "1"
+if "--census" in flags:
+    env["RECOMP_D3D_CENSUS"] = "1"
+if "dump" in opts:
+    os.makedirs(opts["dump"], exist_ok=True)
+    env["RECOMP_FB_DUMP"] = os.path.join(os.path.abspath(opts["dump"]), "shot")
 
 errp = os.path.join(outdir, tag + ".err.log")
 evf = open(os.path.join(outdir, tag + ".events.txt"), "w")
