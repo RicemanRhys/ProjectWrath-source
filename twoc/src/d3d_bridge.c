@@ -12,7 +12,16 @@
  * creates the host device and its window (d3d_host.c), Clear is mirrored for
  * the back buffer with the XDK flags mapped, and Swap presents. Clears to other
  * targets (the 128x128 render-to-texture ones) wait for S4. Every 10 s a
- * [D3DB] host line compares guest swaps with host presents. Each draw, clear
+ * [D3DB] host line compares guest swaps with host presents.
+ *
+ * S3 (notes 18.34) adds DrawVerticesUP: after the lifted call, the draw is
+ * repeated through xbox_d3d8 with the state read from D3D's shadows and
+ * translated from XDK to PC numbering and values (translate_rs/_tss, xl_*).
+ * Textures are described here (format, size, levels, a host pointer to the
+ * bytes and a content signature) and cached and uploaded in d3d_host.c. A draw
+ * to another target, with a vertex program or pixel shader, or with a cube or
+ * palette texture isn't mirrored yet; each kind is counted on a [D3DB] host
+ * draws line, and so is each XDK value the translator couldn't map. Each draw, clear
  * and swap also checks the game's D3D lock 0x4EA440 (see check_lock) and
  * counts the D3DX draws separately. RECOMP_D3D_BRIDGE_TINT=1
  * (a check, off by default) clears to the guest frame index instead of the
@@ -92,6 +101,7 @@
 int d3db_on;
 static int d3db_census, d3db_host;
 static int g_tint;                  /* RECOMP_D3D_BRIDGE_TINT: colour clears show the frame index */
+static int g_point;                 /* RECOMP_D3D_BRIDGE_POINT: point sampling (a check, S3) */
 
 static const char *const d3db_name[D3DB_COUNT] = {
     "CreateDevice", "Clear", "Swap", "DrawVerticesUP", "DrawVertices",
@@ -481,11 +491,12 @@ void d3db_init(void)
     d3db_census = env_on("RECOMP_D3D_CENSUS");
     d3db_on = d3db_host || d3db_census;
     g_tint = d3db_host && env_on("RECOMP_D3D_BRIDGE_TINT");
+    g_point = d3db_host && env_on("RECOMP_D3D_BRIDGE_POINT");
     if (d3db_on)
         coop_watch_cs(GAME_D3D_LOCK);
     g_t0_ms = g_last_dump_ms = GetTickCount64();
     if (d3db_host)
-        fprintf(stderr, "[D3DB] bridge on: host mirror (S2: device, window, Clear, Swap)%s\n",
+        fprintf(stderr, "[D3DB] bridge on: host mirror (S3: device, window, Clear, Swap, DrawVerticesUP)%s\n",
                 g_tint ? "; colour clears tinted with the frame index" : "");
     if (d3db_census)
         fprintf(stderr, "[D3DB] census on: a [D3DB] c block every %d s\n", CEN_PERIOD_MS / 1000);
@@ -593,6 +604,457 @@ static void mirror_clear(const d3db_args_t *a)
     d3dh_clear(a->arg[2], a->arg[3], z, a->arg[5]);
 }
 
+/* ── Draws (S3): XDK state → xbox_d3d8 ─────────────────────── */
+
+/* xbox_d3d8 takes PC D3D8 numbering and values; D3D keeps XDK ones in its
+ * shadows (18.31). XDK render-state indices, in the D3D__RenderState order
+ * (0-56 pixel shader, 57-81 simple, 82-116 deferred, 117-145 complex): */
+enum {
+    XRS_ZFUNC = 57, XRS_ALPHAFUNC, XRS_ALPHABLENDENABLE, XRS_ALPHATESTENABLE, XRS_ALPHAREF,
+    XRS_SRCBLEND, XRS_DESTBLEND, XRS_ZWRITEENABLE, XRS_DITHERENABLE, XRS_SHADEMODE,
+    XRS_COLORWRITEENABLE, XRS_STENCILZFAIL, XRS_STENCILPASS, XRS_STENCILFUNC, XRS_STENCILREF,
+    XRS_STENCILMASK, XRS_STENCILWRITEMASK, XRS_BLENDOP,
+    XRS_FOGENABLE = 82, XRS_FOGTABLEMODE, XRS_FOGSTART, XRS_FOGEND, XRS_FOGDENSITY, XRS_RANGEFOGENABLE,
+    XRS_LIGHTING = 92, XRS_SPECULARENABLE, XRS_LOCALVIEWER, XRS_COLORVERTEX,
+    XRS_SPECULARMATERIALSOURCE = 100, XRS_DIFFUSEMATERIALSOURCE, XRS_AMBIENTMATERIALSOURCE,
+    XRS_EMISSIVEMATERIALSOURCE,
+    XRS_AMBIENT = 105,
+    XRS_PSTEXTUREMODES = 117, XRS_VERTEXBLEND, XRS_FOGCOLOR, XRS_FILLMODE, XRS_BACKFILLMODE,
+    XRS_TWOSIDEDLIGHTING, XRS_NORMALIZENORMALS, XRS_ZENABLE, XRS_STENCILENABLE, XRS_STENCILFAIL,
+    XRS_FRONTFACE, XRS_CULLMODE, XRS_TEXTUREFACTOR, XRS_ZBIAS,
+};
+
+/* XDK texture-stage indices (D3D__TextureState[stage][32]). */
+enum {
+    XTSS_ADDRESSU = 0, XTSS_ADDRESSV, XTSS_ADDRESSW, XTSS_MAGFILTER, XTSS_MINFILTER, XTSS_MIPFILTER,
+    XTSS_MIPMAPLODBIAS, XTSS_MAXMIPLEVEL, XTSS_MAXANISOTROPY, XTSS_COLORKEYOP, XTSS_COLORSIGN,
+    XTSS_ALPHAKILL, XTSS_COLOROP, XTSS_COLORARG0, XTSS_COLORARG1, XTSS_COLORARG2, XTSS_ALPHAOP,
+    XTSS_ALPHAARG0, XTSS_ALPHAARG1, XTSS_ALPHAARG2, XTSS_RESULTARG, XTSS_TEXTURETRANSFORMFLAGS,
+    XTSS_TEXCOORDINDEX = 28,
+};
+
+/* The PC D3D8 numbers xbox_d3d8 uses (its d3d8_xbox.h can't be included
+ * next to the generated-code headers). */
+enum {
+    PRS_ZENABLE = 7, PRS_FILLMODE = 8, PRS_SHADEMODE = 9, PRS_ZWRITEENABLE = 14, PRS_ALPHATESTENABLE = 15,
+    PRS_SRCBLEND = 19, PRS_DESTBLEND = 20, PRS_CULLMODE = 22, PRS_ZFUNC = 23, PRS_ALPHAREF = 24,
+    PRS_ALPHAFUNC = 25, PRS_DITHERENABLE = 26, PRS_ALPHABLENDENABLE = 27, PRS_FOGENABLE = 28,
+    PRS_SPECULARENABLE = 29, PRS_FOGCOLOR = 34, PRS_FOGTABLEMODE = 35, PRS_FOGSTART = 36, PRS_FOGEND = 37,
+    PRS_FOGDENSITY = 38, PRS_RANGEFOGENABLE = 48, PRS_STENCILENABLE = 52, PRS_STENCILFAIL = 53,
+    PRS_STENCILZFAIL = 54, PRS_STENCILPASS = 55, PRS_STENCILFUNC = 56, PRS_STENCILREF = 57,
+    PRS_STENCILMASK = 58, PRS_STENCILWRITEMASK = 59, PRS_TEXTUREFACTOR = 60, PRS_LIGHTING = 137,
+    PRS_AMBIENT = 139, PRS_COLORVERTEX = 141, PRS_LOCALVIEWER = 142, PRS_NORMALIZENORMALS = 143,
+    PRS_DIFFUSEMATERIALSOURCE = 145, PRS_SPECULARMATERIALSOURCE = 146, PRS_AMBIENTMATERIALSOURCE = 147,
+    PRS_EMISSIVEMATERIALSOURCE = 148, PRS_VERTEXBLEND = 151, PRS_COLORWRITEENABLE = 168, PRS_BLENDOP = 171,
+
+    PTSS_COLOROP = 1, PTSS_COLORARG1 = 2, PTSS_COLORARG2 = 3, PTSS_ALPHAOP = 4, PTSS_ALPHAARG1 = 5,
+    PTSS_ALPHAARG2 = 6, PTSS_TEXCOORDINDEX = 11, PTSS_ADDRESSU = 13, PTSS_ADDRESSV = 14,
+    PTSS_MAGFILTER = 16, PTSS_MINFILTER = 17, PTSS_MIPFILTER = 18, PTSS_MAXANISOTROPY = 21,
+};
+
+/* What the translator met that xbox_d3d8 can't show, by kind: counted, and
+ * the first few of each logged. */
+enum {
+    GAP_VALUE,          /* an XDK value with no PC equivalent (mapped to a default) */
+    GAP_TEXOP,          /* a texture op outside the verified 1-11 range */
+    GAP_DIFFUSE_ARG,    /* plain D3DTA_DIFFUSE on a stage > 0 (xbox_d3d8 reads 0 as "default") */
+    GAP_FRONTFACE,      /* FRONTFACE not the default CW */
+    GAP_COUNT
+};
+static volatile LONG g_gap[GAP_COUNT], g_ev_gap;
+static const char *const g_gap_name[GAP_COUNT] = {
+    "unmapped value", "texture op above 11", "D3DTA_DIFFUSE on stage > 0", "FRONTFACE not CW",
+};
+
+static void gap(int kind, const char *what, uint32_t v)
+{
+    InterlockedIncrement(&g_gap[kind]);
+    event(&g_ev_gap, 20, "translate: %s (%s = %X)", g_gap_name[kind], what, v);
+}
+
+static uint32_t rs_x(int i)
+{
+    return MEM32(D3D_RENDERSTATE + 4 * i);
+}
+
+/* XDK comparisons are GL's: NEVER 0x200 .. ALWAYS 0x207. PC: 1 .. 8. */
+static uint32_t xl_cmp(uint32_t v, const char *what)
+{
+    if (v >= 0x200 && v <= 0x207)
+        return v - 0x200 + 1;
+    gap(GAP_VALUE, what, v);
+    return 8;
+}
+
+/* XDK blend factors: ZERO 0, ONE 1, SRCCOLOR 0x300 .. SRCALPHASAT 0x308 (the
+ * GL order, which is the PC order from SRCCOLOR 3 on). */
+static uint32_t xl_blend(uint32_t v, const char *what)
+{
+    if (v == 0)
+        return 1;
+    if (v == 1)
+        return 2;
+    if (v >= 0x300 && v <= 0x308)
+        return v - 0x300 + 3;
+    gap(GAP_VALUE, what, v);             /* the constant-colour factors */
+    return 2;
+}
+
+static uint32_t xl_stencil_op(uint32_t v, const char *what)
+{
+    switch (v) {
+    case 0x1E00: return 1;              /* KEEP */
+    case 0:      return 2;              /* ZERO */
+    case 0x1E01: return 3;              /* REPLACE */
+    case 0x1E02: return 4;              /* INCRSAT */
+    case 0x1E03: return 5;              /* DECRSAT */
+    case 0x150A: return 6;              /* INVERT */
+    case 0x8507: return 7;              /* INCR */
+    case 0x8508: return 8;              /* DECR */
+    }
+    gap(GAP_VALUE, what, v);
+    return 1;
+}
+
+static uint32_t xl_blend_op(uint32_t v)
+{
+    switch (v) {
+    case 0x8006: return 1;              /* ADD */
+    case 0x800A: return 2;              /* SUBTRACT */
+    case 0x800B: return 3;              /* REVSUBTRACT */
+    case 0x8007: return 4;              /* MIN */
+    case 0x8008: return 5;              /* MAX */
+    }
+    gap(GAP_VALUE, "BLENDOP", v);
+    return 1;
+}
+
+/* XDK colour-write bits: R 1 << 16, G 1 << 8, B 1, A 1 << 24. */
+static uint32_t xl_color_write(uint32_t v)
+{
+    return ((v >> 16) & 1) | (((v >> 8) & 1) << 1) | ((v & 1) << 2) | (((v >> 24) & 1) << 3);
+}
+
+/* The render states xbox_d3d8 reads, from D3D__RenderState. */
+static unsigned translate_rs(d3dh_state_t *o)
+{
+    unsigned n = 0;
+    uint32_t v;
+
+#define PUT(s, val) do { o[n].state = (s); o[n].value = (val); n++; } while (0)
+    PUT(PRS_ZENABLE, rs_x(XRS_ZENABLE));                    /* D3DZB_*: the same */
+    v = rs_x(XRS_FILLMODE);                                 /* GL POINT 0x1B00, LINE, FILL */
+    PUT(PRS_FILLMODE, (v >= 0x1B00 && v <= 0x1B02) ? v - 0x1B00 + 1 : 3);
+    PUT(PRS_SHADEMODE, rs_x(XRS_SHADEMODE) == 0x1D00 ? 1 : 2);  /* GL FLAT 0x1D00, SMOOTH 0x1D01 */
+    PUT(PRS_ZWRITEENABLE, rs_x(XRS_ZWRITEENABLE));
+    PUT(PRS_ALPHATESTENABLE, rs_x(XRS_ALPHATESTENABLE));
+    PUT(PRS_SRCBLEND, xl_blend(rs_x(XRS_SRCBLEND), "SRCBLEND"));
+    PUT(PRS_DESTBLEND, xl_blend(rs_x(XRS_DESTBLEND), "DESTBLEND"));
+    v = rs_x(XRS_CULLMODE);                                 /* NONE 0, CW 0x900, CCW 0x901 */
+    PUT(PRS_CULLMODE, v == 0x900 ? 2 : v == 0x901 ? 3 : 1);
+    if (v && rs_x(XRS_FRONTFACE) != 0x900)
+        gap(GAP_FRONTFACE, "FRONTFACE", rs_x(XRS_FRONTFACE));
+    PUT(PRS_ZFUNC, xl_cmp(rs_x(XRS_ZFUNC), "ZFUNC"));
+    PUT(PRS_ALPHAREF, rs_x(XRS_ALPHAREF));
+    PUT(PRS_ALPHAFUNC, xl_cmp(rs_x(XRS_ALPHAFUNC), "ALPHAFUNC"));
+    PUT(PRS_DITHERENABLE, rs_x(XRS_DITHERENABLE));
+    PUT(PRS_ALPHABLENDENABLE, rs_x(XRS_ALPHABLENDENABLE));
+    PUT(PRS_FOGENABLE, rs_x(XRS_FOGENABLE));
+    PUT(PRS_FOGTABLEMODE, rs_x(XRS_FOGTABLEMODE));          /* D3DFOG_*: the same */
+    PUT(PRS_FOGSTART, rs_x(XRS_FOGSTART));
+    PUT(PRS_FOGEND, rs_x(XRS_FOGEND));
+    PUT(PRS_FOGDENSITY, rs_x(XRS_FOGDENSITY));
+    PUT(PRS_RANGEFOGENABLE, rs_x(XRS_RANGEFOGENABLE));
+    PUT(PRS_FOGCOLOR, rs_x(XRS_FOGCOLOR));
+    PUT(PRS_SPECULARENABLE, rs_x(XRS_SPECULARENABLE));
+    PUT(PRS_STENCILENABLE, rs_x(XRS_STENCILENABLE));
+    PUT(PRS_STENCILFAIL, xl_stencil_op(rs_x(XRS_STENCILFAIL), "STENCILFAIL"));
+    PUT(PRS_STENCILZFAIL, xl_stencil_op(rs_x(XRS_STENCILZFAIL), "STENCILZFAIL"));
+    PUT(PRS_STENCILPASS, xl_stencil_op(rs_x(XRS_STENCILPASS), "STENCILPASS"));
+    PUT(PRS_STENCILFUNC, xl_cmp(rs_x(XRS_STENCILFUNC), "STENCILFUNC"));
+    PUT(PRS_STENCILREF, rs_x(XRS_STENCILREF));
+    PUT(PRS_STENCILMASK, rs_x(XRS_STENCILMASK));
+    PUT(PRS_STENCILWRITEMASK, rs_x(XRS_STENCILWRITEMASK));
+    PUT(PRS_TEXTUREFACTOR, rs_x(XRS_TEXTUREFACTOR));
+    PUT(PRS_LIGHTING, rs_x(XRS_LIGHTING));
+    PUT(PRS_AMBIENT, rs_x(XRS_AMBIENT));
+    PUT(PRS_COLORVERTEX, rs_x(XRS_COLORVERTEX));
+    PUT(PRS_LOCALVIEWER, rs_x(XRS_LOCALVIEWER));
+    PUT(PRS_NORMALIZENORMALS, rs_x(XRS_NORMALIZENORMALS));
+    PUT(PRS_DIFFUSEMATERIALSOURCE, rs_x(XRS_DIFFUSEMATERIALSOURCE));    /* D3DMCS_*: the same */
+    PUT(PRS_SPECULARMATERIALSOURCE, rs_x(XRS_SPECULARMATERIALSOURCE));
+    PUT(PRS_AMBIENTMATERIALSOURCE, rs_x(XRS_AMBIENTMATERIALSOURCE));
+    PUT(PRS_EMISSIVEMATERIALSOURCE, rs_x(XRS_EMISSIVEMATERIALSOURCE));
+    PUT(PRS_VERTEXBLEND, rs_x(XRS_VERTEXBLEND));
+    PUT(PRS_COLORWRITEENABLE, xl_color_write(rs_x(XRS_COLORWRITEENABLE)));
+    PUT(PRS_BLENDOP, xl_blend_op(rs_x(XRS_BLENDOP)));
+#undef PUT
+    return n;
+}
+
+/* XDK texture ops. 1-11 are the PC ones (DISABLE .. ADDSMOOTH). From 12 the
+ * XDK order is BLENDDIFFUSEALPHA, BLENDCURRENTALPHA, BLENDTEXTUREALPHA,
+ * BLENDFACTORALPHA, ..., DOTPRODUCT3 22 (from memory, not yet checked
+ * against a draw that uses one), mapped to xbox_d3d8's own numbers
+ * (BLENDTEXTUREALPHA 13, BLENDFACTORALPHA 14, BLENDCURRENTALPHA 15, DOT3 24). */
+static uint32_t xl_texop(uint32_t v)
+{
+    if (v >= 1 && v <= 11)
+        return v;
+    gap(GAP_TEXOP, "texture op", v);
+    switch (v) {
+    case 12: return 12;
+    case 13: return 15;
+    case 14: return 13;
+    case 15: return 14;
+    case 22: return 24;
+    }
+    return 4;
+}
+
+/* D3DTA_* are the same. xbox_d3d8 reads an argument of 0 as its default
+ * (TEXTURE for ARG1, CURRENT for ARG2), so plain DIFFUSE can't be passed.
+ * On stage 0 CURRENT is the diffuse colour, so it stands in there. */
+static uint32_t xl_arg(uint32_t v, unsigned stage, const char *what)
+{
+    if (v != 0)
+        return v;
+    if (stage == 0)
+        return 1;
+    gap(GAP_DIFFUSE_ARG, what, stage);
+    return 1;
+}
+
+/* XDK filters: NONE 0, POINT 1, LINEAR 2, ANISOTROPIC 3, QUINCUNX 4,
+ * GAUSSIANCUBIC 5; the last two become LINEAR. */
+static uint32_t xl_filter(uint32_t v)
+{
+    return v > 3 ? 2 : v;
+}
+
+/* XDK addressing: WRAP 1, MIRROR 2, CLAMP 3, BORDER 4, CLAMPTOEDGE 5. PC 5 is
+ * MIRRORONCE, so CLAMPTOEDGE becomes CLAMP. */
+static uint32_t xl_address(uint32_t v)
+{
+    return v == 5 ? 3 : v;
+}
+
+static unsigned translate_tss(unsigned stage, d3dh_state_t *o)
+{
+    uint32_t base = D3D_TEXTURESTATE + 4 * D3D_TSS_COUNT * stage;
+    unsigned n = 0;
+
+#define TS(i) MEM32(base + 4 * (i))
+#define PUT(s, val) do { o[n].state = (s); o[n].value = (val); n++; } while (0)
+    PUT(PTSS_COLOROP, xl_texop(TS(XTSS_COLOROP)));
+    PUT(PTSS_COLORARG1, xl_arg(TS(XTSS_COLORARG1), stage, "COLORARG1"));
+    PUT(PTSS_COLORARG2, xl_arg(TS(XTSS_COLORARG2), stage, "COLORARG2"));
+    PUT(PTSS_ALPHAOP, xl_texop(TS(XTSS_ALPHAOP)));
+    PUT(PTSS_ALPHAARG1, xl_arg(TS(XTSS_ALPHAARG1), stage, "ALPHAARG1"));
+    PUT(PTSS_ALPHAARG2, xl_arg(TS(XTSS_ALPHAARG2), stage, "ALPHAARG2"));
+    PUT(PTSS_TEXCOORDINDEX, TS(XTSS_TEXCOORDINDEX));
+    PUT(PTSS_ADDRESSU, xl_address(TS(XTSS_ADDRESSU)));
+    PUT(PTSS_ADDRESSV, xl_address(TS(XTSS_ADDRESSV)));
+    /* RECOMP_D3D_BRIDGE_POINT: point sampling from level 0, the way the NV2A
+     * executor's software rasteriser samples, to compare with its dumps. */
+    PUT(PTSS_MAGFILTER, g_point ? 1 : xl_filter(TS(XTSS_MAGFILTER)));
+    PUT(PTSS_MINFILTER, g_point ? 1 : xl_filter(TS(XTSS_MINFILTER)));
+    PUT(PTSS_MIPFILTER, g_point ? 0 : xl_filter(TS(XTSS_MIPFILTER)));
+    PUT(PTSS_MAXANISOTROPY, TS(XTSS_MAXANISOTROPY));
+#undef PUT
+#undef TS
+    return n;
+}
+
+/* XDK primitive types are the NV2A's (POINTLIST 1, LINELIST 2, LINELOOP 3,
+ * LINESTRIP 4, TRIANGLELIST 5, TRIANGLESTRIP 6, TRIANGLEFAN 7, QUADLIST 8,
+ * QUADSTRIP 9, POLYGON 10) and draws count vertices. xbox_d3d8 takes PC types
+ * (POINTLIST 1, LINELIST 2, LINESTRIP 3, TRIANGLELIST 4, TRIANGLESTRIP 5,
+ * TRIANGLEFAN 6, and its own QUADLIST 8) and primitive counts. 0: not mapped. */
+static uint32_t xl_prim(uint32_t xdk, uint32_t verts, uint32_t *count)
+{
+    switch (xdk) {
+    case 1: *count = verts;                        return 1;
+    case 2: *count = verts / 2;                    return 2;
+    case 4: *count = verts >= 2 ? verts - 1 : 0;   return 3;
+    case 5: *count = verts / 3;                    return 4;
+    case 6: *count = verts >= 3 ? verts - 2 : 0;   return 5;
+    case 7: *count = verts >= 3 ? verts - 2 : 0;   return 6;
+    case 8: *count = verts / 4;                    return 8;
+    }
+    *count = 0;
+    return 0;
+}
+
+/* Physical Data -> guest VA: the runtime's contiguous arena maps physical P
+ * at 0x80000000 + P (xbox_memory_layout.c). An address beyond what the arena
+ * handed out is taken as a VA, as the NV2A executor does. */
+uint32_t xbox_ContiguousAllocatedBytes(void);
+
+static uint32_t phys_to_va(uint32_t p)
+{
+    return p < xbox_ContiguousAllocatedBytes() ? 0x80000000u + p : p;
+}
+
+/* FNV-1a over the whole texture when it is up to 256 KB, else over 64
+ * 64-byte samples spread across it plus the first and last 4 KB. */
+static uint32_t content_sig(const uint8_t *p, uint32_t n)
+{
+    uint32_t h = 2166136261u, i;
+
+#define MIX(ptr, len) do { const uint8_t *q_ = (ptr); uint32_t k_; \
+        for (k_ = 0; k_ < (len); k_++) h = (h ^ q_[k_]) * 16777619u; } while (0)
+    if (n <= 256 * 1024) {
+        MIX(p, n);
+    } else {
+        MIX(p, 4096);
+        for (i = 0; i < 64; i++)
+            MIX(p + (uint64_t)(n - 64) * i / 64, 64);
+        MIX(p + n - 4096, 4096);
+    }
+#undef MIX
+    return h ? h : 1;
+}
+
+/* Why a draw wasn't mirrored. */
+enum {
+    SKIP_TARGET,        /* render target isn't the back buffer (render-to-texture: S4) */
+    SKIP_VS_PROGRAM,    /* a programmable vertex shader (S5) */
+    SKIP_PIXEL_SHADER,  /* a pixel shader (S4) */
+    SKIP_PRIM,          /* LINELOOP, QUADSTRIP, POLYGON */
+    SKIP_TEXTURE,       /* a cube, volume or palette texture, or a format xbox_d3d8 lacks */
+    SKIP_COUNT
+};
+static volatile LONG g_skip[SKIP_COUNT], g_mirrored_draws, g_ev_skip, g_ev_draw, g_ev_draw_tss, g_ev_diffuse;
+static const char *const g_skip_name[SKIP_COUNT] = {
+    "render target", "vertex program", "pixel shader", "primitive", "texture",
+};
+
+static void skip(int kind, uint32_t v)
+{
+    InterlockedIncrement(&g_skip[kind]);
+    event(&g_ev_skip, 20, "draw not mirrored: %s (%X)", g_skip_name[kind], v);
+}
+
+/* The guest texture bound to a stage, as a host descriptor. Returns 0 if
+ * there is none, 1 if described, -1 if it can't be mirrored. */
+static int describe_texture(unsigned stage, d3dh_tex_t *t)
+{
+    uint32_t hdr = MEM32(dev() + DEV_TEXTURES + 4 * stage), f, sz, fmt;
+
+    if (!hdr)
+        return 0;
+    f = MEM32(hdr + RES_FORMAT);
+    sz = MEM32(hdr + RES_SIZE);
+    fmt = (f >> 8) & 0xFF;
+    if ((f & 4) || ((f >> 4) & 15) != 2 || !d3dh_format_supported(fmt)) {
+        skip(SKIP_TEXTURE, f);          /* cube, not 2D, or not uploadable */
+        return -1;
+    }
+    memset(t, 0, sizeof(*t));
+    t->key = hdr;
+    t->data = MEM32(hdr + RES_DATA);
+    t->format = fmt;
+    t->levels = (f >> 16) & 15;
+    if (sz) {                           /* linear: Size has width, height, pitch */
+        t->width = (sz & 0xFFF) + 1;
+        t->height = ((sz >> 12) & 0xFFF) + 1;
+        t->pitch = ((sz >> 24) + 1) * 64;
+    } else {
+        t->width = 1u << ((f >> 20) & 15);
+        t->height = 1u << ((f >> 24) & 15);
+    }
+    if (!t->levels)
+        t->levels = 1;
+    t->bytes = d3dh_texture_bytes(fmt, t->width, t->height, t->levels, t->pitch);
+    t->bits = (const uint8_t *)XBOX_PTR(phys_to_va(t->data));
+    t->sig = content_sig(t->bits, t->bytes);
+    return 1;
+}
+
+/* DrawVerticesUP(PrimitiveType, VertexCount, pVertexStreamZeroData,
+ * VertexStreamZeroStride), after the lifted call: the same draw through
+ * xbox_d3d8, with the state read from D3D's shadows at this point. */
+static void mirror_draw_up(const d3db_args_t *a)
+{
+    uint32_t d = dev(), vs, count = 0, prim, s;
+    d3dh_state_t rs[64], tss[4][16];
+    d3dh_tex_t tex[4];
+    d3dh_draw_t dr;
+
+    memset(tex, 0, sizeof(tex));
+    if (strcmp(surface_kind(MEM32(d + DEV_RENDER_TARGET)), "back") != 0) {
+        skip(SKIP_TARGET, MEM32(d + DEV_RENDER_TARGET));
+        return;
+    }
+    vs = MEM32(d + DEV_VS_HANDLE);
+    if (vs & 1) {
+        skip(SKIP_VS_PROGRAM, vs);
+        return;
+    }
+    if (MEM32(d + DEV_PIXEL_SHADER)) {
+        skip(SKIP_PIXEL_SHADER, MEM32(d + DEV_PIXEL_SHADER));
+        return;
+    }
+    prim = xl_prim(a->arg[0], a->arg[1], &count);
+    if (!prim || !count) {
+        skip(SKIP_PRIM, a->arg[0]);
+        return;
+    }
+
+    memset(&dr, 0, sizeof(dr));
+    for (s = 0; s < 4; s++) {
+        int r = describe_texture(s, &tex[s]);
+        if (r < 0)
+            return;
+        dr.tex[s] = r ? &tex[s] : NULL;
+        dr.tss[s] = tss[s];
+        dr.n_tss[s] = translate_tss(s, tss[s]);
+    }
+    dr.rs = rs;
+    dr.n_rs = translate_rs(rs);
+    dr.prim = prim;
+    dr.prim_count = count;
+    dr.stride = a->arg[3];
+    dr.fvf = vs;
+    dr.verts = (const void *)XBOX_PTR(a->arg[2]);
+    dr.vp_x = MEM32(d + DEV_VIEWPORT);
+    dr.vp_y = MEM32(d + DEV_VIEWPORT + 4);
+    dr.vp_w = MEM32(d + DEV_VIEWPORT + 8);
+    dr.vp_h = MEM32(d + DEV_VIEWPORT + 12);
+    memcpy(&dr.vp_minz, (const void *)XBOX_PTR(d + DEV_VIEWPORT + 16), 4);
+    memcpy(&dr.vp_maxz, (const void *)XBOX_PTR(d + DEV_VIEWPORT + 20), 4);
+
+    if (g_ev_draw < 6) {                /* the first few draws, raw XDK values */
+        char line[400];
+        int len = 0, i;
+        static const int shown[] = { XRS_ZFUNC, XRS_ALPHAFUNC, XRS_ALPHABLENDENABLE, XRS_ALPHATESTENABLE,
+                                     XRS_ALPHAREF, XRS_SRCBLEND, XRS_DESTBLEND, XRS_ZWRITEENABLE,
+                                     XRS_STENCILFUNC, XRS_STENCILREF, XRS_LIGHTING, XRS_ZENABLE,
+                                     XRS_STENCILENABLE, XRS_CULLMODE, XRS_COLORWRITEENABLE, XRS_BLENDOP };
+        for (i = 0; i < (int)(sizeof(shown) / sizeof(shown[0])); i++)
+            len += snprintf(line + len, sizeof(line) - len, " %d=%X", shown[i], rs_x(shown[i]));
+        event(&g_ev_draw, 6, "DrawVerticesUP prim %u verts %u stride %u fvf %X tex0 %08X (fmt %02X %ux%u lv %u"
+              " data %08X, %u bytes); RS%s", a->arg[0], a->arg[1], a->arg[3], vs, tex[0].key,
+              dr.tex[0] ? tex[0].format : 0, dr.tex[0] ? tex[0].width : 0, dr.tex[0] ? tex[0].height : 0,
+              dr.tex[0] ? tex[0].levels : 0, dr.tex[0] ? tex[0].data : 0, dr.tex[0] ? tex[0].bytes : 0, line);
+        for (len = 0, i = 0; i < D3D_TSS_COUNT; i++)
+            len += snprintf(line + len, sizeof(line) - len, " %X", MEM32(D3D_TEXTURESTATE + 4 * i));
+        event(&g_ev_draw_tss, 6, "  TSS stage 0:%s", line);
+    }
+    if (vs & 0x40) {                    /* D3DFVF_DIFFUSE: vertex 0's colour, for the first draws */
+        uint32_t off = ((vs & 0xE) == 4 ? 16 : 12) + ((vs & 0x10) ? 12 : 0);
+        event(&g_ev_diffuse, 120, "UP draw %ld at guest swap %ld: tex0 %s, vertex 0 diffuse %08X",
+              (long)g_mirrored_draws, (long)g_swaps, dr.tex[0] ? "set" : "none", MEM32(a->arg[2] + off));
+    }
+    if (d3dh_draw_up(&dr) == 0)
+        InterlockedIncrement(&g_mirrored_draws);
+}
+
+/* Time spent in the mirror (translate + host call, in d3db_leave), in QPC
+ * ticks: draws, swaps (dump, copy, present), everything else. */
+static volatile LONG64 g_mirror_ticks[3];
+
 static void mirror_swap(void)
 {
     LONG n = InterlockedIncrement(&g_swaps);
@@ -619,6 +1081,31 @@ static void mirror_swap(void)
                     st.clears, st.clears_colour, st.clears_depth, st.clears_partial_colour,
                     (long)g_clears_other_rt, (long)g_nolock, (long)g_interleaved, (long)g_d3dx_draws,
                     st.dumps, st.present_fails, st.present_status);
+            fprintf(stderr, "[D3DB] host draws: mirrored %ld, host draws %u (fails %u); not mirrored: target %ld,"
+                    " vertex program %ld, pixel shader %ld, primitive %ld, texture %ld; textures uploaded %u"
+                    " (fails %u, evictions %u); translation gaps: value %ld, texop %ld, diffuse arg %ld,"
+                    " frontface %ld\n",
+                    (long)g_mirrored_draws, st.draws, st.draw_fails, (long)g_skip[SKIP_TARGET],
+                    (long)g_skip[SKIP_VS_PROGRAM], (long)g_skip[SKIP_PIXEL_SHADER], (long)g_skip[SKIP_PRIM],
+                    (long)g_skip[SKIP_TEXTURE], st.tex_uploads, st.tex_upload_fails, st.tex_evictions,
+                    (long)g_gap[GAP_VALUE], (long)g_gap[GAP_TEXOP], (long)g_gap[GAP_DIFFUSE_ARG],
+                    (long)g_gap[GAP_FRONTFACE]);
+            {
+                static LONG64 last[3];
+                LARGE_INTEGER f;
+                LONG64 cur[3];
+                int i;
+                QueryPerformanceFrequency(&f);
+                for (i = 0; i < 3; i++)
+                    cur[i] = g_mirror_ticks[i];
+                fprintf(stderr, "[D3DB] host mirror time this interval: draws %.1f ms, swaps %.1f ms,"
+                        " other %.1f ms (%.1f%% of the interval)\n",
+                        1000.0 * (cur[0] - last[0]) / f.QuadPart, 1000.0 * (cur[1] - last[1]) / f.QuadPart,
+                        1000.0 * (cur[2] - last[2]) / f.QuadPart,
+                        100.0 * ((cur[0] - last[0]) + (cur[1] - last[1]) + (cur[2] - last[2])) / f.QuadPart / dt);
+                for (i = 0; i < 3; i++)
+                    last[i] = cur[i];
+            }
             {
                 char buf[512];
                 int i, len = 0;
@@ -681,6 +1168,10 @@ void d3db_enter(int id, d3db_args_t *a)
     case D3DB_CLEAR: case D3DB_SWAP: case D3DB_DRAW_UP: case D3DB_DRAW:
     case D3DB_DRAW_INDEXED: case D3DB_BEGIN: case D3DB_END: case D3DB_COPYRECTS:
         check_lock(id, a);
+        break;
+    case D3DB_TEX_LOCK: case D3DB_SURF_LOCK:
+        if (d3db_host)                  /* the game is about to write it: re-upload at the next draw */
+            d3dh_texture_touch(res_data(a->arg[0]));
         break;
     }
     if (!d3db_census)
@@ -797,11 +1288,17 @@ void d3db_enter(int id, d3db_args_t *a)
 void d3db_leave(int id, d3db_args_t *a)
 {
     if (d3db_host) {
+        LARGE_INTEGER t0, t1;
+        QueryPerformanceCounter(&t0);
         switch (id) {
         case D3DB_CREATE_DEVICE: mirror_create_device(a); break;
         case D3DB_CLEAR:         mirror_clear(a);         break;
         case D3DB_SWAP:          mirror_swap();           break;
+        case D3DB_DRAW_UP:       mirror_draw_up(a);       break;
         }
+        QueryPerformanceCounter(&t1);
+        InterlockedAdd64(&g_mirror_ticks[id == D3DB_DRAW_UP ? 0 : id == D3DB_SWAP ? 1 : 2],
+                         t1.QuadPart - t0.QuadPart);
     }
     if (!d3db_census)
         return;

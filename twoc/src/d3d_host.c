@@ -39,6 +39,8 @@
  * Dumps: with a prefix (from RECOMP_FB_DUMP, as -DumpDir sets it), the back
  * buffer is written as <prefix>NNN.bmp before the present, on the executor's
  * cadence: the first 8 frames that had mirrored work, then one every 10 s.
+ * RECOMP_D3D_BRIDGE_DUMP_EVERY=N adds one every Nth guest swap (S3 uses it to
+ * catch the splash after its fade-in, which the executor's cadence misses).
  */
 
 #include <stdio.h>
@@ -66,6 +68,7 @@ static IDirect3DDevice8 *g_dev;
 static ID3D11Texture2D *g_staging;
 static char g_dump_prefix[512];
 static unsigned g_dump_seq, g_dump_first;
+static unsigned g_dump_every;           /* RECOMP_D3D_BRIDGE_DUMP_EVERY: also every Nth guest swap */
 static ULONGLONG g_last_dump_ms;
 static int g_frame_work;                /* mirrored work since the last present */
 static d3dh_stats_t g_st;
@@ -141,8 +144,11 @@ int d3dh_create(unsigned width, unsigned height, unsigned interval, const char *
     g_w = width ? width : 640;
     g_h = height ? height : 480;
     g_interval = interval;
-    if (dump_prefix)
+    if (dump_prefix) {
+        const char *every = getenv("RECOMP_D3D_BRIDGE_DUMP_EVERY");
         snprintf(g_dump_prefix, sizeof(g_dump_prefix), "%s", dump_prefix);
+        g_dump_every = every ? (unsigned)strtoul(every, NULL, 0) : 0;
+    }
 
     args.made = CreateEventA(NULL, TRUE, FALSE, NULL);
     th = CreateThread(NULL, 0, win_thread, &args, 0, NULL);
@@ -240,6 +246,194 @@ void d3dh_clear(uint32_t xdk_flags, uint32_t color, float z, uint32_t stencil)
     LeaveCriticalSection(&g_lock);
 }
 
+/* ── Textures (S3) ─────────────────────────────────────────── */
+
+/* xbox_d3d8 textures made from guest ones, keyed by the guest header. An
+ * entry is reused only while the header's Data, format, size and content
+ * signature all match; otherwise it is recreated and uploaded again. The
+ * least recently used entry makes room when the table is full. */
+#define TEX_CACHE_SLOTS 1024
+
+typedef struct {
+    d3dh_tex_t desc;                    /* bits unused once uploaded */
+    IDirect3DTexture8 *tex;
+    unsigned last_use;
+} host_tex_t;
+
+static host_tex_t g_tex[TEX_CACHE_SLOTS];
+static unsigned g_tex_clock;
+
+static uint32_t level_dim(uint32_t d, uint32_t level)
+{
+    d >>= level;
+    return d ? d : 1;
+}
+
+static uint32_t level_bytes(D3DFORMAT fmt, uint32_t w, uint32_t h, uint32_t pitch)
+{
+    if (pitch)
+        return pitch * h;
+    return d3d8_row_pitch(fmt, w) * (d3d8_format_is_compressed(fmt) ? (h + 3) / 4 : h);
+}
+
+int d3dh_format_supported(uint32_t format)
+{
+    return !d3d8_format_is_palettized((D3DFORMAT)format) &&
+           d3d8_to_dxgi_format((D3DFORMAT)format) != DXGI_FORMAT_UNKNOWN &&
+           d3d8_format_bpp((D3DFORMAT)format) != 0;
+}
+
+uint32_t d3dh_texture_bytes(uint32_t format, uint32_t width, uint32_t height, uint32_t levels, uint32_t pitch)
+{
+    uint32_t l, n = 0;
+
+    if (!d3dh_format_supported(format))
+        return 0;
+    for (l = 0; l < levels; l++)
+        n += level_bytes((D3DFORMAT)format, level_dim(width, l), level_dim(height, l), pitch);
+    return n;
+}
+
+static void tex_release(host_tex_t *e)
+{
+    int s;
+
+    if (!e->tex)
+        return;
+    for (s = 0; s < 4; s++)             /* xbox_d3d8 keeps the bound pointer */
+        g_dev->lpVtbl->SetTexture(g_dev, s, NULL);
+    e->tex->lpVtbl->Release(e->tex);
+    e->tex = NULL;
+}
+
+/* Copy each level from the guest layout into xbox_d3d8's (the same bytes:
+ * levels back to back; a linear format's rows at the guest pitch). */
+static int tex_upload(IDirect3DTexture8 *tex, const d3dh_tex_t *t)
+{
+    const uint8_t *src = t->bits;
+    uint32_t l;
+
+    for (l = 0; l < t->levels; l++) {
+        uint32_t w = level_dim(t->width, l), h = level_dim(t->height, l);
+        uint32_t n = level_bytes((D3DFORMAT)t->format, w, h, t->pitch);
+        D3DLOCKED_RECT lr;
+        if (FAILED(tex->lpVtbl->LockRect(tex, l, &lr, NULL, 0)))
+            return -1;
+        if (t->pitch) {
+            uint32_t row = d3d8_row_pitch((D3DFORMAT)t->format, w), y;
+            for (y = 0; y < h; y++)
+                memcpy((uint8_t *)lr.pBits + (size_t)y * lr.Pitch, src + (size_t)y * t->pitch,
+                       row < t->pitch ? row : t->pitch);
+        } else {
+            memcpy(lr.pBits, src, n);
+        }
+        tex->lpVtbl->UnlockRect(tex, l);
+        src += n;
+    }
+    return 0;
+}
+
+static IDirect3DTexture8 *tex_get(const d3dh_tex_t *t)
+{
+    host_tex_t *e = NULL, *oldest = NULL;
+    uint32_t i, h = (t->key >> 4) * 2654435761u;
+
+    g_tex_clock++;
+    for (i = 0; i < TEX_CACHE_SLOTS; i++) {
+        host_tex_t *s = &g_tex[(h + i) & (TEX_CACHE_SLOTS - 1)];
+        if (s->tex && s->desc.key == t->key) {
+            e = s;
+            break;
+        }
+        if (!s->tex) {
+            if (!e)
+                e = s;
+            break;
+        }
+        if (!oldest || s->last_use < oldest->last_use)
+            oldest = s;
+    }
+    if (!e) {                           /* full along this probe run: evict */
+        e = oldest;
+        tex_release(e);
+        g_st.tex_evictions++;
+    }
+    if (e->tex && (e->desc.data != t->data || e->desc.format != t->format || e->desc.width != t->width ||
+                   e->desc.height != t->height || e->desc.levels != t->levels || e->desc.pitch != t->pitch ||
+                   e->desc.sig != t->sig))
+        tex_release(e);
+    if (!e->tex) {
+        IDirect3DTexture8 *tex = NULL;
+        if (FAILED(g_dev->lpVtbl->CreateTexture(g_dev, t->width, t->height, t->levels, 0,
+                                                (D3DFORMAT)t->format, D3DPOOL_MANAGED, &tex)) ||
+            tex_upload(tex, t) != 0) {
+            if (tex)
+                tex->lpVtbl->Release(tex);
+            if (++g_st.tex_upload_fails <= 5)
+                fprintf(stderr, "[D3DB] host texture upload failed: header %08X format %02X %ux%u levels %u\n",
+                        t->key, t->format, t->width, t->height, t->levels);
+            return NULL;
+        }
+        e->tex = tex;
+        e->desc = *t;
+        e->desc.bits = NULL;
+        g_st.tex_uploads++;
+    }
+    e->last_use = g_tex_clock;
+    return e->tex;
+}
+
+void d3dh_texture_touch(uint32_t data)
+{
+    uint32_t i;
+
+    if (!g_ready)
+        return;
+    EnterCriticalSection(&g_lock);
+    for (i = 0; i < TEX_CACHE_SLOTS; i++)
+        if (g_tex[i].tex && data >= g_tex[i].desc.data && data - g_tex[i].desc.data < g_tex[i].desc.bytes)
+            g_tex[i].desc.sig ^= 0x80000000u;   /* no longer matches: re-upload at its next draw */
+    LeaveCriticalSection(&g_lock);
+}
+
+/* ── Draws (S3) ────────────────────────────────────────────── */
+
+int d3dh_draw_up(const d3dh_draw_t *d)
+{
+    D3DVIEWPORT8 vp;
+    HRESULT hr;
+    unsigned i, s;
+
+    if (!g_ready)
+        return -1;
+    EnterCriticalSection(&g_lock);
+    vp.X = d->vp_x;
+    vp.Y = d->vp_y;
+    vp.Width = d->vp_w;
+    vp.Height = d->vp_h;
+    vp.MinZ = d->vp_minz;
+    vp.MaxZ = d->vp_maxz;
+    g_dev->lpVtbl->SetViewport(g_dev, &vp);
+    /* Textures before stage states: xbox_d3d8's SetTexture edits COLOROP. */
+    for (s = 0; s < 4; s++)
+        g_dev->lpVtbl->SetTexture(g_dev, s, d->tex[s] ? (IDirect3DBaseTexture8 *)tex_get(d->tex[s]) : NULL);
+    for (s = 0; s < 4; s++)
+        for (i = 0; i < d->n_tss[s]; i++)
+            g_dev->lpVtbl->SetTextureStageState(g_dev, s, (D3DTEXTURESTAGESTATETYPE)d->tss[s][i].state,
+                                                d->tss[s][i].value);
+    for (i = 0; i < d->n_rs; i++)
+        g_dev->lpVtbl->SetRenderState(g_dev, (D3DRENDERSTATETYPE)d->rs[i].state, d->rs[i].value);
+    g_dev->lpVtbl->SetVertexShader(g_dev, d->fvf);
+    hr = g_dev->lpVtbl->DrawPrimitiveUP(g_dev, (D3DPRIMITIVETYPE)d->prim, d->prim_count, d->verts, d->stride);
+    g_st.draws++;
+    if (FAILED(hr) && ++g_st.draw_fails <= 5)
+        fprintf(stderr, "[D3DB] host DrawPrimitiveUP failed 0x%08lX (prim %u count %u stride %u fvf %X)\n",
+                (unsigned long)hr, d->prim, d->prim_count, d->stride, d->fvf);
+    g_frame_work = 1;
+    LeaveCriticalSection(&g_lock);
+    return FAILED(hr) ? -1 : 0;
+}
+
 /* ── Dumps ─────────────────────────────────────────────────── */
 
 /* The back buffer (R8G8B8A8) as a bottom-up 24-bit BMP, like the executor's. */
@@ -319,7 +513,8 @@ void d3dh_present(double t_s, unsigned swap_no)
     EnterCriticalSection(&g_lock);
     now = GetTickCount64();
     if (g_dump_prefix[0] &&
-        ((g_frame_work && g_dump_first < DUMP_FIRST_FRAMES) || now - g_last_dump_ms >= DUMP_PERIOD_MS)) {
+        ((g_frame_work && g_dump_first < DUMP_FIRST_FRAMES) || now - g_last_dump_ms >= DUMP_PERIOD_MS ||
+         (g_dump_every && swap_no % g_dump_every == 0))) {
         char path[600];
         snprintf(path, sizeof(path), "%s%03u.bmp", g_dump_prefix, g_dump_seq++);
         dump_back_buffer(path);
