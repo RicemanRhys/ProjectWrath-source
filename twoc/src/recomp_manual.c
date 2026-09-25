@@ -756,6 +756,283 @@ static void vm_NtFreeVirtualMemory(void)
     heap_watch();
 }
 
+/* ── MmAllocateContiguousMemory(Ex) / MmFreeContiguousMemory ── */
+
+/*
+ * The runtime serves contiguous memory from a bump arena over the physical
+ * window at 0x80000000 (xbox_ContiguousAlloc, 64 MB less 128 KiB of GPU
+ * instance memory) and never takes any back: its MmFreeContiguousMemory calls
+ * xbox_HeapFree, which never matches a 0x80xxxxxx block (notes 18.27). Every
+ * level load takes texture and vertex memory from it, so with the executor
+ * off, where the attract demo loads again every ~15 s, the arena ran out at
+ * ~36 s and the game faulted after a failed read (18.33).
+ *
+ * The same kind of hand-write as NtFreeVirtualMemory above, kept in twoc/
+ * because the arena's state is internal to the runtime:
+ *   MmAllocateContiguousMemory[Ex]: first fit from the blocks the game has
+ *     freed (split, aligned, zeroed as the runtime zeroes); if none fits, the
+ *     bridge's bump allocator, as before. Either way the block's extent (its
+ *     size rounded up to a page; the arena aligns every block to a page) is
+ *     recorded by base address.
+ *   MmFreeContiguousMemory at a recorded base: the extent goes back on the
+ *     free list, merged with free neighbours.
+ *   Anything else (a pinned physical address from the Ex path, a size of 0,
+ *     an address never recorded, a full table): the bridge, as before.
+ * Freed memory is reused only below the arena's high-water mark, so the NV2A
+ * executor's test for "contiguous memory this runtime handed out"
+ * (xbox_ContiguousAllocatedBytes) still holds for every block.
+ */
+#define CM_ALLOC_THUNK        0x0015AAC8u      /* [thunk] = MmAllocateContiguousMemory (ordinal 165) */
+#define CM_ALLOC_EX_THUNK     0x0015AB18u      /* [thunk] = MmAllocateContiguousMemoryEx (ordinal 166) */
+#define CM_FREE_THUNK         0x0015AAD0u      /* [thunk] = MmFreeContiguousMemory (ordinal 171) */
+#define CM_QSIZE_THUNK        0x0015AB1Cu      /* [thunk] = MmQueryAllocationSize (ordinal 180) */
+#define CM_WINDOW             0x80000000u
+#define CM_PAGE               0x1000u
+#define CM_LIVE_SLOTS         32768            /* power of two */
+#define CM_FREE_MAX           8192
+
+typedef struct { uint32_t base, extent; } cm_block_t;
+static cm_block_t g_cm_live[CM_LIVE_SLOTS];     /* by base; base 0: empty, 1: deleted */
+static cm_block_t g_cm_free[CM_FREE_MAX];       /* sorted by base, neighbours merged */
+static int g_cm_free_n;
+static SRWLOCK g_cm_lock = SRWLOCK_INIT;
+static uint32_t g_cm_live_bytes, g_cm_free_bytes;
+static volatile LONG g_cm_allocs, g_cm_reused, g_cm_frees, g_cm_free_bridged, g_cm_untracked, g_cm_qsize;
+
+static cm_block_t *cm_live_slot(uint32_t base, int insert)
+{
+    uint32_t i, h = (base >> 12) * 2654435761u;
+    cm_block_t *tomb = NULL;
+
+    for (i = 0; i < CM_LIVE_SLOTS; i++) {
+        cm_block_t *s = &g_cm_live[(h + i) & (CM_LIVE_SLOTS - 1)];
+        if (s->base == base)
+            return s;
+        if (s->base == 1 && !tomb)
+            tomb = s;
+        if (s->base == 0)
+            return insert ? (tomb ? tomb : s) : NULL;
+    }
+    return insert ? tomb : NULL;
+}
+
+/* Caller holds g_cm_lock. Returns 0 if the table is full. */
+static int cm_record(uint32_t base, uint32_t extent)
+{
+    cm_block_t *s = cm_live_slot(base, 1);
+
+    if (!s)
+        return 0;
+    s->base = base;
+    s->extent = extent;
+    g_cm_live_bytes += extent;
+    return 1;
+}
+
+/* Caller holds g_cm_lock. First fit that honours `align`; the pieces before
+ * and after stay on the list. Returns 0 if nothing fits. */
+static uint32_t cm_take(uint32_t extent, uint32_t align)
+{
+    int i;
+
+    for (i = 0; i < g_cm_free_n; i++) {
+        uint32_t b = g_cm_free[i].base, e = g_cm_free[i].extent;
+        uint32_t a = (b + align - 1) & ~(align - 1);
+        if (a < b || a - b > e || e - (a - b) < extent)
+            continue;
+        {
+            uint32_t head = a - b, tail = e - head - extent;
+            if (head && tail) {
+                if (g_cm_free_n == CM_FREE_MAX)
+                    continue;              /* no room to split in three */
+                memmove(&g_cm_free[i + 2], &g_cm_free[i + 1], (g_cm_free_n - i - 1) * sizeof(g_cm_free[0]));
+                g_cm_free_n++;
+                g_cm_free[i].extent = head;
+                g_cm_free[i + 1].base = a + extent;
+                g_cm_free[i + 1].extent = tail;
+            } else if (head) {
+                g_cm_free[i].extent = head;
+            } else if (tail) {
+                g_cm_free[i].base = a + extent;
+                g_cm_free[i].extent = tail;
+            } else {
+                memmove(&g_cm_free[i], &g_cm_free[i + 1], (g_cm_free_n - i - 1) * sizeof(g_cm_free[0]));
+                g_cm_free_n--;
+            }
+        }
+        g_cm_free_bytes -= extent;
+        return a;
+    }
+    return 0;
+}
+
+/* Caller holds g_cm_lock. Returns 0 if the list is full (the block leaks, as
+ * every block did before). */
+static int cm_give(uint32_t base, uint32_t extent)
+{
+    int lo = 0, hi = g_cm_free_n, i;
+
+    while (lo < hi) {                      /* first block above base */
+        int mid = (lo + hi) / 2;
+        if (g_cm_free[mid].base < base)
+            lo = mid + 1;
+        else
+            hi = mid;
+    }
+    i = lo;
+    if (i > 0 && g_cm_free[i - 1].base + g_cm_free[i - 1].extent == base) {
+        g_cm_free[i - 1].extent += extent;             /* merge down */
+        if (i < g_cm_free_n && base + extent == g_cm_free[i].base) {
+            g_cm_free[i - 1].extent += g_cm_free[i].extent;   /* and up */
+            memmove(&g_cm_free[i], &g_cm_free[i + 1], (g_cm_free_n - i - 1) * sizeof(g_cm_free[0]));
+            g_cm_free_n--;
+        }
+    } else if (i < g_cm_free_n && base + extent == g_cm_free[i].base) {
+        g_cm_free[i].base = base;                      /* merge up */
+        g_cm_free[i].extent += extent;
+    } else {
+        if (g_cm_free_n == CM_FREE_MAX)
+            return 0;
+        memmove(&g_cm_free[i + 1], &g_cm_free[i], (g_cm_free_n - i) * sizeof(g_cm_free[0]));
+        g_cm_free[i].base = base;
+        g_cm_free[i].extent = extent;
+        g_cm_free_n++;
+    }
+    g_cm_free_bytes += extent;
+    return 1;
+}
+
+/* The shared allocation path: `ret` is the stdcall argument bytes. */
+static void cm_alloc(uint32_t thunk, uint32_t size, uint32_t align, uint32_t ret)
+{
+    uint32_t extent = (size + CM_PAGE - 1) & ~(CM_PAGE - 1), va = 0;
+    coop_thread_t *self;
+
+    if (align < CM_PAGE)
+        align = CM_PAGE;
+    if (size && extent >= size) {
+        AcquireSRWLockExclusive(&g_cm_lock);
+        va = cm_take(extent, align);
+        if (va && !cm_record(va, extent)) {
+            cm_give(va, extent);
+            va = 0;
+        }
+        ReleaseSRWLockExclusive(&g_cm_lock);
+    }
+    if (!va) {                             /* the bridge's bump arena, as before */
+        t_coop_kernel_va = MEM32(thunk);
+        coop_kernel_call();
+        va = eax;
+        InterlockedIncrement(&g_cm_allocs);
+        if (va >= CM_WINDOW && size && (va & (CM_PAGE - 1)) == 0) {
+            int ok;
+            AcquireSRWLockExclusive(&g_cm_lock);
+            ok = cm_record(va, extent);
+            ReleaseSRWLockExclusive(&g_cm_lock);
+            if (!ok)
+                InterlockedIncrement(&g_cm_untracked);
+        } else if (va) {
+            InterlockedIncrement(&g_cm_untracked);   /* pinned, or size 0 */
+        }
+        return;
+    }
+    self = coop_enter();
+    memset((void *)XBOX_PTR(va), 0, size);           /* as xbox_ContiguousAlloc does */
+    InterlockedIncrement(&g_cm_allocs);
+    InterlockedIncrement(&g_cm_reused);
+    eax = va;
+    esp += 4 + ret;
+    coop_leave(self);
+}
+
+/* PVOID MmAllocateContiguousMemory(ULONG NumberOfBytes); ret 4 */
+static void cm_MmAllocateContiguousMemory(void)
+{
+    cm_alloc(CM_ALLOC_THUNK, MEM32(esp + 4), CM_PAGE, 4);
+}
+
+/* PVOID MmAllocateContiguousMemoryEx(SIZE_T NumberOfBytes, ULONG_PTR Lowest,
+ *     ULONG_PTR Highest, ULONG_PTR Alignment, ULONG Protect); ret 20.
+ * A range that pins one physical address goes to the bridge unchanged (it
+ * maps it directly, outside the arena); so does an alignment that isn't a
+ * power of two. The range is otherwise ignored, as the bridge ignores it. */
+static void cm_MmAllocateContiguousMemoryEx(void)
+{
+    uint32_t size = MEM32(esp + 4), low = MEM32(esp + 8), high = MEM32(esp + 12), align = MEM32(esp + 16);
+
+    if ((low && high >= low && high - low + 1 <= size + CM_PAGE) || (align & (align - 1))) {
+        t_coop_kernel_va = MEM32(CM_ALLOC_EX_THUNK);
+        coop_kernel_call();
+        if (eax)
+            InterlockedIncrement(&g_cm_untracked);
+        return;
+    }
+    cm_alloc(CM_ALLOC_EX_THUNK, size, align, 20);
+}
+
+/* VOID MmFreeContiguousMemory(PVOID BaseAddress); ret 4 */
+static void cm_MmFreeContiguousMemory(void)
+{
+    uint32_t base = MEM32(esp + 4), extent = 0;
+    cm_block_t *s;
+    coop_thread_t *self;
+    int freed = 0;
+
+    AcquireSRWLockExclusive(&g_cm_lock);
+    s = base >= CM_WINDOW ? cm_live_slot(base, 0) : NULL;
+    if (s) {
+        extent = s->extent;
+        s->base = 1;                       /* deleted */
+        g_cm_live_bytes -= extent;
+        freed = cm_give(base, extent);
+    }
+    ReleaseSRWLockExclusive(&g_cm_lock);
+    if (!s) {
+        InterlockedIncrement(&g_cm_free_bridged);
+        t_coop_kernel_va = MEM32(CM_FREE_THUNK);
+        coop_kernel_call();
+        return;
+    }
+    self = coop_enter();
+    InterlockedIncrement(&g_cm_frees);
+    if (!freed)
+        InterlockedIncrement(&g_cm_untracked);   /* free list full: this block stays leaked */
+    esp += 8;                              /* ret 4 */
+    coop_leave(self);
+    heap_watch();
+}
+
+/* ULONG MmQueryAllocationSize(PVOID BaseAddress); ret 4. The bridge answers
+ * from the guest heap only, so a contiguous block read as 0. Answered from
+ * the table when the address is a recorded block's base. The only caller seen
+ * is DSOUND's contiguous allocator (0x137B5A, 19 calls at boot): it adds the
+ * size to its usage counter [0x153254] and zeroes that many bytes, so with 0
+ * it counted and zeroed nothing (the arena had zeroed the block anyway). */
+static void cm_MmQueryAllocationSize(void)
+{
+    uint32_t base = MEM32(esp + 4), extent = 0;
+    cm_block_t *s = NULL;
+    coop_thread_t *self;
+
+    if (base >= CM_WINDOW) {
+        InterlockedIncrement(&g_cm_qsize);
+        AcquireSRWLockShared(&g_cm_lock);
+        s = cm_live_slot(base, 0);
+        if (s)
+            extent = s->extent;
+        ReleaseSRWLockShared(&g_cm_lock);
+    }
+    if (!s) {
+        t_coop_kernel_va = MEM32(CM_QSIZE_THUNK);
+        coop_kernel_call();
+        return;
+    }
+    self = coop_enter();
+    eax = extent;
+    esp += 8;                              /* ret 4 */
+    coop_leave(self);
+}
+
 /* One [HEAPSTAT] line every 2 s, from whichever thread gets there. */
 static void heap_watch(void)
 {
@@ -777,6 +1054,21 @@ static void heap_watch(void)
             s.live / 1024, s.live_blocks, s.free / 1024, s.free_blocks, s.largest_free / 1024,
             (long)g_vm_released, (long)g_vm_released_kb, (long)g_vm_decommits, (long)g_vm_bridged,
             g_vm_waste_live / 1024, g_vm_waste_max / 1024, g_vm_waste_events);
+    {
+        uint32_t live, free_b;
+        int free_n;
+        AcquireSRWLockShared(&g_cm_lock);
+        live = g_cm_live_bytes;
+        free_b = g_cm_free_bytes;
+        free_n = g_cm_free_n;
+        ReleaseSRWLockShared(&g_cm_lock);
+        fprintf(stderr, "[CONTIGSTAT] arena high-water %u KiB; live %u KiB, free for reuse %u KiB in %d blocks;"
+                        " allocs %ld (reused %ld), frees %ld; to the bridge: frees %ld, untracked blocks %ld;"
+                        " size queries %ld\n",
+                xbox_ContiguousAllocatedBytes() / 1024, live / 1024, free_b / 1024, free_n,
+                (long)g_cm_allocs, (long)g_cm_reused, (long)g_cm_frees, (long)g_cm_free_bridged,
+                (long)g_cm_untracked, (long)g_cm_qsize);
+    }
     fflush(stderr);
 }
 
@@ -788,6 +1080,10 @@ recomp_func_t recomp_lookup_manual(uint32_t xbox_va)
         if (xbox_va == MEM32(COOP_NTRESUME_THUNK))  return coop_NtResumeThread;
         if (xbox_va == MEM32(VM_NTFREE_THUNK))      return vm_NtFreeVirtualMemory;
         if (xbox_va == MEM32(VM_NTALLOC_THUNK))     return vm_NtAllocateVirtualMemory;
+        if (xbox_va == MEM32(CM_ALLOC_THUNK))       return cm_MmAllocateContiguousMemory;
+        if (xbox_va == MEM32(CM_ALLOC_EX_THUNK))    return cm_MmAllocateContiguousMemoryEx;
+        if (xbox_va == MEM32(CM_FREE_THUNK))        return cm_MmFreeContiguousMemory;
+        if (xbox_va == MEM32(CM_QSIZE_THUNK))       return cm_MmQueryAllocationSize;
         if (recomp_lookup_kernel(xbox_va)) {
             t_coop_kernel_va = xbox_va;
             return coop_kernel_call;
