@@ -61,6 +61,13 @@
  *   - Pixel shaders arrive already re-encoded for xbox_d3d8's combiner
  *     translator (d3d_bridge.c translate_ps) and are set before each draw.
  *     d3dh_ps_probe draws one pixel with one, for RECOMP_D3D_BRIDGE_PSPROBE.
+ *
+ * Step 34 (notes 18.36): fixed-function 3D. A draw with untransformed
+ * vertices carries world/view/projection, the material and the enabled
+ * lights (apply_ff), and an indexed one goes through xbox_d3d8's
+ * DrawIndexedPrimitiveUP with 16-bit indices already rebased to its vertex
+ * range and turned into lists where xbox_d3d8 can't draw the primitive
+ * indexed (d3d_bridge.c index_list).
  */
 
 #include <stdio.h>
@@ -586,12 +593,42 @@ static const void *rescale_rhw(const void *verts, uint32_t count, uint32_t strid
     return buf;
 }
 
+/* Fixed-function 3D: world, view and projection, the material, and the
+ * enabled lights packed from index 0 (the rest disabled). The texture
+ * matrices stay identity: the game never sets TEXTURETRANSFORMFLAGS (the
+ * bridge counts it if it does). Called with g_lock held. */
+static void apply_ff(const d3dh_ff_t *ff, int lit)
+{
+    static unsigned enabled;            /* host lights enabled by the last call */
+    D3DLIGHT8 l;
+    D3DMATERIAL8 m;
+    unsigned i;
+
+    g_dev->lpVtbl->SetTransform(g_dev, D3DTS_WORLD, (const D3DMATRIX *)ff->world);
+    g_dev->lpVtbl->SetTransform(g_dev, D3DTS_VIEW, (const D3DMATRIX *)ff->view);
+    g_dev->lpVtbl->SetTransform(g_dev, D3DTS_PROJECTION, (const D3DMATRIX *)ff->proj);
+    memcpy(&m, ff->material, sizeof(m));
+    g_dev->lpVtbl->SetMaterial(g_dev, &m);
+    for (i = 0; i < ff->n_lights && i < D3DH_MAX_LIGHTS; i++) {
+        memcpy(&l, ff->light[i], sizeof(l));
+        g_dev->lpVtbl->SetLight(g_dev, i, &l);
+        g_dev->lpVtbl->LightEnable(g_dev, i, TRUE);
+    }
+    for (; i < enabled; i++)
+        g_dev->lpVtbl->LightEnable(g_dev, i, FALSE);
+    enabled = ff->n_lights;
+    g_st.ff_draws++;
+    if (lit)
+        g_st.lit_draws++;
+}
+
 int d3dh_draw_up(const d3dh_draw_t *d)
 {
     D3DVIEWPORT8 vp;
     HRESULT hr;
     unsigned i, s;
     const void *verts;
+    int lit = 0;
 
     if (!g_ready)
         return -1;
@@ -614,8 +651,13 @@ int d3dh_draw_up(const d3dh_draw_t *d)
         for (i = 0; i < d->n_tss[s]; i++)
             g_dev->lpVtbl->SetTextureStageState(g_dev, s, (D3DTEXTURESTAGESTATETYPE)d->tss[s][i].state,
                                                 d->tss[s][i].value);
-    for (i = 0; i < d->n_rs; i++)
+    for (i = 0; i < d->n_rs; i++) {
         g_dev->lpVtbl->SetRenderState(g_dev, (D3DRENDERSTATETYPE)d->rs[i].state, d->rs[i].value);
+        if (d->rs[i].state == D3DRS_LIGHTING)
+            lit = d->rs[i].value != 0;
+    }
+    if (d->ff)
+        apply_ff(d->ff, lit);
     if (d->ps && d->ps->token) {        /* S4: the combiner states, then the token */
         for (i = 0; i < d->ps->n_rs; i++)
             g_dev->lpVtbl->SetRenderState(g_dev, (D3DRENDERSTATETYPE)d->ps->rs[i].state, d->ps->rs[i].value);
@@ -627,13 +669,20 @@ int d3dh_draw_up(const d3dh_draw_t *d)
     g_dev->lpVtbl->SetVertexShader(g_dev, d->fvf);
     verts = (d->fvf & D3DFVF_POSITION_MASK) == D3DFVF_XYZRHW ? rescale_rhw(d->verts, d->vert_count, d->stride, &vp)
                                                                : d->verts;
-    hr = g_dev->lpVtbl->DrawPrimitiveUP(g_dev, (D3DPRIMITIVETYPE)d->prim, d->prim_count, verts, d->stride);
+    if (d->indices) {                   /* xbox_d3d8 uploads vert_count vertices from `verts` */
+        hr = g_dev->lpVtbl->DrawIndexedPrimitiveUP(g_dev, (D3DPRIMITIVETYPE)d->prim, 0, d->vert_count,
+                                                   d->prim_count, d->indices, D3DFMT_INDEX16, verts, d->stride);
+        g_st.indexed_draws++;
+    } else {
+        hr = g_dev->lpVtbl->DrawPrimitiveUP(g_dev, (D3DPRIMITIVETYPE)d->prim, d->prim_count, verts, d->stride);
+    }
     g_st.draws++;
     if (d->target.data)
         g_st.rt_draws++;
     if (FAILED(hr) && ++g_st.draw_fails <= 5)
-        fprintf(stderr, "[D3DB] host DrawPrimitiveUP failed 0x%08lX (prim %u count %u stride %u fvf %X)\n",
-                (unsigned long)hr, d->prim, d->prim_count, d->stride, d->fvf);
+        fprintf(stderr, "[D3DB] host Draw%sPrimitiveUP failed 0x%08lX (prim %u count %u stride %u fvf %X verts %u)\n",
+                d->indices ? "Indexed" : "", (unsigned long)hr, d->prim, d->prim_count, d->stride, d->fvf,
+                d->vert_count);
     g_frame_work = 1;
     LeaveCriticalSection(&g_lock);
     return FAILED(hr) ? -1 : 0;

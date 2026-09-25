@@ -18,6 +18,7 @@ typedef struct {
     unsigned tex_uploads, tex_upload_fails, tex_evictions;
     unsigned rt_created, rt_fails, rt_draws, rt_clears, rt_sampled, rt_feedback;  /* S4 */
     unsigned p8_uploads, ps_draws, ps_probes;                                     /* S4 */
+    unsigned indexed_draws, ff_draws, lit_draws;                                  /* fixed-function 3D */
 } d3dh_stats_t;
 
 /* A state already in xbox_d3d8's (PC D3D8) numbering and values. */
@@ -59,12 +60,27 @@ typedef struct {
     unsigned n_rs;
 } d3dh_ps_t;
 
+/* Fixed-function transform and lighting state (FVF draws with untransformed
+ * positions), as D3D keeps it: row-major D3DMATRIX, D3DLIGHT8 (26 dwords)
+ * and D3DMATERIAL8 (17 dwords), the same layouts in the XDK and PC D3D8. The
+ * lights are the enabled ones, packed. */
+#define D3DH_MAX_LIGHTS 8
+typedef struct {
+    float world[16], view[16], proj[16];
+    uint32_t n_lights;
+    uint32_t light[D3DH_MAX_LIGHTS][26];
+    uint32_t material[17];
+} d3dh_ff_t;
+
 /* One draw from client memory, translated by d3d_bridge.c. `prim` is
  * xbox_d3d8's primitive type and `prim_count` its primitive count. */
 typedef struct {
     uint32_t prim, prim_count, stride, fvf;
     const void *verts;
     uint32_t vert_count;                /* vertices at `verts` */
+    const uint16_t *indices;            /* NULL: not indexed; else prim_count's worth, into `verts` */
+    uint32_t index_count;
+    const d3dh_ff_t *ff;                /* NULL: pre-transformed vertices (XYZRHW) */
     const d3dh_state_t *rs;
     unsigned n_rs;
     const d3dh_state_t *tss[4];
@@ -82,7 +98,8 @@ uint32_t d3dh_texture_bytes(uint32_t format, uint32_t width, uint32_t height, ui
 /* Whether the host can upload this XDK format (P8 through its palette, S4). */
 int d3dh_format_supported(uint32_t format);
 
-/* Draw. Returns 0 on success. */
+/* Draw: DrawPrimitiveUP, or DrawIndexedPrimitiveUP with 16-bit indices when
+ * `indices` is set. Returns 0 on success. */
 int d3dh_draw_up(const d3dh_draw_t *d);
 
 /* S4, RECOMP_D3D_BRIDGE_PSPROBE: draw one pixel with this pixel shader and

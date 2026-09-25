@@ -39,8 +39,18 @@
  *     What it can't express is counted per kind ("pixel-shader gaps").
  *   - A P8 texture is described with its stage's palette (device +0xA88).
  *   - MIPFILTER NONE gives the host level 0 alone (xbox_d3d8 still mips).
- *   - Every draw path is counted on the [D3DB] host draws line; indexed,
- *     immediate and DrawVertices draws aren't mirrored yet.
+ *   - Every draw path is counted on the [D3DB] host draws line.
+ *
+ * Step 34 (notes 18.36) adds fixed-function 3D: DrawIndexedVertices with a
+ * vertex format (the title and menu's FVF 0x152, XYZ|NORMAL|DIFFUSE|TEX1).
+ * Indices come from the caller, vertices from stream 0 plus the base vertex,
+ * and every untransformed draw (UP too) takes world/view/projection, the
+ * material and the enabled lights from the device (describe_ff). xbox_d3d8
+ * lights a draw when its colours all come from the material; when one comes
+ * from the vertex colour (the menu's ambient and emissive), which xbox_d3d8
+ * ignores, the bridge lights a copy of the vertices on the CPU by D3D8's
+ * rules and the host draws it unlit (cpu_light). Immediate-mode and
+ * DrawVertices draws, and vertex programs, aren't mirrored yet.
  * Three checks, off by default: RECOMP_D3D_BRIDGE_PSPROBE (draw each pixel
  * shader once with fixed inputs; tools/diag/pscheck.py), _TEXCHECK (write
  * each P8 texture as uploaded) and _RTLOG (log render-target draws in full;
@@ -68,6 +78,7 @@
 #include <stdlib.h>
 #include <string.h>
 #include <stdarg.h>
+#include <math.h>
 
 #include <windows.h>
 
@@ -124,6 +135,7 @@ static int g_point;                 /* RECOMP_D3D_BRIDGE_POINT: point sampling (
 static int g_psprobe;               /* RECOMP_D3D_BRIDGE_PSPROBE: probe each pixel shader (a check, S4) */
 static int g_texcheck;              /* RECOMP_D3D_BRIDGE_TEXCHECK: write each P8 texture (a check, S4) */
 static int g_rtlog;                 /* RECOMP_D3D_BRIDGE_RTLOG: log render-target draws in full (a check, S4) */
+static int g_skiptex;               /* RECOMP_D3D_BRIDGE_SKIPTEX: textures of skipped draws (a check, step 34) */
 static char g_check_prefix[512];    /* where the checks write: "<dump dir>\host", as the host dumps */
 
 static const char *const d3db_name[D3DB_COUNT] = {
@@ -529,12 +541,13 @@ void d3db_init(void)
     g_psprobe = d3db_host && env_on("RECOMP_D3D_BRIDGE_PSPROBE");
     g_texcheck = d3db_host && env_on("RECOMP_D3D_BRIDGE_TEXCHECK");
     g_rtlog = d3db_host && env_on("RECOMP_D3D_BRIDGE_RTLOG");
+    g_skiptex = d3db_host && env_on("RECOMP_D3D_BRIDGE_SKIPTEX");
     if (d3db_on)
         coop_watch_cs(GAME_D3D_LOCK);
     g_t0_ms = g_last_dump_ms = GetTickCount64();
     if (d3db_host)
-        fprintf(stderr, "[D3DB] bridge on: host mirror (S4 part 1: device, window, Clear, Swap, DrawVerticesUP,"
-                " render targets, pixel shaders, P8)%s%s%s\n", g_tint ? "; colour clears tinted with the frame index" : "",
+        fprintf(stderr, "[D3DB] bridge on: host mirror (device, window, Clear, Swap, DrawVerticesUP,"
+                " render targets, pixel shaders, P8, fixed-function DrawIndexedVertices)%s%s%s\n", g_tint ? "; colour clears tinted with the frame index" : "",
                 g_psprobe ? "; pixel-shader probe" : "", g_texcheck ? "; P8 texture check" : "");
     if (d3db_census)
         fprintf(stderr, "[D3DB] census on: a [D3DB] c block every %d s\n", CEN_PERIOD_MS / 1000);
@@ -706,11 +719,17 @@ enum {
     GAP_TEXOP,          /* a texture op outside the verified 1-11 range */
     GAP_DIFFUSE_ARG,    /* plain D3DTA_DIFFUSE on a stage > 0 (xbox_d3d8 reads 0 as "default") */
     GAP_FRONTFACE,      /* FRONTFACE not the default CW */
+    GAP_LIGHTS,         /* more than 8 enabled lights (xbox_d3d8's limit): the rest dropped */
+    GAP_TEXTRANSFORM,   /* TEXTURETRANSFORMFLAGS set on a textured stage (host matrices stay identity) */
+    GAP_CPU_LIGHT,      /* lighting xbox_d3d8 gets wrong, with no diffuse colour to light on the CPU */
+    GAP_SPECULAR,       /* SPECULARENABLE on a draw lit on the CPU (no specular produced) */
+    GAP_TEXCOORD_SIZE,  /* texture-coordinate formats in the FVF (xbox_d3d8 sizes them its own way) */
     GAP_COUNT
 };
 static volatile LONG g_gap[GAP_COUNT], g_ev_gap;
 static const char *const g_gap_name[GAP_COUNT] = {
     "unmapped value", "texture op above 11", "D3DTA_DIFFUSE on stage > 0", "FRONTFACE not CW",
+    "over 8 lights", "texture transform", "CPU lighting without a diffuse", "specular", "texcoord format",
 };
 
 static void gap(int kind, const char *what, uint32_t v)
@@ -1193,7 +1212,8 @@ enum {
     SKIP_VS_PROGRAM,    /* a programmable vertex shader (S5) */
     SKIP_PRIM,          /* LINELOOP, QUADSTRIP, POLYGON */
     SKIP_TEXTURE,       /* a cube or volume texture, a format xbox_d3d8 lacks, or P8 with no palette */
-    SKIP_INDEXED,       /* DrawIndexedVertices with a vertex format (fixed-function 3D: S5-S6) */
+    SKIP_STREAM,        /* DrawIndexedVertices: no stream 0, or a stride under the FVF's size */
+    SKIP_FVF,           /* an FVF with blend weights (XYZB*) */
     SKIP_IMMEDIATE,     /* Begin/SetVertexData/End (S4 part 2) */
     SKIP_VERTICES,      /* DrawVertices (never seen) */
     SKIP_COUNT
@@ -1202,7 +1222,8 @@ static volatile LONG g_skip[SKIP_COUNT], g_mirrored_draws, g_mirrored_rt_draws, 
 static volatile LONG g_ev_skip, g_ev_draw, g_ev_draw_tss, g_ev_diffuse, g_ev_pal, g_ev_rt;
 static volatile LONG g_ev_draw_rt, g_ev_draw_tss_rt, g_ev_draw_rt_v;
 static const char *const g_skip_name[SKIP_COUNT] = {
-    "render target", "vertex program", "primitive", "texture", "indexed", "immediate", "DrawVertices",
+    "render target", "vertex program", "primitive", "texture", "stream", "immediate", "DrawVertices",
+    "vertex format",
 };
 
 static void skip(int kind, uint32_t v)
@@ -1378,6 +1399,61 @@ static void tex_check_once(void)
     }
 }
 
+/* RECOMP_D3D_BRIDGE_SKIPTEX (step 34, a check): what the draws the mirror
+ * skips would have shown. Each distinct texture (header, palette) a skipped
+ * draw binds is written once per kind, as skiptex_<kind>_<header>_s<stage>
+ * with its format and size: a BMP through the host upload (P8 through its
+ * palette), or the raw level 0 for DXT, which tools/diag/skiptex.py decodes.
+ * An immediate draw also logs its screen box (from SetVertexData4f(-1)) the
+ * first time a texture is seen. */
+static float g_imm_box[4];              /* x0, y0, x1, y1 of the current Begin/End */
+#define SKIPTEX_MAX 512
+static uint32_t g_skiptex_seen[SKIPTEX_MAX][3];
+static int g_skiptex_n;
+
+static int skip_tex_once(const char *kind)
+{
+    unsigned s;
+    int i, any_new = 0;
+
+    for (s = 0; s < 4; s++) {
+        d3dh_tex_t t;
+        char path[700];
+        uint32_t hdr = MEM32(dev() + DEV_TEXTURES + 4 * s), f, fmt, k = (uint32_t)kind[0] | ((uint32_t)kind[1] << 8);
+        if (!hdr || describe_texture(s, &t) != 1)
+            continue;
+        for (i = 0; i < g_skiptex_n; i++)
+            if (g_skiptex_seen[i][0] == hdr && g_skiptex_seen[i][1] == t.pal_sig && g_skiptex_seen[i][2] == k)
+                break;
+        if (i < g_skiptex_n || g_skiptex_n >= SKIPTEX_MAX)
+            continue;
+        g_skiptex_seen[g_skiptex_n][0] = hdr;
+        g_skiptex_seen[g_skiptex_n][1] = t.pal_sig;
+        g_skiptex_seen[g_skiptex_n][2] = k;
+        g_skiptex_n++;
+        any_new = 1;
+        f = MEM32(hdr + RES_FORMAT);
+        fmt = (f >> 8) & 0xFF;
+        if (fmt == 0x0C || fmt == 0x0E || fmt == 0x0F) {    /* DXT1, DXT3, DXT5: raw level 0 */
+            FILE *o;
+            snprintf(path, sizeof(path), "%sskiptex_%s_%08X_s%u_fmt%02X_%ux%u.raw", g_check_prefix, kind, hdr, s,
+                     fmt, t.width, t.height);
+            o = fopen(path, "wb");
+            if (o) {
+                fwrite(t.bits, 1, d3dh_texture_bytes(fmt, t.width, t.height, 1, 0), o);
+                fclose(o);
+            }
+        } else {
+            snprintf(path, sizeof(path), "%sskiptex_%s_%08X_s%u_fmt%02X_%ux%u.bmp", g_check_prefix, kind, hdr, s,
+                     fmt, t.width, t.height);
+            if (d3dh_texture_check(&t, path) != 0)
+                continue;
+        }
+        fprintf(stderr, "[D3DB] skipped-draw texture (%s, stage %u, Data %08X): %s\n", kind, s, t.data, path);
+    }
+    return any_new;
+}
+
 /* Every draw, on any path, before the path is mirrored or skipped. */
 static void draw_checks(void)
 {
@@ -1413,29 +1489,396 @@ static void rt_log_draw(const d3db_args_t *a, const d3dh_draw_t *dr, const d3dh_
     free(line);
 }
 
+/* ── Fixed-function 3D (step 34): transforms, lights, material ── */
+
+#define DEV_BASE_VERTEX     0x01Cu      /* SetIndices' BaseVertexIndex (0xFFEA0) */
+#define DEV_LIGHTS_ON       0x398u      /* first enabled light; LightEnable (0xFFBA0) links them */
+#define DEV_TRANSFORMS      0x750u      /* 64 bytes each, by XDK index (SetTransform 0xFEA20) */
+#define DEV_MATERIAL        0x9F0u      /* D3DMATERIAL8 (SetMaterial 0xFEB50) */
+#define LIGHT_NEXT          0x8Cu       /* in a 0x90-byte light (array at device +0x390): the next enabled one */
+#define XTS_VIEW            0           /* XDK transform indices: VIEW 0, PROJECTION 1, TEXTURE0-3 2-5, WORLD 6 */
+#define XTS_PROJECTION      1
+#define XTS_WORLD           6
+
+#define FVF_POSITION_MASK   0x00Eu      /* the XDK's FVF bits are the PC ones */
+#define FVF_XYZ             0x002u
+#define FVF_XYZRHW          0x004u
+#define FVF_NORMAL          0x010u
+#define FVF_PSIZE           0x020u
+#define FVF_DIFFUSE         0x040u
+#define FVF_SPECULAR        0x080u
+
+/* Bytes per vertex of an FVF. Texture-coordinate formats: 0 two floats, 1
+ * three, 2 four, 3 one. */
+static uint32_t fvf_size(uint32_t fvf)
+{
+    static const uint8_t pos[8] = { 0, 12, 16, 16, 20, 24, 28, 32 };
+    static const uint8_t tc[4] = { 8, 12, 16, 4 };
+    uint32_t n = pos[(fvf & FVF_POSITION_MASK) >> 1], t, i;
+
+    n += (fvf & FVF_NORMAL) ? 12 : 0;
+    n += (fvf & FVF_PSIZE) ? 4 : 0;
+    n += (fvf & FVF_DIFFUSE) ? 4 : 0;
+    n += (fvf & FVF_SPECULAR) ? 4 : 0;
+    t = (fvf >> 8) & 15;
+    for (i = 0; i < t && i < 8; i++)
+        n += tc[(fvf >> (16 + 2 * i)) & 3];
+    return n;
+}
+
+/* What an untransformed draw needs besides the render states: world, view
+ * and projection (device +0x750, XDK order), the material (+0x9F0), and the
+ * enabled lights, walked from +0x398 (the first 26 dwords of each are its
+ * D3DLIGHT8). */
+static void describe_ff(d3dh_ff_t *ff)
+{
+    uint32_t d = dev(), l, n = 0, guard, s;
+
+    memcpy(ff->world, (const void *)XBOX_PTR(d + DEV_TRANSFORMS + 64 * XTS_WORLD), 64);
+    memcpy(ff->view, (const void *)XBOX_PTR(d + DEV_TRANSFORMS + 64 * XTS_VIEW), 64);
+    memcpy(ff->proj, (const void *)XBOX_PTR(d + DEV_TRANSFORMS + 64 * XTS_PROJECTION), 64);
+    memcpy(ff->material, (const void *)XBOX_PTR(d + DEV_MATERIAL), sizeof(ff->material));
+    for (l = MEM32(d + DEV_LIGHTS_ON), guard = 0; l && guard < 256; l = MEM32(l + LIGHT_NEXT), guard++) {
+        if (n == D3DH_MAX_LIGHTS) {
+            gap(GAP_LIGHTS, "enabled lights", n + 1);
+            break;
+        }
+        memcpy(ff->light[n++], (const void *)XBOX_PTR(l), sizeof(ff->light[0]));
+    }
+    ff->n_lights = n;
+    for (s = 0; s < 4; s++)             /* the host's texture matrices stay identity */
+        if (MEM32(D3D_TEXTURESTATE + 4 * (s * D3D_TSS_COUNT + XTSS_TEXTURETRANSFORMFLAGS)) &&
+            MEM32(dev() + DEV_TEXTURES + 4 * s))
+            gap(GAP_TEXTRANSFORM, "TEXTURETRANSFORMFLAGS on stage", s);
+}
+
+/* A material colour's source (RS 100-103, D3DMCS_*: MATERIAL 0, COLOR1 1,
+ * COLOR2 2) as D3D resolves it: a vertex colour only with COLORVERTEX on and
+ * that colour in the FVF. 0 material, 1 the vertex's diffuse, 2 its specular. */
+static int color_source(int xrs, uint32_t fvf)
+{
+    uint32_t v = rs_x(xrs);
+
+    if (!rs_x(XRS_COLORVERTEX))
+        return 0;
+    if (v == 1 && (fvf & FVF_DIFFUSE))
+        return 1;
+    if (v == 2 && (fvf & FVF_SPECULAR))
+        return 2;
+    return 0;
+}
+
+/* Whether a lit draw has to be lit here rather than by xbox_d3d8, whose
+ * lighting takes every colour from the material (COLORVERTEX and the
+ * material sources are ignored) and skips lighting without normals. The
+ * title and menu light with the ambient and emissive colours read from the
+ * vertex colour (RS 102/103 = COLOR1). The result goes in the diffuse
+ * colour, so the FVF needs one. */
+static int needs_cpu_lighting(uint32_t fvf)
+{
+    if (!rs_x(XRS_LIGHTING) || (fvf & FVF_POSITION_MASK) != FVF_XYZ)
+        return 0;
+    if (!color_source(XRS_DIFFUSEMATERIALSOURCE, fvf) && !color_source(XRS_AMBIENTMATERIALSOURCE, fvf) &&
+        !color_source(XRS_EMISSIVEMATERIALSOURCE, fvf) && (fvf & FVF_NORMAL))
+        return 0;
+    if (!(fvf & FVF_DIFFUSE)) {
+        gap(GAP_CPU_LIGHT, "lit with a vertex colour or no normal, but no diffuse to write: FVF", fvf);
+        return 0;
+    }
+    return 1;
+}
+
+typedef struct { float r, g, b, a; } col_t;
+
+static col_t argb_col(uint32_t c)
+{
+    col_t o;
+    o.r = ((c >> 16) & 255) / 255.0f;
+    o.g = ((c >> 8) & 255) / 255.0f;
+    o.b = (c & 255) / 255.0f;
+    o.a = (c >> 24) / 255.0f;
+    return o;
+}
+
+static uint32_t col_argb(col_t c)
+{
+#define Q(x) ((uint32_t)((x) <= 0.0f ? 0 : (x) >= 1.0f ? 255 : (int)((x) * 255.0f + 0.5f)))
+    return (Q(c.a) << 24) | (Q(c.r) << 16) | (Q(c.g) << 8) | Q(c.b);
+#undef Q
+}
+
+/* r = a * b, row-major, row vectors (D3D's convention). */
+static void m4_mul(float *r, const float *a, const float *b)
+{
+    int i, j;
+    for (i = 0; i < 4; i++)
+        for (j = 0; j < 4; j++)
+            r[4 * i + j] = a[4 * i] * b[j] + a[4 * i + 1] * b[4 + j] + a[4 * i + 2] * b[8 + j] +
+                           a[4 * i + 3] * b[12 + j];
+}
+
+static void v3_norm(float *v)
+{
+    float l = sqrtf(v[0] * v[0] + v[1] * v[1] + v[2] * v[2]);
+    if (l > 0.0f) {
+        v[0] /= l;
+        v[1] /= l;
+        v[2] /= l;
+    }
+}
+
+/* D3D8 fixed-function vertex lighting (the "Mathematics of Lighting" rules),
+ * in camera space as D3D does it, for `count` vertices at `v` (a copy the
+ * bridge owns). Each vertex's diffuse becomes
+ *   Ce + Ca * Ga + sum over lights of atten * spot * (Ca * La + Cd * Ld * max(N.L, 0)),
+ * clamped, with Cd's alpha; C* per RS 101-103 (material or vertex colour).
+ * Specular isn't produced (SPECULARENABLE is off from splash to hub; counted
+ * if not). Normals are normalized only with NORMALIZENORMALS, as the NV2A. */
+static void cpu_light(uint8_t *v, uint32_t count, uint32_t stride, uint32_t fvf, const d3dh_ff_t *ff)
+{
+    const float *mat = (const float *)ff->material;     /* Diffuse 0, Ambient 4, Specular 8, Emissive 12 */
+    uint32_t off_n = 12, off_d = 12 + ((fvf & FVF_NORMAL) ? 12 : 0) + ((fvf & FVF_PSIZE) ? 4 : 0);
+    uint32_t off_s = off_d + 4, i, k;
+    int src_d = color_source(XRS_DIFFUSEMATERIALSOURCE, fvf), src_a = color_source(XRS_AMBIENTMATERIALSOURCE, fvf);
+    int src_e = color_source(XRS_EMISSIVEMATERIALSOURCE, fvf), norm = rs_x(XRS_NORMALIZENORMALS) != 0;
+    float wv[16], nm[9], det, lp[D3DH_MAX_LIGHTS][3], ld[D3DH_MAX_LIGHTS][3];
+    col_t ga = argb_col(rs_x(XRS_AMBIENT)), mc[4];
+
+    if (rs_x(XRS_SPECULARENABLE))
+        gap(GAP_SPECULAR, "SPECULARENABLE on a draw lit on the CPU", 1);
+    for (k = 0; k < 4; k++) {
+        mc[k].r = mat[4 * k];
+        mc[k].g = mat[4 * k + 1];
+        mc[k].b = mat[4 * k + 2];
+        mc[k].a = mat[4 * k + 3];
+    }
+    m4_mul(wv, ff->world, ff->view);
+    /* Normals: the inverse transpose of world*view's 3x3 (row vectors), nm. */
+    det = wv[0] * (wv[5] * wv[10] - wv[6] * wv[9]) - wv[1] * (wv[4] * wv[10] - wv[6] * wv[8]) +
+          wv[2] * (wv[4] * wv[9] - wv[5] * wv[8]);
+    if (fabsf(det) < 1e-20f)
+        det = 1.0f;
+    nm[0] = (wv[5] * wv[10] - wv[6] * wv[9]) / det;     /* cofactors / det = inverse transposed */
+    nm[1] = -(wv[4] * wv[10] - wv[6] * wv[8]) / det;
+    nm[2] = (wv[4] * wv[9] - wv[5] * wv[8]) / det;
+    nm[3] = -(wv[1] * wv[10] - wv[2] * wv[9]) / det;
+    nm[4] = (wv[0] * wv[10] - wv[2] * wv[8]) / det;
+    nm[5] = -(wv[0] * wv[9] - wv[1] * wv[8]) / det;
+    nm[6] = (wv[1] * wv[6] - wv[2] * wv[5]) / det;
+    nm[7] = -(wv[0] * wv[6] - wv[2] * wv[4]) / det;
+    nm[8] = (wv[0] * wv[5] - wv[1] * wv[4]) / det;
+    for (k = 0; k < ff->n_lights; k++) {                 /* position 13-15, direction 16-18 (dwords) */
+        const float *L = (const float *)ff->light[k], *vw = ff->view;
+        for (i = 0; i < 3; i++) {
+            lp[k][i] = L[13] * vw[i] + L[14] * vw[4 + i] + L[15] * vw[8 + i] + vw[12 + i];
+            ld[k][i] = L[16] * vw[i] + L[17] * vw[4 + i] + L[18] * vw[8 + i];
+        }
+        v3_norm(ld[k]);
+    }
+
+    for (i = 0; i < count; i++, v += stride) {
+        const float *p = (const float *)v;
+        float P[3], N[3] = { 0, 0, 0 };
+        col_t vd = argb_col(*(const uint32_t *)(v + off_d)), vs = { 0, 0, 0, 0 }, cd, ca, ce, o;
+        uint32_t j;
+
+        if (fvf & FVF_SPECULAR)
+            vs = argb_col(*(const uint32_t *)(v + off_s));
+        cd = src_d == 1 ? vd : src_d == 2 ? vs : mc[0];
+        ca = src_a == 1 ? vd : src_a == 2 ? vs : mc[1];
+        ce = src_e == 1 ? vd : src_e == 2 ? vs : mc[3];
+        for (j = 0; j < 3; j++)
+            P[j] = p[0] * wv[j] + p[1] * wv[4 + j] + p[2] * wv[8 + j] + wv[12 + j];
+        if (fvf & FVF_NORMAL) {
+            const float *n = (const float *)(v + off_n);
+            for (j = 0; j < 3; j++)
+                N[j] = n[0] * nm[3 * j] + n[1] * nm[3 * j + 1] + n[2] * nm[3 * j + 2];
+            if (norm)
+                v3_norm(N);
+        }
+        o.r = ce.r + ca.r * ga.r;
+        o.g = ce.g + ca.g * ga.g;
+        o.b = ce.b + ca.b * ga.b;
+        for (k = 0; k < ff->n_lights; k++) {
+            const uint32_t *L = ff->light[k];
+            const float *Lf = (const float *)L;          /* Diffuse 1-4, Ambient 9-12, Range 19, Falloff 20,
+                                                          * Attenuation 21-23, Theta 24, Phi 25 */
+            float Ldir[3], atten = 1.0f, spot = 1.0f, ndl;
+            if (L[0] == 3) {                            /* directional */
+                Ldir[0] = -ld[k][0];
+                Ldir[1] = -ld[k][1];
+                Ldir[2] = -ld[k][2];
+            } else {                                    /* point 1, spot 2 */
+                float dist, den;
+                for (j = 0; j < 3; j++)
+                    Ldir[j] = lp[k][j] - P[j];
+                dist = sqrtf(Ldir[0] * Ldir[0] + Ldir[1] * Ldir[1] + Ldir[2] * Ldir[2]);
+                if (dist > Lf[19])
+                    continue;
+                if (dist > 0.0f)
+                    for (j = 0; j < 3; j++)
+                        Ldir[j] /= dist;
+                den = Lf[21] + Lf[22] * dist + Lf[23] * dist * dist;
+                atten = den > 0.0f ? 1.0f / den : 1.0f;
+                if (L[0] == 2) {
+                    float rho = -(ld[k][0] * Ldir[0] + ld[k][1] * Ldir[1] + ld[k][2] * Ldir[2]);
+                    float ct = cosf(Lf[24] * 0.5f), cp = cosf(Lf[25] * 0.5f);
+                    if (rho <= cp)
+                        continue;
+                    if (rho < ct)
+                        spot = powf((rho - cp) / (ct - cp), Lf[20]);
+                }
+            }
+            ndl = N[0] * Ldir[0] + N[1] * Ldir[1] + N[2] * Ldir[2];
+            if (ndl < 0.0f)
+                ndl = 0.0f;
+            atten *= spot;
+            o.r += atten * (ca.r * Lf[9] + cd.r * Lf[1] * ndl);
+            o.g += atten * (ca.g * Lf[10] + cd.g * Lf[2] * ndl);
+            o.b += atten * (ca.b * Lf[11] + cd.b * Lf[3] * ndl);
+        }
+        o.a = cd.a;
+        *(uint32_t *)(v + off_d) = col_argb(o);
+    }
+}
+
+/* The census key for fixed-function draws: lighting, COLORVERTEX, the four
+ * material sources (specular, diffuse, ambient, emissive) and the enabled
+ * lights by type. */
+static void scrape_ff(const char *path)
+{
+    uint32_t d = dev(), vs = MEM32(d + DEV_VS_HANDLE), l, guard, types[4] = { 0, 0, 0, 0 };
+
+    if ((vs & 1) || (vs & FVF_POSITION_MASK) == FVF_XYZRHW)
+        return;
+    for (l = MEM32(d + DEV_LIGHTS_ON), guard = 0; l && guard < 256; l = MEM32(l + LIGHT_NEXT), guard++)
+        types[MEM32(l) & 3]++;
+    cen_addf(1, "ff %s fvf=%X lit=%u cv=%u src=%u%u%u%u lights=p%u.s%u.d%u normalize=%u spec=%u fog=%u",
+             path, vs, rs_x(XRS_LIGHTING), rs_x(XRS_COLORVERTEX), rs_x(XRS_SPECULARMATERIALSOURCE),
+             rs_x(XRS_DIFFUSEMATERIALSOURCE), rs_x(XRS_AMBIENTMATERIALSOURCE), rs_x(XRS_EMISSIVEMATERIALSOURCE),
+             types[1], types[2], types[3], rs_x(XRS_NORMALIZENORMALS), rs_x(XRS_SPECULARENABLE),
+             rs_x(XRS_FOGENABLE));
+}
+
+static volatile LONG g_cpu_lit_draws, g_host_lit_draws, g_ev_idx, g_ev_idx_ff;
+
+/* Everything a mirrored draw needs besides its vertices, shared by the UP and
+ * indexed paths: the target, textures and stage states, the pixel shader, the
+ * render states, the viewport and, for untransformed vertices, the
+ * fixed-function state. Returns 0 (lit by xbox_d3d8 or unlit), 1 (to be lit
+ * on the CPU: LIGHTING is already off in `rs`), or -1 (skipped and counted). */
+static int setup_draw(d3dh_draw_t *dr, uint32_t fvf, d3dh_tex_t tex[4], d3dh_state_t rs[64],
+                      d3dh_state_t tss[4][16], d3dh_ps_t *ps, d3dh_ff_t *ff)
+{
+    uint32_t d = dev(), s, i;
+    int z_off, cpu = 0;
+
+    if (describe_target(&dr->target, &z_off) != 0) {
+        skip(SKIP_TARGET, MEM32(d + DEV_RENDER_TARGET));
+        return -1;
+    }
+    if ((fvf & FVF_POSITION_MASK) != FVF_XYZ && (fvf & FVF_POSITION_MASK) != FVF_XYZRHW) {
+        skip(SKIP_FVF, fvf);                /* blend weights (XYZB*) */
+        return -1;
+    }
+    if (fvf & 0xFFFF0000u)
+        gap(GAP_TEXCOORD_SIZE, "texture-coordinate formats in the FVF", fvf);
+    for (s = 0; s < 4; s++) {
+        int r = describe_texture(s, &tex[s]);
+        if (r < 0) {
+            uint32_t hdr = MEM32(d + DEV_TEXTURES + 4 * s);
+            skip(SKIP_TEXTURE, hdr ? MEM32(hdr + RES_FORMAT) : 0);
+            return -1;
+        }
+        dr->tex[s] = r ? &tex[s] : NULL;
+        dr->tss[s] = tss[s];
+        dr->n_tss[s] = translate_tss(s, tss[s]);
+        /* S4: MIPFILTER NONE samples level 0 only in D3D, but xbox_d3d8's
+         * sampler still walks the mip chain (MIP_POINT, MaxLOD unbounded).
+         * So such a stage gets its texture's level 0 alone. */
+        if (r)
+            for (i = 0; i < dr->n_tss[s]; i++)
+                if (tss[s][i].state == PTSS_MIPFILTER && tss[s][i].value == 0)
+                    tex[s].levels = 1;
+    }
+    if (MEM32(d + DEV_PIXEL_SHADER)) {
+        translate_ps(ps);
+        dr->ps = ps;
+    }
+    dr->rs = rs;
+    dr->n_rs = translate_rs(rs);
+    if ((fvf & FVF_POSITION_MASK) == FVF_XYZ) {
+        describe_ff(ff);
+        dr->ff = ff;
+        cpu = needs_cpu_lighting(fvf);
+    }
+    for (i = 0; i < dr->n_rs; i++) {
+        if (z_off && (rs[i].state == PRS_ZENABLE || rs[i].state == PRS_ZWRITEENABLE ||
+                      rs[i].state == PRS_STENCILENABLE))
+            rs[i].value = 0;                /* no guest depth surface: no depth or stencil test */
+        if (rs[i].state == PRS_LIGHTING) {
+            if (cpu)
+                rs[i].value = 0;            /* lit on the CPU: the host draws the result unlit */
+            else if (rs[i].value && dr->ff)
+                InterlockedIncrement(&g_host_lit_draws);
+        }
+    }
+    dr->fvf = fvf;
+    dr->vp_x = MEM32(d + DEV_VIEWPORT);
+    dr->vp_y = MEM32(d + DEV_VIEWPORT + 4);
+    dr->vp_w = MEM32(d + DEV_VIEWPORT + 8);
+    dr->vp_h = MEM32(d + DEV_VIEWPORT + 12);
+    memcpy(&dr->vp_minz, (const void *)XBOX_PTR(d + DEV_VIEWPORT + 16), 4);
+    memcpy(&dr->vp_maxz, (const void *)XBOX_PTR(d + DEV_VIEWPORT + 20), 4);
+    return cpu;
+}
+
+/* A copy of `count` vertices lit on the CPU (freed by the caller). */
+static uint8_t *cpu_lit_copy(const void *verts, uint32_t count, uint32_t stride, uint32_t fvf, const d3dh_ff_t *ff)
+{
+    uint8_t *c = (uint8_t *)malloc((size_t)count * stride);
+
+    if (!c)
+        return NULL;
+    memcpy(c, verts, (size_t)count * stride);
+    cpu_light(c, count, stride, fvf, ff);
+    InterlockedIncrement(&g_cpu_lit_draws);
+    return c;
+}
+
+static void count_mirrored(const d3dh_draw_t *dr)
+{
+    InterlockedIncrement(&g_mirrored_draws);
+    if (dr->target.data)
+        InterlockedIncrement(&g_mirrored_rt_draws);
+    if (dr->ps)
+        InterlockedIncrement(&g_mirrored_ps_draws);
+}
+
 /* DrawVerticesUP(PrimitiveType, VertexCount, pVertexStreamZeroData,
  * VertexStreamZeroStride), after the lifted call: the same draw through
  * xbox_d3d8, with the state read from D3D's shadows at this point. S4 adds
- * render targets and pixel shaders. */
+ * render targets and pixel shaders; step 34 the fixed-function state for
+ * untransformed vertices. */
 static void mirror_draw_up(const d3db_args_t *a)
 {
-    uint32_t d = dev(), vs, count = 0, prim, s, i;
+    uint32_t d = dev(), vs, count = 0, prim;
     d3dh_state_t rs[64], tss[4][16];
     d3dh_tex_t tex[4];
     d3dh_ps_t ps;
+    d3dh_ff_t ff;
     d3dh_draw_t dr;
-    int z_off;
+    uint8_t *lit = NULL;
+    int z_off, cpu;
 
     draw_checks();
     memset(tex, 0, sizeof(tex));
     memset(&dr, 0, sizeof(dr));
-    if (describe_target(&dr.target, &z_off) != 0) {
-        skip(SKIP_TARGET, MEM32(d + DEV_RENDER_TARGET));
-        return;
-    }
     vs = MEM32(d + DEV_VS_HANDLE);
     if (vs & 1) {
         skip(SKIP_VS_PROGRAM, vs);
+        if (g_skiptex && g_check_prefix[0])
+            skip_tex_once("vpup");
         return;
     }
     prim = xl_prim(a->arg[0], a->arg[1], &count);
@@ -1443,47 +1886,20 @@ static void mirror_draw_up(const d3db_args_t *a)
         skip(SKIP_PRIM, a->arg[0]);
         return;
     }
-
-    for (s = 0; s < 4; s++) {
-        int r = describe_texture(s, &tex[s]);
-        if (r < 0) {
-            uint32_t hdr = MEM32(d + DEV_TEXTURES + 4 * s);
-            skip(SKIP_TEXTURE, hdr ? MEM32(hdr + RES_FORMAT) : 0);
-            return;
-        }
-        dr.tex[s] = r ? &tex[s] : NULL;
-        dr.tss[s] = tss[s];
-        dr.n_tss[s] = translate_tss(s, tss[s]);
-        /* S4: MIPFILTER NONE samples level 0 only in D3D, but xbox_d3d8's
-         * sampler still walks the mip chain (MIP_POINT, MaxLOD unbounded).
-         * So such a stage gets its texture's level 0 alone. */
-        if (r)
-            for (i = 0; i < dr.n_tss[s]; i++)
-                if (tss[s][i].state == PTSS_MIPFILTER && tss[s][i].value == 0)
-                    tex[s].levels = 1;
-    }
-    if (MEM32(d + DEV_PIXEL_SHADER)) {
-        translate_ps(&ps);
-        dr.ps = &ps;
-    }
-    dr.rs = rs;
-    dr.n_rs = translate_rs(rs);
-    if (z_off)                          /* no guest depth surface: no depth or stencil test */
-        for (i = 0; i < dr.n_rs; i++)
-            if (rs[i].state == PRS_ZENABLE || rs[i].state == PRS_ZWRITEENABLE || rs[i].state == PRS_STENCILENABLE)
-                rs[i].value = 0;
+    cpu = setup_draw(&dr, vs, tex, rs, tss, &ps, &ff);
+    if (cpu < 0)
+        return;
+    z_off = MEM32(d + DEV_DEPTH_SURFACE) == 0;
     dr.prim = prim;
     dr.prim_count = count;
     dr.stride = a->arg[3];
-    dr.fvf = vs;
     dr.verts = (const void *)XBOX_PTR(a->arg[2]);
     dr.vert_count = a->arg[1];
-    dr.vp_x = MEM32(d + DEV_VIEWPORT);
-    dr.vp_y = MEM32(d + DEV_VIEWPORT + 4);
-    dr.vp_w = MEM32(d + DEV_VIEWPORT + 8);
-    dr.vp_h = MEM32(d + DEV_VIEWPORT + 12);
-    memcpy(&dr.vp_minz, (const void *)XBOX_PTR(d + DEV_VIEWPORT + 16), 4);
-    memcpy(&dr.vp_maxz, (const void *)XBOX_PTR(d + DEV_VIEWPORT + 20), 4);
+    if (cpu) {
+        lit = cpu_lit_copy(dr.verts, dr.vert_count, dr.stride, vs, &ff);
+        if (lit)
+            dr.verts = lit;
+    }
 
     /* The first few draws, raw XDK values; render-target draws have their own
      * allowance, as the splash uses up the first. */
@@ -1519,13 +1935,184 @@ static void mirror_draw_up(const d3db_args_t *a)
     }
     if (g_rtlog && dr.target.data)
         rt_log_draw(a, &dr, &tex[0]);
-    if (d3dh_draw_up(&dr) == 0) {
-        InterlockedIncrement(&g_mirrored_draws);
-        if (dr.target.data)
-            InterlockedIncrement(&g_mirrored_rt_draws);
-        if (dr.ps)
-            InterlockedIncrement(&g_mirrored_ps_draws);
+    if (d3dh_draw_up(&dr) == 0)
+        count_mirrored(&dr);
+    free(lit);
+}
+
+/* An XDK primitive over `n` indices as xbox_d3d8 can draw it indexed, with
+ * each index minus `lo`: lists and strips as they are, and what it can't draw
+ * indexed (fans, quads, quad strips, polygons, line loops) as triangle lists
+ * or a line strip. Returns the index count written to `out` (room for 2n + 6),
+ * 0 if nothing is drawn; `prim` and `count` are the host's. */
+static uint32_t index_list(uint32_t xdk, const uint16_t *in, uint32_t n, uint32_t lo, uint16_t *out,
+                           uint32_t *prim, uint32_t *count)
+{
+    uint32_t i, k = 0;
+
+#define I(j) ((uint16_t)(in[j] - lo))
+    switch (xdk) {
+    case 1: case 2: case 4: case 5: case 6:     /* POINTLIST, LINELIST, LINESTRIP, TRIANGLELIST, STRIP */
+        *prim = xl_prim(xdk, n, count);
+        for (i = 0; i < n; i++)
+            out[k++] = I(i);
+        return *count ? k : 0;
+    case 3:                                     /* LINELOOP: a strip back to the start */
+        if (n < 2)
+            return 0;
+        for (i = 0; i < n; i++)
+            out[k++] = I(i);
+        out[k++] = I(0);
+        *prim = 3;
+        *count = n;
+        return k;
+    case 7: case 10:                            /* TRIANGLEFAN, POLYGON */
+        for (i = 1; i + 1 < n; i++) {
+            out[k++] = I(0);
+            out[k++] = I(i);
+            out[k++] = I(i + 1);
+        }
+        break;
+    case 8:                                     /* QUADLIST */
+        for (i = 0; i + 3 < n; i += 4) {
+            out[k++] = I(i);
+            out[k++] = I(i + 1);
+            out[k++] = I(i + 2);
+            out[k++] = I(i);
+            out[k++] = I(i + 2);
+            out[k++] = I(i + 3);
+        }
+        break;
+    case 9:                                     /* QUADSTRIP: quad j is 2j, 2j+1, 2j+3, 2j+2 */
+        for (i = 0; i + 3 < n; i += 2) {
+            out[k++] = I(i);
+            out[k++] = I(i + 1);
+            out[k++] = I(i + 3);
+            out[k++] = I(i);
+            out[k++] = I(i + 3);
+            out[k++] = I(i + 2);
+        }
+        break;
+    default:
+        return 0;
     }
+#undef I
+    *prim = 4;
+    *count = k / 3;
+    return k;
+}
+
+/* DrawIndexedVertices(PrimitiveType, VertexCount, pIndexData) with a vertex
+ * format (step 34): 16-bit indices from the caller's memory, vertices from
+ * stream 0 (0x10F280: stride +0, offset +4, vertex buffer +8) starting at the
+ * base vertex (device +0x1C), as the lifted body's vertex-array setup
+ * (0x108F40) computes them. Drawn with xbox_d3d8's DrawIndexedPrimitiveUP
+ * over the vertex range the indices use. */
+static void mirror_draw_indexed(const d3db_args_t *a)
+{
+    uint32_t d = dev(), vs = MEM32(d + DEV_VS_HANDLE), n = a->arg[1], stride, vb, lo = 0xFFFF, hi = 0, i;
+    uint32_t prim = 0, count = 0, k, va;
+    const uint16_t *idx;
+    uint16_t *list;
+    d3dh_state_t rs[64], tss[4][16];
+    d3dh_tex_t tex[4];
+    d3dh_ps_t ps;
+    d3dh_ff_t ff;
+    d3dh_draw_t dr;
+    uint8_t *lit = NULL;
+    int cpu;
+
+    draw_checks();
+    if (vs & 1) {
+        skip(SKIP_VS_PROGRAM, vs);
+        if (g_skiptex && g_check_prefix[0])
+            skip_tex_once("vpidx");
+        return;
+    }
+    stride = MEM32(D3D_STREAMS);
+    vb = MEM32(D3D_STREAMS + 8);
+    if (!n || !a->arg[2] || !vb || stride < fvf_size(vs)) {
+        skip(SKIP_STREAM, stride);
+        return;
+    }
+    idx = (const uint16_t *)XBOX_PTR(a->arg[2]);
+    for (i = 0; i < n; i++) {
+        if (idx[i] < lo)
+            lo = idx[i];
+        if (idx[i] > hi)
+            hi = idx[i];
+    }
+    list = (uint16_t *)malloc((2 * (size_t)n + 6) * sizeof(uint16_t));
+    if (!list)
+        return;
+    k = index_list(a->arg[0], idx, n, lo, list, &prim, &count);
+    if (!k || !prim || !count) {
+        skip(SKIP_PRIM, a->arg[0]);
+        free(list);
+        return;
+    }
+    memset(tex, 0, sizeof(tex));
+    memset(&dr, 0, sizeof(dr));
+    cpu = setup_draw(&dr, vs, tex, rs, tss, &ps, &ff);
+    if (cpu < 0) {
+        free(list);
+        return;
+    }
+    va = phys_to_va(MEM32(vb + RES_DATA)) + MEM32(D3D_STREAMS + 4) + (MEM32(d + DEV_BASE_VERTEX) + lo) * stride;
+    dr.prim = prim;
+    dr.prim_count = count;
+    dr.stride = stride;
+    dr.verts = (const void *)XBOX_PTR(va);
+    dr.vert_count = hi - lo + 1;
+    dr.indices = list;
+    dr.index_count = k;
+    if (cpu) {
+        lit = cpu_lit_copy(dr.verts, dr.vert_count, stride, vs, &ff);
+        if (lit)
+            dr.verts = lit;
+    }
+
+    /* The first draws in full, to check the scrape: vertex 0 of the range
+     * before and after lighting, and the fixed-function state. */
+    if (g_ev_idx < 10) {
+        const float *p = (const float *)XBOX_PTR(va);
+        uint32_t off_d = 12 + ((vs & FVF_NORMAL) ? 12 : 0);
+        event(&g_ev_idx, 10, "DrawIndexedVertices prim %u indices %u (%u..%u) base %u stride %u fvf %X vb %08X"
+              " data %08X -> host prim %u count %u, %u vertices; vertex %u: pos (%g, %g, %g) normal (%g, %g, %g)"
+              " diffuse %08X%s%08X; LIGHTING %u COLORVERTEX %u sources %u%u%u%u, %u lights, %s", a->arg[0], n,
+              lo, hi, MEM32(d + DEV_BASE_VERTEX), stride, vs, vb, MEM32(vb + RES_DATA), prim, count,
+              dr.vert_count, lo, (double)p[0], (double)p[1], (double)p[2],
+              (double)((vs & FVF_NORMAL) ? p[3] : 0), (double)((vs & FVF_NORMAL) ? p[4] : 0),
+              (double)((vs & FVF_NORMAL) ? p[5] : 0), (vs & FVF_DIFFUSE) ? MEM32(va + off_d) : 0,
+              lit ? " lit on the CPU to " : " unchanged ", lit ? *(const uint32_t *)(lit + off_d) : 0,
+              rs_x(XRS_LIGHTING), rs_x(XRS_COLORVERTEX), rs_x(XRS_SPECULARMATERIALSOURCE),
+              rs_x(XRS_DIFFUSEMATERIALSOURCE), rs_x(XRS_AMBIENTMATERIALSOURCE),
+              rs_x(XRS_EMISSIVEMATERIALSOURCE), ff.n_lights, dr.tex[0] ? "textured" : "untextured");
+        event(&g_ev_idx_ff, 30, "  world row 3 (%g, %g, %g) diag (%g, %g, %g); view row 3 (%g, %g, %g);"
+              " projection %g %g %g %g %g; material diffuse (%g, %g, %g, %g) ambient (%g, %g, %g) emissive"
+              " (%g, %g, %g); ambient RS %08X", (double)ff.world[12], (double)ff.world[13], (double)ff.world[14],
+              (double)ff.world[0], (double)ff.world[5], (double)ff.world[10], (double)ff.view[12],
+              (double)ff.view[13], (double)ff.view[14], (double)ff.proj[0], (double)ff.proj[5],
+              (double)ff.proj[10], (double)ff.proj[11], (double)ff.proj[14],
+              (double)((const float *)ff.material)[0], (double)((const float *)ff.material)[1],
+              (double)((const float *)ff.material)[2], (double)((const float *)ff.material)[3],
+              (double)((const float *)ff.material)[4], (double)((const float *)ff.material)[5],
+              (double)((const float *)ff.material)[6], (double)((const float *)ff.material)[12],
+              (double)((const float *)ff.material)[13], (double)((const float *)ff.material)[14],
+              rs_x(XRS_AMBIENT));
+        for (i = 0; i < ff.n_lights && i < 3; i++) {
+            const float *L = (const float *)ff.light[i];
+            event(&g_ev_idx_ff, 30, "  light %u: type %u diffuse (%g, %g, %g) ambient (%g, %g, %g) position (%g, %g, %g)"
+                  " direction (%g, %g, %g) range %g attenuation %g %g %g", i, ff.light[i][0], (double)L[1],
+                  (double)L[2], (double)L[3], (double)L[9], (double)L[10], (double)L[11], (double)L[13],
+                  (double)L[14], (double)L[15], (double)L[16], (double)L[17], (double)L[18], (double)L[19],
+                  (double)L[21], (double)L[22], (double)L[23]);
+        }
+    }
+    if (d3dh_draw_up(&dr) == 0)
+        count_mirrored(&dr);
+    free(lit);
+    free(list);
 }
 
 /* The draw paths that aren't mirrored yet: counted, and checked. */
@@ -1534,12 +2121,20 @@ static void mirror_draw_other(int id)
     uint32_t vs = MEM32(dev() + DEV_VS_HANDLE);
 
     draw_checks();
-    if (id == D3DB_END)
+    if (id == D3DB_END) {
         skip(SKIP_IMMEDIATE, vs);
-    else if (vs & 1)
+        if (g_skiptex && g_check_prefix[0] && skip_tex_once((vs & 1) ? "improg" : "imm"))
+            fprintf(stderr, "[D3DB] skipped immediate draw: prim %u, %u vertices, box (%g, %g)-(%g, %g), vs %X,"
+                    " textures %08X %08X\n", g_imm_prim, g_imm_verts, (double)g_imm_box[0], (double)g_imm_box[1],
+                    (double)g_imm_box[2], (double)g_imm_box[3], vs, MEM32(dev() + DEV_TEXTURES),
+                    MEM32(dev() + DEV_TEXTURES + 4));
+    } else if (vs & 1) {
         skip(SKIP_VS_PROGRAM, vs);
-    else
-        skip(id == D3DB_DRAW ? SKIP_VERTICES : SKIP_INDEXED, vs);
+        if (g_skiptex && g_check_prefix[0])
+            skip_tex_once("vpdraw");
+    } else {
+        skip(SKIP_VERTICES, vs);
+    }
 }
 
 /* Time spent in the mirror (translate + host call, in d3db_leave), in QPC
@@ -1574,15 +2169,21 @@ static void mirror_swap(void)
                     st.dumps, st.present_fails, st.present_status);
             fprintf(stderr, "[D3DB] host draws: mirrored %ld (to render targets %ld, with pixel shaders %ld),"
                     " host draws %u (fails %u); not mirrored: target %ld, vertex program %ld, primitive %ld,"
-                    " texture %ld, indexed %ld, immediate %ld, DrawVertices %ld; textures uploaded %u (P8 %u,"
-                    " fails %u, evictions %u); translation gaps: value %ld, texop %ld, diffuse arg %ld,"
+                    " texture %ld, stream %ld, vertex format %ld, immediate %ld, DrawVertices %ld; textures uploaded"
+                    " %u (P8 %u, fails %u, evictions %u); translation gaps: value %ld, texop %ld, diffuse arg %ld,"
                     " frontface %ld\n",
                     (long)g_mirrored_draws, (long)g_mirrored_rt_draws, (long)g_mirrored_ps_draws, st.draws,
                     st.draw_fails, (long)g_skip[SKIP_TARGET], (long)g_skip[SKIP_VS_PROGRAM],
-                    (long)g_skip[SKIP_PRIM], (long)g_skip[SKIP_TEXTURE], (long)g_skip[SKIP_INDEXED],
-                    (long)g_skip[SKIP_IMMEDIATE], (long)g_skip[SKIP_VERTICES], st.tex_uploads, st.p8_uploads,
-                    st.tex_upload_fails, st.tex_evictions, (long)g_gap[GAP_VALUE], (long)g_gap[GAP_TEXOP],
-                    (long)g_gap[GAP_DIFFUSE_ARG], (long)g_gap[GAP_FRONTFACE]);
+                    (long)g_skip[SKIP_PRIM], (long)g_skip[SKIP_TEXTURE], (long)g_skip[SKIP_STREAM],
+                    (long)g_skip[SKIP_FVF], (long)g_skip[SKIP_IMMEDIATE], (long)g_skip[SKIP_VERTICES],
+                    st.tex_uploads, st.p8_uploads, st.tex_upload_fails, st.tex_evictions, (long)g_gap[GAP_VALUE],
+                    (long)g_gap[GAP_TEXOP], (long)g_gap[GAP_DIFFUSE_ARG], (long)g_gap[GAP_FRONTFACE]);
+            fprintf(stderr, "[D3DB] host fixed function: indexed draws %u, untransformed draws %u (lit by xbox_d3d8"
+                    " %ld, lit on the CPU %ld); gaps: over 8 lights %ld, texture transform %ld, CPU lighting"
+                    " without a diffuse %ld, specular %ld, texcoord format %ld\n",
+                    st.indexed_draws, st.ff_draws, (long)g_host_lit_draws, (long)g_cpu_lit_draws,
+                    (long)g_gap[GAP_LIGHTS], (long)g_gap[GAP_TEXTRANSFORM], (long)g_gap[GAP_CPU_LIGHT],
+                    (long)g_gap[GAP_SPECULAR], (long)g_gap[GAP_TEXCOORD_SIZE]);
             fprintf(stderr, "[D3DB] host S4: render targets %u (fails %u), draws to them %u, clears %u, sampled %u"
                     " (while bound as the target %u); pixel-shader draws %u, probes %u; pixel-shader gaps:"
                     " blue %ld, register %ld, output map %ld, blue-to-alpha %ld, mux LSB %ld, texture mode %ld,"
@@ -1667,12 +2268,34 @@ void d3db_enter(int id, d3db_args_t *a)
 
     switch (id) {
     case D3DB_CLEAR: case D3DB_SWAP: case D3DB_DRAW_UP: case D3DB_DRAW:
-    case D3DB_DRAW_INDEXED: case D3DB_BEGIN: case D3DB_END: case D3DB_COPYRECTS:
+    case D3DB_DRAW_INDEXED: case D3DB_END: case D3DB_COPYRECTS:
         check_lock(id, a);
         break;
     case D3DB_TEX_LOCK: case D3DB_SURF_LOCK:
         if (d3db_host)                  /* the game is about to write it: re-upload at the next draw */
             d3dh_texture_touch(res_data(a->arg[0]));
+        break;
+    case D3DB_BEGIN:
+        check_lock(id, a);
+        if (g_skiptex) {                /* SKIPTEX: the immediate draw's screen box */
+            g_imm_prim = a->arg[0];
+            g_imm_verts = 0;
+            g_imm_box[0] = g_imm_box[1] = 1e30f;
+            g_imm_box[2] = g_imm_box[3] = -1e30f;
+        }
+        break;
+    case D3DB_DATA4F:
+        if (g_skiptex && a->arg[0] == 0xFFFFFFFFu) {
+            float x, y;
+            memcpy(&x, &a->arg[1], 4);
+            memcpy(&y, &a->arg[2], 4);
+            g_imm_box[0] = x < g_imm_box[0] ? x : g_imm_box[0];
+            g_imm_box[1] = y < g_imm_box[1] ? y : g_imm_box[1];
+            g_imm_box[2] = x > g_imm_box[2] ? x : g_imm_box[2];
+            g_imm_box[3] = y > g_imm_box[3] ? y : g_imm_box[3];
+            if (!d3db_census)
+                g_imm_verts++;
+        }
         break;
     }
     if (!d3db_census)
@@ -1687,6 +2310,7 @@ void d3db_enter(int id, d3db_args_t *a)
         break;
     case D3DB_DRAW_UP:              /* (Prim, VertexCount, pData, Stride) */
         scrape("UP", a->arg[0], a->arg[1]);
+        scrape_ff("UP");
         cen_addf(1, "stride UP %u", a->arg[3]);
         break;
     case D3DB_DRAW:                 /* (Prim, StartVertex, VertexCount) */
@@ -1696,6 +2320,7 @@ void d3db_enter(int id, d3db_args_t *a)
     case D3DB_DRAW_INDEXED:         /* (Prim, IndexCount, pIndexData) */
         scrape("Indexed", a->arg[0], a->arg[1]);
         scrape_streams("Indexed");
+        scrape_ff("Indexed");
         break;
     case D3DB_BEGIN:                /* (Prim) */
         g_imm_prim = a->arg[0];
@@ -1796,7 +2421,8 @@ void d3db_leave(int id, d3db_args_t *a)
         case D3DB_CLEAR:         mirror_clear(a);         break;
         case D3DB_SWAP:          mirror_swap();           break;
         case D3DB_DRAW_UP:       mirror_draw_up(a);       break;
-        case D3DB_DRAW_INDEXED: case D3DB_END: case D3DB_DRAW:
+        case D3DB_DRAW_INDEXED:  mirror_draw_indexed(a);  break;
+        case D3DB_END: case D3DB_DRAW:
             mirror_draw_other(id);
             break;
         }
