@@ -34,6 +34,9 @@
 #define RECOMP_GENERATED_CODE
 #include "recomp/gen/recomp_funcs.h"
 
+/* D3DB_CALL and the entry ids for the D3D mirror bridge wrappers (end of file). */
+#include "d3d_bridge.h"
+
 /* ── ICALL trace ring buffer ───────────────────────────────── */
 
 /*
@@ -281,6 +284,7 @@ static void traced_sub_0002BCC0(void)
     }
     fflush(stderr);
     fflush(stdout);
+    d3db_mark("main menu opens (sub_0002BCC0)");
     sub_0002BCC0();
 }
 
@@ -1671,3 +1675,70 @@ void sub_000EB270(void)
         }
     }
 }
+
+/* ── D3D mirror bridge wrappers (Option B) ─────────────────── */
+
+/*
+ * Notes 18.31 (the plan) and 18.32 (S1). Each wrapper runs the lifted body,
+ * sub_X_gen, unchanged. With RECOMP_D3D_BRIDGE set, d3d_bridge.c also sees
+ * the arguments before the call and eax after it; in S1 that feeds a
+ * log-only census and nothing else. The lifter emits the original body as
+ * sub_X_gen for each `extern void sub_X_gen(void);` below (manual_scan.py,
+ * _WRAP_RE), and every direct and indirect caller reaches the wrapper.
+ * These have to be spelled out: the lifter's scan reads this file as text.
+ */
+
+/* The 15 entries the bridge wraps. */
+extern void sub_000FD6E0_gen(void);
+void sub_000FD6E0(void) { D3DB_CALL(D3DB_CREATE_DEVICE, sub_000FD6E0_gen); }
+extern void sub_00100EA0_gen(void);
+void sub_00100EA0(void) { D3DB_CALL(D3DB_CLEAR, sub_00100EA0_gen); }
+extern void sub_00100C40_gen(void);
+void sub_00100C40(void) { D3DB_CALL(D3DB_SWAP, sub_00100C40_gen); }
+extern void sub_001019C0_gen(void);
+void sub_001019C0(void) { D3DB_CALL(D3DB_DRAW_UP, sub_001019C0_gen); }
+extern void sub_00101B20_gen(void);
+void sub_00101B20(void) { D3DB_CALL(D3DB_DRAW, sub_00101B20_gen); }
+extern void sub_00101BC0_gen(void);
+void sub_00101BC0(void) { D3DB_CALL(D3DB_DRAW_INDEXED, sub_00101BC0_gen); }
+extern void sub_00101EC0_gen(void);
+void sub_00101EC0(void) { D3DB_CALL(D3DB_BEGIN, sub_00101EC0_gen); }
+extern void sub_00101E20_gen(void);
+void sub_00101E20(void) { D3DB_CALL(D3DB_DATA2F, sub_00101E20_gen); }
+extern void sub_00101E60_gen(void);
+void sub_00101E60(void) { D3DB_CALL(D3DB_DATA4F, sub_00101E60_gen); }
+extern void sub_00101F00_gen(void);
+void sub_00101F00(void) { D3DB_CALL(D3DB_END, sub_00101F00_gen); }
+extern void sub_000FF580_gen(void);
+void sub_000FF580(void) { D3DB_CALL(D3DB_COPYRECTS, sub_000FF580_gen); }
+extern void sub_00102AA0_gen(void);
+void sub_00102AA0(void) { D3DB_CALL(D3DB_VS_CONSTANT, sub_00102AA0_gen); }
+extern void sub_00103C80_gen(void);
+void sub_00103C80(void) { D3DB_CALL(D3DB_TEX_LOCK, sub_00103C80_gen); }
+extern void sub_00103E00_gen(void);
+void sub_00103E00(void) { D3DB_CALL(D3DB_SURF_LOCK, sub_00103E00_gen); }
+extern void sub_000FEC00_gen(void);
+void sub_000FEC00(void) { D3DB_CALL(D3DB_FAST_TEXTURE, sub_000FEC00_gen); }
+
+/* Census-only probes (S1): the step 29 identities marked "probable", the
+ * vblank callback and the state-block pair. Log-only like the rest; they can
+ * go once the census has answered. */
+extern void sub_000FD680_gen(void);
+void sub_000FD680(void) { D3DB_CALL(D3DB_PROBE_FD680, sub_000FD680_gen); }
+extern void sub_000FEC90_gen(void);
+void sub_000FEC90(void) { D3DB_CALL(D3DB_PROBE_FEC90, sub_000FEC90_gen); }
+extern void sub_00039910_gen(void);
+void sub_00039910(void) { D3DB_CALL(D3DB_PROBE_VBLANK_CB, sub_00039910_gen); }
+extern void sub_001012CC_gen(void);
+void sub_001012CC(void) { D3DB_CALL(D3DB_BEGIN_SB, sub_001012CC_gen); }
+extern void sub_0010191E_gen(void);
+void sub_0010191E(void) { D3DB_CALL(D3DB_END_SB, sub_0010191E_gen); }
+extern void sub_00101705_gen(void);
+void sub_00101705(void) { D3DB_CALL(D3DB_APPLY_SB, sub_00101705_gen); }
+extern void sub_0010188D_gen(void);
+void sub_0010188D(void) { D3DB_CALL(D3DB_DELETE_SB, sub_0010188D_gen); }
+extern void sub_000FDC90_gen(void);
+void sub_000FDC90(void) { D3DB_CALL(D3DB_PROBE_DXT1NOISE, sub_000FDC90_gen); }
+/* The splash routine (notes 18.1): marks where the splash's draws start and end. */
+extern void sub_000875A0_gen(void);
+void sub_000875A0(void) { D3DB_CALL(D3DB_PROBE_SPLASH, sub_000875A0_gen); }

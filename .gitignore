@@ -47,3 +47,6 @@ Thumbs.db
 # twoc/run_twoc.ps1 logs and framebuffer dumps
 run_twoc*.log
 dumps/
+
+# xemu reference captures for the D3D bridge (notes 18.32); kept local
+twoc/reference/

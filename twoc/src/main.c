@@ -429,6 +429,12 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance,
         twoc_dev_options_init();
     }
 
+    /* D3D mirror bridge (d3d_bridge.c). Inert unless RECOMP_D3D_BRIDGE is set. */
+    {
+        extern void d3db_init(void);
+        d3db_init();
+    }
+
     /* Step 7: Call the recompiled entry point */
     printf("\nStarting game...\n");
     fflush(stdout);
