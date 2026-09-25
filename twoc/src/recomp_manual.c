@@ -315,9 +315,20 @@ static void traced_sub_0002BCC0(void)
  * Handles that don't resolve to a spawned thread go to the real bridge (the
  * main thread never has a spawned HANDLE). So does a resume of a thread with
  * no cooperative suspend count, such as one created suspended.
+ *
+ * A thread that owns a guest critical section doesn't park either (notes
+ * 18.32, 18.33): it parks at the first boundary where it owns none. Level
+ * setup suspended the stream thread while it held DSOUND's lock 0x152BB0,
+ * then entered DSOUND itself and waited on that lock forever. On the Xbox a
+ * suspend is an APC, which the holder of DSOUND's lock can't take at that
+ * point either. The game takes critical sections only through the two thunks
+ * below (no TryEnter, no AndRegion import), so a per-thread count of enters
+ * minus leaves, kept at this boundary, is exact.
  */
 #define COOP_NTSUSPEND_THUNK  0x0015AA7Cu      /* [thunk] = NtSuspendThread (ordinal 231) */
 #define COOP_NTRESUME_THUNK   0x0015AA80u      /* [thunk] = NtResumeThread (ordinal 224) */
+#define COOP_CS_ENTER_THUNK   0x0015AA64u      /* [thunk] = RtlEnterCriticalSection (ordinal 277) */
+#define COOP_CS_LEAVE_THUNK   0x0015AA60u      /* [thunk] = RtlLeaveCriticalSection (ordinal 294) */
 #define COOP_KERNEL_VA_LO     0xFE000000u      /* the bridge's synthetic thunk VAs */
 #define COOP_KERNEL_VA_HI     0xFF000000u      /* (kernel_bridge.c KERNEL_VA_BASE) */
 #define COOP_MAX_THREADS      64
@@ -330,6 +341,9 @@ typedef struct {
     DWORD         tid;                 /* 0 = free slot */
     volatile LONG suspend;             /* cooperative suspend count */
     volatile LONG state;               /* COOP_GUEST / COOP_KERNEL / COOP_PARKED */
+    volatile LONG locks;               /* guest critical sections held (enters - leaves) */
+    volatile LONG acquiring;           /* inside RtlEnterCriticalSection */
+    LONG          deferred;            /* boundaries passed holding a lock, this suspend */
     HANDLE        wake;                /* manual-reset, signaled while suspend == 0 */
 } coop_thread_t;
 
@@ -339,6 +353,9 @@ static volatile LONG g_coop_logged;
 static RECOMP_TLS coop_thread_t *t_coop;
 static RECOMP_TLS uint32_t t_coop_kernel_va;   /* set by the lookup, read by the call */
 static RECOMP_TLS int t_coop_depth;            /* nesting of kernel calls */
+#define COOP_CS_TRACK 32
+static RECOMP_TLS uint32_t t_cs_held[COOP_CS_TRACK]; /* guest CS addresses owned, innermost last */
+static RECOMP_TLS int t_cs_n;                  /* how many (can exceed COOP_CS_TRACK) */
 
 static const char *const coop_state_name[] = { "in guest code", "in a kernel call", "parked" };
 
@@ -358,6 +375,9 @@ static coop_thread_t *coop_find(DWORD tid, int create)
         t = &g_coop[i];
         t->suspend = 0;
         t->state = COOP_GUEST;
+        t->locks = 0;
+        t->acquiring = 0;
+        t->deferred = 0;
         t->wake = CreateEventA(NULL, TRUE, TRUE, NULL);
         t->tid = tid;
     }
@@ -372,11 +392,24 @@ static coop_thread_t *coop_self(void)
     return t_coop;
 }
 
-/* Called only at depth 0, where this thread holds no host lock. */
+static void coop_log(const char *what, DWORD tid, LONG prev, uint32_t ret, const char *state);
+
+/* Called only at depth 0, where this thread holds no host lock. It may still
+ * own guest critical sections; then it runs on to the next boundary. */
 static void coop_park(coop_thread_t *t)
 {
     if (t->suspend <= 0)
         return;
+    if (InterlockedCompareExchange(&t->locks, 0, 0) > 0) {
+        t->deferred++;
+        return;
+    }
+    if (t->deferred) {
+        char why[64];
+        sprintf(why, "after %ld boundaries holding a guest lock", (long)t->deferred);
+        coop_log("park", t->tid, t->suspend, 0, why);
+        t->deferred = 0;
+    }
     InterlockedExchange(&t->state, COOP_PARKED);
     while (InterlockedCompareExchange(&t->suspend, 0, 0) > 0)
         WaitForSingleObject(t->wake, INFINITE);
@@ -412,16 +445,58 @@ static void coop_kernel_call(void)
 {
     uint32_t va = t_coop_kernel_va;
     coop_thread_t *self = coop_enter();
+    int enter = va == MEM32(COOP_CS_ENTER_THUNK);
+    int leave = !enter && va == MEM32(COOP_CS_LEAVE_THUNK);
+    uint32_t cs = (enter || leave) ? MEM32(esp + 4) : 0;   /* stdcall (PRTL_CRITICAL_SECTION) */
 
+    if (enter && self)
+        InterlockedExchange(&self->acquiring, 1);
     recomp_lookup_kernel(va)();            /* the lookup also selects this thread's dispatch slot */
+    if (enter) {
+        if (t_cs_n < COOP_CS_TRACK)
+            t_cs_held[t_cs_n] = cs;
+        t_cs_n++;
+    } else if (leave) {
+        int i = t_cs_n < COOP_CS_TRACK ? t_cs_n : COOP_CS_TRACK;
+        while (i-- > 0 && t_cs_held[i] != cs)
+            ;
+        if (i >= 0) {                      /* innermost matching entry */
+            for (; i + 1 < t_cs_n && i + 1 < COOP_CS_TRACK; i++)
+                t_cs_held[i] = t_cs_held[i + 1];
+            t_cs_n--;
+        } else if (t_cs_n > COOP_CS_TRACK) {
+            t_cs_n--;                      /* an untracked overflow entry */
+        }                                  /* else: a leave with no enter; ignore */
+    }
+    if (self && (enter || leave)) {
+        InterlockedExchange(&self->locks, t_cs_n);
+        InterlockedExchange(&self->acquiring, 0);
+    }
     coop_leave(self);
     heap_watch();
+}
+
+/* Whether the calling thread owns guest critical section `cs_va` (d3d_bridge.c
+ * checks the game's D3D lock with it). */
+int coop_holds_cs(uint32_t cs_va)
+{
+    int i, n = t_cs_n < COOP_CS_TRACK ? t_cs_n : COOP_CS_TRACK;
+    for (i = 0; i < n; i++)
+        if (t_cs_held[i] == cs_va)
+            return 1;
+    return 0;
 }
 
 static void coop_log(const char *what, DWORD tid, LONG prev, uint32_t ret, const char *state)
 {
     if (InterlockedIncrement(&g_coop_logged) > COOP_LOG_MAX)
         return;
+    if (what[0] == 'p') {                  /* "park": no count change */
+        fprintf(stderr, "[SUSPEND] park thread %lu: count %ld, %s\n",
+                (unsigned long)tid, (long)prev, state);
+        fflush(stderr);
+        return;
+    }
     fprintf(stderr, "[SUSPEND] %s thread %lu from 0x%08X: count %ld -> %ld%s%s\n",
             what, (unsigned long)tid, ret, (long)prev,
             (long)(what[0] == 's' ? prev + 1 : prev - 1),
@@ -476,14 +551,30 @@ static void coop_NtSuspendThread(void)
         return;
     }
     {
+        /* Settled: parked, or in a kernel call it will park on return from.
+         * One that owns or is taking a guest lock runs on until it lets go. */
         ULONGLONG until = GetTickCount64() + COOP_SETTLE_MS;
-        LONG st;
-        while ((st = InterlockedCompareExchange(&t->state, 0, 0)) == COOP_GUEST &&
-               t->suspend > 0 && GetTickCount64() < until)
+        LONG st, locks, acq;
+        char why[96];
+        for (;;) {
+            st    = InterlockedCompareExchange(&t->state, 0, 0);
+            locks = InterlockedCompareExchange(&t->locks, 0, 0);
+            acq   = InterlockedCompareExchange(&t->acquiring, 0, 0);
+            if (st == COOP_PARKED || (st == COOP_KERNEL && !locks && !acq) ||
+                t->suspend <= 0 || GetTickCount64() >= until)
+                break;
             Sleep(1);
-        coop_log("suspend", tid, prev, ret,
-                 st == COOP_GUEST ? "still in guest code, parks at its next kernel call"
-                                  : coop_state_name[st]);
+        }
+        if (acq)
+            sprintf(why, "taking a guest lock, parks once it holds none");
+        else if (locks && st != COOP_PARKED)
+            sprintf(why, "%s holding %ld guest lock(s), parks once it holds none",
+                    coop_state_name[st], (long)locks);
+        else
+            sprintf(why, "%s", st == COOP_GUEST
+                    ? "still in guest code, parks at its next kernel call"
+                    : coop_state_name[st]);
+        coop_log("suspend", tid, prev, ret, why);
     }
 }
 
