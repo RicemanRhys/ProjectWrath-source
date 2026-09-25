@@ -20,6 +20,7 @@ typedef struct {
     unsigned p8_uploads, ps_draws, ps_probes;                                     /* S4 */
     unsigned indexed_draws, ff_draws, lit_draws;                                  /* fixed-function 3D */
     unsigned copies, copy_fails;                                                  /* CopyRects (step 35) */
+    unsigned vp_draws, vs_created, vs_fails, vs_const_uploads, vs_probes;         /* vertex programs (S5) */
 } d3dh_stats_t;
 
 /* A state already in xbox_d3d8's (PC D3D8) numbering and values. */
@@ -73,6 +74,18 @@ typedef struct {
     uint32_t material[17];
 } d3dh_ff_t;
 
+/* S5: a vertex program. `code` is the NV2A microcode (4 dwords an
+ * instruction, `n_insns` of them) and `key` its hash, which names one host
+ * shader. `consts` is the NV2A's constant memory as the draw sees it,
+ * float4[192] by the microcode's own indices. A draw with one has its
+ * vertices in the host's layout for it: a float4 for each register the
+ * program reads, in ascending order (d3dh_vs_inputs). */
+typedef struct {
+    uint32_t key, n_insns;
+    const uint32_t *code;
+    const float *consts;
+} d3dh_vprog_t;
+
 /* One draw from client memory, translated by d3d_bridge.c. `prim` is
  * xbox_d3d8's primitive type and `prim_count` its primitive count. */
 typedef struct {
@@ -91,7 +104,21 @@ typedef struct {
     float vp_minz, vp_maxz;
     d3dh_target_t target;
     const d3dh_ps_t *ps;                /* NULL: fixed function */
+    const d3dh_vprog_t *vprog;          /* S5, NULL: the FVF `fvf` */
 } d3dh_draw_t;
+
+/* S5: the registers a program reads (bit n = vn), 0 if it reads none or
+ * can't be parsed. */
+uint16_t d3dh_vs_inputs(const d3dh_vprog_t *p);
+
+/* S5, RECOMP_D3D_BRIDGE_VSPROBE: draw one vertex (in the program's layout,
+ * `stride` bytes) as a point with this program, the draw's viewport and no
+ * texture, into a host render target of the viewport's extent cleared to a
+ * sentinel, and find the pixel it lit and its colour (oD0). Returns the
+ * number of pixels lit (0: none, -1: failed); `px`, `py`, `argb` are the
+ * first one's. */
+int d3dh_vs_probe(const d3dh_vprog_t *p, const void *vert, uint32_t stride, const d3dh_draw_t *view, int *px,
+                  int *py, uint32_t *argb);
 
 /* Bytes a texture takes in guest memory, the XDK way (0: format not handled). */
 uint32_t d3dh_texture_bytes(uint32_t format, uint32_t width, uint32_t height, uint32_t levels, uint32_t pitch);

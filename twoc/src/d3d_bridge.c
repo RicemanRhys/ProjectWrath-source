@@ -56,6 +56,17 @@
  * attribute and drawn at End (mirror_draw_imm), and CopyRects from the back
  * buffer to a texture (the hub), copied on the host (mirror_copy_rects).
  * RECOMP_D3D_BRIDGE_DRAWLOG=A-B logs every draw of guest swaps A-B.
+ * Step 36 (notes 18.38, S5 part 1) adds vertex programs on the UP and
+ * indexed paths (mirror_draw_vp): the program is read from the current
+ * vertex-shader object, the constants from D3D's shadow plus the viewport
+ * scale and offset D3D gives the NV2A as c58/c59 (vp_constants), and every
+ * register the program reads is fetched from its stream and expanded to a
+ * float4 on the CPU (vp_vertices), so stream 1 interleaves into the one
+ * host stream. xbox_d3d8's translator (d3d8_vsh.c, fixed locally) turns the
+ * microcode into HLSL. Program draws that sample a CopyRects copy wait for
+ * part 2 (counted). Checks: RECOMP_D3D_BRIDGE_VSDUMP (each program in full)
+ * and _VSPROBE (its first vertices drawn as points by the host), compared by
+ * tools/diag/vscheck.py.
  * Three checks, off by default: RECOMP_D3D_BRIDGE_PSPROBE (draw each pixel
  * shader once with fixed inputs; tools/diag/pscheck.py), _TEXCHECK (write
  * each P8 texture as uploaded) and _RTLOG (log render-target draws in full;
@@ -141,6 +152,9 @@ static int g_psprobe;               /* RECOMP_D3D_BRIDGE_PSPROBE: probe each pix
 static int g_texcheck;              /* RECOMP_D3D_BRIDGE_TEXCHECK: write each P8 texture (a check, S4) */
 static int g_rtlog;                 /* RECOMP_D3D_BRIDGE_RTLOG: log render-target draws in full (a check, S4) */
 static int g_skiptex;               /* RECOMP_D3D_BRIDGE_SKIPTEX: textures of skipped draws (a check, step 34) */
+static int g_vsdump;                /* RECOMP_D3D_BRIDGE_VSDUMP: each vertex program in full (a check, S5) */
+static int g_vsprobe;               /* RECOMP_D3D_BRIDGE_VSPROBE: each vertex program drawn as points (a check, S5) */
+static int g_vp_copy;               /* RECOMP_D3D_BRIDGE_VP_COPY: mirror program draws sampling a copy (a look, S5) */
 static long g_drawlog_from, g_drawlog_to;   /* RECOMP_D3D_BRIDGE_DRAWLOG=A-B: every draw in swaps A-B (step 35) */
 static char g_check_prefix[512];    /* where the checks write: "<dump dir>\host", as the host dumps */
 
@@ -548,6 +562,9 @@ void d3db_init(void)
     g_texcheck = d3db_host_on && env_on("RECOMP_D3D_BRIDGE_TEXCHECK");
     g_rtlog = d3db_host_on && env_on("RECOMP_D3D_BRIDGE_RTLOG");
     g_skiptex = d3db_host_on && env_on("RECOMP_D3D_BRIDGE_SKIPTEX");
+    g_vsdump = d3db_host_on && env_on("RECOMP_D3D_BRIDGE_VSDUMP");
+    g_vsprobe = d3db_host_on && env_on("RECOMP_D3D_BRIDGE_VSPROBE");
+    g_vp_copy = d3db_host_on && env_on("RECOMP_D3D_BRIDGE_VP_COPY");
     if (d3db_host_on && getenv("RECOMP_D3D_BRIDGE_DRAWLOG")) {  /* "A-B": guest swaps */
         char *e;
         g_drawlog_from = strtol(getenv("RECOMP_D3D_BRIDGE_DRAWLOG"), &e, 0);
@@ -558,7 +575,7 @@ void d3db_init(void)
     g_t0_ms = g_last_dump_ms = GetTickCount64();
     if (d3db_host_on)
         fprintf(stderr, "[D3DB] bridge on: host mirror (device, window, Clear, Swap, DrawVerticesUP,"
-                " render targets, pixel shaders, P8, fixed-function DrawIndexedVertices, immediate mode)%s%s%s\n", g_tint ? "; colour clears tinted with the frame index" : "",
+                " render targets, pixel shaders, P8, fixed-function DrawIndexedVertices, immediate mode, vertex programs)%s%s%s\n", g_tint ? "; colour clears tinted with the frame index" : "",
                 g_psprobe ? "; pixel-shader probe" : "", g_texcheck ? "; P8 texture check" : "");
     if (d3db_census_on)
         fprintf(stderr, "[D3DB] census on: a [D3DB] c block every %d s\n", CEN_PERIOD_MS / 1000);
@@ -1229,14 +1246,15 @@ enum {
     SKIP_FVF,           /* an FVF with blend weights (XYZB*) */
     SKIP_IMMEDIATE,     /* Begin/SetVertexData/End (S4 part 2) */
     SKIP_VERTICES,      /* DrawVertices (never seen) */
+    SKIP_VP_COPY,       /* a vertex program sampling a CopyRects copy (S5 part 2) */
     SKIP_COUNT
 };
 static volatile LONG g_skip[SKIP_COUNT], g_mirrored_draws, g_mirrored_rt_draws, g_mirrored_ps_draws;
 static volatile LONG g_ev_skip, g_ev_draw, g_ev_draw_tss, g_ev_diffuse, g_ev_pal, g_ev_rt;
 static volatile LONG g_ev_draw_rt, g_ev_draw_tss_rt, g_ev_draw_rt_v;
 static const char *const g_skip_name[SKIP_COUNT] = {
-    "render target", "vertex program", "primitive", "texture", "stream", "immediate", "DrawVertices",
-    "vertex format",
+    "render target", "vertex program", "primitive", "texture", "stream", "vertex format", "immediate",
+    "DrawVertices", "vertex program sampling a copy",
 };
 
 static int copy_dst_bound(void);
@@ -1852,8 +1870,8 @@ static int setup_draw(d3dh_draw_t *dr, uint32_t fvf, d3dh_tex_t tex[4], d3dh_sta
         skip(SKIP_TARGET, MEM32(d + DEV_RENDER_TARGET));
         return -1;
     }
-    if ((fvf & FVF_POSITION_MASK) != FVF_XYZ && (fvf & FVF_POSITION_MASK) != FVF_XYZRHW) {
-        skip(SKIP_FVF, fvf);                /* blend weights (XYZB*) */
+    if (fvf && (fvf & FVF_POSITION_MASK) != FVF_XYZ && (fvf & FVF_POSITION_MASK) != FVF_XYZRHW) {
+        skip(SKIP_FVF, fvf);                /* blend weights (XYZB*); 0 is a vertex program (S5) */
         return -1;
     }
     if (fvf & 0xFFFF0000u)
@@ -1933,9 +1951,478 @@ static void count_mirrored(const d3dh_draw_t *dr)
         InterlockedIncrement(&g_mirrored_ps_draws);
 }
 
+/* ── Vertex programs (S5 part 1) ───────────────────────────────
+ *
+ * A programmable vertex shader is a D3D object (CreateVertexShader 0x102440;
+ * handle = object | 1, current one at device +0x380):
+ *   +0x04 flags: the Usage argument, 0x10 has a program, 0x1 not a plain
+ *         0x2078 program, 0x8 a read/write (0x7378) one; 0x400/0x800/0x1000/
+ *         0x2000 the declaration sets register 3/4/7/8 (SetVertexShader
+ *         0x102940 pushes a default for each one it doesn't);
+ *   +0x08 instruction count; +0x0C the dwords of its upload at +0x114;
+ *   +0x14 + 16 r, register r's declaration (0x1021A0): stream, byte offset in
+ *         the stream's vertex, NV2A format (type in bits 0-3, size in 4-7;
+ *         0x02 disabled); the byte at +0x20 + 16 r is 1 or 2 when the
+ *         tessellator fills the register instead;
+ *   +0x114 the upload, as push-buffer: NV097_SET_TRANSFORM_PROGRAM (0xB00) in
+ *         runs of up to 32 dwords (0x102130), then the declaration's
+ *         constants (CONSTANT_LOAD 0x1EA4 + SET_TRANSFORM_CONSTANT, 0x102340).
+ * The microcode is 4 dwords an instruction, as the NV2A takes it.
+ * SetVertexShader loads it at program address 0 and starts there
+ * (0x102610/0x102670); the load also copies it into the device's program
+ * shadow at +0x1798 and the declaration constants into the constant shadow
+ * at +0xB98, which SetVertexShaderConstant (0x102AA0) writes at slot
+ * reg + 96. The shadow is never skipped from splash to hub (census: device
+ * flag 0x10 always clear), so +0xB98 is the NV2A's whole constant memory as
+ * the game set it, indexed as the microcode indexes it.
+ *
+ * Vertex fetch, as the draw's array setup (0x108F40) programs the NV2A:
+ * hardware attribute i reads declaration register map[i], the byte table at
+ * 0x1B11C8 + (flags & 0x10), from its stream: format (stride << 8) | type,
+ * address = the vertex buffer's Data + the stream's offset + the register's
+ * offset (+ base vertex * stride for indexed draws). A disabled register
+ * (type 0x02) keeps its current value. */
+#define DEV_VS_OBJECT       0x380u
+#define DEV_VS_CONSTANTS    0xB98u      /* float4[192], by NV2A constant slot */
+#define VS_ATTR_MAP         0x001B11C8u
+#define VSO_FLAGS           0x04u
+#define VSO_COUNT           0x08u
+#define VSO_WORDS           0x0Cu
+#define VSO_DECL            0x14u       /* 16 bytes a register: stream, offset, format */
+#define VSO_TESS            0x20u       /* a byte, 16 bytes a register */
+#define VSO_UPLOAD          0x114u
+#define VS_MAX_INSNS        136
+#define VS_CONSTS           192
+#define VS_FMT_DISABLED     0x02u
+
+typedef struct {
+    uint32_t obj, flags, n_insns, hash;
+    uint32_t code[VS_MAX_INSNS * 4];
+    struct {
+        uint32_t reg;                   /* the declaration register (map[i]) */
+        uint32_t stream, offset, format, tess;
+    } attr[16];                         /* by vertex register (hardware attribute) */
+} vprog_t;
+
+/* The current vertex shader's program and declaration. Returns 0, or -1 if
+ * it has no program or its upload can't be read. */
+static int describe_vprog(vprog_t *p)
+{
+    uint32_t obj = MEM32(dev() + DEV_VS_OBJECT), words, i, n = 0, h = 2166136261u;
+
+    memset(p, 0, sizeof(*p));
+    if (!obj)
+        return -1;
+    p->obj = obj;
+    p->flags = MEM32(obj + VSO_FLAGS);
+    if (!(p->flags & 0x10))
+        return -1;
+    words = MEM32(obj + VSO_WORDS);
+    for (i = 0; i < words && n < VS_MAX_INSNS * 4;) {
+        uint32_t hd = MEM32(obj + VSO_UPLOAD + 4 * i), m = hd & 0x1FFC, c = (hd >> 18) & 0x7FF, k;
+        if (!hd || !c)
+            break;
+        if (m >= 0xB00 && m < 0xB80)
+            for (k = 0; k < c && n < VS_MAX_INSNS * 4; k++)
+                p->code[n++] = MEM32(obj + VSO_UPLOAD + 4 * (i + 1 + k));
+        i += 1 + c;
+    }
+    p->n_insns = n / 4;
+    if (p->n_insns > MEM32(obj + VSO_COUNT))
+        p->n_insns = MEM32(obj + VSO_COUNT);
+    if (!p->n_insns)
+        return -1;
+    for (i = 0; i < p->n_insns * 4; i++)
+        h = (h ^ p->code[i]) * 16777619u;
+    p->hash = h ? h : 1;
+    for (i = 0; i < 16; i++) {
+        uint32_t r = MEM8(VS_ATTR_MAP + (p->flags & 0x10) + i) & 15, d = obj + VSO_DECL + 16 * r;
+        p->attr[i].reg = r;
+        p->attr[i].stream = MEM32(d);
+        p->attr[i].offset = MEM32(d + 4);
+        p->attr[i].format = MEM32(d + 8) & 0xFF;
+        p->attr[i].tess = MEM8(obj + VSO_TESS + 16 * r);
+    }
+    return 0;
+}
+
+/* One vertex attribute in an NV2A array format, as the NV2A expands it:
+ * missing components are (0, 0, 0, 1). Types: 0 UB_D3D (a D3DCOLOR: B, G,
+ * R, A bytes read as x = R), 1 S1 (normalized signed short), 2 F (float;
+ * size 7 is FLOAT2H, three floats read as x, y, 0, w), 4 UB_OGL (bytes in
+ * order), 5 S32K (signed short, not normalized), 6 CMP (11:11:10 signed
+ * normalized). Returns 0, or -1 for a type it doesn't know. */
+static int vs_fetch(uint32_t va, uint32_t format, float out[4])
+{
+    uint32_t type = format & 15, size = format >> 4, k;
+
+    out[0] = out[1] = out[2] = 0.0f;
+    out[3] = 1.0f;
+    switch (type) {
+    case 0:                             /* UB_D3D */
+        if (size == 4) {
+            uint32_t c = MEM32(va);
+            out[0] = ((c >> 16) & 255) / 255.0f;
+            out[1] = ((c >> 8) & 255) / 255.0f;
+            out[2] = (c & 255) / 255.0f;
+            out[3] = (c >> 24) / 255.0f;
+            return 0;
+        }
+        for (k = 0; k < size && k < 4; k++)
+            out[k] = MEM8(va + k) / 255.0f;
+        return 0;
+    case 4:                             /* UB_OGL */
+        for (k = 0; k < size && k < 4; k++)
+            out[k] = MEM8(va + k) / 255.0f;
+        return 0;
+    case 1:                             /* S1 */
+        for (k = 0; k < size && k < 4; k++)
+            out[k] = (2.0f * (float)(int16_t)MEM16(va + 2 * k) + 1.0f) / 65535.0f;
+        return 0;
+    case 5:                             /* S32K */
+        for (k = 0; k < size && k < 4; k++)
+            out[k] = (float)(int16_t)MEM16(va + 2 * k);
+        return 0;
+    case 2:                             /* F */
+        if (size == 7) {
+            memcpy(&out[0], (const void *)XBOX_PTR(va), 8);
+            memcpy(&out[3], (const void *)XBOX_PTR(va + 8), 4);
+            return 0;
+        }
+        for (k = 0; k < size && k < 4; k++)
+            memcpy(&out[k], (const void *)XBOX_PTR(va + 4 * k), 4);
+        return 0;
+    case 6: {                           /* CMP: x 11, y 11, z 10 bits, signed */
+        uint32_t c = MEM32(va);
+        out[0] = (float)((int32_t)(c << 21) >> 21) / 1023.0f;
+        out[1] = (float)((int32_t)(c << 10) >> 21) / 1023.0f;
+        out[2] = (float)((int32_t)c >> 22) / 511.0f;
+        return 0;
+    }
+    }
+    return -1;
+}
+
+/* RECOMP_D3D_BRIDGE_VSDUMP (S5, a check): each distinct program, the first
+ * time a draw uses it: its microcode, declaration, streams, the whole
+ * constant shadow, the viewport, and its first vertices' attributes as the
+ * NV2A would fetch them, for tools/diag/vscheck.py to decode and evaluate.
+ * `base[s]`/`stride[s]` locate vertex 0 of stream s (UP: stream 0 only);
+ * `index` holds the first vertices' indices (NULL: 0, 1, 2...). */
+#define VSDUMP_MAX 64
+static uint32_t g_vsdump_seen[VSDUMP_MAX];
+static int g_vsdump_n;
+
+static void vs_dump_once(const char *path, const vprog_t *p, const float *consts, const uint32_t base[16],
+                         const uint32_t stride[16], const uint16_t *index, uint32_t nv)
+{
+    char *line;
+    int len, k;
+    uint32_t i, v, d = dev();
+
+    for (k = 0; k < g_vsdump_n; k++)
+        if (g_vsdump_seen[k] == p->hash)
+            return;
+    if (g_vsdump_n >= VSDUMP_MAX)
+        return;
+    g_vsdump_seen[g_vsdump_n++] = p->hash;
+    line = (char *)malloc(16384);
+    if (!line)
+        return;
+    fprintf(stderr, "[D3DB] vsdump %08X path %s swap %ld obj %08X flags %08X insns %u words %u start %u\n", p->hash,
+            path, (long)g_swaps + 1, p->obj, p->flags, p->n_insns, MEM32(p->obj + VSO_WORDS), MEM32(d + 0x388));
+    for (len = 0, i = 0; i < p->n_insns * 4; i++)
+        len += snprintf(line + len, 16384 - len, " %08X", p->code[i]);
+    fprintf(stderr, "[D3DB] vsdump %08X code%s\n", p->hash, line);
+    for (i = 0; i < 16; i++)
+        if (p->attr[i].format != VS_FMT_DISABLED || p->attr[i].tess)
+            fprintf(stderr, "[D3DB] vsdump %08X attr v%u reg %u stream %u offset %u format %02X tess %u stride %u\n",
+                    p->hash, i, p->attr[i].reg, p->attr[i].stream, p->attr[i].offset, p->attr[i].format,
+                    p->attr[i].tess, stride[p->attr[i].stream & 15]);
+    for (len = 0, i = 0; i < VS_CONSTS * 4; i++) {
+        uint32_t u;
+        memcpy(&u, &consts[i], 4);
+        len += snprintf(line + len, 16384 - len, " %08X", u);
+    }
+    fprintf(stderr, "[D3DB] vsdump %08X const%s\n", p->hash, line);
+    fprintf(stderr, "[D3DB] vsdump %08X viewport %u %u %u %u %08X %08X\n", p->hash, MEM32(d + DEV_VIEWPORT),
+            MEM32(d + DEV_VIEWPORT + 4), MEM32(d + DEV_VIEWPORT + 8), MEM32(d + DEV_VIEWPORT + 12),
+            MEM32(d + DEV_VIEWPORT + 16), MEM32(d + DEV_VIEWPORT + 20));
+    for (v = 0; v < nv && v < 8; v++) {
+        uint32_t ix = index ? index[v] : v;
+        for (len = 0, i = 0; i < 16; i++) {
+            float f[4];
+            uint32_t s = p->attr[i].stream & 15;
+            if (p->attr[i].format == VS_FMT_DISABLED || !base[s])
+                continue;
+            if (vs_fetch(base[s] + ix * stride[s] + p->attr[i].offset, p->attr[i].format, f) != 0)
+                len += snprintf(line + len, 16384 - len, " v%u=?", i);
+            else
+                len += snprintf(line + len, 16384 - len, " v%u=%.9g,%.9g,%.9g,%.9g", i, (double)f[0], (double)f[1],
+                                (double)f[2], (double)f[3]);
+        }
+        fprintf(stderr, "[D3DB] vsdump %08X vertex %u index %u:%s\n", p->hash, v, ix, line);
+    }
+    free(line);
+}
+
+/* Vertex 0 of each stream for an indexed draw: the vertex buffer's Data,
+ * the stream's offset and the base vertex (device +0x1C), as 0x108F40. */
+static void stream_bases(uint32_t base[16], uint32_t stride[16])
+{
+    uint32_t s, bv = MEM32(dev() + 0x01Cu);
+
+    for (s = 0; s < 16; s++) {
+        uint32_t vb = MEM32(D3D_STREAMS + 12 * s + 8);
+        stride[s] = MEM32(D3D_STREAMS + 12 * s);
+        base[s] = vb ? phys_to_va(MEM32(vb + RES_DATA)) + MEM32(D3D_STREAMS + 12 * s + 4) + bv * stride[s] : 0;
+    }
+}
+
 static int drawlog_on(void);
 static void drawlog(const char *path, uint32_t xdk_prim, uint32_t n, uint32_t fvf, const void *verts, uint32_t nv,
                     uint32_t stride, const char *outcome);
+static uint32_t index_list(uint32_t xdk, const uint16_t *in, uint32_t n, uint32_t lo, uint16_t *out,
+                           uint32_t *prim, uint32_t *count);
+
+static float memf(uint32_t va)
+{
+    float f;
+    memcpy(&f, (const void *)XBOX_PTR(va), 4);
+    return f;
+}
+
+/* What the program mirror couldn't do exactly, counted: a register the
+ * program reads that its declaration leaves out (the NV2A's current value
+ * is assumed), one on a stream with no vertex buffer, an array type
+ * vs_fetch doesn't know, a tessellator register, and a device in
+ * D3DSCM_NORESERVEDCONSTANTS mode (c58/c59 unknown). */
+enum { VPGAP_UNDECLARED, VPGAP_STREAM, VPGAP_FORMAT, VPGAP_TESS, VPGAP_NORESERVED, VPGAP_COUNT };
+static volatile LONG g_vpgap[VPGAP_COUNT], g_ev_vpgap, g_mirrored_vp, g_ev_vp;
+static const char *const g_vpgap_name[VPGAP_COUNT] = {
+    "undeclared register", "stream without a buffer", "array type", "tessellator register", "NORESERVEDCONSTANTS",
+};
+
+static void vpgap(int kind, uint32_t hash, uint32_t v)
+{
+    InterlockedIncrement(&g_vpgap[kind]);
+    event(&g_ev_vpgap, 20, "vertex program %08X: %s (%X)", hash, g_vpgap_name[kind], v);
+}
+
+/* The constants a program draw sees: the shadow, with c58 and c59, the
+ * viewport scale and offset, as D3D pushes them for a program (0xFE2B0:
+ * NV097_SET_VIEWPORT_SCALE and _OFFSET, which the NV2A's programs read as
+ * those two constants; the XDK's reserved c-38 and c-37). From the device's
+ * viewport (+0x9D0: X, Y, W, H, MinZ, MaxZ), its super-sample scale
+ * (+0x458/+0x45C), its z scale (+0x450) and screen offset (+0x9E8/+0x9EC),
+ * and D3D's constants 0.5 (0x15AF60) and the y factor (0x15F278):
+ *   ox = X * ssx + offx, oy = Y * ssy + offy (both - 0.5 with device flag
+ *   0x8000 and [0x10F02C] set), sx = W * ssx * 0.5, sy = H * ssy * ky;
+ *   scale = (sx, sy, (MaxZ - MinZ) * zs, 0), offset = (ox + sx, oy - sy, MinZ * zs, 0). */
+static void vp_constants(float *c)
+{
+    uint32_t d = dev(), flags = MEM32(d + DEV_FLAGS);
+    float half = memf(0x0015AF60u), ky = memf(0x0015F278u), zs = memf(d + 0x450);
+    float ssx = memf(d + 0x458), ssy = memf(d + 0x45C);
+    float x = (float)MEM32(d + DEV_VIEWPORT), y = (float)MEM32(d + DEV_VIEWPORT + 4);
+    float w = (float)MEM32(d + DEV_VIEWPORT + 8), h = (float)MEM32(d + DEV_VIEWPORT + 12);
+    float minz = memf(d + DEV_VIEWPORT + 16), maxz = memf(d + DEV_VIEWPORT + 20);
+    float ox = x * ssx + memf(d + 0x9E8), oy = y * ssy + memf(d + 0x9EC), sx, sy;
+
+    memcpy(c, (const void *)XBOX_PTR(d + DEV_VS_CONSTANTS), VS_CONSTS * 16);
+    if (flags & 0x200) {                /* the game keeps c58/c59 itself: never seen */
+        vpgap(VPGAP_NORESERVED, 0, flags);
+        return;
+    }
+    if ((flags & 0x8000) && MEM32(0x0010F02Cu)) {
+        ox -= half;
+        oy -= half;
+    }
+    sx = w * ssx * half;
+    sy = h * ssy * ky;
+    c[58 * 4 + 0] = sx;
+    c[58 * 4 + 1] = sy;
+    c[58 * 4 + 2] = (maxz - minz) * zs;
+    c[58 * 4 + 3] = 0.0f;
+    c[59 * 4 + 0] = ox + sx;
+    c[59 * 4 + 1] = oy - sy;
+    c[59 * 4 + 2] = minz * zs;
+    c[59 * 4 + 3] = 0.0f;
+}
+
+/* Vertices [lo, lo + n) of a program draw in the host's layout: a float4
+ * for each register in `inputs`, ascending, each fetched from its stream
+ * and expanded as the NV2A does (vs_fetch). A register the declaration
+ * leaves out reads what SetVertexShader leaves in it: white for the
+ * diffuse registers 3 and 7, 0 for the speculars 4 and 8 (0x102940), and
+ * (0, 0, 0, 1) for the rest (counted). Freed by the caller. */
+static float *vp_vertices(const vprog_t *p, uint16_t inputs, const uint32_t base[16], const uint32_t stride[16],
+                          uint32_t lo, uint32_t n, uint32_t *vstride)
+{
+    uint32_t regs[16], nr = 0, r, i, k;
+    float *out;
+
+    for (r = 0; r < 16; r++)
+        if (inputs & (1u << r))
+            regs[nr++] = r;
+    *vstride = 16 * nr;
+    out = (float *)malloc((size_t)n * nr * 16 + 16);
+    if (!out)
+        return NULL;
+    for (k = 0; k < nr; k++) {
+        uint32_t fmt = p->attr[regs[k]].format, s = p->attr[regs[k]].stream & 15, va;
+        r = regs[k];
+        if (fmt == VS_FMT_DISABLED || p->attr[r].tess || !base[s]) {
+            float def[4] = { 0.0f, 0.0f, 0.0f, 1.0f };
+            if (r == 3 || r == 7)
+                def[0] = def[1] = def[2] = 1.0f;
+            else if (r == 4 || r == 8)
+                def[3] = 0.0f;
+            else
+                vpgap(VPGAP_UNDECLARED, p->hash, r);
+            if (p->attr[r].tess)
+                vpgap(VPGAP_TESS, p->hash, r);
+            else if (fmt != VS_FMT_DISABLED)
+                vpgap(VPGAP_STREAM, p->hash, s);
+            for (i = 0; i < n; i++)
+                memcpy(out + ((size_t)i * nr + k) * 4, def, 16);
+            continue;
+        }
+        va = base[s] + p->attr[r].offset + lo * stride[s];
+        for (i = 0; i < n; i++, va += stride[s])
+            if (vs_fetch(va, fmt, out + ((size_t)i * nr + k) * 4) != 0) {
+                vpgap(VPGAP_FORMAT, p->hash, fmt);
+                break;
+            }
+    }
+    return out;
+}
+
+/* RECOMP_D3D_BRIDGE_VSPROBE (S5, a check): each program's first draw
+ * (the one RECOMP_D3D_BRIDGE_VSDUMP dumps), the same first vertices drawn
+ * alone as points by the host with the translated shader, and where each
+ * one landed; tools/diag/vscheck.py --probe compares that with its own CPU
+ * evaluation of the dumped program. */
+static uint32_t g_vsprobe_seen[VSDUMP_MAX];
+static int g_vsprobe_n;
+
+static void vs_probe_once(const vprog_t *p, const d3dh_vprog_t *hv, const float *verts, uint32_t vstride,
+                          const d3dh_draw_t *dr, const uint16_t *idx, uint32_t lo, uint32_t n)
+{
+    uint32_t v;
+    int k;
+
+    for (k = 0; k < g_vsprobe_n; k++)
+        if (g_vsprobe_seen[k] == p->hash)
+            return;
+    if (g_vsprobe_n >= VSDUMP_MAX)
+        return;
+    g_vsprobe_seen[g_vsprobe_n++] = p->hash;
+    for (v = 0; v < n && v < 8; v++) {
+        uint32_t at = idx ? idx[v] - lo : v, argb = 0;
+        int px = -1, py = -1, lit = d3dh_vs_probe(hv, (const uint8_t *)verts + (size_t)at * vstride, vstride, dr,
+                                                  &px, &py, &argb);
+        fprintf(stderr, "[D3DB] vsprobe %08X vertex %u: lit %d pixel %d %d colour %08X; viewport %u %u %u %u\n",
+                p->hash, v, lit, px, py, argb, dr->vp_x, dr->vp_y, dr->vp_w, dr->vp_h);
+    }
+}
+
+/* A draw with a vertex program (S5 part 1), UP (`idx` NULL: vertices 0 to
+ * n - 1 of stream 0 at base[0]) or indexed (`n` 16-bit indices, streams at
+ * base[] with the base vertex applied). The program, its declaration and
+ * the constants are read from D3D's own state; the vertex range the draw
+ * uses is fetched and expanded on the CPU, so any number of streams
+ * interleave into the one host stream. Drawn with xbox_d3d8's translated
+ * shader. A draw that samples a CopyRects copy waits for part 2 (linear
+ * textures are addressed in texels) and is counted. */
+static void mirror_draw_vp(const char *path, uint32_t xdk_prim, uint32_t n, const uint16_t *idx,
+                           const uint32_t base[16], const uint32_t stride[16])
+{
+    float consts[VS_CONSTS * 4], *verts;
+    vprog_t p;
+    d3dh_vprog_t hv;
+    d3dh_state_t rs[64], tss[4][16];
+    d3dh_tex_t tex[4];
+    d3dh_ps_t ps;
+    d3dh_draw_t dr;
+    uint16_t inputs, *list = NULL;
+    uint32_t lo = 0, hi = 0, nv, prim = 0, count = 0, k = 0, i, vstride;
+
+    if (describe_vprog(&p) != 0) {
+        skip(SKIP_VS_PROGRAM, MEM32(dev() + DEV_VS_HANDLE));
+        return;
+    }
+    vp_constants(consts);
+    hv.key = p.hash;
+    hv.n_insns = p.n_insns;
+    hv.code = p.code;
+    hv.consts = consts;
+    if (g_vsdump)
+        vs_dump_once(path, &p, consts, base, stride, idx, n);
+    inputs = d3dh_vs_inputs(&hv);
+    if (!inputs || !n) {
+        skip(SKIP_VS_PROGRAM, p.hash);
+        return;
+    }
+    if (copy_dst_bound() && !g_vp_copy) {
+        skip(SKIP_VP_COPY, p.hash);
+        if (drawlog_on())
+            drawlog(path, xdk_prim, n, MEM32(dev() + DEV_VS_HANDLE), NULL, 0, 0,
+                    "skipped: vertex program sampling a CopyRects copy");
+        return;
+    }
+    if (idx) {
+        lo = 0xFFFF;
+        for (i = 0; i < n; i++) {
+            if (idx[i] < lo)
+                lo = idx[i];
+            if (idx[i] > hi)
+                hi = idx[i];
+        }
+        list = (uint16_t *)malloc((3 * (size_t)n + 6) * sizeof(uint16_t));
+        if (!list)
+            return;
+        k = index_list(xdk_prim, idx, n, lo, list, &prim, &count);
+        nv = hi - lo + 1;
+    } else {
+        prim = xl_prim(xdk_prim, n, &count);
+        nv = n;
+    }
+    if (!prim || !count || (idx && !k)) {
+        skip(SKIP_PRIM, xdk_prim);
+        free(list);
+        return;
+    }
+    verts = vp_vertices(&p, inputs, base, stride, lo, nv, &vstride);
+    memset(tex, 0, sizeof(tex));
+    memset(&dr, 0, sizeof(dr));
+    if (!verts || setup_draw(&dr, 0, tex, rs, tss, &ps, NULL) < 0) {
+        free(verts);
+        free(list);
+        return;
+    }
+    dr.prim = prim;
+    dr.prim_count = count;
+    dr.stride = vstride;
+    dr.verts = verts;
+    dr.vert_count = nv;
+    dr.indices = list;
+    dr.index_count = k;
+    dr.vprog = &hv;
+    if (g_vsprobe)
+        vs_probe_once(&p, &hv, verts, vstride, &dr, idx, lo, n);
+    event(&g_ev_vp, 12, "vertex program %08X (%u instructions, reads %04X): %s prim %u, %u vertices from %u, %u regs,"
+          " target %08X, pixel shader %s, tex0 %08X", p.hash, p.n_insns, inputs, path, xdk_prim, nv, lo, vstride / 16,
+          dr.target.data, dr.ps ? "set" : "none", tex[0].key);
+    if (drawlog_on())
+        drawlog(path, xdk_prim, n, MEM32(dev() + DEV_VS_HANDLE), NULL, 0, 0, "mirrored: vertex program");
+    if (d3dh_draw_up(&dr) == 0) {
+        count_mirrored(&dr);
+        InterlockedIncrement(&g_mirrored_vp);
+    }
+    free(verts);
+    free(list);
+}
 
 /* DrawVerticesUP(PrimitiveType, VertexCount, pVertexStreamZeroData,
  * VertexStreamZeroStride), after the lifted call: the same draw through
@@ -1957,12 +2444,9 @@ static void mirror_draw_up(const d3db_args_t *a)
     memset(tex, 0, sizeof(tex));
     memset(&dr, 0, sizeof(dr));
     vs = MEM32(d + DEV_VS_HANDLE);
-    if (vs & 1) {
-        skip(SKIP_VS_PROGRAM, vs);
-        if (g_skiptex && g_check_prefix[0])
-            skip_tex_once("vpup");
-        if (drawlog_on())
-            drawlog("UP", a->arg[0], a->arg[1], vs, NULL, 0, 0, "skipped: vertex program");
+    if (vs & 1) {                       /* S5: a vertex program */
+        uint32_t base[16] = { a->arg[2] }, stride[16] = { a->arg[3] };
+        mirror_draw_vp("UP", a->arg[0], a->arg[1], NULL, base, stride);
         return;
     }
     prim = xl_prim(a->arg[0], a->arg[1], &count);
@@ -2110,12 +2594,11 @@ static void mirror_draw_indexed(const d3db_args_t *a)
     int cpu;
 
     draw_checks();
-    if (vs & 1) {
-        skip(SKIP_VS_PROGRAM, vs);
-        if (g_skiptex && g_check_prefix[0])
-            skip_tex_once("vpidx");
-        if (drawlog_on())
-            drawlog("Indexed", a->arg[0], n, vs, NULL, 0, 0, "skipped: vertex program");
+    if (vs & 1) {                       /* S5: a vertex program */
+        uint32_t base[16], stride[16];
+        stream_bases(base, stride);
+        mirror_draw_vp("Indexed", a->arg[0], n, a->arg[2] ? (const uint16_t *)XBOX_PTR(a->arg[2]) : NULL, base,
+                       stride);
         return;
     }
     stride = MEM32(D3D_STREAMS);
@@ -2479,6 +2962,15 @@ static void mirror_draw_imm(void)
     g_imm.open = 0;
     if (vs & 1) {
         skip(SKIP_VS_PROGRAM, vs);
+        if (g_vsdump) {                 /* none from splash to hub (S5) */
+            static float c[VS_CONSTS * 4];
+            vprog_t p;
+            uint32_t base[16] = { 0 }, stride[16] = { 0 };
+            if (describe_vprog(&p) == 0) {
+                vp_constants(c);
+                vs_dump_once("Immediate", &p, c, base, stride, NULL, 0);
+            }
+        }
         if (g_skiptex && g_check_prefix[0] && skip_tex_once("improg")) {
             float b[4] = { 1e30f, 1e30f, -1e30f, -1e30f };
             for (i = 0; i < n; i++) {
@@ -2688,6 +3180,12 @@ static void mirror_swap(void)
                     st.indexed_draws, st.ff_draws, (long)g_host_lit_draws, (long)g_cpu_lit_draws,
                     (long)g_gap[GAP_LIGHTS], (long)g_gap[GAP_TEXTRANSFORM], (long)g_gap[GAP_CPU_LIGHT],
                     (long)g_gap[GAP_SPECULAR], (long)g_gap[GAP_TEXCOORD_SIZE], (long)g_gap[GAP_IMM_W]);
+            fprintf(stderr, "[D3DB] host vertex programs: mirrored %ld (host draws %u), shaders %u (fails %u), constant"
+                    " uploads %u, probes %u; sampling a copy, not mirrored %ld; gaps: undeclared register %ld, stream"
+                    " %ld, array type %ld, tessellator %ld, NORESERVEDCONSTANTS %ld\n", (long)g_mirrored_vp,
+                    st.vp_draws, st.vs_created, st.vs_fails, st.vs_const_uploads, st.vs_probes,
+                    (long)g_skip[SKIP_VP_COPY], (long)g_vpgap[VPGAP_UNDECLARED], (long)g_vpgap[VPGAP_STREAM],
+                    (long)g_vpgap[VPGAP_FORMAT], (long)g_vpgap[VPGAP_TESS], (long)g_vpgap[VPGAP_NORESERVED]);
             fprintf(stderr, "[D3DB] host copies: CopyRects back buffer -> texture %ld (host %u, fails %u), not"
                     " mirrored %ld; draws sampling a copy: mirrored %ld, vertex program %ld\n", (long)g_copies,
                     st.copies, st.copy_fails, (long)g_copies_skipped, (long)g_copy_sampled, (long)g_copy_sampled_vp);

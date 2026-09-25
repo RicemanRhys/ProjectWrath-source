@@ -636,6 +636,88 @@ static void apply_ff(const d3dh_ff_t *ff, int lit)
         g_st.lit_draws++;
 }
 
+/* ── Vertex programs (S5 part 1) ───────────────────────────────
+ *
+ * A guest program is created once per microcode hash through xbox_d3d8's
+ * CreateVertexShader (its translator, d3d8_vsh.c, fixed locally in
+ * xboxrecomp for this: notes 18.38; its device vtable has no
+ * CreateVertexShader, so d3d8_vsh_create_shader directly), and bound with
+ * SetVertexShader. The
+ * constants arrive whole with each draw; only the registers that differ
+ * from the last upload are passed to SetVertexShaderConstant, which
+ * xbox_d3d8 then uploads at its draw. */
+#define VS_SLOTS 64
+static struct {
+    uint32_t key;
+    DWORD handle;                       /* 0: couldn't be created */
+    uint16_t inputs;
+} g_vs[VS_SLOTS];
+static unsigned g_vs_n;
+static float g_vs_consts[192 * 4];
+static int g_vs_consts_valid;
+
+/* Called with g_lock held. */
+static int vs_slot(const d3dh_vprog_t *p)
+{
+    static NV2AVshProgram parsed;       /* ~30 KB: not on the stack */
+    unsigned i;
+
+    for (i = 0; i < g_vs_n; i++)
+        if (g_vs[i].key == p->key)
+            return (int)i;
+    if (g_vs_n == VS_SLOTS)
+        return -1;
+    g_vs[i].key = p->key;
+    d3d8_vsh_parse((const DWORD *)p->code, (int)p->n_insns, &parsed);
+    g_vs[i].inputs = parsed.inputs_read;
+    if (FAILED(d3d8_vsh_create_shader((const DWORD *)p->code, (int)p->n_insns, &g_vs[i].handle))) {
+        g_vs[i].handle = 0;
+        g_st.vs_fails++;
+    } else {
+        g_st.vs_created++;
+    }
+    g_vs_n++;
+    return (int)i;
+}
+
+uint16_t d3dh_vs_inputs(const d3dh_vprog_t *p)
+{
+    int i;
+    uint16_t r;
+
+    if (!g_ready)
+        return 0;
+    EnterCriticalSection(&g_lock);
+    i = vs_slot(p);
+    r = i < 0 ? 0 : g_vs[i].inputs;
+    LeaveCriticalSection(&g_lock);
+    return r;
+}
+
+/* Bind the program and upload the constants that changed. Returns 0, or -1
+ * if the host has no shader for it. Called with g_lock held. */
+static int vs_bind(const d3dh_vprog_t *p)
+{
+    int i = vs_slot(p), lo = -1, hi = -1, k;
+
+    if (i < 0 || !g_vs[i].handle)
+        return -1;
+    for (k = 0; k < 192; k++)
+        if (!g_vs_consts_valid || memcmp(&g_vs_consts[4 * k], &p->consts[4 * k], 16) != 0) {
+            if (lo < 0)
+                lo = k;
+            hi = k;
+        }
+    if (lo >= 0) {
+        memcpy(&g_vs_consts[4 * lo], &p->consts[4 * lo], 16 * (size_t)(hi - lo + 1));
+        g_dev->lpVtbl->SetVertexShaderConstant(g_dev, lo, &p->consts[4 * lo], (DWORD)(hi - lo + 1));
+        g_vs_consts_valid = 1;
+        g_st.vs_const_uploads++;
+    }
+    g_dev->lpVtbl->SetVertexShader(g_dev, g_vs[i].handle);
+    return 0;
+}
+
 int d3dh_draw_up(const d3dh_draw_t *d)
 {
     D3DVIEWPORT8 vp;
@@ -680,9 +762,19 @@ int d3dh_draw_up(const d3dh_draw_t *d)
     } else {
         g_dev->lpVtbl->SetPixelShader(g_dev, 0);
     }
-    g_dev->lpVtbl->SetVertexShader(g_dev, d->fvf);
-    verts = (d->fvf & D3DFVF_POSITION_MASK) == D3DFVF_XYZRHW ? rescale_rhw(d->verts, d->vert_count, d->stride, &vp)
-                                                               : d->verts;
+    if (d->vprog) {                     /* S5: the vertices are already in the program's layout */
+        if (vs_bind(d->vprog) != 0) {
+            g_st.draw_fails++;
+            LeaveCriticalSection(&g_lock);
+            return -1;
+        }
+        verts = d->verts;
+        g_st.vp_draws++;
+    } else {
+        g_dev->lpVtbl->SetVertexShader(g_dev, d->fvf);
+        verts = (d->fvf & D3DFVF_POSITION_MASK) == D3DFVF_XYZRHW ? rescale_rhw(d->verts, d->vert_count, d->stride, &vp)
+                                                                   : d->verts;
+    }
     if (d->indices) {                   /* xbox_d3d8 uploads vert_count vertices from `verts` */
         hr = g_dev->lpVtbl->DrawIndexedPrimitiveUP(g_dev, (D3DPRIMITIVETYPE)d->prim, 0, d->vert_count,
                                                    d->prim_count, d->indices, D3DFMT_INDEX16, verts, d->stride);
@@ -1043,6 +1135,116 @@ int d3dh_ps_probe(const d3dh_ps_t *ps, uint32_t diffuse, uint32_t specular, cons
     g_st.ps_probes++;
     LeaveCriticalSection(&g_lock);
     return ok;
+}
+
+/* ── Vertex-program probe (S5) ─────────────────────────────── */
+
+#define VS_PROBE_SENTINEL 0x01020304u
+
+int d3dh_vs_probe(const d3dh_vprog_t *p, const void *vert, uint32_t stride, const d3dh_draw_t *view, int *px,
+                  int *py, uint32_t *argb)
+{
+    static IDirect3DTexture8 *rt_tex;
+    static IDirect3DSurface8 *rt_surf, *rt_depth;
+    static ID3D11Texture2D *staging;
+    static uint32_t rt_w, rt_h;
+    static const d3dh_state_t fixed_rs[] = {
+        { 7, 0 }, { 14, 0 }, { 27, 0 }, { 15, 0 }, { 28, 0 }, { 22, 1 }, { 52, 0 }, { 168, 0xF },
+        { 137, 0 }, { 8, 3 }, { 9, 2 }, { 29, 0 },
+    };  /* as the pixel-shader probe, SPECULARENABLE off */
+    uint32_t w = view->vp_x + view->vp_w, h = view->vp_y + view->vp_h, x, y;
+    D3DVIEWPORT8 vp;
+    D3D11_MAPPED_SUBRESOURCE m;
+    ID3D11DeviceContext *ctx;
+    HRESULT hr = S_OK;
+    unsigned i, s;
+    int found = -1;
+
+    if (!g_ready || !w || !h || w > 4096 || h > 4096)
+        return -1;
+    EnterCriticalSection(&g_lock);
+    ctx = d3d8_GetD3D11Context();
+    if (!rt_tex || rt_w != w || rt_h != h) {
+        D3D11_TEXTURE2D_DESC desc;
+        if (rt_tex) {                   /* a new size: drop the old target */
+            g_dev->lpVtbl->SetRenderTarget(g_dev, NULL, NULL);
+            g_cur_target = -2;
+            rt_surf->lpVtbl->Release(rt_surf);
+            rt_depth->lpVtbl->Release(rt_depth);
+            rt_tex->lpVtbl->Release(rt_tex);
+            ID3D11Texture2D_Release(staging);
+            rt_tex = NULL;
+        }
+        hr = g_dev->lpVtbl->CreateTexture(g_dev, w, h, 1, D3DUSAGE_RENDERTARGET, (D3DFORMAT)XDK_FMT_A8R8G8B8,
+                                          D3DPOOL_DEFAULT, &rt_tex);
+        if (SUCCEEDED(hr))
+            hr = rt_tex->lpVtbl->GetSurfaceLevel(rt_tex, 0, &rt_surf);
+        if (SUCCEEDED(hr))
+            hr = g_dev->lpVtbl->CreateDepthStencilSurface(g_dev, w, h, D3DFMT_D24S8, D3DMULTISAMPLE_NONE, &rt_depth);
+        if (SUCCEEDED(hr)) {
+            ID3D11Texture2D_GetDesc(((D3D8Texture *)rt_tex)->d3d11_texture, &desc);
+            desc.Usage = D3D11_USAGE_STAGING;
+            desc.BindFlags = 0;
+            desc.CPUAccessFlags = D3D11_CPU_ACCESS_READ;
+            desc.MiscFlags = 0;
+            hr = ID3D11Device_CreateTexture2D(d3d8_GetD3D11Device(), &desc, NULL, &staging);
+        }
+        if (FAILED(hr)) {
+            fprintf(stderr, "[D3DB] host vertex-program probe unavailable: 0x%08lX\n", (unsigned long)hr);
+            rt_tex = NULL;              /* leaks what was made; tried again at the next call */
+            LeaveCriticalSection(&g_lock);
+            return -1;
+        }
+        rt_w = w;
+        rt_h = h;
+    }
+    g_dev->lpVtbl->SetRenderTarget(g_dev, rt_surf, rt_depth);
+    g_cur_target = -2;                  /* the next mirrored draw rebinds its own */
+    g_dev->lpVtbl->Clear(g_dev, 0, NULL, D3DCLEAR_TARGET | D3DCLEAR_ZBUFFER, VS_PROBE_SENTINEL, 1.0f, 0);
+    vp.X = view->vp_x;
+    vp.Y = view->vp_y;
+    vp.Width = view->vp_w;
+    vp.Height = view->vp_h;
+    vp.MinZ = view->vp_minz;
+    vp.MaxZ = view->vp_maxz;
+    g_dev->lpVtbl->SetViewport(g_dev, &vp);
+    for (s = 0; s < 4; s++)
+        g_dev->lpVtbl->SetTexture(g_dev, s, NULL);
+    /* Stage 0 passes the vertex colour (CURRENT is the diffuse there; xbox_d3d8
+     * reads an argument of 0, D3DTA_DIFFUSE, as its default). */
+    g_dev->lpVtbl->SetTextureStageState(g_dev, 0, D3DTSS_COLOROP, D3DTOP_SELECTARG1);
+    g_dev->lpVtbl->SetTextureStageState(g_dev, 0, D3DTSS_COLORARG1, D3DTA_CURRENT);
+    g_dev->lpVtbl->SetTextureStageState(g_dev, 0, D3DTSS_ALPHAOP, D3DTOP_SELECTARG1);
+    g_dev->lpVtbl->SetTextureStageState(g_dev, 0, D3DTSS_ALPHAARG1, D3DTA_CURRENT);
+    g_dev->lpVtbl->SetTextureStageState(g_dev, 1, D3DTSS_COLOROP, D3DTOP_DISABLE);
+    g_dev->lpVtbl->SetTextureStageState(g_dev, 1, D3DTSS_ALPHAOP, D3DTOP_DISABLE);
+    for (i = 0; i < sizeof(fixed_rs) / sizeof(fixed_rs[0]); i++)
+        g_dev->lpVtbl->SetRenderState(g_dev, (D3DRENDERSTATETYPE)fixed_rs[i].state, fixed_rs[i].value);
+    g_dev->lpVtbl->SetPixelShader(g_dev, 0);
+    if (vs_bind(p) == 0)
+        hr = g_dev->lpVtbl->DrawPrimitiveUP(g_dev, D3DPT_POINTLIST, 1, vert, stride);
+    else
+        hr = E_FAIL;
+    if (SUCCEEDED(hr)) {
+        ID3D11DeviceContext_CopySubresourceRegion(ctx, (ID3D11Resource *)staging, 0, 0, 0, 0,
+                                                  (ID3D11Resource *)((D3D8Texture *)rt_tex)->d3d11_texture, 0, NULL);
+        if (SUCCEEDED(ID3D11DeviceContext_Map(ctx, (ID3D11Resource *)staging, 0, D3D11_MAP_READ, 0, &m))) {
+            found = 0;
+            for (y = 0; y < h; y++)
+                for (x = 0; x < w; x++) {
+                    uint32_t c = ((const uint32_t *)((const uint8_t *)m.pData + (size_t)y * m.RowPitch))[x];
+                    if (c != VS_PROBE_SENTINEL && found++ == 0) {
+                        *px = (int)x;
+                        *py = (int)y;
+                        *argb = c;
+                    }
+                }
+            ID3D11DeviceContext_Unmap(ctx, (ID3D11Resource *)staging, 0);
+        }
+    }
+    g_st.vs_probes++;
+    LeaveCriticalSection(&g_lock);
+    return found;
 }
 
 void d3dh_stats(d3dh_stats_t *out)
