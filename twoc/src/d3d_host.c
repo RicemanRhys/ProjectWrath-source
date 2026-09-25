@@ -43,6 +43,8 @@
  * catch the splash after its fade-in, which the executor's cadence misses).
  * RECOMP_D3D_BRIDGE_DUMP_RT=1 (S4) also writes every host render-target
  * texture with each dump, as <prefix>NNN_rt_<Data>.bmp.
+ * RECOMP_D3D_BRIDGE_DRAWLOG=A-B (step 35, with d3d_bridge.c's draw log) dumps
+ * every guest swap from A to B.
  *
  * S4 (notes 18.35):
  *   - Render targets. A guest render target other than the back buffer (the
@@ -68,6 +70,11 @@
  * DrawIndexedPrimitiveUP with 16-bit indices already rebased to its vertex
  * range and turned into lists where xbox_d3d8 can't draw the primitive
  * indexed (d3d_bridge.c index_list).
+ *
+ * Step 35 (notes 18.37): CopyRects from the back buffer to a texture (the
+ * hub's only kind) copies the host back buffer into a host render-target
+ * texture for the destination's Data, in R8G8B8A8 like the back buffer
+ * (d3dh_copy_back); a draw that binds that texture samples the copy.
  */
 
 #include <stdio.h>
@@ -96,6 +103,7 @@ static ID3D11Texture2D *g_staging;
 static char g_dump_prefix[512];
 static unsigned g_dump_seq, g_dump_first;
 static unsigned g_dump_every;           /* RECOMP_D3D_BRIDGE_DUMP_EVERY: also every Nth guest swap */
+static unsigned g_dump_from, g_dump_to; /* RECOMP_D3D_BRIDGE_DRAWLOG: every swap in this range */
 static ULONGLONG g_last_dump_ms;
 static int g_frame_work;                /* mirrored work since the last present */
 static int g_dump_rt;                   /* RECOMP_D3D_BRIDGE_DUMP_RT: render targets too (S4) */
@@ -185,9 +193,15 @@ int d3dh_create(unsigned width, unsigned height, unsigned interval, const char *
     if (dump_prefix) {
         const char *every = getenv("RECOMP_D3D_BRIDGE_DUMP_EVERY");
         const char *rt = getenv("RECOMP_D3D_BRIDGE_DUMP_RT");
+        const char *log = getenv("RECOMP_D3D_BRIDGE_DRAWLOG");
         snprintf(g_dump_prefix, sizeof(g_dump_prefix), "%s", dump_prefix);
         g_dump_every = every ? (unsigned)strtoul(every, NULL, 0) : 0;
         g_dump_rt = rt && *rt && strcmp(rt, "0") != 0;
+        if (log && *log) {
+            char *e;
+            g_dump_from = (unsigned)strtoul(log, &e, 0);
+            g_dump_to = *e == '-' ? (unsigned)strtoul(e + 1, NULL, 0) : g_dump_from;
+        }
     }
 
     args.made = CreateEventA(NULL, TRUE, FALSE, NULL);
@@ -688,6 +702,65 @@ int d3dh_draw_up(const d3dh_draw_t *d)
     return FAILED(hr) ? -1 : 0;
 }
 
+/* ── CopyRects (step 35) ───────────────────────────────────── */
+
+#define XDK_FMT_LIN_A8B8G8R8 0x3F      /* R8G8B8A8 in xbox_d3d8, the back buffer's DXGI format */
+
+int d3dh_copy_back(const d3dh_target_t *dst, const int32_t *rects, const int32_t *points, unsigned n)
+{
+    d3dh_target_t t = *dst;
+    ID3D11Texture2D *bb = NULL, *dt;
+    ID3D11DeviceContext *ctx;
+    D3D11_BOX box;
+    unsigned k;
+    int i, ok = -1;
+
+    if (!g_ready)
+        return -1;
+    /* D3D11 copies only within a format family, and the guest's A8R8G8B8 is
+     * B8G8R8A8 there: the copy is kept as R8G8B8A8, which samples the same. */
+    t.format = XDK_FMT_LIN_A8B8G8R8;
+    EnterCriticalSection(&g_lock);
+    i = rt_find(&t, 1);
+    if (i >= 0 && SUCCEEDED(IDXGISwapChain_GetBuffer(d3d8_GetSwapChain(), 0, &IID_ID3D11Texture2D, (void **)&bb))) {
+        ctx = d3d8_GetD3D11Context();
+        dt = ((D3D8Texture *)g_rt[i].tex)->d3d11_texture;
+        for (k = 0; k < (n ? n : 1); k++) {
+            int32_t l = n ? rects[4 * k] : 0, top = n ? rects[4 * k + 1] : 0;
+            int32_t r = n ? rects[4 * k + 2] : (int32_t)g_w, b = n ? rects[4 * k + 3] : (int32_t)g_h;
+            int32_t x = points ? points[2 * k] : l, y = points ? points[2 * k + 1] : top;
+            if (r > (int32_t)g_w)
+                r = (int32_t)g_w;
+            if (b > (int32_t)g_h)
+                b = (int32_t)g_h;
+            if (x < 0 || y < 0 || l < 0 || top < 0)
+                continue;
+            if (r - l > (int32_t)t.width - x)
+                r = l + (int32_t)t.width - x;
+            if (b - top > (int32_t)t.height - y)
+                b = top + (int32_t)t.height - y;
+            if (r <= l || b <= top)
+                continue;
+            box.left = (UINT)l;
+            box.top = (UINT)top;
+            box.front = 0;
+            box.right = (UINT)r;
+            box.bottom = (UINT)b;
+            box.back = 1;
+            ID3D11DeviceContext_CopySubresourceRegion(ctx, (ID3D11Resource *)dt, 0, (UINT)x, (UINT)y, 0,
+                                                      (ID3D11Resource *)bb, 0, &box);
+        }
+        ID3D11Texture2D_Release(bb);
+        g_st.copies++;
+        g_frame_work = 1;
+        ok = 0;
+    } else if (++g_st.copy_fails <= 5) {
+        fprintf(stderr, "[D3DB] host CopyRects to Data %08X (%ux%u) failed\n", t.data, t.width, t.height);
+    }
+    LeaveCriticalSection(&g_lock);
+    return ok;
+}
+
 /* ── Dumps ─────────────────────────────────────────────────── */
 
 /* Level 0 of a 32-bit colour texture (R8G8B8A8 like the back buffer, or
@@ -825,7 +898,7 @@ void d3dh_present(double t_s, unsigned swap_no)
     now = GetTickCount64();
     if (g_dump_prefix[0] &&
         ((g_frame_work && g_dump_first < DUMP_FIRST_FRAMES) || now - g_last_dump_ms >= DUMP_PERIOD_MS ||
-         (g_dump_every && swap_no % g_dump_every == 0))) {
+         (g_dump_every && swap_no % g_dump_every == 0) || (swap_no >= g_dump_from && swap_no <= g_dump_to))) {
         char path[600];
         snprintf(path, sizeof(path), "%s%03u.bmp", g_dump_prefix, g_dump_seq++);
         dump_back_buffer(path);

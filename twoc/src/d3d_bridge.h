@@ -46,6 +46,8 @@ typedef struct {
 } d3db_args_t;
 
 extern int d3db_on;                 /* RECOMP_D3D_BRIDGE or RECOMP_D3D_CENSUS set and not "0" */
+extern int d3db_host_on;            /* RECOMP_D3D_BRIDGE: the host mirror */
+extern int d3db_census_on;          /* RECOMP_D3D_CENSUS */
 
 /* From recomp_manual.c: whether the calling thread owns a guest critical
  * section, from the cooperative-suspend bookkeeping. */
@@ -65,6 +67,19 @@ void d3db_mark(const char *label);  /* close the census interval at a phase boun
         d3db_enter((id), &a_);                  \
         gen();                                  \
         d3db_leave((id), &a_);                  \
+    } while (0)
+
+/* SetVertexData2f/4f run once per attribute per vertex (S4 part 2): the
+ * mirror only stores the values (d3db_vertex_data, a few stores), and the
+ * enter/leave pair runs for the census alone. */
+void d3db_vertex_data(int id);
+#define D3DB_DATA_CALL(id, gen) do {            \
+        if (d3db_host_on)                       \
+            d3db_vertex_data(id);               \
+        if (d3db_census_on)                     \
+            D3DB_CALL((id), gen);               \
+        else                                    \
+            gen();                              \
     } while (0)
 
 #endif

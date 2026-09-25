@@ -2113,9 +2113,9 @@ void sub_00101BC0(void) { D3DB_CALL(D3DB_DRAW_INDEXED, sub_00101BC0_gen); }
 extern void sub_00101EC0_gen(void);
 void sub_00101EC0(void) { D3DB_CALL(D3DB_BEGIN, sub_00101EC0_gen); }
 extern void sub_00101E20_gen(void);
-void sub_00101E20(void) { D3DB_CALL(D3DB_DATA2F, sub_00101E20_gen); }
+void sub_00101E20(void) { D3DB_DATA_CALL(D3DB_DATA2F, sub_00101E20_gen); }
 extern void sub_00101E60_gen(void);
-void sub_00101E60(void) { D3DB_CALL(D3DB_DATA4F, sub_00101E60_gen); }
+void sub_00101E60(void) { D3DB_DATA_CALL(D3DB_DATA4F, sub_00101E60_gen); }
 extern void sub_00101F00_gen(void);
 void sub_00101F00(void) { D3DB_CALL(D3DB_END, sub_00101F00_gen); }
 extern void sub_000FF580_gen(void);

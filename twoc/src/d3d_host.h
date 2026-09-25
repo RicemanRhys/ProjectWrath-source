@@ -19,6 +19,7 @@ typedef struct {
     unsigned rt_created, rt_fails, rt_draws, rt_clears, rt_sampled, rt_feedback;  /* S4 */
     unsigned p8_uploads, ps_draws, ps_probes;                                     /* S4 */
     unsigned indexed_draws, ff_draws, lit_draws;                                  /* fixed-function 3D */
+    unsigned copies, copy_fails;                                                  /* CopyRects (step 35) */
 } d3dh_stats_t;
 
 /* A state already in xbox_d3d8's (PC D3D8) numbering and values. */
@@ -113,6 +114,14 @@ int d3dh_ps_probe(const d3dh_ps_t *ps, uint32_t diffuse, uint32_t specular, cons
  * (through the cache, P8 through its palette) without drawing, and write its
  * level 0, alpha kept, as a 32-bit BMP at `path`. Returns 0 on success. */
 int d3dh_texture_check(const d3dh_tex_t *t, const char *path);
+
+/* Step 35, CopyRects from the back buffer to a texture level: the host's
+ * back buffer is copied into a host render-target texture for `dst` (its
+ * guest Data and size), which the guest texture with that Data then samples.
+ * `rects` holds `n` guest RECTs (left, top, right, bottom) and `points` as
+ * many destination POINTs (NULL: the rects' own corners); `n` 0 copies the
+ * whole surface. Returns 0 on success. */
+int d3dh_copy_back(const d3dh_target_t *dst, const int32_t *rects, const int32_t *points, unsigned n);
 
 /* A guest lock at physical address `data`: drop cached textures that hold it. */
 void d3dh_texture_touch(uint32_t data);
