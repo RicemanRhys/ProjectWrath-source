@@ -6,8 +6,21 @@
  * each wrapper calls the lifted body, sub_X_gen, and with RECOMP_D3D_BRIDGE on
  * also calls d3db_enter/d3db_leave around it. Nothing here writes guest memory.
  *
- * Session S1 (step 30): log-only. There is no host device yet. The wrappers
- * feed a census: call counts, primitive types, vertex shaders and FVFs, texture
+ * Two switches, both off by default:
+ *
+ * RECOMP_D3D_BRIDGE=1, the mirror (session S2, notes 18.33). CreateDevice
+ * creates the host device and its window (d3d_host.c), Clear is mirrored for
+ * the back buffer with the XDK flags mapped, and Swap presents. Clears to other
+ * targets (the 128x128 render-to-texture ones) wait for S4. Every 10 s a
+ * [D3DB] host line compares guest swaps with host presents. Each draw, clear
+ * and swap also checks the game's D3D lock 0x4EA440 (see check_lock) and
+ * counts the D3DX draws separately. RECOMP_D3D_BRIDGE_TINT=1
+ * (a check, off by default) clears to the guest frame index instead of the
+ * game's colour (R = k & 0xFF, G = k >> 8 & 0xFF, B = 0x80), so a host dump or
+ * a look at the window shows which guest frame is on it.
+ *
+ * RECOMP_D3D_CENSUS=1, the census (session S1, step 30), with or without the
+ * mirror: call counts, primitive types, vertex shaders and FVFs, texture
  * formats, the RS/TSS indices a draw sees change, render targets, locks and
  * copies, and the threads that draw. Every 10 s one block of [D3DB] c lines is
  * written, one per key seen in that interval:
@@ -19,7 +32,7 @@
  * A few one-off events (CreateDevice's parameters, the first state-block
  * tokens, the first locks and copies) are printed as they happen.
  *
- * With RECOMP_D3D_BRIDGE unset, d3db_on is 0 and the wrappers only call _gen.
+ * With both unset, d3db_on is 0 and the wrappers only call _gen.
  */
 
 #include <stdio.h>
@@ -34,6 +47,7 @@
 #include "recomp/gen/recomp_funcs.h"
 
 #include "d3d_bridge.h"
+#include "d3d_host.h"
 
 /* ── Guest D3D layout (notes 18.31, step29_option_b_plan.md section 1) ── */
 
@@ -64,7 +78,20 @@
 #define RES_SIZE            0x10u
 #define RES_PARENT          0x14u
 
+#define GAME_D3D_LOCK       0x004EA440u     /* the game's CS around its D3D calls */
+#define D3DX_LO             0x0010F5A0u     /* the D3DX library's code */
+#define D3DX_HI             0x00130D58u
+#define GAME_FRAME_COUNTER  0x0025A660u     /* one inc per main-loop pass (18.29) */
+#define HOST_PERIOD_MS      10000
+
+/* XDK D3DPRESENT_PARAMETERS, as dwords (18.32's CreateDevice line). */
+#define PP_WIDTH            0
+#define PP_HEIGHT           1
+#define PP_INTERVAL         12              /* FullScreen_PresentationInterval */
+
 int d3db_on;
+static int d3db_census, d3db_host;
+static int g_tint;                  /* RECOMP_D3D_BRIDGE_TINT: colour clears show the frame index */
 
 static const char *const d3db_name[D3DB_COUNT] = {
     "CreateDevice", "Clear", "Swap", "DrawVerticesUP", "DrawVertices",
@@ -442,15 +469,201 @@ static int sb_live(uint32_t token, int op)
     return was;
 }
 
+static int env_on(const char *name)
+{
+    const char *v = getenv(name);
+    return v && *v && strcmp(v, "0") != 0;
+}
+
 void d3db_init(void)
 {
-    const char *v = getenv("RECOMP_D3D_BRIDGE");
-
-    d3db_on = v && *v && strcmp(v, "0") != 0;
-    g_t0_ms = g_last_dump_ms = GetTickCount64();
+    d3db_host = env_on("RECOMP_D3D_BRIDGE");
+    d3db_census = env_on("RECOMP_D3D_CENSUS");
+    d3db_on = d3db_host || d3db_census;
+    g_tint = d3db_host && env_on("RECOMP_D3D_BRIDGE_TINT");
     if (d3db_on)
-        fprintf(stderr, "[D3DB] bridge on: log-only census (S1), a [D3DB] c block every %d s\n",
-                CEN_PERIOD_MS / 1000);
+        coop_watch_cs(GAME_D3D_LOCK);
+    g_t0_ms = g_last_dump_ms = GetTickCount64();
+    if (d3db_host)
+        fprintf(stderr, "[D3DB] bridge on: host mirror (S2: device, window, Clear, Swap)%s\n",
+                g_tint ? "; colour clears tinted with the frame index" : "");
+    if (d3db_census)
+        fprintf(stderr, "[D3DB] census on: a [D3DB] c block every %d s\n", CEN_PERIOD_MS / 1000);
+}
+
+/* ── The mirror (S2) ────────────────────────────────────────── */
+
+static volatile LONG g_swaps, g_clears_other_rt;
+static volatile LONG g_nolock, g_d3dx_draws, g_interleaved;
+static volatile LONG g_ev_d3dx, g_ev_clear, g_ev_interleave;
+static ULONGLONG g_last_host_ms;
+
+/* Per thread: draws, clears and swaps, and how many had the game's lock. */
+#define LOCK_THREADS 16
+static struct {
+    volatile LONG tid, calls, locked;
+} g_lock_by_thread[LOCK_THREADS];
+
+static void count_thread(unsigned long tid, int locked)
+{
+    int i;
+    for (i = 0; i < LOCK_THREADS; i++) {
+        LONG t = g_lock_by_thread[i].tid;
+        if (t == 0)
+            t = InterlockedCompareExchange(&g_lock_by_thread[i].tid, (LONG)tid, 0);
+        if (t == 0 || t == (LONG)tid) {
+            InterlockedIncrement(&g_lock_by_thread[i].calls);
+            if (locked)
+                InterlockedIncrement(&g_lock_by_thread[i].locked);
+            return;
+        }
+    }
+}
+
+/* The DXGI sync interval: 0 while the executor paces the game, else the
+ * game's own (XDK D3DPRESENT_INTERVAL_*). RECOMP_D3D_BRIDGE_INTERVAL
+ * overrides both. */
+static unsigned present_interval(uint32_t xdk)
+{
+    const char *v = getenv("RECOMP_D3D_BRIDGE_INTERVAL");
+
+    if (v && *v)
+        return (unsigned)strtoul(v, NULL, 0);
+    if (env_on("RECOMP_PB_EXEC"))
+        return 0;
+    switch (xdk) {
+    case 0x80000000u: return 0;         /* IMMEDIATE */
+    case 2:           return 2;
+    case 4:           return 3;
+    case 8:           return 4;
+    default:          return 1;         /* DEFAULT, ONE */
+    }
+}
+
+/* -DumpDir sets RECOMP_FB_DUMP to "<dir>\shot" for the executor's dumps; the
+ * host's go next to them as "<dir>\host". */
+static const char *host_dump_prefix(char *buf, size_t cap)
+{
+    const char *p = getenv("RECOMP_FB_DUMP");
+    const char *slash;
+    size_t n;
+
+    if (!p || !*p)
+        return NULL;
+    slash = strrchr(p, '\\');
+    if (!slash || (strrchr(p, '/') && strrchr(p, '/') > slash))
+        slash = strrchr(p, '/');
+    n = slash ? (size_t)(slash - p) + 1 : 0;
+    snprintf(buf, cap, "%.*shost", (int)n, p);
+    return buf;
+}
+
+static void mirror_create_device(const d3db_args_t *a)
+{
+    uint32_t pp = a->arg[4];
+    char prefix[512];
+
+    if (eax != 0 || !pp) {
+        fprintf(stderr, "[D3DB] guest CreateDevice returned %08X: no host device\n", eax);
+        return;
+    }
+    d3dh_create(MEM32(pp + 4 * PP_WIDTH), MEM32(pp + 4 * PP_HEIGHT),
+                present_interval(MEM32(pp + 4 * PP_INTERVAL)),
+                host_dump_prefix(prefix, sizeof(prefix)));
+}
+
+/* (Count, pRects, Flags, Color, Z, Stencil). The census never saw rects. */
+static void mirror_clear(const d3db_args_t *a)
+{
+    uint32_t rt = MEM32(dev() + DEV_RENDER_TARGET);
+    float z;
+
+    if (strcmp(surface_kind(rt), "back") != 0) {
+        InterlockedIncrement(&g_clears_other_rt);   /* render-to-texture: S4 */
+        return;
+    }
+    memcpy(&z, &a->arg[4], 4);
+    event(&g_ev_clear, 12, "Clear flags %X colour %08X z %g stencil %u -> host", a->arg[2], a->arg[3],
+          (double)z, a->arg[5]);
+    if (g_tint) {                   /* frame k (0-based): R = k & 0xFF, G = k >> 8 & 0xFF, B = 0x80 */
+        uint32_t k = (uint32_t)g_swaps;
+        d3dh_clear(a->arg[2], 0xFF000080u | ((k & 0xFF) << 16) | (((k >> 8) & 0xFF) << 8), z, a->arg[5]);
+        return;
+    }
+    d3dh_clear(a->arg[2], a->arg[3], z, a->arg[5]);
+}
+
+static void mirror_swap(void)
+{
+    LONG n = InterlockedIncrement(&g_swaps);
+    ULONGLONG now;
+
+    d3dh_present(now_s(), (unsigned)n);
+    now = GetTickCount64();
+    if (now - g_last_host_ms >= HOST_PERIOD_MS) {
+        static SRWLOCK line_lock = SRWLOCK_INIT;
+        static LONG last_swaps;
+        static unsigned last_presents;
+        d3dh_stats_t st;
+        if (!TryAcquireSRWLockExclusive(&line_lock))
+            return;
+        if (now - g_last_host_ms >= HOST_PERIOD_MS) {
+            double dt = g_last_host_ms ? (now - g_last_host_ms) / 1000.0 : now_s();
+            d3dh_stats(&st);
+            fprintf(stderr, "[D3DB] host +%.1f s: guest swaps %ld (+%ld, %.1f/s), host presents %u (+%u),"
+                    " frame counter %u; clears %u (colour %u, z/stencil %u, partial colour %u),"
+                    " other-target clears %ld; no game lock %ld (%ld while another thread held it),"
+                    " D3DX draws %ld; dumps %u, present fails %u, other status %u\n",
+                    now_s(), (long)n, (long)(n - last_swaps), (n - last_swaps) / dt,
+                    st.presents, st.presents - last_presents, MEM32(GAME_FRAME_COUNTER),
+                    st.clears, st.clears_colour, st.clears_depth, st.clears_partial_colour,
+                    (long)g_clears_other_rt, (long)g_nolock, (long)g_interleaved, (long)g_d3dx_draws,
+                    st.dumps, st.present_fails, st.present_status);
+            {
+                char buf[512];
+                int i, len = 0;
+                for (i = 0; i < LOCK_THREADS && g_lock_by_thread[i].tid && len < (int)sizeof(buf) - 40; i++)
+                    len += snprintf(buf + len, sizeof(buf) - len, " %ld:%ld/%ld",
+                                    (long)g_lock_by_thread[i].tid, (long)g_lock_by_thread[i].locked,
+                                    (long)g_lock_by_thread[i].calls);
+                fprintf(stderr, "[D3DB] host threads (tid:with game lock/calls):%s\n", len ? buf : " none");
+            }
+            fflush(stderr);
+            last_swaps = n;
+            last_presents = st.presents;
+            g_last_host_ms = now;
+        }
+        ReleaseSRWLockExclusive(&line_lock);
+    }
+}
+
+/* Threads and locks (18.33). A loading screen's thread holds the game's D3D
+ * lock 0x4EA440 around all of its D3D calls; the main thread takes it only
+ * for some of its own (state blocks, resources). So an unlocked call is
+ * normal and only counted. What would break native D3D (and the mirror's
+ * reads of its state) is an unlocked call while another thread holds the
+ * lock: that is counted and logged. D3DX's draws (vtable methods 0x11127A,
+ * 0x11199E) are counted by return address; none ran from splash to hub. */
+static void check_lock(int id, const d3db_args_t *a)
+{
+    int d3dx = a->ret >= D3DX_LO && a->ret < D3DX_HI;
+    int locked = coop_holds_cs(GAME_D3D_LOCK);
+
+    count_thread(a->tid, locked);
+    if (d3dx) {
+        InterlockedIncrement(&g_d3dx_draws);
+        event(&g_ev_d3dx, 10, "D3DX %s from %08X, thread %lu, game D3D lock %s", d3db_name[id], a->ret,
+              a->tid, locked ? "held" : "NOT held");
+    }
+    if (!locked && coop_cs_holders() > 0) {
+        /* Another thread (a loading screen) is inside its locked D3D section
+         * right now: native D3D itself would be interleaved. */
+        InterlockedIncrement(&g_interleaved);
+        event(&g_ev_interleave, 20, "%s from %08X on thread %lu while another thread holds the game's D3D lock",
+              d3db_name[id], a->ret, a->tid);
+    }
+    if (!locked)
+        InterlockedIncrement(&g_nolock);
 }
 
 void d3db_enter(int id, d3db_args_t *a)
@@ -461,7 +674,17 @@ void d3db_enter(int id, d3db_args_t *a)
     a->edx = edx;
     for (i = 0; i < 6; i++)
         a->arg[i] = MEM32(esp + 4 + 4 * i);
+    a->ret = MEM32(esp);
     a->tid = GetCurrentThreadId();
+
+    switch (id) {
+    case D3DB_CLEAR: case D3DB_SWAP: case D3DB_DRAW_UP: case D3DB_DRAW:
+    case D3DB_DRAW_INDEXED: case D3DB_BEGIN: case D3DB_END: case D3DB_COPYRECTS:
+        check_lock(id, a);
+        break;
+    }
+    if (!d3db_census)
+        return;
 
     cen_addf(1, "call %s", d3db_name[id]);
     cen_addf(1, "tid %s %lu", d3db_name[id], a->tid);
@@ -573,6 +796,16 @@ void d3db_enter(int id, d3db_args_t *a)
 
 void d3db_leave(int id, d3db_args_t *a)
 {
+    if (d3db_host) {
+        switch (id) {
+        case D3DB_CREATE_DEVICE: mirror_create_device(a); break;
+        case D3DB_CLEAR:         mirror_clear(a);         break;
+        case D3DB_SWAP:          mirror_swap();           break;
+        }
+    }
+    if (!d3db_census)
+        return;
+
     switch (id) {
     case D3DB_CREATE_DEVICE: {      /* (Adapter, DeviceType, hFocusWindow, Behavior, pPP, ppDevice) */
         uint32_t pp = a->arg[4], i;
@@ -622,7 +855,7 @@ void d3db_leave(int id, d3db_args_t *a)
  * census interval here so each phase gets blocks of its own. */
 void d3db_mark(const char *label)
 {
-    if (!d3db_on)
+    if (!d3db_census)
         return;
     fprintf(stderr, "[D3DB] +%.1f s mark: %s\n", now_s(), label);
     cen_dump(1, label);

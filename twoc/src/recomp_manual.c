@@ -356,6 +356,10 @@ static RECOMP_TLS int t_coop_depth;            /* nesting of kernel calls */
 #define COOP_CS_TRACK 32
 static RECOMP_TLS uint32_t t_cs_held[COOP_CS_TRACK]; /* guest CS addresses owned, innermost last */
 static RECOMP_TLS int t_cs_n;                  /* how many (can exceed COOP_CS_TRACK) */
+static uint32_t g_cs_watch;                     /* coop_watch_cs */
+static volatile LONG g_cs_watch_holders;       /* threads owning it now */
+
+int coop_holds_cs(uint32_t cs_va);
 
 static const char *const coop_state_name[] = { "in guest code", "in a kernel call", "parked" };
 
@@ -448,6 +452,8 @@ static void coop_kernel_call(void)
     int enter = va == MEM32(COOP_CS_ENTER_THUNK);
     int leave = !enter && va == MEM32(COOP_CS_LEAVE_THUNK);
     uint32_t cs = (enter || leave) ? MEM32(esp + 4) : 0;   /* stdcall (PRTL_CRITICAL_SECTION) */
+    int watched = cs && cs == g_cs_watch;
+    int had = watched && coop_holds_cs(cs);            /* before this call */
 
     if (enter && self)
         InterlockedExchange(&self->acquiring, 1);
@@ -456,6 +462,8 @@ static void coop_kernel_call(void)
         if (t_cs_n < COOP_CS_TRACK)
             t_cs_held[t_cs_n] = cs;
         t_cs_n++;
+        if (watched && !had)
+            InterlockedIncrement(&g_cs_watch_holders);
     } else if (leave) {
         int i = t_cs_n < COOP_CS_TRACK ? t_cs_n : COOP_CS_TRACK;
         while (i-- > 0 && t_cs_held[i] != cs)
@@ -467,6 +475,8 @@ static void coop_kernel_call(void)
         } else if (t_cs_n > COOP_CS_TRACK) {
             t_cs_n--;                      /* an untracked overflow entry */
         }                                  /* else: a leave with no enter; ignore */
+        if (had && !coop_holds_cs(cs))
+            InterlockedDecrement(&g_cs_watch_holders);
     }
     if (self && (enter || leave)) {
         InterlockedExchange(&self->locks, t_cs_n);
@@ -485,6 +495,18 @@ int coop_holds_cs(uint32_t cs_va)
         if (t_cs_held[i] == cs_va)
             return 1;
     return 0;
+}
+
+/* One critical section whose owners are counted across threads, so a caller
+ * without it can tell whether another thread holds it right now. */
+void coop_watch_cs(uint32_t cs_va)
+{
+    g_cs_watch = cs_va;
+}
+
+int coop_cs_holders(void)
+{
+    return (int)g_cs_watch_holders;
 }
 
 static void coop_log(const char *what, DWORD tid, LONG prev, uint32_t ret, const char *state)

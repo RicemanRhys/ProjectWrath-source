@@ -41,10 +41,17 @@ enum {
 typedef struct {
     uint32_t arg[6];
     uint32_t ecx, edx;
+    uint32_t ret;                   /* the guest return address */
     unsigned long tid;
 } d3db_args_t;
 
-extern int d3db_on;                 /* RECOMP_D3D_BRIDGE set and not "0" */
+extern int d3db_on;                 /* RECOMP_D3D_BRIDGE or RECOMP_D3D_CENSUS set and not "0" */
+
+/* From recomp_manual.c: whether the calling thread owns a guest critical
+ * section, from the cooperative-suspend bookkeeping. */
+int coop_holds_cs(uint32_t cs_va);
+void coop_watch_cs(uint32_t cs_va);     /* count this section's owners across threads */
+int coop_cs_holders(void);              /* how many threads own the watched section now */
 
 void d3db_init(void);
 void d3db_enter(int id, d3db_args_t *a);
