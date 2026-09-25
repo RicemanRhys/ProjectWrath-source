@@ -16,6 +16,8 @@ typedef struct {
     unsigned dumps;
     unsigned draws, draw_fails;
     unsigned tex_uploads, tex_upload_fails, tex_evictions;
+    unsigned rt_created, rt_fails, rt_draws, rt_clears, rt_sampled, rt_feedback;  /* S4 */
+    unsigned p8_uploads, ps_draws, ps_probes;                                     /* S4 */
 } d3dh_stats_t;
 
 /* A state already in xbox_d3d8's (PC D3D8) numbering and values. */
@@ -32,13 +34,37 @@ typedef struct {
     uint32_t key, data, format, width, height, levels, pitch;
     const uint8_t *bits;
     uint32_t bytes, sig;
+    /* S4, P8 (format 0x0B) only: the stage's guest palette as 32-bit ARGB
+     * entries, and its content signature (part of the cache key). The host
+     * expands the indices through it to A8R8G8B8 at upload. */
+    const uint32_t *palette;
+    uint32_t pal_entries, pal_sig;
 } d3dh_tex_t;
+
+/* S4: where a draw or clear goes. `data` 0 is the back buffer (with the
+ * host's default depth buffer); otherwise the guest render target's physical
+ * Data, which names one host render-target texture of that size and format
+ * (level 0 only). A texture the guest binds with the same Data samples that
+ * host texture instead of guest memory. */
+typedef struct {
+    uint32_t data, width, height, format;
+} d3dh_target_t;
+
+/* S4: a pixel shader already re-encoded into xbox_d3d8's combiner layout
+ * (its D3DRS_PS* numbering 200-253 and its own field order, see
+ * d3d_bridge.c translate_ps) and the token for its SetPixelShader. */
+typedef struct {
+    uint32_t token;                     /* 0: no pixel shader (fixed function) */
+    d3dh_state_t rs[54];
+    unsigned n_rs;
+} d3dh_ps_t;
 
 /* One draw from client memory, translated by d3d_bridge.c. `prim` is
  * xbox_d3d8's primitive type and `prim_count` its primitive count. */
 typedef struct {
     uint32_t prim, prim_count, stride, fvf;
     const void *verts;
+    uint32_t vert_count;                /* vertices at `verts` */
     const d3dh_state_t *rs;
     unsigned n_rs;
     const d3dh_state_t *tss[4];
@@ -46,16 +72,30 @@ typedef struct {
     const d3dh_tex_t *tex[4];           /* NULL: no texture on that stage */
     uint32_t vp_x, vp_y, vp_w, vp_h;
     float vp_minz, vp_maxz;
+    d3dh_target_t target;
+    const d3dh_ps_t *ps;                /* NULL: fixed function */
 } d3dh_draw_t;
 
 /* Bytes a texture takes in guest memory, the XDK way (0: format not handled). */
 uint32_t d3dh_texture_bytes(uint32_t format, uint32_t width, uint32_t height, uint32_t levels, uint32_t pitch);
 
-/* Whether the host can upload this XDK format (no palette formats yet). */
+/* Whether the host can upload this XDK format (P8 through its palette, S4). */
 int d3dh_format_supported(uint32_t format);
 
 /* Draw. Returns 0 on success. */
 int d3dh_draw_up(const d3dh_draw_t *d);
+
+/* S4, RECOMP_D3D_BRIDGE_PSPROBE: draw one pixel with this pixel shader and
+ * fixed inputs (the vertex colours and one 1x1 texture per stage given
+ * here, point sampled, no blending, alpha test or fog) into a small host
+ * render target and read it back as ARGB. Returns 0 on success. */
+int d3dh_ps_probe(const d3dh_ps_t *ps, uint32_t diffuse, uint32_t specular, const uint32_t tex_argb[4],
+                  uint32_t *out_argb);
+
+/* S4, RECOMP_D3D_BRIDGE_TEXCHECK: upload a guest texture as a draw would
+ * (through the cache, P8 through its palette) without drawing, and write its
+ * level 0, alpha kept, as a 32-bit BMP at `path`. Returns 0 on success. */
+int d3dh_texture_check(const d3dh_tex_t *t, const char *path);
 
 /* A guest lock at physical address `data`: drop cached textures that hold it. */
 void d3dh_texture_touch(uint32_t data);
@@ -67,7 +107,7 @@ int  d3dh_ready(void);
 
 /* Clear with XDK flags: TARGET 0xF0 (all four channel bits), ZBUFFER 1,
  * STENCIL 2. A partial colour mask isn't mirrored (counted instead). */
-void d3dh_clear(uint32_t xdk_flags, uint32_t color, float z, uint32_t stencil);
+void d3dh_clear(const d3dh_target_t *target, uint32_t xdk_flags, uint32_t color, float z, uint32_t stencil);
 
 /* End of a guest frame: dump the back buffer when one is due, then present. */
 void d3dh_present(double t_s, unsigned swap_no);

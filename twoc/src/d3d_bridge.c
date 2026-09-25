@@ -28,6 +28,25 @@
  * game's colour (R = k & 0xFF, G = k >> 8 & 0xFF, B = 0x80), so a host dump or
  * a look at the window shows which guest frame is on it.
  *
+ * S4 part 1 (notes 18.35) adds render-to-texture, pixel shaders and P8:
+ *   - A draw or clear whose render target is a texture level (the title's
+ *     128x128 A8R8G8B8 targets) goes to a host render target made for that
+ *     Data (describe_target, d3d_host.c), and a texture with the same Data
+ *     samples it. No guest depth surface means no depth or stencil test.
+ *   - A pixel shader is read from D3D__RenderState[0..56] and RS[117], where
+ *     SetPixelShader copies the def, and re-encoded for xbox_d3d8's combiner
+ *     translator, whose field order differs from the XDK's (translate_ps).
+ *     What it can't express is counted per kind ("pixel-shader gaps").
+ *   - A P8 texture is described with its stage's palette (device +0xA88).
+ *   - MIPFILTER NONE gives the host level 0 alone (xbox_d3d8 still mips).
+ *   - Every draw path is counted on the [D3DB] host draws line; indexed,
+ *     immediate and DrawVertices draws aren't mirrored yet.
+ * Three checks, off by default: RECOMP_D3D_BRIDGE_PSPROBE (draw each pixel
+ * shader once with fixed inputs; tools/diag/pscheck.py), _TEXCHECK (write
+ * each P8 texture as uploaded) and _RTLOG (log render-target draws in full;
+ * tools/diag/rtcheck.py). With -DumpDir, _DUMP_RT writes the host render
+ * targets with each host dump.
+ *
  * RECOMP_D3D_CENSUS=1, the census (session S1, step 30), with or without the
  * mirror: call counts, primitive types, vertex shaders and FVFs, texture
  * formats, the RS/TSS indices a draw sees change, render targets, locks and
@@ -102,6 +121,10 @@ int d3db_on;
 static int d3db_census, d3db_host;
 static int g_tint;                  /* RECOMP_D3D_BRIDGE_TINT: colour clears show the frame index */
 static int g_point;                 /* RECOMP_D3D_BRIDGE_POINT: point sampling (a check, S3) */
+static int g_psprobe;               /* RECOMP_D3D_BRIDGE_PSPROBE: probe each pixel shader (a check, S4) */
+static int g_texcheck;              /* RECOMP_D3D_BRIDGE_TEXCHECK: write each P8 texture (a check, S4) */
+static int g_rtlog;                 /* RECOMP_D3D_BRIDGE_RTLOG: log render-target draws in full (a check, S4) */
+static char g_check_prefix[512];    /* where the checks write: "<dump dir>\host", as the host dumps */
 
 static const char *const d3db_name[D3DB_COUNT] = {
     "CreateDevice", "Clear", "Swap", "DrawVerticesUP", "DrawVertices",
@@ -377,6 +400,17 @@ static void scrape(const char *path, uint32_t prim, uint32_t verts)
             cen_addf(1, "draw fastpath-overrides-stage %u", s);
     }
     cen_addf(1, "draw textures=%u%u%u%u", !!g_last.tex[0], !!g_last.tex[1], !!g_last.tex[2], !!g_last.tex[3]);
+    /* S4: the whole shape of each draw in one key, so a phase's draws can be
+     * sorted by what the mirror needs (target, vertex program, pixel shader,
+     * texture formats per stage; "--" for no texture). */
+    {
+        char fm[4][3];
+        for (s = 0; s < 4; s++)
+            snprintf(fm[s], sizeof(fm[s]), g_last.tex[s] ? "%02X" : "--", (g_last.texfmt[s] >> 8) & 0xFF);
+        cen_addf(1, "combo %s prim=%u rt=%s vs=%s ps=%s tex=%s.%s.%s.%s", path, prim,
+                 surface_kind(MEM32(d + DEV_RENDER_TARGET)), (MEM32(d + DEV_VS_HANDLE) & 1) ? "prog" : "fvf",
+                 MEM32(d + DEV_PIXEL_SHADER) ? "set" : "none", fm[0], fm[1], fm[2], fm[3]);
+    }
 
     v = MEM32(d + DEV_VS_HANDLE);
     if (v != g_last.vs) {
@@ -492,12 +526,16 @@ void d3db_init(void)
     d3db_on = d3db_host || d3db_census;
     g_tint = d3db_host && env_on("RECOMP_D3D_BRIDGE_TINT");
     g_point = d3db_host && env_on("RECOMP_D3D_BRIDGE_POINT");
+    g_psprobe = d3db_host && env_on("RECOMP_D3D_BRIDGE_PSPROBE");
+    g_texcheck = d3db_host && env_on("RECOMP_D3D_BRIDGE_TEXCHECK");
+    g_rtlog = d3db_host && env_on("RECOMP_D3D_BRIDGE_RTLOG");
     if (d3db_on)
         coop_watch_cs(GAME_D3D_LOCK);
     g_t0_ms = g_last_dump_ms = GetTickCount64();
     if (d3db_host)
-        fprintf(stderr, "[D3DB] bridge on: host mirror (S3: device, window, Clear, Swap, DrawVerticesUP)%s\n",
-                g_tint ? "; colour clears tinted with the frame index" : "");
+        fprintf(stderr, "[D3DB] bridge on: host mirror (S4 part 1: device, window, Clear, Swap, DrawVerticesUP,"
+                " render targets, pixel shaders, P8)%s%s%s\n", g_tint ? "; colour clears tinted with the frame index" : "",
+                g_psprobe ? "; pixel-shader probe" : "", g_texcheck ? "; P8 texture check" : "");
     if (d3db_census)
         fprintf(stderr, "[D3DB] census on: a [D3DB] c block every %d s\n", CEN_PERIOD_MS / 1000);
 }
@@ -506,7 +544,7 @@ void d3db_init(void)
 
 static volatile LONG g_swaps, g_clears_other_rt;
 static volatile LONG g_nolock, g_d3dx_draws, g_interleaved;
-static volatile LONG g_ev_d3dx, g_ev_clear, g_ev_interleave;
+static volatile LONG g_ev_d3dx, g_ev_clear, g_ev_clear_rt, g_ev_interleave;
 static ULONGLONG g_last_host_ms;
 
 /* Per thread: draws, clears and swaps, and how many had the game's lock. */
@@ -581,27 +619,36 @@ static void mirror_create_device(const d3db_args_t *a)
     d3dh_create(MEM32(pp + 4 * PP_WIDTH), MEM32(pp + 4 * PP_HEIGHT),
                 present_interval(MEM32(pp + 4 * PP_INTERVAL)),
                 host_dump_prefix(prefix, sizeof(prefix)));
+    if (host_dump_prefix(prefix, sizeof(prefix)))
+        snprintf(g_check_prefix, sizeof(g_check_prefix), "%s", prefix);
 }
 
-/* (Count, pRects, Flags, Color, Z, Stencil). The census never saw rects. */
+static int describe_target(d3dh_target_t *t, int *z_off);
+
+/* (Count, pRects, Flags, Color, Z, Stencil). The census never saw rects.
+ * S4: a render-to-texture target is cleared on its host render target; the
+ * tint check applies to the back buffer only. */
 static void mirror_clear(const d3db_args_t *a)
 {
-    uint32_t rt = MEM32(dev() + DEV_RENDER_TARGET);
+    d3dh_target_t t;
+    int z_off;
     float z;
 
-    if (strcmp(surface_kind(rt), "back") != 0) {
-        InterlockedIncrement(&g_clears_other_rt);   /* render-to-texture: S4 */
+    if (describe_target(&t, &z_off) != 0) {
+        InterlockedIncrement(&g_clears_other_rt);   /* a target the host can't make */
         return;
     }
     memcpy(&z, &a->arg[4], 4);
-    event(&g_ev_clear, 12, "Clear flags %X colour %08X z %g stencil %u -> host", a->arg[2], a->arg[3],
-          (double)z, a->arg[5]);
-    if (g_tint) {                   /* frame k (0-based): R = k & 0xFF, G = k >> 8 & 0xFF, B = 0x80 */
+    event(t.data ? &g_ev_clear_rt : &g_ev_clear, 12, "Clear flags %X colour %08X z %g stencil %u, target %08X -> host",
+          a->arg[2], a->arg[3], (double)z, a->arg[5], t.data);
+    if (g_rtlog && t.data)
+        fprintf(stderr, "[D3DB] rtclear target %08X flags %X colour %08X\n", t.data, a->arg[2], a->arg[3]);
+    if (g_tint && !t.data) {        /* frame k (0-based): R = k & 0xFF, G = k >> 8 & 0xFF, B = 0x80 */
         uint32_t k = (uint32_t)g_swaps;
-        d3dh_clear(a->arg[2], 0xFF000080u | ((k & 0xFF) << 16) | (((k >> 8) & 0xFF) << 8), z, a->arg[5]);
+        d3dh_clear(&t, a->arg[2], 0xFF000080u | ((k & 0xFF) << 16) | (((k >> 8) & 0xFF) << 8), z, a->arg[5]);
         return;
     }
-    d3dh_clear(a->arg[2], a->arg[3], z, a->arg[5]);
+    d3dh_clear(&t, a->arg[2], a->arg[3], z, a->arg[5]);
 }
 
 /* ── Draws (S3): XDK state → xbox_d3d8 ─────────────────────── */
@@ -839,6 +886,228 @@ static uint32_t xl_address(uint32_t v)
     return v == 5 ? 3 : v;
 }
 
+/* ── Pixel shaders (S4): XDK combiner state → xbox_d3d8's ──── */
+
+/* SetPixelShader (0x102BB0) copies the handle's D3DPIXELSHADERDEF into
+ * D3D__RenderState[0..56] (unless device flag 0x10 is set) and its
+ * PSTextureModes into RS[117]; RS[0..56] is the def's layout: */
+enum {
+    XPS_ALPHAINPUTS = 0, XPS_FINAL_ABCD = 8, XPS_FINAL_EFG = 9, XPS_CONST0 = 10, XPS_CONST1 = 18,
+    XPS_ALPHAOUTPUTS = 26, XPS_RGBINPUTS = 34, XPS_COMPAREMODE = 42, XPS_FINALCONST0 = 43, XPS_FINALCONST1 = 44,
+    XPS_RGBOUTPUTS = 45, XPS_COMBINERCOUNT = 53, XPS_DOTMAPPING = 55, XPS_INPUTTEXTURE = 56,
+    XPS_DEF_DWORDS = 57,
+};
+
+/* xbox_d3d8's numbers for them (d3d8_xbox.h), read by d3d8_combiners.c. */
+enum {
+    PPS_ALPHAINPUTS = 200, PPS_FINAL_ABCD = 208, PPS_FINAL_EFG = 209, PPS_RGBINPUTS = 210, PPS_RGBOUTPUTS = 218,
+    PPS_ALPHAOUTPUTS = 226, PPS_COMBINERCOUNT = 234, PPS_CONST0 = 235, PPS_CONST1 = 243, PPS_TEXTUREMODES = 251,
+};
+
+/* What xbox_d3d8's combiner translator can't express, by kind: counted once
+ * per translation that meets it (a mirrored draw or a probe), the first few
+ * logged. */
+enum {
+    PSGAP_BLUE,         /* an alpha-portion or final G input reads blue; xbox_d3d8 always reads alpha */
+    PSGAP_REG,          /* a reserved register (6, 7), or V1R0_SUM/EF_PROD in a general stage */
+    PSGAP_OUTMAP,       /* an output mapping with no xbox_d3d8 equivalent */
+    PSGAP_BLUE_TO_ALPHA,/* AB/CD blue-to-alpha */
+    PSGAP_MUX_LSB,      /* a mux on r0.a's LSB; xbox_d3d8 muxes on the MSB */
+    PSGAP_TEXMODE,      /* a texture mode other than NONE, 2D, 3D, CUBEMAP */
+    PSGAP_FINALCONST,   /* final-combiner constants with all 8 stages in use */
+    PSGAP_V1R0,         /* COMPLEMENT_V1/R0 on the V1R0 sum */
+    PSGAP_COUNT
+};
+static volatile LONG g_psgap[PSGAP_COUNT], g_ev_psgap;
+static const char *const g_psgap_name[PSGAP_COUNT] = {
+    "blue channel read", "register", "output mapping", "blue to alpha", "mux on LSB", "texture mode",
+    "final constants", "V1R0 complement",
+};
+
+static void psgap(unsigned *mask, int kind, const char *what, uint32_t v)
+{
+    if (*mask & (1u << kind))
+        return;
+    *mask |= 1u << kind;
+    InterlockedIncrement(&g_psgap[kind]);
+    event(&g_ev_psgap, 20, "pixel shader: %s (%s = %X)", g_psgap_name[kind], what, v);
+}
+
+/* One XDK combiner input byte (register [3:0], alpha/blue [4], mapping
+ * [7:5]) in xbox_d3d8's terms, which differ only in registers 14 and 15
+ * (V1R0_SUM and EF_PROD are the other way round there). In the alpha
+ * portion and for G, bit 4 clear means blue. */
+static uint32_t xps_in(uint32_t b, int alpha_portion, int final, unsigned *gaps)
+{
+    uint32_t reg = b & 15;
+
+    if (reg == 6 || reg == 7 || (!final && reg >= 14))
+        psgap(gaps, PSGAP_REG, "input register", reg);
+    if (reg >= 14)
+        reg ^= 1;
+    if (alpha_portion && !(b & 0x10) && reg != 0)
+        psgap(gaps, PSGAP_BLUE, "input", b);
+    return (b & 0xF0) | reg;
+}
+
+/* XDK PS_COMBINERINPUTS packs A in the top byte and D in the bottom one;
+ * xbox_d3d8 the other way round. `swap`: exchange AB and CD (a mux, below). */
+static uint32_t xps_inputs(uint32_t v, int alpha_portion, int swap, unsigned *gaps)
+{
+    uint32_t a = xps_in((v >> 24) & 0xFF, alpha_portion, 0, gaps), b = xps_in((v >> 16) & 0xFF, alpha_portion, 0, gaps);
+    uint32_t c = xps_in((v >> 8) & 0xFF, alpha_portion, 0, gaps), d = xps_in(v & 0xFF, alpha_portion, 0, gaps), t;
+
+    if (swap) {
+        t = a; a = c; c = t;
+        t = b; b = d; d = t;
+    }
+    return a | (b << 8) | (c << 16) | (d << 24);
+}
+
+/* XDK PS_COMBINEROUTPUTS: CD destination [3:0], AB [7:4], sum [11:8], CD dot
+ * 12, AB dot 13, mux 14, output mapping [17:15] (SHIFTRIGHT_1 is 6), CD/AB
+ * blue-to-alpha 18/19. xbox_d3d8 has AB in [3:0] and CD in [7:4], and
+ * SHIFTRIGHT_1 as 5. Its mux picks AB when r0.a >= 0.5, where the hardware
+ * picks CD, so a muxing stage has AB and CD exchanged, inputs included. */
+static uint32_t xps_out(uint32_t v, int rgb, unsigned *gaps, int *swap)
+{
+    uint32_t cd = v & 15, ab = (v >> 4) & 15, sum = (v >> 8) & 15;
+    uint32_t cd_dot = (v >> 12) & 1, ab_dot = (v >> 13) & 1, mux = (v >> 14) & 1, map = (v >> 15) & 7, t;
+
+    if (rgb && (v & (3u << 18)))
+        psgap(gaps, PSGAP_BLUE_TO_ALPHA, "output", v);
+    if (map == 6) {
+        map = 5;
+    } else if (map > 4) {
+        psgap(gaps, PSGAP_OUTMAP, "output", v);
+        map = 0;
+    }
+    if (ab >= 14 || cd >= 14 || sum >= 14)
+        psgap(gaps, PSGAP_REG, "output register", v);
+    *swap = (int)mux;
+    if (mux) {
+        t = ab; ab = cd; cd = t;
+        t = ab_dot; ab_dot = cd_dot; cd_dot = t;
+    }
+    return ab | (cd << 4) | (sum << 8) | (cd_dot << 12) | (ab_dot << 13) | (mux << 14) | (map << 15);
+}
+
+/* XDK texture modes, 5 bits per stage (NONE 0, PROJECT2D 1, PROJECT3D 2,
+ * CUBEMAP 3, PASSTHRU 4, ...) → xbox_d3d8's nibble (2D 0, 3D 1, CUBE 2,
+ * NONE 3). */
+static uint32_t xps_texmode(uint32_t m, unsigned *gaps)
+{
+    switch (m) {
+    case 0: return 3;
+    case 1: return 0;
+    case 2: return 1;
+    case 3: return 2;
+    }
+    psgap(gaps, PSGAP_TEXMODE, "texture mode", m);
+    return 3;
+}
+
+static int reads_const(uint32_t abcd, uint32_t efg)
+{
+    int i;
+    for (i = 0; i < 4; i++) {
+        uint32_t r = (abcd >> (8 * i)) & 15;
+        if (r == 1 || r == 2)
+            return 1;
+    }
+    for (i = 1; i < 4; i++) {
+        uint32_t r = (efg >> (8 * i)) & 15;
+        if (r == 1 || r == 2)
+            return 1;
+    }
+    return 0;
+}
+
+/* The pixel shader in D3D__RenderState, for xbox_d3d8: its combiner states
+ * and token (stage count in [3:0], texture-mode nibbles in [23:8]). Returns
+ * the gap kinds met, as a mask. The final combiner's constants (RS 43/44)
+ * have no slot of their own there: xbox_d3d8 gives the final combiner the
+ * last stage's, so when it reads one they go into one extra stage that
+ * writes nothing. No final combiner (ABCD and EFG both 0) outputs r0. */
+static unsigned translate_ps(d3dh_ps_t *ps)
+{
+    uint32_t count = rs_x(XPS_COMBINERCOUNT), n = count & 0xFF, n_host, abcd, efg, tm, token, i, v;
+    uint32_t c0[8], c1[8], out;
+    unsigned gaps = 0;
+    int swap;
+
+    if (n < 1)
+        n = 1;
+    if (n > 8)
+        n = 8;
+    for (i = 0; i < 8; i++) {           /* SAME_C0/C1: every stage reads stage 0's */
+        c0[i] = rs_x(XPS_CONST0 + ((count & 0x1000) ? i : 0));
+        c1[i] = rs_x(XPS_CONST1 + ((count & 0x10000) ? i : 0));
+    }
+    ps->n_rs = 0;
+#define PUT(s, val) do { ps->rs[ps->n_rs].state = (s); ps->rs[ps->n_rs].value = (val); ps->n_rs++; } while (0)
+    for (i = 0; i < 8; i++) {
+        if (i < n) {
+            out = xps_out(rs_x(XPS_RGBOUTPUTS + i), 1, &gaps, &swap);
+            if (swap && !(count & 0x100))
+                psgap(&gaps, PSGAP_MUX_LSB, "combiner count", count);
+            PUT(PPS_RGBOUTPUTS + i, out);
+            PUT(PPS_RGBINPUTS + i, xps_inputs(rs_x(XPS_RGBINPUTS + i), 0, swap, &gaps));
+            out = xps_out(rs_x(XPS_ALPHAOUTPUTS + i), 0, &gaps, &swap);
+            if (swap && !(count & 0x100))
+                psgap(&gaps, PSGAP_MUX_LSB, "combiner count", count);
+            PUT(PPS_ALPHAOUTPUTS + i, out);
+            PUT(PPS_ALPHAINPUTS + i, xps_inputs(rs_x(XPS_ALPHAINPUTS + i), 1, swap, &gaps));
+        } else {                        /* unused, or the constants' carrier stage: writes nothing */
+            PUT(PPS_RGBOUTPUTS + i, 0);
+            PUT(PPS_RGBINPUTS + i, 0);
+            PUT(PPS_ALPHAOUTPUTS + i, 0);
+            PUT(PPS_ALPHAINPUTS + i, 0);
+        }
+    }
+
+    abcd = rs_x(XPS_FINAL_ABCD);
+    efg = rs_x(XPS_FINAL_EFG);
+    n_host = n;
+    if (!abcd && !efg) {                /* no final combiner: r0 */
+        PUT(PPS_FINAL_ABCD, 12u << 24);             /* D = r0 */
+        PUT(PPS_FINAL_EFG, (12u | 0x10) << 16);     /* G = r0.a */
+    } else {
+        if (reads_const(abcd, efg)) {
+            if (n < 8) {
+                c0[n] = rs_x(XPS_FINALCONST0);
+                c1[n] = rs_x(XPS_FINALCONST1);
+                n_host = n + 1;
+            } else if (c0[7] != rs_x(XPS_FINALCONST0) || c1[7] != rs_x(XPS_FINALCONST1)) {
+                psgap(&gaps, PSGAP_FINALCONST, "final constants", rs_x(XPS_FINALCONST0));
+            }
+        }
+        if (efg & 0x60)                 /* COMPLEMENT_V1/R0: only matter if V1R0_SUM (14) is read */
+            for (i = 0; i < 7; i++)
+                if (((i < 4 ? abcd >> (8 * i) : efg >> (8 * (i - 3))) & 15) == 14)
+                    psgap(&gaps, PSGAP_V1R0, "final EFG", efg);
+        for (i = 0, v = 0; i < 4; i++)  /* A..D: top byte first */
+            v |= xps_in((abcd >> (24 - 8 * i)) & 0xFF, 0, 1, &gaps) << (8 * i);
+        PUT(PPS_FINAL_ABCD, v);
+        v = xps_in((efg >> 24) & 0xFF, 0, 1, &gaps) | (xps_in((efg >> 16) & 0xFF, 0, 1, &gaps) << 8) |
+            (xps_in((efg >> 8) & 0xFF, 1, 1, &gaps) << 16);
+        PUT(PPS_FINAL_EFG, v);
+    }
+    for (i = 0; i < 8; i++) {
+        PUT(PPS_CONST0 + i, c0[i]);
+        PUT(PPS_CONST1 + i, c1[i]);
+    }
+    PUT(PPS_COMBINERCOUNT, n_host);
+    tm = rs_x(XRS_PSTEXTUREMODES);
+    for (i = 0, v = 0; i < 4; i++)
+        v |= xps_texmode((tm >> (5 * i)) & 31, &gaps) << (4 * i);
+    PUT(PPS_TEXTUREMODES, v);
+#undef PUT
+    token = n_host | (v << 8);
+    ps->token = token;
+    return gaps;
+}
+
 static unsigned translate_tss(unsigned stage, d3dh_state_t *o)
 {
     uint32_t base = D3D_TEXTURESTATE + 4 * D3D_TSS_COUNT * stage;
@@ -916,18 +1185,24 @@ static uint32_t content_sig(const uint8_t *p, uint32_t n)
     return h ? h : 1;
 }
 
-/* Why a draw wasn't mirrored. */
+/* Why a draw wasn't mirrored. Every draw path is counted, so the [D3DB] host
+ * draws line accounts for all of a frame's draws (S4; before, only
+ * DrawVerticesUP's skips were). */
 enum {
-    SKIP_TARGET,        /* render target isn't the back buffer (render-to-texture: S4) */
+    SKIP_TARGET,        /* a render target the host can't make (not a texture level, or its format) */
     SKIP_VS_PROGRAM,    /* a programmable vertex shader (S5) */
-    SKIP_PIXEL_SHADER,  /* a pixel shader (S4) */
     SKIP_PRIM,          /* LINELOOP, QUADSTRIP, POLYGON */
-    SKIP_TEXTURE,       /* a cube, volume or palette texture, or a format xbox_d3d8 lacks */
+    SKIP_TEXTURE,       /* a cube or volume texture, a format xbox_d3d8 lacks, or P8 with no palette */
+    SKIP_INDEXED,       /* DrawIndexedVertices with a vertex format (fixed-function 3D: S5-S6) */
+    SKIP_IMMEDIATE,     /* Begin/SetVertexData/End (S4 part 2) */
+    SKIP_VERTICES,      /* DrawVertices (never seen) */
     SKIP_COUNT
 };
-static volatile LONG g_skip[SKIP_COUNT], g_mirrored_draws, g_ev_skip, g_ev_draw, g_ev_draw_tss, g_ev_diffuse;
+static volatile LONG g_skip[SKIP_COUNT], g_mirrored_draws, g_mirrored_rt_draws, g_mirrored_ps_draws;
+static volatile LONG g_ev_skip, g_ev_draw, g_ev_draw_tss, g_ev_diffuse, g_ev_pal, g_ev_rt;
+static volatile LONG g_ev_draw_rt, g_ev_draw_tss_rt, g_ev_draw_rt_v;
 static const char *const g_skip_name[SKIP_COUNT] = {
-    "render target", "vertex program", "pixel shader", "primitive", "texture",
+    "render target", "vertex program", "primitive", "texture", "indexed", "immediate", "DrawVertices",
 };
 
 static void skip(int kind, uint32_t v)
@@ -935,6 +1210,10 @@ static void skip(int kind, uint32_t v)
     InterlockedIncrement(&g_skip[kind]);
     event(&g_ev_skip, 20, "draw not mirrored: %s (%X)", g_skip_name[kind], v);
 }
+
+#define DEV_PALETTES        0xA88u      /* palettes[4], by stage (SetPalette 0xFFE10) */
+#define XDK_FMT_P8          0x0B
+#define RES_TYPE_PALETTE    0x30000u    /* Common & 0x70000 */
 
 /* The guest texture bound to a stage, as a host descriptor. Returns 0 if
  * there is none, 1 if described, -1 if it can't be mirrored. */
@@ -947,10 +1226,8 @@ static int describe_texture(unsigned stage, d3dh_tex_t *t)
     f = MEM32(hdr + RES_FORMAT);
     sz = MEM32(hdr + RES_SIZE);
     fmt = (f >> 8) & 0xFF;
-    if ((f & 4) || ((f >> 4) & 15) != 2 || !d3dh_format_supported(fmt)) {
-        skip(SKIP_TEXTURE, f);          /* cube, not 2D, or not uploadable */
-        return -1;
-    }
+    if ((f & 4) || ((f >> 4) & 15) != 2 || !d3dh_format_supported(fmt))
+        return -1;                      /* cube, not 2D, or not uploadable */
     memset(t, 0, sizeof(*t));
     t->key = hdr;
     t->data = MEM32(hdr + RES_DATA);
@@ -969,21 +1246,190 @@ static int describe_texture(unsigned stage, d3dh_tex_t *t)
     t->bytes = d3dh_texture_bytes(fmt, t->width, t->height, t->levels, t->pitch);
     t->bits = (const uint8_t *)XBOX_PTR(phys_to_va(t->data));
     t->sig = content_sig(t->bits, t->bytes);
+    if (fmt == XDK_FMT_P8) {
+        /* S4: the stage's palette. Its Common carries the size in [31:30]
+         * (256 >> n entries) and the resource type 3 in [18:16]. */
+        uint32_t pal = MEM32(dev() + DEV_PALETTES + 4 * stage), common;
+        if (!pal)
+            return -1;
+        common = MEM32(pal + RES_COMMON);
+        t->pal_entries = 256u >> ((common >> 30) & 3);
+        t->palette = (const uint32_t *)XBOX_PTR(phys_to_va(MEM32(pal + RES_DATA)));
+        t->pal_sig = content_sig((const uint8_t *)t->palette, 4 * t->pal_entries);
+        event(&g_ev_pal, 6, "P8 texture %08X (%ux%u, %u levels) on stage %u: palette %08X, Common %08X (type %u),"
+              " %u entries, data %08X", hdr, t->width, t->height, t->levels, stage, pal, common,
+              (common >> 16) & 7, t->pal_entries, MEM32(pal + RES_DATA));
+    }
     return 1;
+}
+
+/* Where the guest draws: the back buffer, or a texture level the host can
+ * make a render target for. Returns 0, or -1 (not mirrored). `z_off`: the
+ * guest has no depth surface, so depth and stencil tests are off (the XDK
+ * SetRenderTarget turns them off with a null Z). */
+static int describe_target(d3dh_target_t *t, int *z_off)
+{
+    uint32_t d = dev(), rt = MEM32(d + DEV_RENDER_TARGET), f, sz;
+
+    memset(t, 0, sizeof(*t));
+    *z_off = MEM32(d + DEV_DEPTH_SURFACE) == 0;
+    if (strcmp(surface_kind(rt), "back") == 0)
+        return 0;
+    if (!MEM32(rt + RES_PARENT))
+        return -1;                      /* not a texture level */
+    f = MEM32(rt + RES_FORMAT);
+    sz = MEM32(rt + RES_SIZE);
+    t->format = (f >> 8) & 0xFF;
+    if (sz) {
+        t->width = (sz & 0xFFF) + 1;
+        t->height = ((sz >> 12) & 0xFFF) + 1;
+    } else {
+        t->width = 1u << ((f >> 20) & 15);
+        t->height = 1u << ((f >> 24) & 15);
+    }
+    t->data = res_data(rt);
+    if (!t->data || t->format == XDK_FMT_P8 || !d3dh_format_supported(t->format) ||
+        d3dh_texture_bytes(t->format, 4, 4, 1, 0) == 0)
+        return -1;
+    event(&g_ev_rt, 8, "render target %08X: texture level, Data %08X, %ux%u format %02X, depth %s", rt, t->data,
+          t->width, t->height, t->format, *z_off ? "none" : "set");
+    return 0;
+}
+
+/* ── S4 checks: the pixel-shader probe and the texture check ── */
+
+/* Probe inputs: four sets (v0, v1, t0-t3, ARGB) with distinct values in
+ * every channel, so a wrong register or channel shows, and spread over the
+ * range so that at least one set keeps each result off 0 and 255. */
+#define PROBE_SETS 4
+static const uint32_t g_probe_in[PROBE_SETS][6] = {
+    { 0xB0906030u, 0x40C0A020u, 0xE0F08010u, 0x80304070u, 0x6050E0C0u, 0xF0209050u },
+    { 0x80808080u, 0x7F7F7F7Fu, 0x90888078u, 0x70787F88u, 0x8C847C74u, 0x747C848Cu },
+    { 0x20406080u, 0xA0806040u, 0x406080A0u, 0x6080A0C0u, 0x80A0C0E0u, 0x302010F0u },
+    { 0xFF102030u, 0x10FFE0D0u, 0x08183848u, 0xF8E8C8A8u, 0x55AA55AAu, 0xAA55AA55u },
+};
+
+#define PS_SEEN_MAX 64
+static uint32_t g_ps_seen[PS_SEEN_MAX];
+static int g_ps_seen_n;
+
+/* Each distinct pixel shader, the first time a draw (any path) uses one:
+ * translated, drawn on the host once per probe set, and logged with its XDK
+ * def (RS 0-56 and 117) so tools/diag/pscheck.py can evaluate the same def
+ * on the CPU and compare. */
+static void ps_probe_once(void)
+{
+    uint32_t h = 2166136261u, i, out = 0;
+    unsigned gaps;
+    d3dh_ps_t ps;
+    char line[1024];
+    int len = 0, rc, k;
+
+    for (i = 0; i < XPS_DEF_DWORDS; i++)
+        h = (h ^ rs_x(i)) * 16777619u;
+    h = (h ^ rs_x(XRS_PSTEXTUREMODES)) * 16777619u;
+    for (i = 0; i < (uint32_t)g_ps_seen_n; i++)
+        if (g_ps_seen[i] == h)
+            return;
+    if (g_ps_seen_n >= PS_SEEN_MAX)
+        return;
+    g_ps_seen[g_ps_seen_n++] = h;
+    gaps = translate_ps(&ps);
+    for (i = 0; i < XPS_DEF_DWORDS; i++)
+        len += snprintf(line + len, sizeof(line) - len, "%s%08X", i ? " " : "", rs_x(i));
+    for (k = 0; k < PROBE_SETS; k++) {
+        const uint32_t *in = g_probe_in[k];
+        rc = d3dh_ps_probe(&ps, in[0], in[1], in + 2, &out);
+        fprintf(stderr, "[D3DB] ps probe %d.%d: %s %08X; gaps %X; v0 %08X v1 %08X t %08X %08X %08X %08X;"
+                " token %08X; def %s tm %08X\n", g_ps_seen_n - 1, k, rc ? "FAILED" : "result", out, gaps, in[0],
+                in[1], in[2], in[3], in[4], in[5], ps.token, line, rs_x(XRS_PSTEXTUREMODES));
+    }
+}
+
+#define TEX_SEEN_MAX 256
+static uint32_t g_tex_seen[TEX_SEEN_MAX][2];
+static int g_tex_seen_n;
+
+/* Each distinct P8 texture (by header and palette), the first time a draw
+ * (any path) binds it: uploaded through the palette and written out. */
+static void tex_check_once(void)
+{
+    unsigned s;
+    int i;
+
+    for (s = 0; s < 4; s++) {
+        d3dh_tex_t t;
+        char path[700];
+        uint32_t hdr = MEM32(dev() + DEV_TEXTURES + 4 * s);
+        if (!hdr || ((MEM32(hdr + RES_FORMAT) >> 8) & 0xFF) != XDK_FMT_P8 || describe_texture(s, &t) != 1)
+            continue;
+        for (i = 0; i < g_tex_seen_n; i++)
+            if (g_tex_seen[i][0] == hdr && g_tex_seen[i][1] == t.pal_sig)
+                break;
+        if (i < g_tex_seen_n || g_tex_seen_n >= TEX_SEEN_MAX)
+            continue;
+        g_tex_seen[g_tex_seen_n][0] = hdr;
+        g_tex_seen[g_tex_seen_n][1] = t.pal_sig;
+        g_tex_seen_n++;
+        snprintf(path, sizeof(path), "%stex_%08X_%08X.bmp", g_check_prefix, hdr, t.pal_sig);
+        fprintf(stderr, "[D3DB] texture check %s: %s (P8 %ux%u, %u levels, palette %u entries, stage %u)\n",
+                d3dh_texture_check(&t, path) == 0 ? "wrote" : "FAILED", path, t.width, t.height, t.levels,
+                t.pal_entries, s);
+    }
+}
+
+/* Every draw, on any path, before the path is mirrored or skipped. */
+static void draw_checks(void)
+{
+    if (g_psprobe && MEM32(dev() + DEV_PIXEL_SHADER))
+        ps_probe_once();
+    if (g_texcheck && g_check_prefix[0])
+        tex_check_once();
+}
+
+/* RECOMP_D3D_BRIDGE_RTLOG: a render-target draw in full, for a software
+ * re-render (tools/diag/rtcheck.py): target, primitive, the XDK states it
+ * needs, texture 0, and every vertex's dwords. */
+static void rt_log_draw(const d3db_args_t *a, const d3dh_draw_t *dr, const d3dh_tex_t *t0)
+{
+    uint32_t i, n = a->arg[1] * (a->arg[3] / 4);
+    char *line = (char *)malloc(64 + 9 * (size_t)n);
+    int len = 0;
+    uint32_t tss = D3D_TEXTURESTATE;
+
+    if (!line)
+        return;
+    for (i = 0; i < n; i++)
+        len += sprintf(line + len, " %08X", MEM32(a->arg[2] + 4 * i));
+    fprintf(stderr, "[D3DB] rtdraw target %08X prim %u verts %u stride %u fvf %X tex0 %08X %ux%u fmt %02X"
+            " blend %u %X %X op %X atest %u %X ref %X colorop %u %u %u alphaop %u %u %u addr %u %u:%s\n",
+            dr->target.data, a->arg[0], a->arg[1], a->arg[3], dr->fvf, dr->tex[0] ? t0->data : 0,
+            dr->tex[0] ? t0->width : 0, dr->tex[0] ? t0->height : 0, dr->tex[0] ? t0->format : 0,
+            rs_x(XRS_ALPHABLENDENABLE), rs_x(XRS_SRCBLEND), rs_x(XRS_DESTBLEND), rs_x(XRS_BLENDOP),
+            rs_x(XRS_ALPHATESTENABLE), rs_x(XRS_ALPHAFUNC), rs_x(XRS_ALPHAREF),
+            MEM32(tss + 4 * XTSS_COLOROP), MEM32(tss + 4 * XTSS_COLORARG1), MEM32(tss + 4 * XTSS_COLORARG2),
+            MEM32(tss + 4 * XTSS_ALPHAOP), MEM32(tss + 4 * XTSS_ALPHAARG1), MEM32(tss + 4 * XTSS_ALPHAARG2),
+            MEM32(tss + 4 * XTSS_ADDRESSU), MEM32(tss + 4 * XTSS_ADDRESSV), line);
+    free(line);
 }
 
 /* DrawVerticesUP(PrimitiveType, VertexCount, pVertexStreamZeroData,
  * VertexStreamZeroStride), after the lifted call: the same draw through
- * xbox_d3d8, with the state read from D3D's shadows at this point. */
+ * xbox_d3d8, with the state read from D3D's shadows at this point. S4 adds
+ * render targets and pixel shaders. */
 static void mirror_draw_up(const d3db_args_t *a)
 {
-    uint32_t d = dev(), vs, count = 0, prim, s;
+    uint32_t d = dev(), vs, count = 0, prim, s, i;
     d3dh_state_t rs[64], tss[4][16];
     d3dh_tex_t tex[4];
+    d3dh_ps_t ps;
     d3dh_draw_t dr;
+    int z_off;
 
+    draw_checks();
     memset(tex, 0, sizeof(tex));
-    if (strcmp(surface_kind(MEM32(d + DEV_RENDER_TARGET)), "back") != 0) {
+    memset(&dr, 0, sizeof(dr));
+    if (describe_target(&dr.target, &z_off) != 0) {
         skip(SKIP_TARGET, MEM32(d + DEV_RENDER_TARGET));
         return;
     }
@@ -992,32 +1438,46 @@ static void mirror_draw_up(const d3db_args_t *a)
         skip(SKIP_VS_PROGRAM, vs);
         return;
     }
-    if (MEM32(d + DEV_PIXEL_SHADER)) {
-        skip(SKIP_PIXEL_SHADER, MEM32(d + DEV_PIXEL_SHADER));
-        return;
-    }
     prim = xl_prim(a->arg[0], a->arg[1], &count);
     if (!prim || !count) {
         skip(SKIP_PRIM, a->arg[0]);
         return;
     }
 
-    memset(&dr, 0, sizeof(dr));
     for (s = 0; s < 4; s++) {
         int r = describe_texture(s, &tex[s]);
-        if (r < 0)
+        if (r < 0) {
+            uint32_t hdr = MEM32(d + DEV_TEXTURES + 4 * s);
+            skip(SKIP_TEXTURE, hdr ? MEM32(hdr + RES_FORMAT) : 0);
             return;
+        }
         dr.tex[s] = r ? &tex[s] : NULL;
         dr.tss[s] = tss[s];
         dr.n_tss[s] = translate_tss(s, tss[s]);
+        /* S4: MIPFILTER NONE samples level 0 only in D3D, but xbox_d3d8's
+         * sampler still walks the mip chain (MIP_POINT, MaxLOD unbounded).
+         * So such a stage gets its texture's level 0 alone. */
+        if (r)
+            for (i = 0; i < dr.n_tss[s]; i++)
+                if (tss[s][i].state == PTSS_MIPFILTER && tss[s][i].value == 0)
+                    tex[s].levels = 1;
+    }
+    if (MEM32(d + DEV_PIXEL_SHADER)) {
+        translate_ps(&ps);
+        dr.ps = &ps;
     }
     dr.rs = rs;
     dr.n_rs = translate_rs(rs);
+    if (z_off)                          /* no guest depth surface: no depth or stencil test */
+        for (i = 0; i < dr.n_rs; i++)
+            if (rs[i].state == PRS_ZENABLE || rs[i].state == PRS_ZWRITEENABLE || rs[i].state == PRS_STENCILENABLE)
+                rs[i].value = 0;
     dr.prim = prim;
     dr.prim_count = count;
     dr.stride = a->arg[3];
     dr.fvf = vs;
     dr.verts = (const void *)XBOX_PTR(a->arg[2]);
+    dr.vert_count = a->arg[1];
     dr.vp_x = MEM32(d + DEV_VIEWPORT);
     dr.vp_y = MEM32(d + DEV_VIEWPORT + 4);
     dr.vp_w = MEM32(d + DEV_VIEWPORT + 8);
@@ -1025,30 +1485,61 @@ static void mirror_draw_up(const d3db_args_t *a)
     memcpy(&dr.vp_minz, (const void *)XBOX_PTR(d + DEV_VIEWPORT + 16), 4);
     memcpy(&dr.vp_maxz, (const void *)XBOX_PTR(d + DEV_VIEWPORT + 20), 4);
 
-    if (g_ev_draw < 6) {                /* the first few draws, raw XDK values */
+    /* The first few draws, raw XDK values; render-target draws have their own
+     * allowance, as the splash uses up the first. */
+    if (dr.target.data ? g_ev_draw_rt < 8 : g_ev_draw < 12) {
         char line[400];
-        int len = 0, i;
+        int len = 0, k;
         static const int shown[] = { XRS_ZFUNC, XRS_ALPHAFUNC, XRS_ALPHABLENDENABLE, XRS_ALPHATESTENABLE,
                                      XRS_ALPHAREF, XRS_SRCBLEND, XRS_DESTBLEND, XRS_ZWRITEENABLE,
                                      XRS_STENCILFUNC, XRS_STENCILREF, XRS_LIGHTING, XRS_ZENABLE,
                                      XRS_STENCILENABLE, XRS_CULLMODE, XRS_COLORWRITEENABLE, XRS_BLENDOP };
-        for (i = 0; i < (int)(sizeof(shown) / sizeof(shown[0])); i++)
-            len += snprintf(line + len, sizeof(line) - len, " %d=%X", shown[i], rs_x(shown[i]));
-        event(&g_ev_draw, 6, "DrawVerticesUP prim %u verts %u stride %u fvf %X tex0 %08X (fmt %02X %ux%u lv %u"
-              " data %08X, %u bytes); RS%s", a->arg[0], a->arg[1], a->arg[3], vs, tex[0].key,
+        for (k = 0; k < (int)(sizeof(shown) / sizeof(shown[0])); k++)
+            len += snprintf(line + len, sizeof(line) - len, " %d=%X", shown[k], rs_x(shown[k]));
+        event(dr.target.data ? &g_ev_draw_rt : &g_ev_draw, dr.target.data ? 8 : 12, "DrawVerticesUP prim %u verts %u stride %u fvf %X target %08X (%ux%u)%s tex0 %08X"
+              " (fmt %02X %ux%u lv %u data %08X, %u bytes); RS%s", a->arg[0], a->arg[1], a->arg[3], vs,
+              dr.target.data, dr.target.width, dr.target.height, z_off ? " no depth" : "", tex[0].key,
               dr.tex[0] ? tex[0].format : 0, dr.tex[0] ? tex[0].width : 0, dr.tex[0] ? tex[0].height : 0,
               dr.tex[0] ? tex[0].levels : 0, dr.tex[0] ? tex[0].data : 0, dr.tex[0] ? tex[0].bytes : 0, line);
-        for (len = 0, i = 0; i < D3D_TSS_COUNT; i++)
-            len += snprintf(line + len, sizeof(line) - len, " %X", MEM32(D3D_TEXTURESTATE + 4 * i));
-        event(&g_ev_draw_tss, 6, "  TSS stage 0:%s", line);
+        for (len = 0, k = 0; k < D3D_TSS_COUNT; k++)
+            len += snprintf(line + len, sizeof(line) - len, " %X", MEM32(D3D_TEXTURESTATE + 4 * k));
+        event(dr.target.data ? &g_ev_draw_tss_rt : &g_ev_draw_tss, dr.target.data ? 8 : 12, "  TSS stage 0:%s",
+              line);
+        if (dr.target.data && (vs & 0x40)) {
+            uint32_t off = ((vs & 0xE) == 4 ? 16 : 12) + ((vs & 0x10) ? 12 : 0);
+            event(&g_ev_draw_rt_v, 8, "  render-target draw: vertex 0 at (%g, %g), diffuse %08X, tex0 %s%08X",
+                  (double)*(const float *)XBOX_PTR(a->arg[2]), (double)*(const float *)XBOX_PTR(a->arg[2] + 4),
+                  MEM32(a->arg[2] + off), tex[0].key && dr.tex[0] ? "Data " : "none ", dr.tex[0] ? tex[0].data : 0);
+        }
     }
     if (vs & 0x40) {                    /* D3DFVF_DIFFUSE: vertex 0's colour, for the first draws */
         uint32_t off = ((vs & 0xE) == 4 ? 16 : 12) + ((vs & 0x10) ? 12 : 0);
         event(&g_ev_diffuse, 120, "UP draw %ld at guest swap %ld: tex0 %s, vertex 0 diffuse %08X",
               (long)g_mirrored_draws, (long)g_swaps, dr.tex[0] ? "set" : "none", MEM32(a->arg[2] + off));
     }
-    if (d3dh_draw_up(&dr) == 0)
+    if (g_rtlog && dr.target.data)
+        rt_log_draw(a, &dr, &tex[0]);
+    if (d3dh_draw_up(&dr) == 0) {
         InterlockedIncrement(&g_mirrored_draws);
+        if (dr.target.data)
+            InterlockedIncrement(&g_mirrored_rt_draws);
+        if (dr.ps)
+            InterlockedIncrement(&g_mirrored_ps_draws);
+    }
+}
+
+/* The draw paths that aren't mirrored yet: counted, and checked. */
+static void mirror_draw_other(int id)
+{
+    uint32_t vs = MEM32(dev() + DEV_VS_HANDLE);
+
+    draw_checks();
+    if (id == D3DB_END)
+        skip(SKIP_IMMEDIATE, vs);
+    else if (vs & 1)
+        skip(SKIP_VS_PROGRAM, vs);
+    else
+        skip(id == D3DB_DRAW ? SKIP_VERTICES : SKIP_INDEXED, vs);
 }
 
 /* Time spent in the mirror (translate + host call, in d3db_leave), in QPC
@@ -1081,15 +1572,25 @@ static void mirror_swap(void)
                     st.clears, st.clears_colour, st.clears_depth, st.clears_partial_colour,
                     (long)g_clears_other_rt, (long)g_nolock, (long)g_interleaved, (long)g_d3dx_draws,
                     st.dumps, st.present_fails, st.present_status);
-            fprintf(stderr, "[D3DB] host draws: mirrored %ld, host draws %u (fails %u); not mirrored: target %ld,"
-                    " vertex program %ld, pixel shader %ld, primitive %ld, texture %ld; textures uploaded %u"
-                    " (fails %u, evictions %u); translation gaps: value %ld, texop %ld, diffuse arg %ld,"
+            fprintf(stderr, "[D3DB] host draws: mirrored %ld (to render targets %ld, with pixel shaders %ld),"
+                    " host draws %u (fails %u); not mirrored: target %ld, vertex program %ld, primitive %ld,"
+                    " texture %ld, indexed %ld, immediate %ld, DrawVertices %ld; textures uploaded %u (P8 %u,"
+                    " fails %u, evictions %u); translation gaps: value %ld, texop %ld, diffuse arg %ld,"
                     " frontface %ld\n",
-                    (long)g_mirrored_draws, st.draws, st.draw_fails, (long)g_skip[SKIP_TARGET],
-                    (long)g_skip[SKIP_VS_PROGRAM], (long)g_skip[SKIP_PIXEL_SHADER], (long)g_skip[SKIP_PRIM],
-                    (long)g_skip[SKIP_TEXTURE], st.tex_uploads, st.tex_upload_fails, st.tex_evictions,
-                    (long)g_gap[GAP_VALUE], (long)g_gap[GAP_TEXOP], (long)g_gap[GAP_DIFFUSE_ARG],
-                    (long)g_gap[GAP_FRONTFACE]);
+                    (long)g_mirrored_draws, (long)g_mirrored_rt_draws, (long)g_mirrored_ps_draws, st.draws,
+                    st.draw_fails, (long)g_skip[SKIP_TARGET], (long)g_skip[SKIP_VS_PROGRAM],
+                    (long)g_skip[SKIP_PRIM], (long)g_skip[SKIP_TEXTURE], (long)g_skip[SKIP_INDEXED],
+                    (long)g_skip[SKIP_IMMEDIATE], (long)g_skip[SKIP_VERTICES], st.tex_uploads, st.p8_uploads,
+                    st.tex_upload_fails, st.tex_evictions, (long)g_gap[GAP_VALUE], (long)g_gap[GAP_TEXOP],
+                    (long)g_gap[GAP_DIFFUSE_ARG], (long)g_gap[GAP_FRONTFACE]);
+            fprintf(stderr, "[D3DB] host S4: render targets %u (fails %u), draws to them %u, clears %u, sampled %u"
+                    " (while bound as the target %u); pixel-shader draws %u, probes %u; pixel-shader gaps:"
+                    " blue %ld, register %ld, output map %ld, blue-to-alpha %ld, mux LSB %ld, texture mode %ld,"
+                    " final constants %ld, V1R0 %ld\n",
+                    st.rt_created, st.rt_fails, st.rt_draws, st.rt_clears, st.rt_sampled, st.rt_feedback,
+                    st.ps_draws, st.ps_probes, (long)g_psgap[PSGAP_BLUE], (long)g_psgap[PSGAP_REG],
+                    (long)g_psgap[PSGAP_OUTMAP], (long)g_psgap[PSGAP_BLUE_TO_ALPHA], (long)g_psgap[PSGAP_MUX_LSB],
+                    (long)g_psgap[PSGAP_TEXMODE], (long)g_psgap[PSGAP_FINALCONST], (long)g_psgap[PSGAP_V1R0]);
             {
                 static LONG64 last[3];
                 LARGE_INTEGER f;
@@ -1295,9 +1796,13 @@ void d3db_leave(int id, d3db_args_t *a)
         case D3DB_CLEAR:         mirror_clear(a);         break;
         case D3DB_SWAP:          mirror_swap();           break;
         case D3DB_DRAW_UP:       mirror_draw_up(a);       break;
+        case D3DB_DRAW_INDEXED: case D3DB_END: case D3DB_DRAW:
+            mirror_draw_other(id);
+            break;
         }
         QueryPerformanceCounter(&t1);
-        InterlockedAdd64(&g_mirror_ticks[id == D3DB_DRAW_UP ? 0 : id == D3DB_SWAP ? 1 : 2],
+        InterlockedAdd64(&g_mirror_ticks[id == D3DB_DRAW_UP || id == D3DB_DRAW_INDEXED || id == D3DB_END ||
+                                         id == D3DB_DRAW ? 0 : id == D3DB_SWAP ? 1 : 2],
                          t1.QuadPart - t0.QuadPart);
     }
     if (!d3db_census)

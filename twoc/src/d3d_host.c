@@ -41,6 +41,26 @@
  * cadence: the first 8 frames that had mirrored work, then one every 10 s.
  * RECOMP_D3D_BRIDGE_DUMP_EVERY=N adds one every Nth guest swap (S3 uses it to
  * catch the splash after its fade-in, which the executor's cadence misses).
+ * RECOMP_D3D_BRIDGE_DUMP_RT=1 (S4) also writes every host render-target
+ * texture with each dump, as <prefix>NNN_rt_<Data>.bmp.
+ *
+ * S4 (notes 18.35):
+ *   - Render targets. A guest render target other than the back buffer (the
+ *     title's six 128x128 A8R8G8B8 texture levels) gets a host render-target
+ *     texture of its size and format, level 0 only, plus a depth buffer of the
+ *     same size (D3D11 won't pair a render target with a depth view of
+ *     another size, and xbox_d3d8 binds its 640x480 default when given none).
+ *     Draws and clears go to it; a guest texture with the same Data samples
+ *     it instead of guest memory. Its other levels are never rendered by the
+ *     game, so one level stands for them.
+ *   - P8 textures are expanded through the stage's guest palette to A8R8G8B8
+ *     here (the swizzle is per texel, so it survives), and the palette's
+ *     signature is part of the cache key. xbox_d3d8's own P8 path bakes a
+ *     per-stage palette into the texture it uploads, which doesn't fit a cache
+ *     shared by stages.
+ *   - Pixel shaders arrive already re-encoded for xbox_d3d8's combiner
+ *     translator (d3d_bridge.c translate_ps) and are set before each draw.
+ *     d3dh_ps_probe draws one pixel with one, for RECOMP_D3D_BRIDGE_PSPROBE.
  */
 
 #include <stdio.h>
@@ -71,7 +91,18 @@ static unsigned g_dump_seq, g_dump_first;
 static unsigned g_dump_every;           /* RECOMP_D3D_BRIDGE_DUMP_EVERY: also every Nth guest swap */
 static ULONGLONG g_last_dump_ms;
 static int g_frame_work;                /* mirrored work since the last present */
+static int g_dump_rt;                   /* RECOMP_D3D_BRIDGE_DUMP_RT: render targets too (S4) */
 static d3dh_stats_t g_st;
+
+/* S4: host render-target textures, by guest Data. */
+#define RT_SLOTS 16
+typedef struct {
+    uint32_t data, width, height, format;
+    IDirect3DTexture8 *tex;
+    IDirect3DSurface8 *surf, *depth;
+} host_rt_t;
+static host_rt_t g_rt[RT_SLOTS];
+static int g_cur_target = -1;           /* -1 the back buffer, else a g_rt index; -2 unknown */
 
 /* ── Window thread ─────────────────────────────────────────── */
 
@@ -146,8 +177,10 @@ int d3dh_create(unsigned width, unsigned height, unsigned interval, const char *
     g_interval = interval;
     if (dump_prefix) {
         const char *every = getenv("RECOMP_D3D_BRIDGE_DUMP_EVERY");
+        const char *rt = getenv("RECOMP_D3D_BRIDGE_DUMP_RT");
         snprintf(g_dump_prefix, sizeof(g_dump_prefix), "%s", dump_prefix);
         g_dump_every = every ? (unsigned)strtoul(every, NULL, 0) : 0;
+        g_dump_rt = rt && *rt && strcmp(rt, "0") != 0;
     }
 
     args.made = CreateEventA(NULL, TRUE, FALSE, NULL);
@@ -216,9 +249,103 @@ int d3dh_ready(void)
     return g_ready;
 }
 
+/* ── Render targets (S4) ───────────────────────────────────── */
+
+/* The host render target for guest Data, created on first use. Called with
+ * g_lock held. Returns its index, or -1. */
+static int rt_find(const d3dh_target_t *t, int create)
+{
+    int i, s, free_i = -1;
+    IDirect3DTexture8 *tex = NULL;
+    IDirect3DSurface8 *surf = NULL, *depth = NULL;
+    HRESULT hr;
+
+    for (i = 0; i < RT_SLOTS; i++) {
+        if (g_rt[i].tex && g_rt[i].data == t->data) {
+            if (g_rt[i].width == t->width && g_rt[i].height == t->height && g_rt[i].format == t->format)
+                return i;
+            if (!create)
+                return -1;
+            if (g_cur_target == i) {    /* the guest reused the memory for another shape */
+                g_dev->lpVtbl->SetRenderTarget(g_dev, NULL, NULL);
+                g_cur_target = -1;
+            }
+            for (s = 0; s < 4; s++)     /* xbox_d3d8 keeps the bound pointer */
+                g_dev->lpVtbl->SetTexture(g_dev, s, NULL);
+            g_rt[i].depth->lpVtbl->Release(g_rt[i].depth);
+            g_rt[i].surf->lpVtbl->Release(g_rt[i].surf);
+            g_rt[i].tex->lpVtbl->Release(g_rt[i].tex);
+            memset(&g_rt[i], 0, sizeof(g_rt[i]));
+            free_i = i;
+            break;
+        }
+        if (!g_rt[i].tex && free_i < 0)
+            free_i = i;
+    }
+    if (!create || free_i < 0)
+        return -1;
+    hr = g_dev->lpVtbl->CreateTexture(g_dev, t->width, t->height, 1, D3DUSAGE_RENDERTARGET, (D3DFORMAT)t->format,
+                                      D3DPOOL_DEFAULT, &tex);
+    if (SUCCEEDED(hr))
+        hr = tex->lpVtbl->GetSurfaceLevel(tex, 0, &surf);
+    if (SUCCEEDED(hr))
+        hr = g_dev->lpVtbl->CreateDepthStencilSurface(g_dev, t->width, t->height, D3DFMT_D24S8,
+                                                      D3DMULTISAMPLE_NONE, &depth);
+    if (FAILED(hr) || !surf || !depth) {
+        if (depth)
+            depth->lpVtbl->Release(depth);
+        if (surf)
+            surf->lpVtbl->Release(surf);
+        if (tex)
+            tex->lpVtbl->Release(tex);
+        if (++g_st.rt_fails <= 5)
+            fprintf(stderr, "[D3DB] host render target %08X (%ux%u format %02X) not created: 0x%08lX\n",
+                    t->data, t->width, t->height, t->format, (unsigned long)hr);
+        return -1;
+    }
+    g_rt[free_i].data = t->data;
+    g_rt[free_i].width = t->width;
+    g_rt[free_i].height = t->height;
+    g_rt[free_i].format = t->format;
+    g_rt[free_i].tex = tex;
+    g_rt[free_i].surf = surf;
+    g_rt[free_i].depth = depth;
+    g_st.rt_created++;
+    fprintf(stderr, "[D3DB] host render target %d for guest Data %08X: %ux%u format %02X\n", free_i, t->data,
+            t->width, t->height, t->format);
+    /* Start from black, as the guest's memory was (never seen otherwise). */
+    g_dev->lpVtbl->SetRenderTarget(g_dev, surf, depth);
+    g_dev->lpVtbl->Clear(g_dev, 0, NULL, D3DCLEAR_TARGET | D3DCLEAR_ZBUFFER | D3DCLEAR_STENCIL, 0, 1.0f, 0);
+    g_cur_target = free_i;
+    return free_i;
+}
+
+/* Bind where a draw or clear goes. Called with g_lock held. Returns 0, or -1
+ * if the host has no render target for it. */
+static int bind_target(const d3dh_target_t *t)
+{
+    int i;
+
+    if (!t->data) {
+        if (g_cur_target != -1) {
+            g_dev->lpVtbl->SetRenderTarget(g_dev, NULL, NULL);     /* the default views */
+            g_cur_target = -1;
+        }
+        return 0;
+    }
+    i = rt_find(t, 1);
+    if (i < 0)
+        return -1;
+    if (g_cur_target != i) {
+        g_dev->lpVtbl->SetRenderTarget(g_dev, g_rt[i].surf, g_rt[i].depth);
+        g_cur_target = i;
+    }
+    return 0;
+}
+
 /* ── Clear ─────────────────────────────────────────────────── */
 
-void d3dh_clear(uint32_t xdk_flags, uint32_t color, float z, uint32_t stencil)
+void d3dh_clear(const d3dh_target_t *target, uint32_t xdk_flags, uint32_t color, float z, uint32_t stencil)
 {
     DWORD pc = 0;
 
@@ -232,6 +359,12 @@ void d3dh_clear(uint32_t xdk_flags, uint32_t color, float z, uint32_t stencil)
         pc |= D3DCLEAR_STENCIL;
 
     EnterCriticalSection(&g_lock);
+    if (bind_target(target) != 0) {
+        LeaveCriticalSection(&g_lock);
+        return;
+    }
+    if (target->data)
+        g_st.rt_clears++;
     g_st.clears++;
     if ((xdk_flags & 0xF0) && (xdk_flags & 0xF0) != 0xF0)
         g_st.clears_partial_colour++;   /* D3D11 can't mask a clear: not mirrored */
@@ -276,9 +409,12 @@ static uint32_t level_bytes(D3DFORMAT fmt, uint32_t w, uint32_t h, uint32_t pitc
     return d3d8_row_pitch(fmt, w) * (d3d8_format_is_compressed(fmt) ? (h + 3) / 4 : h);
 }
 
+#define XDK_FMT_P8          0x0B
+#define XDK_FMT_A8R8G8B8    0x06        /* swizzled, like P8: what a P8 texture is uploaded as */
+
 int d3dh_format_supported(uint32_t format)
 {
-    return !d3d8_format_is_palettized((D3DFORMAT)format) &&
+    return (format == XDK_FMT_P8 || !d3d8_format_is_palettized((D3DFORMAT)format)) &&
            d3d8_to_dxgi_format((D3DFORMAT)format) != DXGI_FORMAT_UNKNOWN &&
            d3d8_format_bpp((D3DFORMAT)format) != 0;
 }
@@ -319,7 +455,11 @@ static int tex_upload(IDirect3DTexture8 *tex, const d3dh_tex_t *t)
         D3DLOCKED_RECT lr;
         if (FAILED(tex->lpVtbl->LockRect(tex, l, &lr, NULL, 0)))
             return -1;
-        if (t->pitch) {
+        if (t->format == XDK_FMT_P8) {  /* S4: indices -> ARGB, texel for texel (swizzled order kept) */
+            uint32_t *dst = (uint32_t *)lr.pBits, i, mask = t->pal_entries - 1;
+            for (i = 0; i < w * h; i++)
+                dst[i] = t->palette[src[i] & mask];
+        } else if (t->pitch) {
             uint32_t row = d3d8_row_pitch((D3DFORMAT)t->format, w), y;
             for (y = 0; y < h; y++)
                 memcpy((uint8_t *)lr.pBits + (size_t)y * lr.Pitch, src + (size_t)y * t->pitch,
@@ -338,6 +478,13 @@ static IDirect3DTexture8 *tex_get(const d3dh_tex_t *t)
     host_tex_t *e = NULL, *oldest = NULL;
     uint32_t i, h = (t->key >> 4) * 2654435761u;
 
+    for (i = 0; i < RT_SLOTS; i++)      /* S4: what the host rendered, not guest memory */
+        if (g_rt[i].tex && g_rt[i].data == t->data) {
+            g_st.rt_sampled++;
+            if (g_cur_target == (int)i)
+                g_st.rt_feedback++;     /* D3D11 unbinds the view: the stage samples black */
+            return g_rt[i].tex;
+        }
     g_tex_clock++;
     for (i = 0; i < TEX_CACHE_SLOTS; i++) {
         host_tex_t *s = &g_tex[(h + i) & (TEX_CACHE_SLOTS - 1)];
@@ -360,12 +507,15 @@ static IDirect3DTexture8 *tex_get(const d3dh_tex_t *t)
     }
     if (e->tex && (e->desc.data != t->data || e->desc.format != t->format || e->desc.width != t->width ||
                    e->desc.height != t->height || e->desc.levels != t->levels || e->desc.pitch != t->pitch ||
-                   e->desc.sig != t->sig))
+                   e->desc.sig != t->sig || e->desc.pal_sig != t->pal_sig))
         tex_release(e);
     if (!e->tex) {
         IDirect3DTexture8 *tex = NULL;
+        uint32_t host_fmt = t->format == XDK_FMT_P8 ? XDK_FMT_A8R8G8B8 : t->format;
+        if (t->format == XDK_FMT_P8 && (!t->palette || !t->pal_entries))
+            return NULL;
         if (FAILED(g_dev->lpVtbl->CreateTexture(g_dev, t->width, t->height, t->levels, 0,
-                                                (D3DFORMAT)t->format, D3DPOOL_MANAGED, &tex)) ||
+                                                (D3DFORMAT)host_fmt, D3DPOOL_MANAGED, &tex)) ||
             tex_upload(tex, t) != 0) {
             if (tex)
                 tex->lpVtbl->Release(tex);
@@ -377,7 +527,10 @@ static IDirect3DTexture8 *tex_get(const d3dh_tex_t *t)
         e->tex = tex;
         e->desc = *t;
         e->desc.bits = NULL;
+        e->desc.palette = NULL;
         g_st.tex_uploads++;
+        if (t->format == XDK_FMT_P8)
+            g_st.p8_uploads++;
     }
     e->last_use = g_tex_clock;
     return e->tex;
@@ -398,15 +551,55 @@ void d3dh_texture_touch(uint32_t data)
 
 /* ── Draws (S3) ────────────────────────────────────────────── */
 
+/* xbox_d3d8's fixed-function vertex shader maps pre-transformed (XYZRHW)
+ * x and y through the back buffer's size, whatever the viewport: on a
+ * 128x128 render target a full-target quad lands in its top-left fifth.
+ * D3D takes them as pixels of the render target. So such vertices are
+ * copied and rescaled, x' = (x - vp.X) * back_w / vp.W (y likewise), which
+ * the viewport then maps back to pixel x. Identity for a full-screen
+ * viewport on the back buffer (the splash). Called with g_lock held. */
+static const void *rescale_rhw(const void *verts, uint32_t count, uint32_t stride, const D3DVIEWPORT8 *vp)
+{
+    static uint8_t *buf;
+    static size_t cap;
+    size_t n = (size_t)count * stride;
+    float sx, sy;
+    uint32_t i;
+
+    if (!vp->Width || !vp->Height || (vp->X == 0 && vp->Y == 0 && vp->Width == g_w && vp->Height == g_h))
+        return verts;
+    if (n > cap) {
+        uint8_t *nb = (uint8_t *)realloc(buf, n);
+        if (!nb)
+            return verts;
+        buf = nb;
+        cap = n;
+    }
+    memcpy(buf, verts, n);
+    sx = (float)g_w / (float)vp->Width;
+    sy = (float)g_h / (float)vp->Height;
+    for (i = 0; i < count; i++) {
+        float *p = (float *)(buf + (size_t)i * stride);
+        p[0] = (p[0] - (float)vp->X) * sx;
+        p[1] = (p[1] - (float)vp->Y) * sy;
+    }
+    return buf;
+}
+
 int d3dh_draw_up(const d3dh_draw_t *d)
 {
     D3DVIEWPORT8 vp;
     HRESULT hr;
     unsigned i, s;
+    const void *verts;
 
     if (!g_ready)
         return -1;
     EnterCriticalSection(&g_lock);
+    if (bind_target(&d->target) != 0) {
+        LeaveCriticalSection(&g_lock);
+        return -1;
+    }
     vp.X = d->vp_x;
     vp.Y = d->vp_y;
     vp.Width = d->vp_w;
@@ -423,9 +616,21 @@ int d3dh_draw_up(const d3dh_draw_t *d)
                                                 d->tss[s][i].value);
     for (i = 0; i < d->n_rs; i++)
         g_dev->lpVtbl->SetRenderState(g_dev, (D3DRENDERSTATETYPE)d->rs[i].state, d->rs[i].value);
+    if (d->ps && d->ps->token) {        /* S4: the combiner states, then the token */
+        for (i = 0; i < d->ps->n_rs; i++)
+            g_dev->lpVtbl->SetRenderState(g_dev, (D3DRENDERSTATETYPE)d->ps->rs[i].state, d->ps->rs[i].value);
+        g_dev->lpVtbl->SetPixelShader(g_dev, d->ps->token);
+        g_st.ps_draws++;
+    } else {
+        g_dev->lpVtbl->SetPixelShader(g_dev, 0);
+    }
     g_dev->lpVtbl->SetVertexShader(g_dev, d->fvf);
-    hr = g_dev->lpVtbl->DrawPrimitiveUP(g_dev, (D3DPRIMITIVETYPE)d->prim, d->prim_count, d->verts, d->stride);
+    verts = (d->fvf & D3DFVF_POSITION_MASK) == D3DFVF_XYZRHW ? rescale_rhw(d->verts, d->vert_count, d->stride, &vp)
+                                                               : d->verts;
+    hr = g_dev->lpVtbl->DrawPrimitiveUP(g_dev, (D3DPRIMITIVETYPE)d->prim, d->prim_count, verts, d->stride);
     g_st.draws++;
+    if (d->target.data)
+        g_st.rt_draws++;
     if (FAILED(hr) && ++g_st.draw_fails <= 5)
         fprintf(stderr, "[D3DB] host DrawPrimitiveUP failed 0x%08lX (prim %u count %u stride %u fvf %X)\n",
                 (unsigned long)hr, d->prim, d->prim_count, d->stride, d->fvf);
@@ -436,39 +641,48 @@ int d3dh_draw_up(const d3dh_draw_t *d)
 
 /* ── Dumps ─────────────────────────────────────────────────── */
 
-/* The back buffer (R8G8B8A8) as a bottom-up 24-bit BMP, like the executor's. */
-static void dump_back_buffer(const char *path)
+/* Level 0 of a 32-bit colour texture (R8G8B8A8 like the back buffer, or
+ * B8G8R8A8 like an A8R8G8B8 render target) as a bottom-up 24-bit BMP, like
+ * the executor's, or with `alpha` a 32-bit one that keeps alpha. `staging`
+ * caches a staging copy (NULL: a temporary one). */
+static void dump_texture(ID3D11Texture2D *src, ID3D11Texture2D **staging, const char *path, int alpha)
 {
     ID3D11Device *d = d3d8_GetD3D11Device();
     ID3D11DeviceContext *ctx = d3d8_GetD3D11Context();
-    ID3D11Texture2D *bb = NULL;
+    ID3D11Texture2D *st = staging ? *staging : NULL;
     D3D11_TEXTURE2D_DESC desc;
     D3D11_MAPPED_SUBRESOURCE m;
     uint8_t hdr[54], *row;
     uint32_t w, h, y, x, pad, filesz, rowbytes;
+    int bgra;
     FILE *f;
 
-    if (FAILED(IDXGISwapChain_GetBuffer(d3d8_GetSwapChain(), 0, &IID_ID3D11Texture2D, (void **)&bb)))
+    ID3D11Texture2D_GetDesc(src, &desc);
+    bgra = desc.Format == DXGI_FORMAT_B8G8R8A8_UNORM || desc.Format == DXGI_FORMAT_B8G8R8X8_UNORM;
+    if (!bgra && desc.Format != DXGI_FORMAT_R8G8B8A8_UNORM)
         return;
-    ID3D11Texture2D_GetDesc(bb, &desc);
-    if (!g_staging) {
+    if (!st) {
+        desc.MipLevels = 1;
+        desc.ArraySize = 1;
         desc.Usage = D3D11_USAGE_STAGING;
         desc.BindFlags = 0;
         desc.CPUAccessFlags = D3D11_CPU_ACCESS_READ;
         desc.MiscFlags = 0;
-        if (FAILED(ID3D11Device_CreateTexture2D(d, &desc, NULL, &g_staging))) {
-            ID3D11Texture2D_Release(bb);
+        if (FAILED(ID3D11Device_CreateTexture2D(d, &desc, NULL, &st)))
             return;
-        }
+        if (staging)
+            *staging = st;
     }
-    ID3D11DeviceContext_CopyResource(ctx, (ID3D11Resource *)g_staging, (ID3D11Resource *)bb);
-    ID3D11Texture2D_Release(bb);
-    if (FAILED(ID3D11DeviceContext_Map(ctx, (ID3D11Resource *)g_staging, 0, D3D11_MAP_READ, 0, &m)))
+    ID3D11DeviceContext_CopySubresourceRegion(ctx, (ID3D11Resource *)st, 0, 0, 0, 0, (ID3D11Resource *)src, 0, NULL);
+    if (FAILED(ID3D11DeviceContext_Map(ctx, (ID3D11Resource *)st, 0, D3D11_MAP_READ, 0, &m))) {
+        if (!staging)
+            ID3D11Texture2D_Release(st);
         return;
+    }
 
     w = desc.Width;
     h = desc.Height;
-    rowbytes = w * 3;
+    rowbytes = w * (alpha ? 4 : 3);
     pad = (4 - (rowbytes & 3)) & 3;
     filesz = 54 + (rowbytes + pad) * h;
     f = fopen(path, "wb");
@@ -482,15 +696,18 @@ static void dump_back_buffer(const char *path)
         memcpy(hdr + 18, &w, 4);
         memcpy(hdr + 22, &h, 4);
         hdr[26] = 1;
-        hdr[28] = 24;
+        hdr[28] = alpha ? 32 : 24;
         fwrite(hdr, 1, sizeof(hdr), f);
         row = (uint8_t *)malloc(rowbytes + pad);
         for (y = h; row && y-- > 0; ) {
-            const uint8_t *src = (const uint8_t *)m.pData + (size_t)y * m.RowPitch;
+            const uint8_t *px = (const uint8_t *)m.pData + (size_t)y * m.RowPitch;
+            uint32_t k = alpha ? 4 : 3;
             for (x = 0; x < w; x++) {
-                row[3 * x + 0] = src[4 * x + 2];
-                row[3 * x + 1] = src[4 * x + 1];
-                row[3 * x + 2] = src[4 * x + 0];
+                row[k * x + 0] = px[4 * x + (bgra ? 0 : 2)];
+                row[k * x + 1] = px[4 * x + 1];
+                row[k * x + 2] = px[4 * x + (bgra ? 2 : 0)];
+                if (alpha)
+                    row[k * x + 3] = px[4 * x + 3];
             }
             memset(row + rowbytes, 0, pad);
             fwrite(row, 1, rowbytes + pad, f);
@@ -498,7 +715,52 @@ static void dump_back_buffer(const char *path)
         free(row);
         fclose(f);
     }
-    ID3D11DeviceContext_Unmap(ctx, (ID3D11Resource *)g_staging, 0);
+    ID3D11DeviceContext_Unmap(ctx, (ID3D11Resource *)st, 0);
+    if (!staging)
+        ID3D11Texture2D_Release(st);
+}
+
+static void dump_back_buffer(const char *path)
+{
+    ID3D11Texture2D *bb = NULL;
+
+    if (FAILED(IDXGISwapChain_GetBuffer(d3d8_GetSwapChain(), 0, &IID_ID3D11Texture2D, (void **)&bb)))
+        return;
+    dump_texture(bb, &g_staging, path, 0);
+    ID3D11Texture2D_Release(bb);
+}
+
+/* S4: every host render target, as <dump path without .bmp>_rt_<Data>.bmp. */
+static void dump_targets(const char *path)
+{
+    char p[640];
+    size_t n = strlen(path);
+    int i;
+
+    for (i = 0; i < RT_SLOTS; i++)
+        if (g_rt[i].tex) {
+            snprintf(p, sizeof(p), "%.*s_rt_%08X.bmp", (int)(n > 4 ? n - 4 : n), path, g_rt[i].data);
+            dump_texture(((D3D8Texture *)g_rt[i].tex)->d3d11_texture, NULL, p, 0);
+        }
+}
+
+/* S4: upload a guest texture the way a draw would, without drawing, and
+ * write its level 0 as a 32-bit BMP (the P8 check). */
+int d3dh_texture_check(const d3dh_tex_t *t, const char *path)
+{
+    IDirect3DTexture8 *tex;
+    int ok = -1;
+
+    if (!g_ready)
+        return -1;
+    EnterCriticalSection(&g_lock);
+    tex = tex_get(t);
+    if (tex) {
+        dump_texture(((D3D8Texture *)tex)->d3d11_texture, NULL, path, 1);
+        ok = 0;
+    }
+    LeaveCriticalSection(&g_lock);
+    return ok;
 }
 
 /* ── Present ───────────────────────────────────────────────── */
@@ -518,6 +780,8 @@ void d3dh_present(double t_s, unsigned swap_no)
         char path[600];
         snprintf(path, sizeof(path), "%s%03u.bmp", g_dump_prefix, g_dump_seq++);
         dump_back_buffer(path);
+        if (g_dump_rt)
+            dump_targets(path);
         if (g_frame_work && g_dump_first < DUMP_FIRST_FRAMES)
             g_dump_first++;
         g_last_dump_ms = now;
@@ -542,6 +806,121 @@ void d3dh_present(double t_s, unsigned swap_no)
         fprintf(stderr, "[D3DB] host Present returned status 0x%08lX\n", (unsigned long)hr);
     g_frame_work = 0;
     LeaveCriticalSection(&g_lock);
+}
+
+/* ── Pixel-shader probe (S4) ───────────────────────────────── */
+
+#define PROBE_SIZE 4
+
+int d3dh_ps_probe(const d3dh_ps_t *ps, uint32_t diffuse, uint32_t specular, const uint32_t tex_argb[4],
+                  uint32_t *out_argb)
+{
+    static IDirect3DTexture8 *rt_tex, *src[4];
+    static IDirect3DSurface8 *rt_surf, *rt_depth;
+    static ID3D11Texture2D *staging;
+    static const d3dh_state_t fixed_rs[] = {
+        { 7, 0 }, { 14, 0 }, { 27, 0 }, { 15, 0 }, { 28, 0 }, { 22, 1 }, { 52, 0 }, { 168, 0xF },
+        { 137, 0 }, { 8, 3 }, { 9, 2 }, { 29, 1 },
+    };  /* ZENABLE, ZWRITEENABLE, ALPHABLENDENABLE, ALPHATESTENABLE, FOGENABLE, CULLMODE NONE, STENCILENABLE,
+         * COLORWRITEENABLE, LIGHTING, FILLMODE SOLID, SHADEMODE GOURAUD, SPECULARENABLE */
+    struct {
+        float x, y, z, rhw;
+        uint32_t diffuse, specular;
+        float uv[4][2];
+    } v[4];
+    D3DVIEWPORT8 vp;
+    D3DLOCKED_RECT lr;
+    D3D11_MAPPED_SUBRESOURCE m;
+    ID3D11DeviceContext *ctx;
+    HRESULT hr = S_OK;
+    unsigned i, s;
+    int ok = -1;
+
+    if (!g_ready || !ps || !ps->token)
+        return -1;
+    EnterCriticalSection(&g_lock);
+    ctx = d3d8_GetD3D11Context();
+    if (!rt_tex) {
+        D3D11_TEXTURE2D_DESC desc;
+        hr = g_dev->lpVtbl->CreateTexture(g_dev, PROBE_SIZE, PROBE_SIZE, 1, D3DUSAGE_RENDERTARGET,
+                                          (D3DFORMAT)XDK_FMT_A8R8G8B8, D3DPOOL_DEFAULT, &rt_tex);
+        if (SUCCEEDED(hr))
+            hr = rt_tex->lpVtbl->GetSurfaceLevel(rt_tex, 0, &rt_surf);
+        if (SUCCEEDED(hr))
+            hr = g_dev->lpVtbl->CreateDepthStencilSurface(g_dev, PROBE_SIZE, PROBE_SIZE, D3DFMT_D24S8,
+                                                          D3DMULTISAMPLE_NONE, &rt_depth);
+        for (s = 0; s < 4 && SUCCEEDED(hr); s++)
+            hr = g_dev->lpVtbl->CreateTexture(g_dev, 1, 1, 1, 0, (D3DFORMAT)XDK_FMT_A8R8G8B8, D3DPOOL_MANAGED,
+                                              &src[s]);
+        if (SUCCEEDED(hr)) {
+            ID3D11Texture2D_GetDesc(((D3D8Texture *)rt_tex)->d3d11_texture, &desc);
+            desc.Usage = D3D11_USAGE_STAGING;
+            desc.BindFlags = 0;
+            desc.CPUAccessFlags = D3D11_CPU_ACCESS_READ;
+            desc.MiscFlags = 0;
+            hr = ID3D11Device_CreateTexture2D(d3d8_GetD3D11Device(), &desc, NULL, &staging);
+        }
+        if (FAILED(hr)) {
+            fprintf(stderr, "[D3DB] host pixel-shader probe unavailable: 0x%08lX\n", (unsigned long)hr);
+            rt_tex = NULL;              /* leaks what was made; tried once per call */
+            LeaveCriticalSection(&g_lock);
+            return -1;
+        }
+    }
+    for (s = 0; s < 4; s++)
+        if (SUCCEEDED(src[s]->lpVtbl->LockRect(src[s], 0, &lr, NULL, 0))) {
+            *(uint32_t *)lr.pBits = tex_argb[s];
+            src[s]->lpVtbl->UnlockRect(src[s], 0);
+        }
+
+    g_dev->lpVtbl->SetRenderTarget(g_dev, rt_surf, rt_depth);
+    g_cur_target = -2;                  /* the next mirrored draw rebinds its own */
+    g_dev->lpVtbl->Clear(g_dev, 0, NULL, D3DCLEAR_TARGET | D3DCLEAR_ZBUFFER, 0x7F7F7F7F, 1.0f, 0);
+    vp.X = vp.Y = 0;
+    vp.Width = vp.Height = PROBE_SIZE;
+    vp.MinZ = 0.0f;
+    vp.MaxZ = 1.0f;
+    g_dev->lpVtbl->SetViewport(g_dev, &vp);
+    for (s = 0; s < 4; s++) {
+        g_dev->lpVtbl->SetTexture(g_dev, s, (IDirect3DBaseTexture8 *)src[s]);
+        g_dev->lpVtbl->SetTextureStageState(g_dev, s, D3DTSS_MAGFILTER, 1);
+        g_dev->lpVtbl->SetTextureStageState(g_dev, s, D3DTSS_MINFILTER, 1);
+        g_dev->lpVtbl->SetTextureStageState(g_dev, s, D3DTSS_MIPFILTER, 0);
+        g_dev->lpVtbl->SetTextureStageState(g_dev, s, D3DTSS_ADDRESSU, 3);
+        g_dev->lpVtbl->SetTextureStageState(g_dev, s, D3DTSS_ADDRESSV, 3);
+        g_dev->lpVtbl->SetTextureStageState(g_dev, s, D3DTSS_TEXCOORDINDEX, s);
+    }
+    for (i = 0; i < sizeof(fixed_rs) / sizeof(fixed_rs[0]); i++)
+        g_dev->lpVtbl->SetRenderState(g_dev, (D3DRENDERSTATETYPE)fixed_rs[i].state, fixed_rs[i].value);
+    for (i = 0; i < ps->n_rs; i++)
+        g_dev->lpVtbl->SetRenderState(g_dev, (D3DRENDERSTATETYPE)ps->rs[i].state, ps->rs[i].value);
+    g_dev->lpVtbl->SetPixelShader(g_dev, ps->token);
+    g_dev->lpVtbl->SetVertexShader(g_dev, D3DFVF_XYZRHW | D3DFVF_DIFFUSE | D3DFVF_SPECULAR | D3DFVF_TEX4);
+    memset(v, 0, sizeof(v));
+    for (i = 0; i < 4; i++) {
+        v[i].x = (i & 1) ? (float)PROBE_SIZE : 0.0f;
+        v[i].y = (i & 2) ? (float)PROBE_SIZE : 0.0f;
+        v[i].z = 0.5f;
+        v[i].rhw = 1.0f;
+        v[i].diffuse = diffuse;
+        v[i].specular = specular;
+        for (s = 0; s < 4; s++)
+            v[i].uv[s][0] = v[i].uv[s][1] = 0.5f;
+    }
+    hr = g_dev->lpVtbl->DrawPrimitiveUP(g_dev, D3DPT_TRIANGLESTRIP, 2, rescale_rhw(v, 4, sizeof(v[0]), &vp), sizeof(v[0]));
+    g_dev->lpVtbl->SetPixelShader(g_dev, 0);
+    if (SUCCEEDED(hr)) {
+        ID3D11DeviceContext_CopySubresourceRegion(ctx, (ID3D11Resource *)staging, 0, 0, 0, 0,
+                                                  (ID3D11Resource *)((D3D8Texture *)rt_tex)->d3d11_texture, 0, NULL);
+        if (SUCCEEDED(ID3D11DeviceContext_Map(ctx, (ID3D11Resource *)staging, 0, D3D11_MAP_READ, 0, &m))) {
+            *out_argb = *(const uint32_t *)((const uint8_t *)m.pData + m.RowPitch + 4);    /* pixel (1,1) */
+            ID3D11DeviceContext_Unmap(ctx, (ID3D11Resource *)staging, 0);
+            ok = 0;
+        }
+    }
+    g_st.ps_probes++;
+    LeaveCriticalSection(&g_lock);
+    return ok;
 }
 
 void d3dh_stats(d3dh_stats_t *out)
