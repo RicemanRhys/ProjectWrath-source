@@ -1,6 +1,6 @@
 # Diagnostics
 
-These are debugging tools from steps 24 to 27 (notes 18.26 to 18.29). None of them are part of the build.
+These are debugging tools from steps 24 to 30 (notes 18.26 to 18.32). None of them are part of the build.
 
 | File | What it does |
 |---|---|
@@ -18,6 +18,8 @@ These are debugging tools from steps 24 to 27 (notes 18.26 to 18.29). None of th
 | `probe.py` | `python probe.py INPUT_FILE OUT_PREFIX [hold_s] [none\|up\|down\|left\|right]`. Needs a game started with `RECOMP_DEV_INPUT_FILE=INPUT_FILE`. It snapshots idle (A, A2), stick held (B, C) and released (D, E), writes `OUT_PREFIX.npz` and lists dwords that move only while the stick is held. Compare several runs, including `none`: one probe alone is swamped by particles and clocks. |
 | `crashpos.py` | `python crashpos.py INPUT_FILE`. It drives the stick 5 s in each direction and prints Crash's position (player object `0x8F5120`, `+0x6C`) and state byte (`+0x172`) once a second. |
 | `step28_ktap.patch` | A temporary patch against `c262d7d`: a kernel-call tap in `coop_kernel_call` (`recomp_manual.c`), armed by `ktrace=1` in the input file. It logs each guest kernel call with four args and `eax`, at most 20 per thunk slot. Slot numbers are the XBE thunk table's (file offset `0x14B000`, slot 0 = ordinal 294). Never commit it applied. |
+| `drive.py` | Step 30 (notes 18.32). `python drive.py TAG SECONDS [--bridge] [--no-pbexec] [--no-input] [--intro=S] [--outdir=DIR]`. One unattended run through splash, title, menu, intro and hub: `-FastTitle -AutoStart` variables plus `RECOMP_DEV_INPUT_FILE`, Start `S` s after `INTRO1.wav` opens (default 6), then A and the stick once `THEMEL.wav` opens in the hub. Clears every other `RECOMP_*` variable. Writes `TAG.err.log`, `TAG.out.log` and `TAG.events.txt`. |
+| `census.py` | Step 30. `python census.py TAG.err.log [--keys]`. It summarises a `RECOMP_D3D_BRIDGE=1` log (the `[D3DB] c` blocks from `twoc/src/d3d_bridge.c`) by phase: boot, splash, title, menu, intro-load, intro, hub-load, hub. It prints calls per swap, draw paths and primitive types, texture formats, FVFs and shader objects, the RS/TSS indices that change between draws (with XDK names), render targets, locks, copies and threads. A block that straddles a phase marker is listed but left out of the tables. |
 | `discover.py` | `python discover.py TAG.disc.bin [t_from] [t_to] [min_rate] [max_rate]`. It lists guest dwords that rose at a steady rate in an `fpsrun.py --discover` dump. That's how `0x25A660` was found. |
 
 Using the patch:
