@@ -1,7 +1,8 @@
 """One unattended run through splash, title, menu, intro and hub (notes 18.32).
 
   python drive.py TAG SECONDS [--bridge] [--tint] [--point] [--census] [--no-pbexec] [--no-input] [--intro=S]
-                  [--dump=DIR] [--dump-every=N] [--dump-rt] [--rtlog] [--psprobe] [--texcheck] [--skiptex] [--outdir=DIR] [--exe=PATH]
+                  [--dump=DIR] [--dump-every=N] [--dump-rt] [--rtlog] [--psprobe] [--texcheck] [--skiptex] [--drawlog=A-B]
+                  [--outdir=DIR] [--exe=PATH]
 
 Environment as run_twoc.ps1 -FastTitle -AutoStart, plus RECOMP_DEV_INPUT_FILE
 (TAG.pad.txt). Input is keyed off the stderr log: Start S seconds (default 6)
@@ -20,6 +21,8 @@ the hub, A once, stick up 5 s, stick right 5 s.
   --texcheck RECOMP_D3D_BRIDGE_TEXCHECK=1: write each P8 texture once, as uploaded (S4; needs --dump)
   --skiptex  RECOMP_D3D_BRIDGE_SKIPTEX=1: write each texture a skipped draw binds, once per kind, and each
              new immediate draw's screen box (step 34; needs --dump; skiptex.py decodes the DXT ones)
+  --drawlog=A-B  RECOMP_D3D_BRIDGE_DRAWLOG=A-B: log every draw in guest swaps A-B (path, texture, screen box,
+             texture-coordinate range) and, with --dump, a host dump of each of those swaps (step 35)
   --no-pbexec leaves RECOMP_PB_EXEC unset.
   --exe=PATH runs a copy of crash_twoc.exe (so the build can be relinked meanwhile);
              the game still runs in the repo root.
@@ -66,6 +69,8 @@ if "--census" in flags:
 if "dump" in opts:
     os.makedirs(opts["dump"], exist_ok=True)
     env["RECOMP_FB_DUMP"] = os.path.join(os.path.abspath(opts["dump"]), "shot")
+if "drawlog" in opts:
+    env["RECOMP_D3D_BRIDGE_DRAWLOG"] = opts["drawlog"]
 if "dump-every" in opts:
     env["RECOMP_D3D_BRIDGE_DUMP_EVERY"] = opts["dump-every"]
 for flag, var in (("--dump-rt", "RECOMP_D3D_BRIDGE_DUMP_RT"), ("--rtlog", "RECOMP_D3D_BRIDGE_RTLOG"),
