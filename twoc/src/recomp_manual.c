@@ -2051,6 +2051,179 @@ void sub_000ECB2B(void)
     esp += 12;                                 /* ret 8 */
 }
 
+/* ── DSOUND voice-off: the APU interrupt it waits for (notes 18.42) ── */
+
+/*
+ * A released voice is "stopping" ([voice+0x12] & 0x8000, set by
+ * sub_0013B76E) until it is turned off. DSOUND polls it through
+ * sub_0013ADB8: from the wait loop sub_0013B682, and from its per-voice
+ * dispatchers sub_0013C64D and sub_0013D174 when the game asks for status
+ * (level setup waits for every voice and stream to stop). sub_0013ADB8 forces
+ * the voice off once 5 s have passed since the stop stamp at +0x80 (that is
+ * DSOUND's count at [0x1531A8]): the 3-5 s full stops at voice lines and at
+ * every level change (notes 18.40, 18.41).
+ *
+ * On hardware the voice is turned off from DSOUND's APU interrupt (KINTERRUPT
+ * 0x153260, ISR 0x13A0FB) within a frame or so of the release finishing: the
+ * voice processor idles the voice, the front end traps SE2FE_IDLE_VOICE
+ * (method 0x8000, the voice's handle in FEDECPARAM) and interrupts, and the
+ * ISR's sub_00139F42 -> sub_00139EC1 -> sub_001399D0(handle) calls
+ * sub_0013AAF6(1), which clears 0x8000.
+ *
+ * The emulated APU (DSOUND sets FETFORCE1 bit 15, so the trap is on) gets as
+ * far as the trap and no further:
+ *   - it never raises ISTS for it (the flag it sets for that is never read),
+ *     and nothing delivers an interrupt on this vector, so the front end
+ *     stays TRAPPED and its frame thread stops running the voice processor;
+ *   - its VOICE_OFF doesn't take a voice out of its list. The first voice
+ *     turned off stays at the head of the list, linked to itself, so from
+ *     then on every frame's walk traps on that voice again and never reaches
+ *     the others: a voice released later goes inactive in the model but is
+ *     never reported (seen: handle 0x45 inactive, every trap naming 0x44).
+ *
+ * So whenever a stopping voice is polled, this does what the interrupt would
+ * have done by then, and then runs the lifted body as before:
+ *   - FECTL trapped on an idle voice that is real (FEDECMETH 0x8000; the
+ *     voice DSOUND has on that handle, [context + 0x330 + handle * 4], is
+ *     stopping; and the model has idled it): write 0 to ISTS, then call the
+ *     ISR with DSOUND's KINTERRUPT and context, the way the runtime calls a
+ *     connected ISR for vblank. ISTS is write-one-to-clear, so the write
+ *     clears nothing; the model's ISTS write path raises FETINTSTS for the
+ *     trap, and GINTSTS if IEN enables it, as the trap should have.
+ *   - Trapped on anything else, the stale entry: DSOUND never sees it (a
+ *     first version handed it on, and DSOUND turned off the playing voice
+ *     that had been given the handle, then crashed in sub_0013AAF6). The
+ *     front end resumes the way DSOUND's own handler resumes it,
+ *     sub_0013EE94(0) then (1), so the voice processor runs again.
+ *   - The polled voice inactive in the model (PAR_STATE ACTIVE_VOICE clear in
+ *     its voice block, [0x153310] + handle * 0x80): report its idle as its
+ *     trap would, sub_001399D0(handle) with the ISR's context. That checks
+ *     the voice itself, as it does for a real trap.
+ * The ISR runs for nothing else: FECTL keeps the trap reason after a resume,
+ * so it would read the stale method again. One thread at a time (a CPU
+ * doesn't take an interrupt twice); a thread that finds it busy just carries
+ * on. The 5 s force-off stays as the fallback.
+ */
+#define VW_KINTERRUPT         0x00153260u      /* DSOUND's KINTERRUPT: routine, context, vector */
+#define VW_ISR                0x0013A0FBu
+#define VW_RET                0x0013B694u      /* in the wait loop, where the interrupt lands */
+#define VW_VOICE_BLOCKS       0x00153310u      /* [ ] = the APU's voice blocks, 0x80 bytes each */
+#define VW_FORCED_OFF         0x001531A8u      /* DSOUND's count of 5 s force-offs */
+#define APU_ISTS_VA           0xFE801000u
+#define APU_IEN_VA            0xFE801004u
+#define APU_FECTL_VA          0xFE801100u
+#define APU_FEDECMETH_VA      0xFE801300u
+#define APU_FEDECPARAM_VA     0xFE801304u
+#define APU_FETFORCE1_VA      0xFE801504u
+#define VW_IDLE_VOICE         0x8000u          /* SE2FE_IDLE_VOICE */
+#define APU_ISTS_GINTSTS      0x1u
+#define APU_FECTL_TRAPPED     0xE0u
+#define APU_PAR_STATE         0x54u
+#define APU_PAR_STATE_ACTIVE  (1u << 21)
+
+extern uint32_t xbox_GetConnectedInterrupt(uint32_t vector);
+
+static SRWLOCK g_vw_isr_lock = SRWLOCK_INIT;
+static volatile LONG g_vw_isr_runs, g_vw_idles, g_vw_freed, g_vw_stale;
+
+/* DSOUND's KINTERRUPT, if it's connected; 0 if not (yet). */
+static uint32_t vw_kinterrupt(void)
+{
+    uint32_t kint = VW_KINTERRUPT;
+
+    if (MEM32(kint) != VW_ISR || xbox_GetConnectedInterrupt(MEM32(kint + 8)) != kint)
+        return 0;
+    return kint;
+}
+
+/* Whether the model has idled the voice with this hardware handle. */
+static int vw_model_idle(uint32_t handle)
+{
+    uint32_t blocks = MEM32(VW_VOICE_BLOCKS);
+
+    return blocks && handle < 0x100 && !(MEM32(blocks + handle * 0x80 + APU_PAR_STATE) & APU_PAR_STATE_ACTIVE);
+}
+
+/* A pending front-end trap, handled; then the voice's idle, if the model has
+ * idled it. Caller holds g_vw_isr_lock. */
+static void vw_apu_interrupt(uint32_t kint, uint32_t voice)
+{
+    uint32_t ctx = MEM32(kint + 4), handle, trapped_voice;
+
+    if ((MEM32(APU_FECTL_VA) & APU_FECTL_TRAPPED) == APU_FECTL_TRAPPED) {
+        handle = MEM32(APU_FEDECPARAM_VA) & 0xFFFF;
+        trapped_voice = MEM32(APU_FEDECMETH_VA) == VW_IDLE_VOICE && handle < 0x100
+                        ? MEM32(ctx + 0x330 + handle * 4) : 0;
+        if (trapped_voice && (MEM16(trapped_voice + 0x12) & 0x8000) && vw_model_idle(handle)) {
+            MEM32(APU_ISTS_VA) = 0;        /* raises the trap's status */
+            if (MEM32(APU_ISTS_VA) & APU_ISTS_GINTSTS) {
+                PUSH32(esp, ctx);
+                PUSH32(esp, kint);
+                PUSH32(esp, VW_RET);
+                RECOMP_ABI_CALL(VW_ISR, sub_0013A0FB);     /* ret 8 */
+                InterlockedIncrement(&g_vw_isr_runs);
+            }
+        } else {
+            /* A stale trap: the model's list still holds a voice turned off
+             * earlier (whose handle may now be another, playing voice's).
+             * DSOUND never sees it; the front end resumes as DSOUND's own
+             * handler resumes it, sub_0013EE94(0) then (1). */
+            ecx = ctx + 8;
+            PUSH32(esp, 0);
+            PUSH32(esp, VW_RET);
+            RECOMP_ABI_CALL(0x0013EE94u, sub_0013EE94);     /* ret 4 */
+            ecx = ctx + 8;
+            PUSH32(esp, 1);
+            PUSH32(esp, VW_RET);
+            RECOMP_ABI_CALL(0x0013EE94u, sub_0013EE94);
+            InterlockedIncrement(&g_vw_stale);
+        }
+    }
+    if (!(MEM16(voice + 0x12) & 0x8000))
+        return;
+    handle = MEM16(voice + 0xA + 2 * MEM8(voice + 0x64));
+    if (vw_model_idle(handle)) {
+        ecx = ctx;
+        PUSH32(esp, handle);
+        PUSH32(esp, VW_RET);
+        RECOMP_ABI_CALL(0x001399D0u, sub_001399D0); /* ret 4 */
+        InterlockedIncrement(&g_vw_idles);
+    }
+}
+
+/* sub_0013ADB8 (thiscall, the voice; ret): see above. */
+extern void sub_0013ADB8_gen(void);
+void sub_0013ADB8(void)
+{
+    static LONG last_forced = -1;
+    uint32_t voice = ecx, kint;
+    LONG freed, forced;
+
+    if ((MEM16(voice + 0x12) & 0x8001) == 0x8001 && (kint = vw_kinterrupt()) != 0
+            && TryAcquireSRWLockExclusive(&g_vw_isr_lock)) {
+        if (g_vw_idles == 0 && g_vw_isr_runs == 0)
+            fprintf(stderr, "[VOICEOFF] first stopping voice %08X: FECTL %08X ISTS %08X IEN %08X FETFORCE1 %08X\n",
+                    voice, MEM32(APU_FECTL_VA), MEM32(APU_ISTS_VA), MEM32(APU_IEN_VA), MEM32(APU_FETFORCE1_VA));
+        vw_apu_interrupt(kint, voice);
+        ReleaseSRWLockExclusive(&g_vw_isr_lock);
+        if (!(MEM16(voice + 0x12) & 0x8000)) {
+            freed = InterlockedIncrement(&g_vw_freed);
+            if (freed <= 10 || freed % 50 == 0)
+                fprintf(stderr, "[VOICEOFF] voice %08X off at its poll; %ld so far (ISR runs %ld, idles reported %ld, stale traps %ld),"
+                                " DSOUND 5 s force-offs %u\n",
+                        voice, (long)freed, (long)g_vw_isr_runs, (long)g_vw_idles, (long)g_vw_stale,
+                        MEM32(VW_FORCED_OFF));
+        }
+    }
+    ecx = voice;
+    sub_0013ADB8_gen();
+    forced = (LONG)MEM32(VW_FORCED_OFF);
+    if (forced != last_forced && forced > 0) {
+        last_forced = forced;
+        fprintf(stderr, "[VOICEOFF] DSOUND forced a voice off after 5 s (%ld so far)\n", (long)forced);
+    }
+}
+
 /* ── DSOUND 3D-listener maintenance: null-interface guard ─────────────── */
 
 /*
