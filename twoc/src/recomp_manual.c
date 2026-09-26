@@ -349,6 +349,7 @@ typedef struct {
 
 static coop_thread_t g_coop[COOP_MAX_THREADS];
 static SRWLOCK g_coop_lock = SRWLOCK_INIT;
+static volatile LONG g_coop_created;    /* records made, for the spawn wait (S7) */
 static volatile LONG g_coop_logged;
 static RECOMP_TLS coop_thread_t *t_coop;
 static RECOMP_TLS uint32_t t_coop_kernel_va;   /* set by the lookup, read by the call */
@@ -363,30 +364,50 @@ int coop_holds_cs(uint32_t cs_va);
 
 static const char *const coop_state_name[] = { "in guest code", "in a kernel call", "parked" };
 
-/* The record for a thread id, created if asked. NULL if the table is full. */
+/* The record for a thread id, created if asked. NULL if the table is full.
+ * A worker's record is given back when it ends (coop_forget, S7): every level
+ * load starts a loading-screen thread, so an attract loop would otherwise fill
+ * the table after ~30 menu -> demo cycles. */
 static coop_thread_t *coop_find(DWORD tid, int create)
 {
-    coop_thread_t *t = NULL;
+    coop_thread_t *t = NULL, *empty = NULL;
     int i;
 
     AcquireSRWLockExclusive(&g_coop_lock);
-    for (i = 0; i < COOP_MAX_THREADS && g_coop[i].tid; i++)
+    for (i = 0; i < COOP_MAX_THREADS; i++) {
         if (g_coop[i].tid == tid) {
             t = &g_coop[i];
             break;
         }
-    if (!t && create && i < COOP_MAX_THREADS) {
-        t = &g_coop[i];
+        if (!g_coop[i].tid && !empty)
+            empty = &g_coop[i];
+    }
+    if (!t && create && empty) {
+        t = empty;
         t->suspend = 0;
         t->state = COOP_GUEST;
         t->locks = 0;
         t->acquiring = 0;
         t->deferred = 0;
-        t->wake = CreateEventA(NULL, TRUE, TRUE, NULL);
+        if (t->wake)
+            SetEvent(t->wake);          /* a reused record keeps its event */
+        else
+            t->wake = CreateEventA(NULL, TRUE, TRUE, NULL);
         t->tid = tid;
+        InterlockedIncrement(&g_coop_created);
     }
     ReleaseSRWLockExclusive(&g_coop_lock);
     return t;
+}
+
+/* A worker is ending: its record can serve the next thread. */
+static void coop_forget(coop_thread_t *t)
+{
+    if (!t)
+        return;
+    AcquireSRWLockExclusive(&g_coop_lock);
+    t->tid = 0;
+    ReleaseSRWLockExclusive(&g_coop_lock);
 }
 
 static coop_thread_t *coop_self(void)
@@ -443,6 +464,9 @@ static void coop_leave(coop_thread_t *self)
 }
 
 static void heap_watch(void);
+static int hg_kernel_call(uint32_t va, coop_thread_t *self);
+static void hg_enter(void);
+static void hg_leave(void);
 
 /* Every guest kernel call, via recomp_lookup_manual. */
 static void coop_kernel_call(void)
@@ -457,7 +481,8 @@ static void coop_kernel_call(void)
 
     if (enter && self)
         InterlockedExchange(&self->acquiring, 1);
-    recomp_lookup_kernel(va)();            /* the lookup also selects this thread's dispatch slot */
+    if (!hg_kernel_call(va, self))         /* the guest heap guard, below (S7) */
+        recomp_lookup_kernel(va)();        /* the lookup also selects this thread's dispatch slot */
     if (enter) {
         if (t_cs_n < COOP_CS_TRACK)
             t_cs_held[t_cs_n] = cs;
@@ -700,7 +725,9 @@ static void vm_NtAllocateVirtualMemory(void)
         return;                            /* failed, or a commit on an existing region */
     base = MEM32(base_va);
     size = (MEM32(size_va) + 0xFFFu) & ~0xFFFu;
+    hg_enter();
     blk = xbox_HeapBlockSize(base);
+    hg_leave();
     if (blk < size + VM_WASTE_MIN)
         return;
     AcquireSRWLockExclusive(&g_vm_lock);
@@ -725,22 +752,27 @@ static void vm_NtFreeVirtualMemory(void)
 {
     uint32_t base_va = MEM32(esp + 4), size_va = MEM32(esp + 8), type = MEM32(esp + 12);
     uint32_t base = base_va ? MEM32(base_va) : 0;
-    uint32_t blk = xbox_HeapBlockSize(base);
+    uint32_t blk;
     coop_thread_t *self;
+    int release, decommit;
 
+    self = coop_enter();
+    hg_enter();
+    blk = xbox_HeapBlockSize(base);
     /* A block start: the byte before it isn't in the same block. */
-    int release = (type & VM_MEM_RELEASE) && blk && xbox_HeapBlockSize(base - 1) != blk + 1;
-    int decommit = !(type & VM_MEM_RELEASE) && (type & VM_MEM_DECOMMIT) && base;
-
+    release = (type & VM_MEM_RELEASE) && blk && xbox_HeapBlockSize(base - 1) != blk + 1;
+    decommit = !(type & VM_MEM_RELEASE) && (type & VM_MEM_DECOMMIT) && base;
+    if (release)
+        xbox_HeapFree(base);
+    hg_leave();
     if (!release && !decommit) {
+        coop_leave(self);
         InterlockedIncrement(&g_vm_bridged);
         t_coop_kernel_va = MEM32(VM_NTFREE_THUNK);
         coop_kernel_call();
         return;
     }
-    self = coop_enter();
     if (release) {
-        xbox_HeapFree(base);
         if (size_va)
             MEM32(size_va) = blk;
         InterlockedIncrement(&g_vm_released);
@@ -754,6 +786,167 @@ static void vm_NtFreeVirtualMemory(void)
     if (release)
         vm_waste_forget(base);
     heap_watch();
+}
+
+/* ── Guest heap guard; thread TIBs (S7, notes 18.40) ──────── */
+
+/*
+ * The runtime's heap (xbox_HeapAlloc/xbox_HeapFree: one block table and a
+ * bump pointer, reached from NtAllocateVirtualMemory, the pool, thread
+ * stacks and TIBs) has no lock. The game's own locks keep its heap calls
+ * apart (no two were ever in flight at once, splash to hub and five level
+ * loads), except around its threads:
+ *
+ *   - A worker's TIB is allocated on the new host thread
+ *     (bridge_thread_main -> xbox_AllocThreadTib) while the creator carries
+ *     on. At the first level load the loader's TIB and the main thread's next
+ *     2.6 MB level block got the same bump address, 0x01B50000.
+ *   - PsTerminateSystemThread frees the worker's stack while other threads
+ *     allocate.
+ *   - The TIB is never freed at all. The heap reuses a freed block whole
+ *     (first fit, no split), so a loader's small TIB could keep a freed
+ *     1.2 MB D3D block or a 2.6 MB level block live for good: 1,200 to
+ *     5,379 KiB more heap per menu -> demo cycle until the fifth demo's load
+ *     ran it out (the "640x480x4 block per level load" of 18.34).
+ *
+ * The runtime's thread code is internal, so this is done at the kernel-call
+ * boundary, in twoc/ (like NtFreeVirtualMemory above):
+ *   - One guard, a Win32 mutex, around every guest kernel call that touches
+ *     that heap (below) and around the hand-written NtAllocate/NtFree paths.
+ *     A mutex because a worker's PsTerminateSystemThread never returns: the
+ *     guard it holds is abandoned at ExitThread, and the next waiter gets it.
+ *     It is taken inside the call (depth 1), where a thread never parks.
+ *   - PsCreateSystemThreadEx keeps the guard until the new thread has its
+ *     TIB: the heap's live-block count has grown by its stack and TIB, or the
+ *     thread has made its first kernel call (after its TIB), with a timeout.
+ *     Not for the first call, which runs the game itself (INLINE mode) and
+ *     never returns, nor with RECOMP_WORKERS=inline.
+ *   - PsTerminateSystemThread on a worker (a TIB other than the main one)
+ *     frees its TIB first, then gives back its cooperative-suspend record.
+ *     Nothing reads the guest TIB after that: the bridge only logs, frees the
+ *     stack and calls ExitThread.
+ */
+#define HG_PS_CREATE_THUNK     0x0015AA8Cu     /* [thunk] = PsCreateSystemThreadEx (ordinal 255) */
+#define HG_PS_TERMINATE_THUNK  0x0015AA88u     /* [thunk] = PsTerminateSystemThread (ordinal 258) */
+#define HG_TIB_MAIN            0x00004000u     /* xbox_memory_layout.h XBOX_TIB_MAIN */
+#define HG_SPAWN_WAIT_MS       2000
+
+static const uint32_t g_hg_thunks[] = {
+    0x0015AB3Cu,        /* ExAllocatePool (14) */
+    0x0015AC10u,        /* ExAllocatePoolWithTag (15) */
+    0x0015AB98u,        /* ExFreePool (17) */
+    0x0015AB38u,        /* IoCreateDevice (65) */
+    VM_NTALLOC_THUNK,   /* NtAllocateVirtualMemory (184) */
+    VM_NTFREE_THUNK,    /* NtFreeVirtualMemory (199), what the hand-write passes on */
+    0x0015AB04u,        /* RtlUnicodeStringToAnsiString (308) */
+    0x0015AAD0u,        /* MmFreeContiguousMemory (171), what the hand-write passes on */
+};
+
+static HANDLE g_hg_mutex;
+static INIT_ONCE g_hg_once = INIT_ONCE_STATIC_INIT;
+static volatile LONG g_hg_abandoned, g_hg_tibs_freed, g_hg_spawns, g_hg_spawn_timeouts, g_hg_spawn_max_ms;
+
+static BOOL CALLBACK hg_init(PINIT_ONCE once, PVOID param, PVOID *ctx)
+{
+    (void)once; (void)param; (void)ctx;
+    g_hg_mutex = CreateMutexA(NULL, FALSE, NULL);
+    return g_hg_mutex != NULL;
+}
+
+static void hg_enter(void)
+{
+    InitOnceExecuteOnce(&g_hg_once, hg_init, NULL, NULL);
+    if (WaitForSingleObject(g_hg_mutex, INFINITE) == WAIT_ABANDONED)
+        InterlockedIncrement(&g_hg_abandoned);  /* a worker ended in PsTerminateSystemThread holding it */
+}
+
+static void hg_leave(void)
+{
+    ReleaseMutex(g_hg_mutex);
+}
+
+/* PsCreateSystemThreadEx (ordinal 255): see above. */
+static void hg_ps_create(uint32_t va)
+{
+    static volatile LONG calls;
+    const char *workers = getenv("RECOMP_WORKERS");
+    xbox_heap_stats_t s0, s;
+    LONG reg0;
+    ULONGLONG t0;
+    LONG ms;
+
+    if (InterlockedIncrement(&calls) == 1 || (workers && !strcmp(workers, "inline"))) {
+        recomp_lookup_kernel(va)();
+        return;
+    }
+    hg_enter();
+    xbox_HeapStats(&s0);
+    reg0 = g_coop_created;
+    recomp_lookup_kernel(va)();
+    xbox_HeapStats(&s);
+    if (eax == 0 && s.live_blocks > s0.live_blocks) {        /* a stack was taken: a thread was spawned */
+        t0 = GetTickCount64();
+        while (s.live_blocks < s0.live_blocks + 2 && g_coop_created == reg0) {
+            if (GetTickCount64() - t0 >= HG_SPAWN_WAIT_MS) {
+                if (InterlockedIncrement(&g_hg_spawn_timeouts) <= 5)
+                    fprintf(stderr, "[THREAD] spawn: no TIB seen after %u ms; the guard lets go\n",
+                            HG_SPAWN_WAIT_MS);
+                break;
+            }
+            SwitchToThread();
+            xbox_HeapStats(&s);
+        }
+        ms = (LONG)(GetTickCount64() - t0);
+        if (ms > g_hg_spawn_max_ms)
+            g_hg_spawn_max_ms = ms;
+        InterlockedIncrement(&g_hg_spawns);
+    }
+    hg_leave();
+}
+
+/* PsTerminateSystemThread (ordinal 258): see above. */
+static void hg_ps_terminate(uint32_t va, coop_thread_t *self)
+{
+    uint32_t tib = g_fs_base, blk = 0;
+    int freed = 0;
+
+    hg_enter();
+    if (tib && tib != HG_TIB_MAIN) {
+        blk = xbox_HeapBlockSize(tib);
+        if (blk && xbox_HeapBlockSize(tib - 1) != blk + 1) {
+            xbox_HeapFree(tib);
+            freed = 1;
+            InterlockedIncrement(&g_hg_tibs_freed);
+        }
+        fprintf(stderr, "[THREAD] worker %lu ends: TIB %08X (%u byte block) %s\n", GetCurrentThreadId(), tib, blk,
+                freed ? "freed" : "not a heap block, kept");
+        coop_forget(self);
+    }
+    recomp_lookup_kernel(va)();            /* a worker ends inside (ExitThread), abandoning the guard */
+    hg_leave();
+}
+
+/* coop_kernel_call's dispatch for the calls above. 0: not one of them. */
+static int hg_kernel_call(uint32_t va, coop_thread_t *self)
+{
+    int i;
+
+    if (va == MEM32(HG_PS_CREATE_THUNK)) {
+        hg_ps_create(va);
+        return 1;
+    }
+    if (va == MEM32(HG_PS_TERMINATE_THUNK)) {
+        hg_ps_terminate(va, self);
+        return 1;
+    }
+    for (i = 0; i < (int)(sizeof(g_hg_thunks) / sizeof(g_hg_thunks[0])); i++)
+        if (va == MEM32(g_hg_thunks[i])) {
+            hg_enter();
+            recomp_lookup_kernel(va)();
+            hg_leave();
+            return 1;
+        }
+    return 0;
 }
 
 /* ── MmAllocateContiguousMemory(Ex) / MmFreeContiguousMemory ── */
@@ -1049,11 +1242,14 @@ static void heap_watch(void)
     xbox_HeapStats(&s);
     fprintf(stderr, "[HEAPSTAT] used %u/%u KiB (%.1f%%); live %u KiB in %u blocks; "
                     "free %u KiB in %u blocks, largest %u KiB; VM released %ld (%ld KiB), "
-                    "decommits %ld, bridged %ld; reuse slack %u KiB live, max %u KiB, %u events\n",
+                    "decommits %ld, bridged %ld; reuse slack %u KiB live, max %u KiB, %u events; "
+                    "threads: TIBs freed %ld, spawn waits %ld (timeouts %ld, longest %ld ms), guard abandoned %ld\n",
             s.used / 1024, s.total / 1024, s.total ? 100.0 * s.used / s.total : 0.0,
             s.live / 1024, s.live_blocks, s.free / 1024, s.free_blocks, s.largest_free / 1024,
             (long)g_vm_released, (long)g_vm_released_kb, (long)g_vm_decommits, (long)g_vm_bridged,
-            g_vm_waste_live / 1024, g_vm_waste_max / 1024, g_vm_waste_events);
+            g_vm_waste_live / 1024, g_vm_waste_max / 1024, g_vm_waste_events,
+            (long)g_hg_tibs_freed, (long)g_hg_spawns, (long)g_hg_spawn_timeouts, (long)g_hg_spawn_max_ms,
+            (long)g_hg_abandoned);
     {
         uint32_t live, free_b;
         int free_n;
