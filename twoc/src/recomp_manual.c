@@ -675,6 +675,9 @@ static void coop_NtResumeThread(void)
  *     the bridge, as before.
  * It runs inside the cooperative kernel-call boundary, like any other kernel
  * call, so a suspended thread can't stop holding the heap.
+ *
+ * Since 18.42 new regions come from a zone of their own (below, "The VM
+ * zone"), and a region from the zone is released back to it.
  */
 #define VM_NTALLOC_THUNK      0x0015AB08u      /* [thunk] = NtAllocateVirtualMemory (ordinal 184) */
 #define VM_NTFREE_THUNK       0x0015AB0Cu      /* [thunk] = NtFreeVirtualMemory (ordinal 199) */
@@ -690,7 +693,8 @@ static volatile LONG g_vm_released, g_vm_released_kb, g_vm_decommits, g_vm_bridg
  * The heap reuses a freed block first-fit without splitting it (notes 18.27),
  * so a small request can take a whole multi-MB block. Watched, not fixed:
  * each NtAllocateVirtualMemory that lands in a block at least 64 KiB bigger
- * than it asked for is recorded here until that block is released.
+ * than it asked for is recorded here until that block is released. Since
+ * 18.42 only regions the zone can't hold reach the heap.
  */
 static struct { uint32_t base, waste; } g_vm_waste[VM_WASTE_SLOTS];
 static SRWLOCK g_vm_lock = SRWLOCK_INIT;
@@ -710,15 +714,218 @@ static void vm_waste_forget(uint32_t base)
     ReleaseSRWLockExclusive(&g_vm_lock);
 }
 
+/*
+ * The VM zone (notes 18.42).
+ *
+ * Nearly all of the game's virtual memory is XAPI's RtlAllocateHeap passing
+ * big blocks straight to NtAllocateVirtualMemory (MEM_COMMIT at 0xF0C51,
+ * MEM_RELEASE at 0xF0EFA): the level pool (7 MB at boot, 10 MB from the menu
+ * on) and each level file's buffer (1-4 MB), allocated and released at every
+ * load. Given back to the heap, a released block went whole to the next
+ * request it could hold (first fit, no split): at the hub a 7 MB request
+ * held the old 10 MB pool and a 1 MB one a 2.6 MB block, and the slack piled
+ * up. Cutting released blocks up here instead wasn't enough either: the
+ * heap's blocks are exact byte sizes with page-alignment padding between
+ * them, so two released neighbours never merged, and every level whose
+ * buffer outgrew the biggest piece took 4 MB more of the bump space (four
+ * loads ran it out).
+ *
+ * On a console none of this arises: a region is contiguous virtual memory
+ * over whatever physical pages are free. Here a guest address is its
+ * physical place, so the regions need an allocator that keeps free space in
+ * one piece. The zone is one heap block taken at the first new region (at
+ * boot, from bump space, so it costs its size and nothing more): every region
+ * after that is cut from it, page-aligned and a whole number of pages, from
+ * the smallest free range that holds it; a released region goes back and
+ * merges with the free ranges on either side. The heap keeps VM_ZONE_SPARE
+ * for everything else it serves (thread stacks and TIBs, the pool arena and
+ * its big blocks, the runtime's own). A region the zone can't hold, and any
+ * region asked for at a given address, goes to the bridge as before.
+ *
+ * Reported as the bridge does: the size asked back through RegionSize, and
+ * zeroed (its whole pages; the bridge zeroed the bytes asked). A commit
+ * inside a zone region is the bridge's no-op, as for any live block.
+ * NtQueryVirtualMemory doesn't look at blocks. The ranges are kept on the
+ * host side, not in guest memory.
+ */
+#define VR_MAX                2048
+#define VR_PAGE               0x1000u
+#define VM_ZONE_SPARE         (10u * 1024u * 1024u)
+
+typedef struct { uint32_t base, size; } vr_range_t;
+
+static vr_range_t g_vr_free[VR_MAX], g_vr_live[VR_MAX];   /* each sorted by base */
+static int g_vr_free_n, g_vr_live_n;
+static uint32_t g_vr_zone, g_vr_zone_size;                 /* 0 = not made yet */
+static int g_vr_zone_failed;
+static uint32_t g_vr_free_bytes, g_vr_live_bytes, g_vr_live_peak;
+static volatile LONG g_vr_cut, g_vr_returned, g_vr_to_heap, g_vr_table_full;
+static SRWLOCK g_vr_lock = SRWLOCK_INIT;
+
+/* The first index whose range starts at or above va. */
+static int vr_lower(const vr_range_t *r, int n, uint32_t va)
+{
+    int lo = 0, hi = n;
+
+    while (lo < hi) {
+        int mid = (lo + hi) / 2;
+        if (r[mid].base < va)
+            lo = mid + 1;
+        else
+            hi = mid;
+    }
+    return lo;
+}
+
+static int vr_insert(vr_range_t *r, int *n, int i, uint32_t base, uint32_t size)
+{
+    if (*n == VR_MAX)
+        return 0;
+    memmove(&r[i + 1], &r[i], (*n - i) * sizeof(r[0]));
+    r[i].base = base;
+    r[i].size = size;
+    (*n)++;
+    return 1;
+}
+
+static void vr_remove(vr_range_t *r, int *n, int i)
+{
+    memmove(&r[i], &r[i + 1], (*n - i - 1) * sizeof(r[0]));
+    (*n)--;
+}
+
+static int vr_in_zone(uint32_t va)
+{
+    return g_vr_zone && va >= g_vr_zone && va - g_vr_zone < g_vr_zone_size;
+}
+
+/* Takes the zone from the heap. Caller holds g_vr_lock. */
+static void vr_make_zone(void)
+{
+    xbox_heap_stats_t s;
+    uint32_t size;
+
+    hg_enter();
+    xbox_HeapStats(&s);
+    size = s.total - s.used > VM_ZONE_SPARE ? (s.total - s.used - VM_ZONE_SPARE) & ~(VR_PAGE - 1) : 0;
+    g_vr_zone = size ? xbox_HeapAlloc(size, VR_PAGE) : 0;
+    hg_leave();
+    if (g_vr_zone) {
+        g_vr_zone_size = size;
+        g_vr_free[0].base = g_vr_zone;
+        g_vr_free[0].size = size;
+        g_vr_free_n = 1;
+        g_vr_free_bytes = size;
+    } else {
+        g_vr_zone_failed = 1;
+    }
+    fprintf(stderr, "[VM] zone %u KiB at %08X, %u KiB of the heap left for the rest%s\n",
+            size / 1024, g_vr_zone, (s.total - s.used - size) / 1024,
+            g_vr_zone ? "" : ": no room, regions stay on the heap");
+}
+
+/* [base, base + size) becomes free, merged with its neighbours. 0 if the
+ * table is full. Caller holds g_vr_lock. */
+static int vr_free_add(uint32_t base, uint32_t size)
+{
+    int i = vr_lower(g_vr_free, g_vr_free_n, base);
+    int down = i > 0 && g_vr_free[i - 1].base + g_vr_free[i - 1].size == base;
+    int up = i < g_vr_free_n && base + size == g_vr_free[i].base;
+
+    if (down && up) {
+        g_vr_free[i - 1].size += size + g_vr_free[i].size;
+        vr_remove(g_vr_free, &g_vr_free_n, i);
+    } else if (down) {
+        g_vr_free[i - 1].size += size;
+    } else if (up) {
+        g_vr_free[i].base = base;
+        g_vr_free[i].size += size;
+    } else if (!vr_insert(g_vr_free, &g_vr_free_n, i, base, size)) {
+        return 0;
+    }
+    g_vr_free_bytes += size;
+    return 1;
+}
+
+/* `need` bytes (a page multiple) from the smallest free range that holds
+ * them, at its start, or 0. Every range starts and ends on a page, so there
+ * is never padding to strand. Caller holds g_vr_lock. */
+static uint32_t vr_take(uint32_t need)
+{
+    uint32_t at;
+    int i, best = -1;
+
+    if (g_vr_live_n == VR_MAX)
+        return 0;
+    for (i = 0; i < g_vr_free_n; i++)
+        if (g_vr_free[i].size >= need && (best < 0 || g_vr_free[i].size < g_vr_free[best].size))
+            best = i;
+    if (best < 0)
+        return 0;
+    at = g_vr_free[best].base;
+    if (g_vr_free[best].size == need) {
+        vr_remove(g_vr_free, &g_vr_free_n, best);
+    } else {
+        g_vr_free[best].base += need;
+        g_vr_free[best].size -= need;
+    }
+    g_vr_free_bytes -= need;
+    vr_insert(g_vr_live, &g_vr_live_n, vr_lower(g_vr_live, g_vr_live_n, at), at, need);
+    g_vr_live_bytes += need;
+    if (g_vr_live_bytes > g_vr_live_peak)
+        g_vr_live_peak = g_vr_live_bytes;
+    return at;
+}
+
+/* Releases a zone region; its size, or 0 if base isn't the start of a live
+ * one. Caller holds g_vr_lock. */
+static uint32_t vr_give(uint32_t base)
+{
+    int i = vr_lower(g_vr_live, g_vr_live_n, base);
+    uint32_t size;
+
+    if (i == g_vr_live_n || g_vr_live[i].base != base)
+        return 0;
+    size = g_vr_live[i].size;
+    vr_remove(g_vr_live, &g_vr_live_n, i);
+    g_vr_live_bytes -= size;
+    if (!vr_free_add(base, size))
+        InterlockedIncrement(&g_vr_table_full);    /* stays out of use; counted */
+    return size;
+}
+
 /* NTSTATUS NtAllocateVirtualMemory(PVOID *BaseAddress, ULONG_PTR ZeroBits,
  *     PSIZE_T RegionSize, ULONG AllocationType, ULONG Protect); ret 20.
- * The bridge does the work; this only measures the block it got. */
+ * A new region comes from the zone when it fits (above); otherwise the bridge
+ * does the work, and this measures the block it got. */
 static void vm_NtAllocateVirtualMemory(void)
 {
     uint32_t base_va = MEM32(esp + 4), size_va = MEM32(esp + 12), type = MEM32(esp + 16);
     uint32_t hint = base_va ? MEM32(base_va) : 0;
     uint32_t base, size, blk;
 
+    size = size_va ? MEM32(size_va) : 0;
+    if (base_va && size && !hint && (type & 0x3000) && size <= 0xFFFFFFFFu - VR_PAGE) {
+        coop_thread_t *self = coop_enter();
+        AcquireSRWLockExclusive(&g_vr_lock);
+        if (!g_vr_zone && !g_vr_zone_failed)
+            vr_make_zone();
+        base = g_vr_zone ? vr_take((size + VR_PAGE - 1) & ~(VR_PAGE - 1)) : 0;
+        ReleaseSRWLockExclusive(&g_vr_lock);
+        if (base) {
+            memset((void *)XBOX_PTR(base), 0, (size + VR_PAGE - 1) & ~(VR_PAGE - 1));
+            MEM32(base_va) = base;
+            MEM32(size_va) = size;                     /* the bridge reports the size asked */
+            InterlockedIncrement(&g_vr_cut);
+            eax = 0;                                   /* STATUS_SUCCESS */
+            esp += 24;                                 /* ret 20 */
+            coop_leave(self);
+            return;
+        }
+        coop_leave(self);
+        if (g_vr_zone && InterlockedIncrement(&g_vr_to_heap) <= 5)
+            fprintf(stderr, "[VM] zone has no room for %u bytes: the heap serves it\n", size);
+    }
     t_coop_kernel_va = MEM32(VM_NTALLOC_THUNK);
     coop_kernel_call();
     if (eax != 0 || !base_va || !size_va || (hint && !(type & 0x2000)))
@@ -752,19 +959,34 @@ static void vm_NtFreeVirtualMemory(void)
 {
     uint32_t base_va = MEM32(esp + 4), size_va = MEM32(esp + 8), type = MEM32(esp + 12);
     uint32_t base = base_va ? MEM32(base_va) : 0;
-    uint32_t blk;
+    uint32_t blk = 0;
     coop_thread_t *self;
-    int release, decommit;
+    int release = 0, decommit;
 
     self = coop_enter();
-    hg_enter();
-    blk = xbox_HeapBlockSize(base);
-    /* A block start: the byte before it isn't in the same block. */
-    release = (type & VM_MEM_RELEASE) && blk && xbox_HeapBlockSize(base - 1) != blk + 1;
     decommit = !(type & VM_MEM_RELEASE) && (type & VM_MEM_DECOMMIT) && base;
-    if (release)
-        xbox_HeapFree(base);
-    hg_leave();
+    AcquireSRWLockExclusive(&g_vr_lock);
+    if (vr_in_zone(base)) {
+        /* A zone region, or not one to release: an interior address or one
+         * released already goes to the bridge, which fails it, as it did
+         * before for a block the heap no longer had. */
+        if (type & VM_MEM_RELEASE) {
+            blk = vr_give(base);
+            release = blk != 0;
+            if (release)
+                InterlockedIncrement(&g_vr_returned);
+        }
+        ReleaseSRWLockExclusive(&g_vr_lock);
+    } else {
+        ReleaseSRWLockExclusive(&g_vr_lock);
+        hg_enter();
+        blk = xbox_HeapBlockSize(base);
+        /* A block start: the byte before it isn't in the same block. */
+        release = (type & VM_MEM_RELEASE) && blk && xbox_HeapBlockSize(base - 1) != blk + 1;
+        if (release)
+            xbox_HeapFree(base);
+        hg_leave();
+    }
     if (!release && !decommit) {
         coop_leave(self);
         InterlockedIncrement(&g_vm_bridged);
@@ -1226,6 +1448,234 @@ static void cm_MmQueryAllocationSize(void)
     coop_leave(self);
 }
 
+/* ── Kernel pool: an arena of its own (notes 18.42) ──────── */
+
+/*
+ * The runtime serves ExAllocatePool[WithTag] from the guest heap, and the
+ * heap reuses a freed block whole (first fit, no split). The pool is small
+ * and allocate-once (splash to hub: 864 allocations, 976 KiB, 19 frees;
+ * almost all from DSOUND's helper sub_00137AFB), but it allocates all game
+ * long, so its requests kept landing in the multi-MB blocks the game had
+ * just freed: at the hub 841 DSOUND blocks asking 970 KiB held 16.5 MB of
+ * the heap's 39.8 MB live. An 84-byte request held the freed 7 MB level
+ * pool, and a 24-byte one a 2.6 MB level block. Nothing else could use them,
+ * so level loads bumped the heap to 93.5% and left a 4.1 MB largest block.
+ *
+ * So, small requests (up to POOL_SMALL_MAX) come from an arena taken from
+ * the heap once, at the first pool call (still bump space, so the arena
+ * costs exactly its size): first fit, split, coalesced on free, 16-byte
+ * granules as the runtime's pool had. The arena's layout is kept here, not
+ * in guest memory. Bigger requests, and small ones once the arena is full,
+ * go to the bridge as before.
+ *
+ *   ExAllocatePool / ExAllocatePoolWithTag: from the arena, zeroed.
+ *   ExFreePool: an arena block goes back to it; anything else to the bridge.
+ *   ExQueryPoolBlockSize: an arena block's size. The bridge answers from the
+ *     heap's block table, which would report the rest of the whole arena for
+ *     an address inside it, and DSOUND zeroes that many bytes after every
+ *     allocation (and keeps a usage count from it, [0x153258]).
+ * They run inside the cooperative boundary, like the other hand-writes.
+ */
+#define POOL_ALLOC_THUNK      0x0015AB3Cu      /* [thunk] = ExAllocatePool (ordinal 14) */
+#define POOL_ALLOC_TAG_THUNK  0x0015AC10u      /* [thunk] = ExAllocatePoolWithTag (ordinal 15) */
+#define POOL_FREE_THUNK       0x0015AB98u      /* [thunk] = ExFreePool (ordinal 17) */
+#define POOL_QSIZE_THUNK      0x0015AC0Cu      /* [thunk] = ExQueryPoolBlockSize (ordinal 23) */
+#define POOL_ARENA_SIZE       (512u * 1024u)   /* ~3x the small-pool peak seen splash to hub */
+#define POOL_SMALL_MAX        0x10000u         /* larger requests stay on the heap */
+#define POOL_GRANULE          16u
+#define POOL_MAX_EXTENTS      8192
+
+typedef struct { uint32_t off, size, used; } pool_extent_t;
+
+/* Extents tile the arena in address order, so neighbours in the array are
+ * neighbours in memory. */
+static pool_extent_t g_pool_ext[POOL_MAX_EXTENTS];
+static int g_pool_n;
+static uint32_t g_pool_base;               /* 0 = not made yet */
+static int g_pool_failed;                  /* the heap had no room for the arena */
+static SRWLOCK g_pool_lock = SRWLOCK_INIT;
+static uint32_t g_pool_live, g_pool_live_n, g_pool_peak;
+static volatile LONG g_pool_allocs, g_pool_frees, g_pool_to_heap, g_pool_full;
+
+/* Index of the extent starting at off, or of the one containing it if
+ * `containing`; -1 if none. Caller holds the lock. */
+static int pool_find(uint32_t off, int containing)
+{
+    int lo = 0, hi = g_pool_n - 1;
+
+    while (lo <= hi) {
+        int mid = (lo + hi) / 2;
+        pool_extent_t *e = &g_pool_ext[mid];
+        if (off < e->off)
+            hi = mid - 1;
+        else if (off >= e->off + e->size)
+            lo = mid + 1;
+        else
+            return (containing || off == e->off) ? mid : -1;
+    }
+    return -1;
+}
+
+/* The arena's guest address for `size` bytes, or 0. Caller holds the lock. */
+static uint32_t pool_take(uint32_t size)
+{
+    uint32_t need = (size + POOL_GRANULE - 1) & ~(POOL_GRANULE - 1);
+    int i;
+
+    if (!need)
+        need = POOL_GRANULE;
+    for (i = 0; i < g_pool_n; i++) {
+        pool_extent_t *e = &g_pool_ext[i];
+        if (e->used || e->size < need)
+            continue;
+        if (e->size > need && g_pool_n < POOL_MAX_EXTENTS) {       /* split */
+            memmove(&g_pool_ext[i + 2], &g_pool_ext[i + 1], (g_pool_n - i - 1) * sizeof(g_pool_ext[0]));
+            g_pool_ext[i + 1].off = e->off + need;
+            g_pool_ext[i + 1].size = e->size - need;
+            g_pool_ext[i + 1].used = 0;
+            e->size = need;
+            g_pool_n++;
+        }
+        e->used = 1;
+        g_pool_live += e->size;
+        g_pool_live_n++;
+        if (g_pool_live > g_pool_peak)
+            g_pool_peak = g_pool_live;
+        return g_pool_base + e->off;
+    }
+    return 0;
+}
+
+/* Frees the arena block at va. 0 if va isn't one. Caller holds the lock. */
+static int pool_give(uint32_t va)
+{
+    int i;
+
+    if (!g_pool_base || va < g_pool_base || va >= g_pool_base + POOL_ARENA_SIZE)
+        return 0;
+    i = pool_find(va - g_pool_base, 0);
+    if (i < 0 || !g_pool_ext[i].used)
+        return 0;
+    g_pool_ext[i].used = 0;
+    g_pool_live -= g_pool_ext[i].size;
+    g_pool_live_n--;
+    if (i + 1 < g_pool_n && !g_pool_ext[i + 1].used) {             /* merge up */
+        g_pool_ext[i].size += g_pool_ext[i + 1].size;
+        memmove(&g_pool_ext[i + 1], &g_pool_ext[i + 2], (g_pool_n - i - 2) * sizeof(g_pool_ext[0]));
+        g_pool_n--;
+    }
+    if (i > 0 && !g_pool_ext[i - 1].used) {                        /* and down */
+        g_pool_ext[i - 1].size += g_pool_ext[i].size;
+        memmove(&g_pool_ext[i], &g_pool_ext[i + 1], (g_pool_n - i - 1) * sizeof(g_pool_ext[0]));
+        g_pool_n--;
+    }
+    return 1;
+}
+
+/* The shared allocation path: `ret` is the stdcall argument bytes. */
+static void pool_alloc(uint32_t thunk, uint32_t size, uint32_t ret)
+{
+    coop_thread_t *self;
+    uint32_t va = 0;
+
+    if (size && size <= POOL_SMALL_MAX) {
+        self = coop_enter();
+        AcquireSRWLockExclusive(&g_pool_lock);
+        if (!g_pool_base && !g_pool_failed) {
+            hg_enter();
+            g_pool_base = xbox_HeapAlloc(POOL_ARENA_SIZE, POOL_GRANULE);
+            hg_leave();
+            g_pool_failed = !g_pool_base;
+            if (g_pool_base) {
+                g_pool_ext[0].off = 0;
+                g_pool_ext[0].size = POOL_ARENA_SIZE;
+                g_pool_ext[0].used = 0;
+                g_pool_n = 1;
+            }
+            fprintf(stderr, "[POOL] arena %u KiB at %08X%s\n", POOL_ARENA_SIZE / 1024, g_pool_base,
+                    g_pool_base ? "" : ": no room, the pool stays on the heap");
+        }
+        if (g_pool_base)
+            va = pool_take(size);
+        ReleaseSRWLockExclusive(&g_pool_lock);
+        if (va) {
+            memset((void *)XBOX_PTR(va), 0, (size + POOL_GRANULE - 1) & ~(POOL_GRANULE - 1));
+            InterlockedIncrement(&g_pool_allocs);
+            eax = va;
+            esp += 4 + ret;
+            coop_leave(self);
+            return;
+        }
+        coop_leave(self);
+        if (g_pool_base && InterlockedIncrement(&g_pool_full) <= 5)
+            fprintf(stderr, "[POOL] arena full: %u bytes go to the heap\n", size);
+    }
+    InterlockedIncrement(&g_pool_to_heap);
+    t_coop_kernel_va = MEM32(thunk);
+    coop_kernel_call();
+}
+
+/* PVOID ExAllocatePool(SIZE_T NumberOfBytes); ret 4 */
+static void pool_ExAllocatePool(void)
+{
+    pool_alloc(POOL_ALLOC_THUNK, MEM32(esp + 4), 4);
+}
+
+/* PVOID ExAllocatePoolWithTag(SIZE_T NumberOfBytes, ULONG Tag); ret 8 */
+static void pool_ExAllocatePoolWithTag(void)
+{
+    pool_alloc(POOL_ALLOC_TAG_THUNK, MEM32(esp + 4), 8);
+}
+
+/* VOID ExFreePool(PVOID P); ret 4 */
+static void pool_ExFreePool(void)
+{
+    uint32_t va = MEM32(esp + 4);
+    coop_thread_t *self = coop_enter();
+    int ours;
+
+    AcquireSRWLockExclusive(&g_pool_lock);
+    ours = pool_give(va);
+    ReleaseSRWLockExclusive(&g_pool_lock);
+    if (!ours) {
+        coop_leave(self);
+        t_coop_kernel_va = MEM32(POOL_FREE_THUNK);
+        coop_kernel_call();
+        return;
+    }
+    InterlockedIncrement(&g_pool_frees);
+    esp += 8;                              /* ret 4 */
+    coop_leave(self);
+}
+
+/* ULONG ExQueryPoolBlockSize(PVOID PoolBlock); ret 4. Like the bridge's
+ * answer, an address inside a block gets the rest of that block. */
+static void pool_ExQueryPoolBlockSize(void)
+{
+    uint32_t va = MEM32(esp + 4), size = 0;
+    coop_thread_t *self;
+    int i = -1;
+
+    AcquireSRWLockShared(&g_pool_lock);
+    if (g_pool_base && va >= g_pool_base && va < g_pool_base + POOL_ARENA_SIZE) {
+        i = pool_find(va - g_pool_base, 1);
+        if (i >= 0 && g_pool_ext[i].used)
+            size = g_pool_ext[i].off + g_pool_ext[i].size - (va - g_pool_base);
+        else
+            i = -1;
+    }
+    ReleaseSRWLockShared(&g_pool_lock);
+    if (i < 0) {
+        t_coop_kernel_va = MEM32(POOL_QSIZE_THUNK);
+        coop_kernel_call();
+        return;
+    }
+    self = coop_enter();
+    eax = size;
+    esp += 8;                              /* ret 4 */
+    coop_leave(self);
+}
+
 /* One [HEAPSTAT] line every 2 s, from whichever thread gets there. */
 static void heap_watch(void)
 {
@@ -1265,6 +1715,42 @@ static void heap_watch(void)
                 (long)g_cm_allocs, (long)g_cm_reused, (long)g_cm_frees, (long)g_cm_free_bridged,
                 (long)g_cm_untracked, (long)g_cm_qsize);
     }
+    {
+        uint32_t live, live_n, peak, largest = 0;
+        int i;
+        AcquireSRWLockShared(&g_pool_lock);
+        live = g_pool_live;
+        live_n = g_pool_live_n;
+        peak = g_pool_peak;
+        for (i = 0; i < g_pool_n; i++)
+            if (!g_pool_ext[i].used && g_pool_ext[i].size > largest)
+                largest = g_pool_ext[i].size;
+        ReleaseSRWLockShared(&g_pool_lock);
+        fprintf(stderr, "[POOLSTAT] arena %u KiB at %08X; live %u KiB in %u blocks, peak %u KiB, largest free %u KiB;"
+                        " allocs %ld, frees %ld; to the heap %ld (arena full %ld)\n",
+                g_pool_base ? POOL_ARENA_SIZE / 1024 : 0, g_pool_base, live / 1024, live_n, peak / 1024, largest / 1024,
+                (long)g_pool_allocs, (long)g_pool_frees, (long)g_pool_to_heap, (long)g_pool_full);
+    }
+    {
+        uint32_t free_b, live_b, peak, largest = 0;
+        int free_n, live_n, i;
+        AcquireSRWLockShared(&g_vr_lock);
+        free_b = g_vr_free_bytes;
+        live_b = g_vr_live_bytes;
+        peak = g_vr_live_peak;
+        free_n = g_vr_free_n;
+        live_n = g_vr_live_n;
+        for (i = 0; i < g_vr_free_n; i++)
+            if (g_vr_free[i].size > largest)
+                largest = g_vr_free[i].size;
+        ReleaseSRWLockShared(&g_vr_lock);
+        fprintf(stderr, "[VMSTAT] zone %u KiB at %08X: live %u KiB in %d regions (peak %u KiB), free %u KiB in %d ranges"
+                        " (largest %u KiB); regions %ld, released %ld, to the heap %ld, table full %ld;"
+                        " heap live less zone free %u KiB\n",
+                g_vr_zone_size / 1024, g_vr_zone, live_b / 1024, live_n, peak / 1024, free_b / 1024, free_n,
+                largest / 1024, (long)g_vr_cut, (long)g_vr_returned, (long)g_vr_to_heap, (long)g_vr_table_full,
+                (s.live - free_b) / 1024);
+    }
     fflush(stderr);
 }
 
@@ -1280,6 +1766,10 @@ recomp_func_t recomp_lookup_manual(uint32_t xbox_va)
         if (xbox_va == MEM32(CM_ALLOC_EX_THUNK))    return cm_MmAllocateContiguousMemoryEx;
         if (xbox_va == MEM32(CM_FREE_THUNK))        return cm_MmFreeContiguousMemory;
         if (xbox_va == MEM32(CM_QSIZE_THUNK))       return cm_MmQueryAllocationSize;
+        if (xbox_va == MEM32(POOL_ALLOC_THUNK))     return pool_ExAllocatePool;
+        if (xbox_va == MEM32(POOL_ALLOC_TAG_THUNK)) return pool_ExAllocatePoolWithTag;
+        if (xbox_va == MEM32(POOL_FREE_THUNK))      return pool_ExFreePool;
+        if (xbox_va == MEM32(POOL_QSIZE_THUNK))     return pool_ExQueryPoolBlockSize;
         if (recomp_lookup_kernel(xbox_va)) {
             t_coop_kernel_va = xbox_va;
             return coop_kernel_call;
