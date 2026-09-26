@@ -2279,6 +2279,15 @@ void sub_000EB270(void)
             break;
         }
     }
+    /* The original's `ret`: pop the return address the caller pushed. Missing
+     * until notes 18.41, so every call left the guest stack 4 bytes low. A
+     * caller with a frame pointer hid it (mov esp, ebp), but the front-end
+     * loop sub_0002D950 pops edi/esi/ebx before that, so it handed its caller
+     * garbage callee-saved registers: sub_00087BF0's esi, the 7 MB level-pool
+     * size, came back as ~180 KB, the pool was reallocated that small with
+     * its end still at base + 7 MB, and the level spilled into heap blocks
+     * DSOUND then took and zeroed (the first attract demo's crash, 18.40). */
+    esp += 4;
 }
 
 /* ── D3D mirror bridge wrappers (Option B) ─────────────────── */
