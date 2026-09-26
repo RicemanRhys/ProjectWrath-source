@@ -1,6 +1,7 @@
 """One unattended run through splash, title, menu, intro and hub (notes 18.32).
 
-  python drive.py TAG SECONDS [--bridge] [--tint] [--point] [--census] [--no-pbexec] [--no-input] [--intro=S]
+  python drive.py TAG SECONDS [--bridge] [--host-only] [--tint] [--point] [--census] [--no-pbexec] [--no-input]
+                  [--no-autostart] [--no-fast-title] [--hz=HZ] [--intro=S]
                   [--dump=DIR] [--dump-every=N] [--dump-rt] [--rtlog] [--psprobe] [--texcheck] [--skiptex] [--vsdump] [--vsprobe] [--vp-copy] [--drawlog=A-B]
                   [--outdir=DIR] [--exe=PATH]
 
@@ -31,6 +32,10 @@ the hub, A once, stick up 5 s, stick right 5 s.
              texture-coordinate range, pixel-shader texture modes and all four stage textures) and, with --dump, a
              host dump of each of those swaps (step 35)
   --no-pbexec leaves RECOMP_PB_EXEC unset.
+  --host-only  --bridge --no-pbexec, as run_twoc.ps1 -HostOnly (S7): the mirror alone, paced by its limiter
+  --no-autostart leaves RECOMP_DEV_AUTOSTART unset: the menu waits for its idle timeout (S7 timing check)
+  --no-fast-title leaves RECOMP_DEV_FAST_TITLE unset: the title animation at its own speed
+  --hz=HZ    RECOMP_D3D_BRIDGE_HZ=HZ: the host frame limiter's refresh rate (S7; 0 turns it off)
   --exe=PATH runs a copy of crash_twoc.exe (so the build can be relinked meanwhile);
              the game still runs in the repo root.
 
@@ -51,6 +56,8 @@ EXE = os.path.join(REPO, "twoc", "build", "Release", "crash_twoc.exe")
 tag, secs = sys.argv[1], int(sys.argv[2])
 opts = dict(a[2:].split("=", 1) for a in sys.argv[3:] if "=" in a)
 flags = {a for a in sys.argv[3:] if "=" not in a}
+if "--host-only" in flags:
+    flags |= {"--bridge", "--no-pbexec"}
 intro_s = float(opts.get("intro", "6"))
 outdir = os.path.abspath(opts.get("outdir", "."))
 if "exe" in opts:
@@ -59,8 +66,11 @@ if "exe" in opts:
 pad = os.path.join(outdir, tag + ".pad.txt")
 open(pad, "w").write("\n")
 env = {k: v for k, v in os.environ.items() if not k.startswith("RECOMP_")}
-env.update(RECOMP_VBLANK="1", RECOMP_AC97_READY="1", RECOMP_WATCHDOG_SECS=str(secs),
-           RECOMP_DEV_FAST_TITLE="1", RECOMP_DEV_AUTOSTART="1")
+env.update(RECOMP_VBLANK="1", RECOMP_AC97_READY="1", RECOMP_WATCHDOG_SECS=str(secs))
+if "--no-fast-title" not in flags:
+    env["RECOMP_DEV_FAST_TITLE"] = "1"
+if "--no-autostart" not in flags:
+    env["RECOMP_DEV_AUTOSTART"] = "1"
 if "--no-pbexec" not in flags:
     env["RECOMP_PB_EXEC"] = "1"
 if "--no-input" not in flags:
@@ -78,6 +88,8 @@ if "dump" in opts:
     env["RECOMP_FB_DUMP"] = os.path.join(os.path.abspath(opts["dump"]), "shot")
 if "drawlog" in opts:
     env["RECOMP_D3D_BRIDGE_DRAWLOG"] = opts["drawlog"]
+if "hz" in opts:
+    env["RECOMP_D3D_BRIDGE_HZ"] = opts["hz"]
 if "dump-every" in opts:
     env["RECOMP_D3D_BRIDGE_DUMP_EVERY"] = opts["dump-every"]
 for flag, var in (("--dump-rt", "RECOMP_D3D_BRIDGE_DUMP_RT"), ("--rtlog", "RECOMP_D3D_BRIDGE_RTLOG"),
