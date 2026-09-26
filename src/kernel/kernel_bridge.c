@@ -8839,7 +8839,12 @@ static void kernel_thunk_dispatch(void)
     ordinal = g_slot_ordinals[slot];
     bridge = g_slot_bridges[slot];
 
-    g_kernel_call_count++;
+    /* Saturates rather than wrapping. Past 0x7FFFFFFF the count read
+     * negative, KERNEL_LOG_ON() held again, and every call was logged and
+     * flushed: a title that spins on KeQuerySystemTime got there in about
+     * half an hour and then ran at a few frames a second. */
+    if (g_kernel_call_count < 0x7FFFFFFF)
+        g_kernel_call_count++;
     if (ordinal < XBOX_KERNEL_THUNK_TABLE_SIZE)
         g_ordinal_calls[ordinal]++;
 
