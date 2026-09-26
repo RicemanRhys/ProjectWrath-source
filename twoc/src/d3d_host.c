@@ -30,8 +30,13 @@
  * Pacing: every present uses one DXGI sync interval, chosen by d3d_bridge.c.
  * It is 0 while the NV2A executor paces the game (the S2 default), so the
  * mirror never adds a wait. Native Swap doesn't pace without the executor
- * (18.32), so after S7 turns the executor off, the game's own interval
- * (D3DPRESENT_INTERVAL_ONE) has to be used here.
+ * (18.32), and DXGI vsync paces to the host monitor (240 presents/s on a
+ * 239 Hz display, 18.33). So with the executor off (S7) the host present
+ * paces the game itself: a frame limiter on the Xbox's 59.94 Hz clock
+ * (divided by the game's D3DPRESENT_INTERVAL), independent of the monitor.
+ * Each present waits for its slot, on a high-resolution waitable timer and a
+ * short spin; a present later than one whole period restarts the clock
+ * instead of hurrying to catch up.
  *
  * Presents skip xbox_d3d8's gamma pass; the game's gamma ramp isn't mirrored
  * yet.
@@ -102,6 +107,7 @@ static HWND g_hwnd;                     /* visible: the flip-model swap chain */
 static HWND g_hwnd_dev;                 /* hidden: xbox_d3d8's own swap chain */
 static IDXGISwapChain1 *g_flip;
 static unsigned g_w, g_h, g_interval;
+static double g_frame_hz;               /* S7: the frame limiter's rate, 0 = off */
 static IDirect3DDevice8 *g_dev;
 static ID3D11Texture2D *g_staging;
 static char g_dump_prefix[512];
@@ -179,7 +185,7 @@ static DWORD WINAPI win_thread(LPVOID p)
 
 /* ── Device ────────────────────────────────────────────────── */
 
-int d3dh_create(unsigned width, unsigned height, unsigned interval, const char *dump_prefix)
+int d3dh_create(unsigned width, unsigned height, unsigned interval, double frame_hz, const char *dump_prefix)
 {
     static LONG once;
     win_args_t args;
@@ -194,6 +200,7 @@ int d3dh_create(unsigned width, unsigned height, unsigned interval, const char *
     g_w = width ? width : 640;
     g_h = height ? height : 480;
     g_interval = interval;
+    g_frame_hz = frame_hz > 0 ? frame_hz : 0;
     if (dump_prefix) {
         const char *every = getenv("RECOMP_D3D_BRIDGE_DUMP_EVERY");
         const char *rt = getenv("RECOMP_D3D_BRIDGE_DUMP_RT");
@@ -263,8 +270,9 @@ int d3dh_create(unsigned width, unsigned height, unsigned interval, const char *
         fprintf(stderr, "[D3DB] host: xbox_d3d8 CreateDevice failed 0x%08lX\n", (unsigned long)hr);
         return -1;
     }
-    fprintf(stderr, "[D3DB] host device %ux%u, window %p (own thread, flip model), present interval %u%s%s\n",
-            g_w, g_h, (void *)g_hwnd, g_interval,
+    fprintf(stderr, "[D3DB] host device %ux%u, window %p (own thread, flip model), present interval %u, frame limiter"
+            " %s%.3f Hz%s%s\n",
+            g_w, g_h, (void *)g_hwnd, g_interval, g_frame_hz > 0 ? "" : "off, ", g_frame_hz,
             g_dump_prefix[0] ? ", dumps " : "", g_dump_prefix[0] ? g_dump_prefix : "");
     return 0;
 }
@@ -1001,6 +1009,68 @@ int d3dh_texture_check(const d3dh_tex_t *t, const char *path)
 
 /* ── Present ───────────────────────────────────────────────── */
 
+/* S7: wait for this present's slot on the g_frame_hz clock. Outside g_lock,
+ * so a loading thread's host calls never queue behind the wait; the game
+ * serialises its swaps anyway, and pace_lock keeps the clock consistent if
+ * two threads ever swapped at once. */
+static void pace(void)
+{
+    static SRWLOCK pace_lock = SRWLOCK_INIT;
+    static LARGE_INTEGER freq;
+    static double next;                 /* QPC tick of the next slot, 0 before the first present */
+    static HANDLE timer;
+    static int timer_tried;
+    LARGE_INTEGER now;
+    double period, left;
+
+    if (g_frame_hz <= 0)
+        return;
+    AcquireSRWLockExclusive(&pace_lock);
+    if (!freq.QuadPart)
+        QueryPerformanceFrequency(&freq);
+    if (!timer_tried) {
+        timer_tried = 1;
+        timer = CreateWaitableTimerExW(NULL, NULL, 0x00000002 /* CREATE_WAITABLE_TIMER_HIGH_RESOLUTION */,
+                                       TIMER_ALL_ACCESS);
+        if (!timer)
+            fprintf(stderr, "[D3DB] host: no high-resolution timer (%lu); the limiter sleeps in 1 ms steps\n",
+                    GetLastError());
+    }
+    period = (double)freq.QuadPart / g_frame_hz;
+    QueryPerformanceCounter(&now);
+    if (next == 0 || (double)now.QuadPart - next > period) {
+        if (next != 0)
+            g_st.paced_late++;          /* a whole period late: restart the clock from now */
+        next = (double)now.QuadPart;
+    } else if ((double)now.QuadPart < next) {
+        double t0 = (double)now.QuadPart;
+        for (;;) {
+            left = (next - (double)now.QuadPart) * 1000.0 / (double)freq.QuadPart;   /* ms */
+            if (left <= 0)
+                break;
+            if (left > 1.5) {           /* sleep to ~1 ms before the slot, then spin */
+                if (timer) {
+                    LARGE_INTEGER due;
+                    due.QuadPart = -(LONGLONG)((left - 1.0) * 10000.0);            /* relative, 100 ns */
+                    if (SetWaitableTimer(timer, &due, 0, NULL, NULL, FALSE))
+                        WaitForSingleObject(timer, INFINITE);
+                    else
+                        Sleep(1);
+                } else {
+                    Sleep(1);
+                }
+            } else {
+                YieldProcessor();
+            }
+            QueryPerformanceCounter(&now);
+        }
+        g_st.paced_wait_ms += ((double)now.QuadPart - t0) * 1000.0 / (double)freq.QuadPart;
+    }
+    g_st.paced++;
+    next += period;
+    ReleaseSRWLockExclusive(&pace_lock);
+}
+
 void d3dh_present(double t_s, unsigned swap_no)
 {
     ULONGLONG now;
@@ -1008,6 +1078,7 @@ void d3dh_present(double t_s, unsigned swap_no)
 
     if (!g_ready)
         return;
+    pace();
     EnterCriticalSection(&g_lock);
     now = GetTickCount64();
     if (g_dump_prefix[0] &&

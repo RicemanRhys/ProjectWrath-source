@@ -22,6 +22,8 @@ typedef struct {
     unsigned indexed_draws, ff_draws, lit_draws;                                  /* fixed-function 3D */
     unsigned copies, copy_fails;                                                  /* CopyRects (step 35) */
     unsigned vp_draws, vs_created, vs_fails, vs_const_uploads, vs_probes;         /* vertex programs (S5) */
+    unsigned paced, paced_late;                                                   /* frame limiter (S7) */
+    double paced_wait_ms;
 } d3dh_stats_t;
 
 /* A state already in xbox_d3d8's (PC D3D8) numbering and values. */
@@ -160,8 +162,10 @@ int d3dh_copy_back(const d3dh_target_t *dst, const int32_t *rects, const int32_t
 void d3dh_texture_touch(uint32_t data);
 
 /* Create the window (on its own thread) and the host device. `interval` is
- * the DXGI sync interval for every present. Returns 0 on success. */
-int  d3dh_create(unsigned width, unsigned height, unsigned interval, const char *dump_prefix);
+ * the DXGI sync interval for every present; `frame_hz`, if above 0, is the
+ * frame limiter's rate (S7): each present waits for its slot on that clock.
+ * Returns 0 on success. */
+int  d3dh_create(unsigned width, unsigned height, unsigned interval, double frame_hz, const char *dump_prefix);
 int  d3dh_ready(void);
 
 /* Clear with XDK flags: TARGET 0xF0 (all four channel bits), ZBUFFER 1,

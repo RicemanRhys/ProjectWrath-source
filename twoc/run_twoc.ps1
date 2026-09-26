@@ -20,6 +20,10 @@
 #   -Bridge      RECOMP_D3D_BRIDGE=1: also opens "Crash TWOC - D3D bridge (host)", a second window where
 #                the game's D3D calls are mirrored through xbox_d3d8. The native D3D and the executor still
 #                run as before
+#   -HostOnly    -Bridge with RECOMP_PB_EXEC unset (S7, notes 18.40): the mirror is the only renderer. The
+#                fence mirror completes the push buffers, and the bridge's host present paces the game at
+#                59.94 Hz (RECOMP_D3D_BRIDGE_HZ overrides the rate, 0 turns the limiter off). No -DumpDir
+#                shots from the executor, only the host's hostNNN.bmp
 #
 # Usage, from anywhere (script execution is off by default on this machine, so bypass it for this process):
 #   powershell -NoProfile -ExecutionPolicy Bypass -File twoc\run_twoc.ps1
@@ -28,6 +32,7 @@
 #   ... -File twoc\run_twoc.ps1 -Window                 # also open the 640x480 framebuffer window
 #   ... -File twoc\run_twoc.ps1 -FastTitle -AutoStart   # straight to the next level's load, unattended
 #   ... -File twoc\run_twoc.ps1 -Bridge -Seconds 900    # play, with the mirrored picture in its own window
+#   ... -File twoc\run_twoc.ps1 -HostOnly -Seconds 900  # play on the mirror alone, at 60 fps
 #
 # Logs go to run_twoc.out.log and run_twoc.err.log in the repo root (gitignored). The BMPs are named
 # shot000.bmp, shot001.bmp ...; the executor writes the first eight frames that contain geometry and one
@@ -38,7 +43,8 @@ param(
     [switch]$Window,
     [switch]$FastTitle,
     [switch]$AutoStart,
-    [switch]$Bridge
+    [switch]$Bridge,
+    [switch]$HostOnly
 )
 $ErrorActionPreference = 'Stop'
 $repo = Split-Path -Parent $PSScriptRoot
@@ -46,8 +52,9 @@ $exe  = Join-Path $repo 'twoc\build\Release\crash_twoc.exe'
 if (-not (Test-Path $exe)) { throw "Not built: $exe (cmake --build twoc\build --config Release --parallel)" }
 if (-not (Test-Path (Join-Path $repo 'game_files\default.xbe'))) { throw "game_files\default.xbe is missing" }
 
+if ($HostOnly) { $Bridge = $true }
 $env:RECOMP_VBLANK        = '1'
-$env:RECOMP_PB_EXEC       = '1'
+if ($HostOnly) { Remove-Item Env:RECOMP_PB_EXEC -ErrorAction SilentlyContinue } else { $env:RECOMP_PB_EXEC = '1' }
 $env:RECOMP_AC97_READY    = '1'
 $env:RECOMP_WATCHDOG_SECS = "$Seconds"
 if ($Window) { $env:RECOMP_FB_WINDOW = '1' }
@@ -77,4 +84,4 @@ if (-not $p.WaitForExit(($Seconds + 30) * 1000)) {
     if ($p.ExitCode -eq 3) { Write-Host "Watchdog ended the run after $took s (exit code 3, the normal end)." }
     else { Write-Host "Exited with code $($p.ExitCode)." }
 }
-if ($DumpDir) { Write-Host ("Framebuffer dumps: {0} file(s) in {1}" -f (Get-ChildItem $DumpDir -Filter 'shot*').Count, (Resolve-Path $DumpDir)) }
+if ($DumpDir) { Write-Host ("Framebuffer dumps: {0} executor, {1} host file(s) in {2}" -f (Get-ChildItem $DumpDir -Filter 'shot*').Count, (Get-ChildItem $DumpDir -Filter 'host*').Count, (Resolve-Path $DumpDir)) }

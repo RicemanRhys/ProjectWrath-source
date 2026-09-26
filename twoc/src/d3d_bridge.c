@@ -615,23 +615,36 @@ static void count_thread(unsigned long tid, int locked)
     }
 }
 
-/* The DXGI sync interval: 0 while the executor paces the game, else the
- * game's own (XDK D3DPRESENT_INTERVAL_*). RECOMP_D3D_BRIDGE_INTERVAL
- * overrides both. */
-static unsigned present_interval(uint32_t xdk)
+/* Pacing (S7). While the executor paces the game, the host adds no wait:
+ * DXGI interval 0, no limiter. Without it (run_twoc.ps1 -HostOnly) nothing
+ * else paces the game (18.32), and DXGI vsync would pace it to the host
+ * monitor (240/s at 239 Hz, 18.33), so the host present runs a frame limiter
+ * at the Xbox's 59.94 Hz divided by the game's own XDK
+ * D3DPRESENT_INTERVAL_* (none for IMMEDIATE), with DXGI interval 0.
+ * RECOMP_D3D_BRIDGE_INTERVAL overrides the DXGI interval and
+ * RECOMP_D3D_BRIDGE_HZ the refresh rate the limiter divides (0: off). */
+#define XBOX_REFRESH_HZ (60000.0 / 1001.0)
+
+static unsigned present_interval(void)
 {
     const char *v = getenv("RECOMP_D3D_BRIDGE_INTERVAL");
 
-    if (v && *v)
-        return (unsigned)strtoul(v, NULL, 0);
-    if (env_on("RECOMP_PB_EXEC"))
+    return v && *v ? (unsigned)strtoul(v, NULL, 0) : 0;
+}
+
+static double present_hz(uint32_t xdk)
+{
+    const char *v = getenv("RECOMP_D3D_BRIDGE_HZ");
+    double hz = v && *v ? strtod(v, NULL) : XBOX_REFRESH_HZ;
+
+    if (env_on("RECOMP_PB_EXEC") && !(v && *v))
         return 0;
     switch (xdk) {
     case 0x80000000u: return 0;         /* IMMEDIATE */
-    case 2:           return 2;
-    case 4:           return 3;
-    case 8:           return 4;
-    default:          return 1;         /* DEFAULT, ONE */
+    case 2:           return hz / 2;
+    case 4:           return hz / 3;
+    case 8:           return hz / 4;
+    default:          return hz;        /* DEFAULT, ONE */
     }
 }
 
@@ -663,7 +676,7 @@ static void mirror_create_device(const d3db_args_t *a)
         return;
     }
     d3dh_create(MEM32(pp + 4 * PP_WIDTH), MEM32(pp + 4 * PP_HEIGHT),
-                present_interval(MEM32(pp + 4 * PP_INTERVAL)),
+                present_interval(), present_hz(MEM32(pp + 4 * PP_INTERVAL)),
                 host_dump_prefix(prefix, sizeof(prefix)));
     if (host_dump_prefix(prefix, sizeof(prefix)))
         snprintf(g_check_prefix, sizeof(g_check_prefix), "%s", prefix);
@@ -3364,7 +3377,8 @@ static void mirror_swap(void)
     if (now - g_last_host_ms >= HOST_PERIOD_MS) {
         static SRWLOCK line_lock = SRWLOCK_INIT;
         static LONG last_swaps;
-        static unsigned last_presents;
+        static unsigned last_presents, last_paced, last_late;
+        static double last_wait_ms;
         d3dh_stats_t st;
         if (!TryAcquireSRWLockExclusive(&line_lock))
             return;
@@ -3380,6 +3394,14 @@ static void mirror_swap(void)
                     st.clears, st.clears_colour, st.clears_depth, st.clears_partial_colour,
                     (long)g_clears_other_rt, (long)g_nolock, (long)g_interleaved, (long)g_d3dx_draws,
                     st.dumps, st.present_fails, st.present_status);
+            if (st.paced)       /* S7: the frame limiter */
+                fprintf(stderr, "[D3DB] host limiter: paced %u (+%u), late %u (+%u), waited %.0f ms this interval"
+                        " (%.2f ms a frame)\n", st.paced, st.paced - last_paced, st.paced_late,
+                        st.paced_late - last_late, st.paced_wait_ms - last_wait_ms,
+                        st.paced > last_paced ? (st.paced_wait_ms - last_wait_ms) / (st.paced - last_paced) : 0.0);
+            last_paced = st.paced;
+            last_late = st.paced_late;
+            last_wait_ms = st.paced_wait_ms;
             fprintf(stderr, "[D3DB] host draws: mirrored %ld (to render targets %ld, with pixel shaders %ld,"
                     " immediate %ld, of them pre-transformed %ld),"
                     " host draws %u (fails %u); not mirrored: target %ld, vertex program %ld, primitive %ld,"
