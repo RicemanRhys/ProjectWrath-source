@@ -75,6 +75,10 @@
  * hub's only kind) copies the host back buffer into a host render-target
  * texture for the destination's Data, in R8G8B8A8 like the back buffer
  * (d3dh_copy_back); a draw that binds that texture samples the copy.
+ *
+ * S5 part 2 (notes 18.39): cube maps go into the same cache as xbox_d3d8
+ * cube textures, uploaded face by face (tex_upload); its fixed-function and
+ * combiner pixel shaders sample a bound cube with the coordinates' xyz.
  */
 
 #include <stdio.h>
@@ -410,7 +414,7 @@ void d3dh_clear(const d3dh_target_t *target, uint32_t xdk_flags, uint32_t color,
 
 typedef struct {
     d3dh_tex_t desc;                    /* bits unused once uploaded */
-    IDirect3DTexture8 *tex;
+    IDirect3DBaseTexture8 *tex;         /* an IDirect3DTexture8, or an IDirect3DCubeTexture8 (desc.cube) */
     unsigned last_use;
 } host_tex_t;
 
@@ -464,17 +468,21 @@ static void tex_release(host_tex_t *e)
 }
 
 /* Copy each level from the guest layout into xbox_d3d8's (the same bytes:
- * levels back to back; a linear format's rows at the guest pitch). */
-static int tex_upload(IDirect3DTexture8 *tex, const d3dh_tex_t *t)
+ * levels back to back; a linear format's rows at the guest pitch). A cube
+ * map is six such chains, `face_bytes` apart. */
+static int tex_upload(IDirect3DBaseTexture8 *base, const d3dh_tex_t *t)
 {
+    IDirect3DTexture8 *tex = (IDirect3DTexture8 *)base;
+    IDirect3DCubeTexture8 *cube = (IDirect3DCubeTexture8 *)base;
     const uint8_t *src = t->bits;
-    uint32_t l;
+    uint32_t l, face = 0;
 
     for (l = 0; l < t->levels; l++) {
         uint32_t w = level_dim(t->width, l), h = level_dim(t->height, l);
         uint32_t n = level_bytes((D3DFORMAT)t->format, w, h, t->pitch);
         D3DLOCKED_RECT lr;
-        if (FAILED(tex->lpVtbl->LockRect(tex, l, &lr, NULL, 0)))
+        if (FAILED(t->cube ? cube->lpVtbl->LockRect(cube, (D3DCUBEMAP_FACES)face, l, &lr, NULL, 0)
+                           : tex->lpVtbl->LockRect(tex, l, &lr, NULL, 0)))
             return -1;
         if (t->format == XDK_FMT_P8) {  /* S4: indices -> ARGB, texel for texel (swizzled order kept) */
             uint32_t *dst = (uint32_t *)lr.pBits, i, mask = t->pal_entries - 1;
@@ -488,13 +496,20 @@ static int tex_upload(IDirect3DTexture8 *tex, const d3dh_tex_t *t)
         } else {
             memcpy(lr.pBits, src, n);
         }
-        tex->lpVtbl->UnlockRect(tex, l);
+        if (t->cube)
+            cube->lpVtbl->UnlockRect(cube, (D3DCUBEMAP_FACES)face, l);
+        else
+            tex->lpVtbl->UnlockRect(tex, l);
         src += n;
+        if (t->cube && l + 1 == t->levels && ++face < 6) {
+            src = t->bits + (size_t)face * t->face_bytes;
+            l = (uint32_t)-1;           /* the next face's chain */
+        }
     }
     return 0;
 }
 
-static IDirect3DTexture8 *tex_get(const d3dh_tex_t *t)
+static IDirect3DBaseTexture8 *tex_get(const d3dh_tex_t *t)
 {
     host_tex_t *e = NULL, *oldest = NULL;
     uint32_t i, h = (t->key >> 4) * 2654435761u;
@@ -504,7 +519,7 @@ static IDirect3DTexture8 *tex_get(const d3dh_tex_t *t)
             g_st.rt_sampled++;
             if (g_cur_target == (int)i)
                 g_st.rt_feedback++;     /* D3D11 unbinds the view: the stage samples black */
-            return g_rt[i].tex;
+            return (IDirect3DBaseTexture8 *)g_rt[i].tex;
         }
     g_tex_clock++;
     for (i = 0; i < TEX_CACHE_SLOTS; i++) {
@@ -528,21 +543,26 @@ static IDirect3DTexture8 *tex_get(const d3dh_tex_t *t)
     }
     if (e->tex && (e->desc.data != t->data || e->desc.format != t->format || e->desc.width != t->width ||
                    e->desc.height != t->height || e->desc.levels != t->levels || e->desc.pitch != t->pitch ||
-                   e->desc.sig != t->sig || e->desc.pal_sig != t->pal_sig))
+                   e->desc.sig != t->sig || e->desc.pal_sig != t->pal_sig || e->desc.cube != t->cube))
         tex_release(e);
     if (!e->tex) {
-        IDirect3DTexture8 *tex = NULL;
+        IDirect3DBaseTexture8 *tex = NULL;
         uint32_t host_fmt = t->format == XDK_FMT_P8 ? XDK_FMT_A8R8G8B8 : t->format;
+        HRESULT hr;
         if (t->format == XDK_FMT_P8 && (!t->palette || !t->pal_entries))
             return NULL;
-        if (FAILED(g_dev->lpVtbl->CreateTexture(g_dev, t->width, t->height, t->levels, 0,
-                                                (D3DFORMAT)host_fmt, D3DPOOL_MANAGED, &tex)) ||
-            tex_upload(tex, t) != 0) {
+        if (t->cube)
+            hr = g_dev->lpVtbl->CreateCubeTexture(g_dev, t->width, t->levels, 0, (D3DFORMAT)host_fmt,
+                                                  D3DPOOL_MANAGED, (IDirect3DCubeTexture8 **)&tex);
+        else
+            hr = g_dev->lpVtbl->CreateTexture(g_dev, t->width, t->height, t->levels, 0, (D3DFORMAT)host_fmt,
+                                              D3DPOOL_MANAGED, (IDirect3DTexture8 **)&tex);
+        if (FAILED(hr) || tex_upload(tex, t) != 0) {
             if (tex)
                 tex->lpVtbl->Release(tex);
             if (++g_st.tex_upload_fails <= 5)
-                fprintf(stderr, "[D3DB] host texture upload failed: header %08X format %02X %ux%u levels %u\n",
-                        t->key, t->format, t->width, t->height, t->levels);
+                fprintf(stderr, "[D3DB] host texture upload failed: header %08X format %02X %ux%u levels %u%s\n",
+                        t->key, t->format, t->width, t->height, t->levels, t->cube ? " cube" : "");
             return NULL;
         }
         e->tex = tex;
@@ -552,6 +572,8 @@ static IDirect3DTexture8 *tex_get(const d3dh_tex_t *t)
         g_st.tex_uploads++;
         if (t->format == XDK_FMT_P8)
             g_st.p8_uploads++;
+        if (t->cube)
+            g_st.cube_uploads++;
     }
     e->last_use = g_tex_clock;
     return e->tex;
@@ -742,7 +764,7 @@ int d3dh_draw_up(const d3dh_draw_t *d)
     g_dev->lpVtbl->SetViewport(g_dev, &vp);
     /* Textures before stage states: xbox_d3d8's SetTexture edits COLOROP. */
     for (s = 0; s < 4; s++)
-        g_dev->lpVtbl->SetTexture(g_dev, s, d->tex[s] ? (IDirect3DBaseTexture8 *)tex_get(d->tex[s]) : NULL);
+        g_dev->lpVtbl->SetTexture(g_dev, s, d->tex[s] ? tex_get(d->tex[s]) : NULL);
     for (s = 0; s < 4; s++)
         for (i = 0; i < d->n_tss[s]; i++)
             g_dev->lpVtbl->SetTextureStageState(g_dev, s, (D3DTEXTURESTAGESTATETYPE)d->tss[s][i].state,
@@ -962,10 +984,10 @@ static void dump_targets(const char *path)
  * write its level 0 as a 32-bit BMP (the P8 check). */
 int d3dh_texture_check(const d3dh_tex_t *t, const char *path)
 {
-    IDirect3DTexture8 *tex;
+    IDirect3DBaseTexture8 *tex;
     int ok = -1;
 
-    if (!g_ready)
+    if (!g_ready || t->cube)
         return -1;
     EnterCriticalSection(&g_lock);
     tex = tex_get(t);

@@ -67,6 +67,8 @@
  * part 2 (counted). Checks: RECOMP_D3D_BRIDGE_VSDUMP (each program in full)
  * and _VSPROBE (its first vertices drawn as points by the host), compared by
  * tools/diag/vscheck.py.
+ * S5 part 2 (notes 18.39) adds cube maps (describe_texture: six faces, each
+ * a mip chain padded to 128 bytes; the hub's DXT5 0x07780F2D).
  * Three checks, off by default: RECOMP_D3D_BRIDGE_PSPROBE (draw each pixel
  * shader once with fixed inputs; tools/diag/pscheck.py), _TEXCHECK (write
  * each P8 texture as uploaded) and _RTLOG (log render-target draws in full;
@@ -1241,7 +1243,7 @@ enum {
     SKIP_TARGET,        /* a render target the host can't make (not a texture level, or its format) */
     SKIP_VS_PROGRAM,    /* a programmable vertex shader (S5) */
     SKIP_PRIM,          /* LINELOOP, QUADSTRIP, POLYGON */
-    SKIP_TEXTURE,       /* a cube or volume texture, a format xbox_d3d8 lacks, or P8 with no palette */
+    SKIP_TEXTURE,       /* a volume texture, a format xbox_d3d8 lacks, or P8 with no palette */
     SKIP_STREAM,        /* DrawIndexedVertices: no stream 0, or a stride under the FVF's size */
     SKIP_FVF,           /* an FVF with blend weights (XYZB*) */
     SKIP_IMMEDIATE,     /* Begin/SetVertexData/End (S4 part 2) */
@@ -1306,6 +1308,10 @@ static void sig_forget(uint32_t data)
             g_sig[i].hdr = 0;
 }
 
+static volatile LONG g_cube_binds, g_ev_cube;  /* draws' stages that bound a cube map (S5 part 2) */
+#define CUBE_SEEN_MAX 16
+static uint32_t g_cube_seen[CUBE_SEEN_MAX];     /* shaders, stage and texture modes: each kind logged once */
+
 /* The guest texture bound to a stage, as a host descriptor. Returns 0 if
  * there is none, 1 if described, -1 if it can't be mirrored. */
 static int describe_texture(unsigned stage, d3dh_tex_t *t)
@@ -1317,9 +1323,10 @@ static int describe_texture(unsigned stage, d3dh_tex_t *t)
     f = MEM32(hdr + RES_FORMAT);
     sz = MEM32(hdr + RES_SIZE);
     fmt = (f >> 8) & 0xFF;
-    if ((f & 4) || ((f >> 4) & 15) != 2 || !d3dh_format_supported(fmt))
-        return -1;                      /* cube, not 2D, or not uploadable */
+    if (((f >> 4) & 15) != 2 || !d3dh_format_supported(fmt) || ((f & 4) && (sz || fmt == XDK_FMT_P8)))
+        return -1;                      /* not 2D, not uploadable, or a linear or P8 cube */
     memset(t, 0, sizeof(*t));
+    t->cube = (f & 4) != 0;
     t->key = hdr;
     t->data = MEM32(hdr + RES_DATA);
     t->format = fmt;
@@ -1335,6 +1342,10 @@ static int describe_texture(unsigned stage, d3dh_tex_t *t)
     if (!t->levels)
         t->levels = 1;
     t->bytes = d3dh_texture_bytes(fmt, t->width, t->height, t->levels, t->pitch);
+    if (t->cube) {                      /* S5 part 2: six faces, each padded to 128 bytes */
+        t->face_bytes = (t->bytes + 127) & ~127u;
+        t->bytes = 6 * t->face_bytes;
+    }
     t->bits = (const uint8_t *)XBOX_PTR(phys_to_va(t->data));
     t->sig = texture_sig(hdr, t->data, t->bits, t->bytes);
     if (fmt == XDK_FMT_P8) {
@@ -1442,7 +1453,10 @@ static uint32_t g_tex_seen[TEX_SEEN_MAX][2];
 static int g_tex_seen_n;
 
 /* Each distinct P8 texture (by header and palette), the first time a draw
- * (any path) binds it: uploaded through the palette and written out. */
+ * (any path) binds it: uploaded through the palette and written out. S5
+ * part 2: each DXT cube map too, as its six faces' level 0 raw from guest
+ * memory at the face stride (skiptex_cube_*.raw; tools/diag/skiptex.py
+ * decodes them), which shows whether the stride is right. */
 static void tex_check_once(void)
 {
     unsigned s;
@@ -1451,8 +1465,33 @@ static void tex_check_once(void)
     for (s = 0; s < 4; s++) {
         d3dh_tex_t t;
         char path[700];
-        uint32_t hdr = MEM32(dev() + DEV_TEXTURES + 4 * s);
-        if (!hdr || ((MEM32(hdr + RES_FORMAT) >> 8) & 0xFF) != XDK_FMT_P8 || describe_texture(s, &t) != 1)
+        uint32_t hdr = MEM32(dev() + DEV_TEXTURES + 4 * s), fmt = hdr ? (MEM32(hdr + RES_FORMAT) >> 8) & 0xFF : 0;
+        if (hdr && (MEM32(hdr + RES_FORMAT) & 4) && (fmt == 0x0C || fmt == 0x0E || fmt == 0x0F) &&
+            describe_texture(s, &t) == 1) {
+            unsigned face;
+            for (i = 0; i < g_tex_seen_n; i++)
+                if (g_tex_seen[i][0] == hdr && g_tex_seen[i][1] == t.sig)
+                    break;
+            if (i < g_tex_seen_n || g_tex_seen_n >= TEX_SEEN_MAX)
+                continue;
+            g_tex_seen[g_tex_seen_n][0] = hdr;
+            g_tex_seen[g_tex_seen_n][1] = t.sig;
+            g_tex_seen_n++;
+            for (face = 0; face < 6; face++) {
+                FILE *o;
+                snprintf(path, sizeof(path), "%sskiptex_cube_%08X_f%u_fmt%02X_%ux%u.raw", g_check_prefix, hdr, face,
+                         fmt, t.width, t.height);
+                o = fopen(path, "wb");
+                if (o) {
+                    fwrite(t.bits + (size_t)face * t.face_bytes, 1, d3dh_texture_bytes(fmt, t.width, t.height, 1, 0), o);
+                    fclose(o);
+                }
+            }
+            fprintf(stderr, "[D3DB] texture check: cube %08X (fmt %02X, edge %u, %u levels, face stride %u, Data %08X,"
+                    " stage %u): six faces written\n", hdr, fmt, t.width, t.levels, t.face_bytes, t.data, s);
+            continue;
+        }
+        if (!hdr || fmt != XDK_FMT_P8 || describe_texture(s, &t) != 1)
             continue;
         for (i = 0; i < g_tex_seen_n; i++)
             if (g_tex_seen[i][0] == hdr && g_tex_seen[i][1] == t.pal_sig)
@@ -1897,6 +1936,21 @@ static int setup_draw(d3dh_draw_t *dr, uint32_t fvf, d3dh_tex_t tex[4], d3dh_sta
             return -1;
         }
         dr->tex[s] = r ? &tex[s] : NULL;
+        if (r > 0 && tex[s].cube) {
+            uint32_t key = MEM32(d + DEV_VS_HANDLE) ^ (MEM32(d + DEV_PIXEL_SHADER) * 31u) ^ (s << 28) ^
+                           (rs_x(XRS_PSTEXTUREMODES) * 17u), j;
+            InterlockedIncrement(&g_cube_binds);
+            for (j = 0; j < CUBE_SEEN_MAX && g_cube_seen[j] && g_cube_seen[j] != key; j++)
+                ;
+            if (j < CUBE_SEEN_MAX && !g_cube_seen[j]) {         /* each kind of cube draw once */
+                g_cube_seen[j] = key;
+                event(&g_ev_cube, CUBE_SEEN_MAX, "cube map %08X on stage %u: vertex shader %08X, pixel shader %08X"
+                      " (texture modes %08X), target %08X, textures %08X %08X %08X %08X", tex[s].key, s,
+                      MEM32(d + DEV_VS_HANDLE), MEM32(d + DEV_PIXEL_SHADER), rs_x(XRS_PSTEXTUREMODES),
+                      MEM32(d + DEV_RENDER_TARGET), MEM32(d + DEV_TEXTURES), MEM32(d + DEV_TEXTURES + 4),
+                      MEM32(d + DEV_TEXTURES + 8), MEM32(d + DEV_TEXTURES + 12));
+            }
+        }
         dr->tss[s] = tss[s];
         dr->n_tss[s] = translate_tss(s, tss[s]);
         /* S4: MIPFILTER NONE samples level 0 only in D3D, but xbox_d3d8's
@@ -3222,14 +3276,16 @@ static void mirror_swap(void)
                     " immediate %ld, of them pre-transformed %ld),"
                     " host draws %u (fails %u); not mirrored: target %ld, vertex program %ld, primitive %ld,"
                     " texture %ld, stream %ld, vertex format %ld, immediate %ld, DrawVertices %ld; textures uploaded"
-                    " %u (P8 %u, fails %u, evictions %u); translation gaps: value %ld, texop %ld, diffuse arg %ld,"
+                    " %u (P8 %u, cube %u, fails %u, evictions %u; cube binds %ld); translation gaps: value %ld, texop"
+                    " %ld, diffuse arg %ld,"
                     " frontface %ld\n",
                     (long)g_mirrored_draws, (long)g_mirrored_rt_draws, (long)g_mirrored_ps_draws,
                     (long)g_mirrored_imm, (long)g_mirrored_imm_rhw, st.draws,
                     st.draw_fails, (long)g_skip[SKIP_TARGET], (long)g_skip[SKIP_VS_PROGRAM],
                     (long)g_skip[SKIP_PRIM], (long)g_skip[SKIP_TEXTURE], (long)g_skip[SKIP_STREAM],
                     (long)g_skip[SKIP_FVF], (long)g_skip[SKIP_IMMEDIATE], (long)g_skip[SKIP_VERTICES],
-                    st.tex_uploads, st.p8_uploads, st.tex_upload_fails, st.tex_evictions, (long)g_gap[GAP_VALUE],
+                    st.tex_uploads, st.p8_uploads, st.cube_uploads, st.tex_upload_fails, st.tex_evictions,
+                    (long)g_cube_binds, (long)g_gap[GAP_VALUE],
                     (long)g_gap[GAP_TEXOP], (long)g_gap[GAP_DIFFUSE_ARG], (long)g_gap[GAP_FRONTFACE]);
             fprintf(stderr, "[D3DB] host fixed function: indexed draws %u, untransformed draws %u (lit by xbox_d3d8"
                     " %ld, lit on the CPU %ld); gaps: over 8 lights %ld, texture transform %ld, CPU lighting"

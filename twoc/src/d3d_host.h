@@ -18,6 +18,7 @@ typedef struct {
     unsigned tex_uploads, tex_upload_fails, tex_evictions;
     unsigned rt_created, rt_fails, rt_draws, rt_clears, rt_sampled, rt_feedback;  /* S4 */
     unsigned p8_uploads, ps_draws, ps_probes;                                     /* S4 */
+    unsigned cube_uploads;                                                        /* S5 part 2 */
     unsigned indexed_draws, ff_draws, lit_draws;                                  /* fixed-function 3D */
     unsigned copies, copy_fails;                                                  /* CopyRects (step 35) */
     unsigned vp_draws, vs_created, vs_fails, vs_const_uploads, vs_probes;         /* vertex programs (S5) */
@@ -42,6 +43,10 @@ typedef struct {
      * expands the indices through it to A8R8G8B8 at upload. */
     const uint32_t *palette;
     uint32_t pal_entries, pal_sig;
+    /* S5 part 2: a cube map. Its six faces follow one another in `bits`,
+     * each one a full mip chain `face_bytes` apart (padded to 128 bytes, as
+     * the NV2A and xemu lay them out); `width` is the edge. */
+    uint32_t cube, face_bytes;
 } d3dh_tex_t;
 
 /* S4: where a draw or clear goes. `data` 0 is the back buffer (with the
@@ -120,7 +125,8 @@ uint16_t d3dh_vs_inputs(const d3dh_vprog_t *p);
 int d3dh_vs_probe(const d3dh_vprog_t *p, const void *vert, uint32_t stride, const d3dh_draw_t *view, int *px,
                   int *py, uint32_t *argb);
 
-/* Bytes a texture takes in guest memory, the XDK way (0: format not handled). */
+/* Bytes a texture takes in guest memory, the XDK way (0: format not handled).
+ * For a cube map this is one face; the faces are that rounded up to 128. */
 uint32_t d3dh_texture_bytes(uint32_t format, uint32_t width, uint32_t height, uint32_t levels, uint32_t pitch);
 
 /* Whether the host can upload this XDK format (P8 through its palette, S4). */
