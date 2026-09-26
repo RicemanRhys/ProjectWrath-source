@@ -1855,6 +1855,19 @@ static int copy_dst_bound(void)
 
 static int g_draw_samples_copy;        /* set by setup_draw for the draw being mirrored */
 
+/* The device's viewport (+0x9D0: X, Y, W, H, MinZ, MaxZ) into a draw. */
+static void draw_viewport(d3dh_draw_t *dr)
+{
+    uint32_t d = dev();
+
+    dr->vp_x = MEM32(d + DEV_VIEWPORT);
+    dr->vp_y = MEM32(d + DEV_VIEWPORT + 4);
+    dr->vp_w = MEM32(d + DEV_VIEWPORT + 8);
+    dr->vp_h = MEM32(d + DEV_VIEWPORT + 12);
+    memcpy(&dr->vp_minz, (const void *)XBOX_PTR(d + DEV_VIEWPORT + 16), 4);
+    memcpy(&dr->vp_maxz, (const void *)XBOX_PTR(d + DEV_VIEWPORT + 20), 4);
+}
+
 /* Everything a mirrored draw needs besides its vertices, shared by the UP and
  * indexed paths: the target, textures and stage states, the pixel shader, the
  * render states, the viewport and, for untransformed vertices, the
@@ -1920,12 +1933,7 @@ static int setup_draw(d3dh_draw_t *dr, uint32_t fvf, d3dh_tex_t tex[4], d3dh_sta
         }
     }
     dr->fvf = fvf;
-    dr->vp_x = MEM32(d + DEV_VIEWPORT);
-    dr->vp_y = MEM32(d + DEV_VIEWPORT + 4);
-    dr->vp_w = MEM32(d + DEV_VIEWPORT + 8);
-    dr->vp_h = MEM32(d + DEV_VIEWPORT + 12);
-    memcpy(&dr->vp_minz, (const void *)XBOX_PTR(d + DEV_VIEWPORT + 16), 4);
-    memcpy(&dr->vp_maxz, (const void *)XBOX_PTR(d + DEV_VIEWPORT + 20), 4);
+    draw_viewport(dr);
     return cpu;
 }
 
@@ -2104,7 +2112,8 @@ static int vs_fetch(uint32_t va, uint32_t format, float out[4])
 }
 
 /* RECOMP_D3D_BRIDGE_VSDUMP (S5, a check): each distinct program, the first
- * time a draw uses it: its microcode, declaration, streams, the whole
+ * time a draw uses it (and, with RECOMP_D3D_BRIDGE_DRAWLOG, every program
+ * draw in the draw-log range, named HASH.N after its draw-log number): its microcode, declaration, streams, the whole
  * constant shadow, the viewport, and its first vertices' attributes as the
  * NV2A would fetch them, for tools/diag/vscheck.py to decode and evaluate.
  * `base[s]`/`stride[s]` locate vertex 0 of stream s (UP: stream 0 only);
@@ -2114,38 +2123,43 @@ static uint32_t g_vsdump_seen[VSDUMP_MAX];
 static int g_vsdump_n;
 
 static void vs_dump_once(const char *path, const vprog_t *p, const float *consts, const uint32_t base[16],
-                         const uint32_t stride[16], const uint16_t *index, uint32_t nv)
+                         const uint32_t stride[16], const uint16_t *index, uint32_t nv, int draw_no)
 {
-    char *line;
+    char *line, id[24];
     int len, k;
     uint32_t i, v, d = dev();
 
-    for (k = 0; k < g_vsdump_n; k++)
-        if (g_vsdump_seen[k] == p->hash)
+    if (draw_no < 0) {                  /* once per program */
+        for (k = 0; k < g_vsdump_n; k++)
+            if (g_vsdump_seen[k] == p->hash)
+                return;
+        if (g_vsdump_n >= VSDUMP_MAX)
             return;
-    if (g_vsdump_n >= VSDUMP_MAX)
-        return;
-    g_vsdump_seen[g_vsdump_n++] = p->hash;
+        g_vsdump_seen[g_vsdump_n++] = p->hash;
+        snprintf(id, sizeof(id), "%08X", p->hash);
+    } else {                            /* a draw in the draw-log range: named by its draw-log number */
+        snprintf(id, sizeof(id), "%08X.%d", p->hash, draw_no);
+    }
     line = (char *)malloc(16384);
     if (!line)
         return;
-    fprintf(stderr, "[D3DB] vsdump %08X path %s swap %ld obj %08X flags %08X insns %u words %u start %u\n", p->hash,
+    fprintf(stderr, "[D3DB] vsdump %s path %s swap %ld obj %08X flags %08X insns %u words %u start %u\n", id,
             path, (long)g_swaps + 1, p->obj, p->flags, p->n_insns, MEM32(p->obj + VSO_WORDS), MEM32(d + 0x388));
     for (len = 0, i = 0; i < p->n_insns * 4; i++)
         len += snprintf(line + len, 16384 - len, " %08X", p->code[i]);
-    fprintf(stderr, "[D3DB] vsdump %08X code%s\n", p->hash, line);
+    fprintf(stderr, "[D3DB] vsdump %s code%s\n", id, line);
     for (i = 0; i < 16; i++)
         if (p->attr[i].format != VS_FMT_DISABLED || p->attr[i].tess)
-            fprintf(stderr, "[D3DB] vsdump %08X attr v%u reg %u stream %u offset %u format %02X tess %u stride %u\n",
-                    p->hash, i, p->attr[i].reg, p->attr[i].stream, p->attr[i].offset, p->attr[i].format,
+            fprintf(stderr, "[D3DB] vsdump %s attr v%u reg %u stream %u offset %u format %02X tess %u stride %u\n",
+                    id, i, p->attr[i].reg, p->attr[i].stream, p->attr[i].offset, p->attr[i].format,
                     p->attr[i].tess, stride[p->attr[i].stream & 15]);
     for (len = 0, i = 0; i < VS_CONSTS * 4; i++) {
         uint32_t u;
         memcpy(&u, &consts[i], 4);
         len += snprintf(line + len, 16384 - len, " %08X", u);
     }
-    fprintf(stderr, "[D3DB] vsdump %08X const%s\n", p->hash, line);
-    fprintf(stderr, "[D3DB] vsdump %08X viewport %u %u %u %u %08X %08X\n", p->hash, MEM32(d + DEV_VIEWPORT),
+    fprintf(stderr, "[D3DB] vsdump %s const%s\n", id, line);
+    fprintf(stderr, "[D3DB] vsdump %s viewport %u %u %u %u %08X %08X\n", id, MEM32(d + DEV_VIEWPORT),
             MEM32(d + DEV_VIEWPORT + 4), MEM32(d + DEV_VIEWPORT + 8), MEM32(d + DEV_VIEWPORT + 12),
             MEM32(d + DEV_VIEWPORT + 16), MEM32(d + DEV_VIEWPORT + 20));
     for (v = 0; v < nv && v < 8; v++) {
@@ -2161,7 +2175,7 @@ static void vs_dump_once(const char *path, const vprog_t *p, const float *consts
                 len += snprintf(line + len, 16384 - len, " v%u=%.9g,%.9g,%.9g,%.9g", i, (double)f[0], (double)f[1],
                                 (double)f[2], (double)f[3]);
         }
-        fprintf(stderr, "[D3DB] vsdump %08X vertex %u index %u:%s\n", p->hash, v, ix, line);
+        fprintf(stderr, "[D3DB] vsdump %s vertex %u index %u:%s\n", id, v, ix, line);
     }
     free(line);
 }
@@ -2180,6 +2194,7 @@ static void stream_bases(uint32_t base[16], uint32_t stride[16])
 }
 
 static int drawlog_on(void);
+static unsigned g_drawlog_n;
 static void drawlog(const char *path, uint32_t xdk_prim, uint32_t n, uint32_t fvf, const void *verts, uint32_t nv,
                     uint32_t stride, const char *outcome);
 static uint32_t index_list(uint32_t xdk, const uint16_t *in, uint32_t n, uint32_t lo, uint16_t *out,
@@ -2357,18 +2372,14 @@ static void mirror_draw_vp(const char *path, uint32_t xdk_prim, uint32_t n, cons
     hv.n_insns = p.n_insns;
     hv.code = p.code;
     hv.consts = consts;
-    if (g_vsdump)
-        vs_dump_once(path, &p, consts, base, stride, idx, n);
+    if (g_vsdump) {
+        vs_dump_once(path, &p, consts, base, stride, idx, n, -1);
+        if (drawlog_on())
+            vs_dump_once(path, &p, consts, base, stride, idx, n, (int)g_drawlog_n);
+    }
     inputs = d3dh_vs_inputs(&hv);
     if (!inputs || !n) {
         skip(SKIP_VS_PROGRAM, p.hash);
-        return;
-    }
-    if (copy_dst_bound() && !g_vp_copy) {
-        skip(SKIP_VP_COPY, p.hash);
-        if (drawlog_on())
-            drawlog(path, xdk_prim, n, MEM32(dev() + DEV_VS_HANDLE), NULL, 0, 0,
-                    "skipped: vertex program sampling a CopyRects copy");
         return;
     }
     if (idx) {
@@ -2394,9 +2405,28 @@ static void mirror_draw_vp(const char *path, uint32_t xdk_prim, uint32_t n, cons
         return;
     }
     verts = vp_vertices(&p, inputs, base, stride, lo, nv, &vstride);
+    if (!verts) {
+        free(list);
+        return;
+    }
+    if (g_vsprobe) {                    /* before anything can skip the draw: the program is what's checked */
+        d3dh_draw_t view;
+        memset(&view, 0, sizeof(view));
+        draw_viewport(&view);
+        vs_probe_once(&p, &hv, verts, vstride, &view, idx, lo, n);
+    }
+    if (copy_dst_bound() && !g_vp_copy) {
+        skip(SKIP_VP_COPY, p.hash);
+        if (drawlog_on())
+            drawlog(path, xdk_prim, n, MEM32(dev() + DEV_VS_HANDLE), NULL, 0, 0,
+                    "skipped: vertex program sampling a CopyRects copy");
+        free(verts);
+        free(list);
+        return;
+    }
     memset(tex, 0, sizeof(tex));
     memset(&dr, 0, sizeof(dr));
-    if (!verts || setup_draw(&dr, 0, tex, rs, tss, &ps, NULL) < 0) {
+    if (setup_draw(&dr, 0, tex, rs, tss, &ps, NULL) < 0) {
         free(verts);
         free(list);
         return;
@@ -2409,13 +2439,29 @@ static void mirror_draw_vp(const char *path, uint32_t xdk_prim, uint32_t n, cons
     dr.indices = list;
     dr.index_count = k;
     dr.vprog = &hv;
-    if (g_vsprobe)
-        vs_probe_once(&p, &hv, verts, vstride, &dr, idx, lo, n);
     event(&g_ev_vp, 12, "vertex program %08X (%u instructions, reads %04X): %s prim %u, %u vertices from %u, %u regs,"
           " target %08X, pixel shader %s, tex0 %08X", p.hash, p.n_insns, inputs, path, xdk_prim, nv, lo, vstride / 16,
           dr.target.data, dr.ps ? "set" : "none", tex[0].key);
-    if (drawlog_on())
+    if (drawlog_on()) {
+        uint32_t r, j, c, col = 0;
         drawlog(path, xdk_prim, n, MEM32(dev() + DEV_VS_HANDLE), NULL, 0, 0, "mirrored: vertex program");
+        fprintf(stderr, "[D3DB] drawlog   inputs over %u vertices:", nv);
+        for (r = 0; r < 16; r++) {
+            float lo4[4] = { 1e30f, 1e30f, 1e30f, 1e30f }, hi4[4] = { -1e30f, -1e30f, -1e30f, -1e30f };
+            if (!(inputs & (1u << r)))
+                continue;
+            for (j = 0; j < nv; j++)
+                for (c = 0; c < 4; c++) {
+                    float x = verts[(size_t)j * (vstride / 4) + 4 * col + c];
+                    lo4[c] = x < lo4[c] ? x : lo4[c];
+                    hi4[c] = x > hi4[c] ? x : hi4[c];
+                }
+            fprintf(stderr, " v%u (%.4g..%.4g, %.4g..%.4g, %.4g..%.4g, %.4g..%.4g)", r, (double)lo4[0], (double)hi4[0],
+                    (double)lo4[1], (double)hi4[1], (double)lo4[2], (double)hi4[2], (double)lo4[3], (double)hi4[3]);
+            col++;
+        }
+        fputc('\n', stderr);
+    }
     if (d3dh_draw_up(&dr) == 0) {
         count_mirrored(&dr);
         InterlockedIncrement(&g_mirrored_vp);
@@ -2861,7 +2907,6 @@ static uint8_t *imm_vertices(uint32_t fvf, uint32_t stride)
  * screen (untransformed vertices through world * view * projection and the
  * viewport) and its texture-coordinate range. d3d_host.c dumps every one of
  * those swaps, so a thing on screen can be matched with its draws. */
-static unsigned g_drawlog_n;
 
 static int drawlog_on(void)
 {
@@ -2928,6 +2973,18 @@ static void drawlog(const char *path, uint32_t xdk_prim, uint32_t n, uint32_t fv
             surface_kind(MEM32(d + DEV_RENDER_TARGET)), (double)box[0], (double)box[1], (double)box[2],
             (double)box[3], behind ? " (some behind the eye)" : "", (double)uv[0], (double)uv[1], (double)uv[2],
             (double)uv[3], w);
+    /* S5: the blending and stage-0/1 ops too (XDK values), and the pixel shader. */
+    fprintf(stderr, "[D3DB] drawlog   blend %u %X %X op %X atest %u %X ref %X z %u/%u; stage 0 colour %u %X %X alpha"
+            " %u %X %X address %u %u; stage 1 colour %u alpha %u; pixel shader %s; fog %u\n", rs_x(XRS_ALPHABLENDENABLE),
+            rs_x(XRS_SRCBLEND), rs_x(XRS_DESTBLEND), rs_x(XRS_BLENDOP), rs_x(XRS_ALPHATESTENABLE), rs_x(XRS_ALPHAFUNC),
+            rs_x(XRS_ALPHAREF), rs_x(XRS_ZENABLE), rs_x(XRS_ZWRITEENABLE),
+            MEM32(D3D_TEXTURESTATE + 4 * XTSS_COLOROP), MEM32(D3D_TEXTURESTATE + 4 * XTSS_COLORARG1),
+            MEM32(D3D_TEXTURESTATE + 4 * XTSS_COLORARG2), MEM32(D3D_TEXTURESTATE + 4 * XTSS_ALPHAOP),
+            MEM32(D3D_TEXTURESTATE + 4 * XTSS_ALPHAARG1), MEM32(D3D_TEXTURESTATE + 4 * XTSS_ALPHAARG2),
+            MEM32(D3D_TEXTURESTATE + 4 * XTSS_ADDRESSU), MEM32(D3D_TEXTURESTATE + 4 * XTSS_ADDRESSV),
+            MEM32(D3D_TEXTURESTATE + 4 * (D3D_TSS_COUNT + XTSS_COLOROP)),
+            MEM32(D3D_TEXTURESTATE + 4 * (D3D_TSS_COUNT + XTSS_ALPHAOP)), MEM32(d + DEV_PIXEL_SHADER) ? "set" : "none",
+            rs_x(XRS_FOGENABLE));
     if (v && nv <= 16 && pos == FVF_XYZ) {      /* small draws: every vertex, and the view, in full */
         d3dh_ff_t ff;
         describe_ff(&ff);
@@ -2968,7 +3025,7 @@ static void mirror_draw_imm(void)
             uint32_t base[16] = { 0 }, stride[16] = { 0 };
             if (describe_vprog(&p) == 0) {
                 vp_constants(c);
-                vs_dump_once("Immediate", &p, c, base, stride, NULL, 0);
+                vs_dump_once("Immediate", &p, c, base, stride, NULL, 0, -1);
             }
         }
         if (g_skiptex && g_check_prefix[0] && skip_tex_once("improg")) {
