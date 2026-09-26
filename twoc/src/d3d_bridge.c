@@ -68,7 +68,9 @@
  * and _VSPROBE (its first vertices drawn as points by the host), compared by
  * tools/diag/vscheck.py.
  * S5 part 2 (notes 18.39) adds cube maps (describe_texture: six faces, each
- * a mip chain padded to 128 bytes; the hub's DXT5 0x07780F2D).
+ * a mip chain padded to 128 bytes; the hub's DXT5 0x07780F2D) and texel
+ * addressing for linear textures in program draws (texel_patch: the hub's
+ * water refraction samples the CopyRects copy at screen pixels).
  * Three checks, off by default: RECOMP_D3D_BRIDGE_PSPROBE (draw each pixel
  * shader once with fixed inputs; tools/diag/pscheck.py), _TEXCHECK (write
  * each P8 texture as uploaded) and _RTLOG (log render-target draws in full;
@@ -156,7 +158,8 @@ static int g_rtlog;                 /* RECOMP_D3D_BRIDGE_RTLOG: log render-targe
 static int g_skiptex;               /* RECOMP_D3D_BRIDGE_SKIPTEX: textures of skipped draws (a check, step 34) */
 static int g_vsdump;                /* RECOMP_D3D_BRIDGE_VSDUMP: each vertex program in full (a check, S5) */
 static int g_vsprobe;               /* RECOMP_D3D_BRIDGE_VSPROBE: each vertex program drawn as points (a check, S5) */
-static int g_vp_copy;               /* RECOMP_D3D_BRIDGE_VP_COPY: mirror program draws sampling a copy (a look, S5) */
+static int g_vp_copy;               /* RECOMP_D3D_BRIDGE_VP_COPY: mirror copy-sampling program draws even
+                                       when texel_patch can't patch them (a look, S5) */
 static long g_drawlog_from, g_drawlog_to;   /* RECOMP_D3D_BRIDGE_DRAWLOG=A-B: every draw in swaps A-B (step 35) */
 static char g_check_prefix[512];    /* where the checks write: "<dump dir>\host", as the host dumps */
 
@@ -2396,14 +2399,111 @@ static void vs_probe_once(const vprog_t *p, const d3dh_vprog_t *hv, const float 
     }
 }
 
+/* S5 part 2 (notes 18.39): the NV2A addresses a linear texture in texels,
+ * while xbox_d3d8 samples every texture over 0..1. A program draw with a
+ * linear texture on stage n (the hub's water refraction C6C8F337 reads the
+ * CopyRects copy at oPos.xy plus a ripple) gets one more instruction,
+ * MUL oTn.xy, Rk, c[K] with c[K] = (1/w, 1/h, 1, 1), and each instruction
+ * that writes oTn.xy also writes the free temp Rk. Rk is a temp the program
+ * never touches and K a constant it doesn't read (nor within 64 above a
+ * relative read). Returns the number of stages patched, or -1 if a writer
+ * can't also write a temp or nothing is free (the caller then skips a draw
+ * that samples a copy, as before). Microcode fields as in vscheck.py. */
+#define VF(w, sh, n) (((w) >> (sh)) & ((1u << (n)) - 1))
+static volatile LONG g_texel_draws, g_texel_fails, g_ev_texel;
+
+static int texel_patch(vprog_t *p, float *consts)
+{
+    uint32_t used = 1u << 12, cread[VS_CONSTS / 32 + 1] = { 0 }, i, s, patched = 0, h = 2166136261u;
+    int rel_lo = VS_CONSTS;
+
+    for (i = 0; i < p->n_insns; i++) {
+        const uint32_t *w = p->code + 4 * i;
+        uint32_t mac = VF(w[1], 21, 4), ilu = VF(w[1], 25, 3), cm = VF(w[3], 28, 2);
+        uint32_t am = VF(w[2], 26, 2), bm = VF(w[2], 11, 2), c = VF(w[1], 13, 8);
+        if (am == 1) used |= 1u << VF(w[2], 28, 4);
+        if (bm == 1) used |= 1u << VF(w[2], 13, 4);
+        if (cm == 1) used |= 1u << ((VF(w[2], 0, 2) << 2) | VF(w[3], 30, 2));
+        if (mac && VF(w[3], 24, 4)) used |= 1u << VF(w[3], 20, 4);
+        if (ilu && VF(w[3], 16, 4)) used |= 1u << (mac ? 1 : VF(w[3], 20, 4));
+        if (am == 3 || bm == 3 || cm == 3) {
+            if (VF(w[3], 1, 1)) {
+                if ((int)c < rel_lo)
+                    rel_lo = (int)c;
+            } else if (c < VS_CONSTS) {
+                cread[c / 32] |= 1u << (c % 32);
+            }
+        }
+    }
+    for (s = 0; s < 4; s++) {
+        uint32_t hdr = MEM32(dev() + DEV_TEXTURES + 4 * s), sz = hdr ? MEM32(hdr + RES_SIZE) : 0, k, K, n = 0;
+        if (!sz)
+            continue;                   /* none, or swizzled / compressed: 0..1 as on the host */
+        for (i = 0; i < p->n_insns; i++) {
+            uint32_t w3 = p->code[4 * i + 3], w1 = p->code[4 * i + 1];
+            if (!VF(w3, 11, 1) || VF(w3, 3, 8) != 9 + s || !(VF(w3, 12, 4) & 0xC))
+                continue;
+            n++;
+            if (VF(w3, 2, 1) ? (VF(w1, 21, 4) || VF(w3, 16, 4)) : VF(w3, 24, 4))
+                return -1;              /* its unit already writes a temp (or the ILU's is R1) */
+        }
+        if (!n)
+            continue;                   /* the program doesn't write oTn.xy */
+        for (k = 11; k >= 2 && (used & (1u << k)); k--)
+            ;
+        for (K = VS_CONSTS - 1; K > 59; K--)
+            if (!(cread[K / 32] & (1u << (K % 32))) && !((int)K >= rel_lo && (int)K < rel_lo + 64))
+                break;
+        if (k < 2 || K <= 59 || p->n_insns >= VS_MAX_INSNS)
+            return -1;
+        used |= 1u << k;
+        cread[K / 32] |= 1u << (K % 32);
+        for (i = 0; i < p->n_insns; i++) {
+            uint32_t *w = p->code + 4 * i, om = VF(w[3], 12, 4);
+            if (!VF(w[3], 11, 1) || VF(w[3], 3, 8) != 9 + s || !(om & 0xC))
+                continue;
+            if (VF(w[3], 2, 1))         /* the ILU alone: its temp write goes to R[r] */
+                w[3] = (w[3] & ~(0xFu << 16) & ~(0xFu << 20)) | (om << 16) | (k << 20);
+            else
+                w[3] = (w[3] & ~(0xFu << 24) & ~(0xFu << 20)) | (om << 24) | (k << 20);
+        }
+        p->code[4 * (p->n_insns - 1) + 3] &= ~1u;          /* no longer the final one */
+        {
+            uint32_t *w = p->code + 4 * p->n_insns;
+            w[0] = 0;
+            w[1] = (2u << 21) | (K << 13) | 0x1Bu;          /* MUL; A swizzle xyzw */
+            w[2] = (k << 28) | (1u << 26) | (0x1Bu << 17) | (3u << 11) | (0x1Bu << 2);  /* A = Rk, B = c[K] */
+            w[3] = (1u << 28) | (0xCu << 12) | (1u << 11) | ((9 + s) << 3) | 1u;       /* oTn.xy, final */
+        }
+        p->n_insns++;
+        consts[4 * K + 0] = 1.0f / (float)((sz & 0xFFF) + 1);
+        consts[4 * K + 1] = 1.0f / (float)(((sz >> 12) & 0xFFF) + 1);
+        consts[4 * K + 2] = 1.0f;
+        consts[4 * K + 3] = 1.0f;
+        event(&g_ev_texel, 8, "vertex program %08X: linear texture %08X (%ux%u) on stage %u, oT%u.xy scaled to 0..1"
+              " (%u writers, temp R%u, constant %u)", p->hash, hdr, (sz & 0xFFF) + 1, ((sz >> 12) & 0xFFF) + 1, s, s,
+              n, k, K);
+        patched++;
+    }
+    if (patched) {
+        for (i = 0; i < p->n_insns * 4; i++)
+            h = (h ^ p->code[i]) * 16777619u;
+        p->hash = h ? h : 1;            /* its own host shader */
+    }
+    return (int)patched;
+}
+#undef VF
+
 /* A draw with a vertex program (S5 part 1), UP (`idx` NULL: vertices 0 to
  * n - 1 of stream 0 at base[0]) or indexed (`n` 16-bit indices, streams at
  * base[] with the base vertex applied). The program, its declaration and
  * the constants are read from D3D's own state; the vertex range the draw
  * uses is fetched and expanded on the CPU, so any number of streams
  * interleave into the one host stream. Drawn with xbox_d3d8's translated
- * shader. A draw that samples a CopyRects copy waits for part 2 (linear
- * textures are addressed in texels) and is counted. */
+ * shader. A linear texture on a stage (the CopyRects copy) is addressed in
+ * texels, so the program is patched to scale those coordinates (S5 part 2,
+ * texel_patch); a draw that samples a copy and can't be patched is skipped
+ * and counted. */
 static void mirror_draw_vp(const char *path, uint32_t xdk_prim, uint32_t n, const uint16_t *idx,
                            const uint32_t base[16], const uint32_t stride[16])
 {
@@ -2416,21 +2516,27 @@ static void mirror_draw_vp(const char *path, uint32_t xdk_prim, uint32_t n, cons
     d3dh_draw_t dr;
     uint16_t inputs, *list = NULL;
     uint32_t lo = 0, hi = 0, nv, prim = 0, count = 0, k = 0, i, vstride;
+    int texel;
 
     if (describe_vprog(&p) != 0) {
         skip(SKIP_VS_PROGRAM, MEM32(dev() + DEV_VS_HANDLE));
         return;
     }
     vp_constants(consts);
-    hv.key = p.hash;
-    hv.n_insns = p.n_insns;
-    hv.code = p.code;
-    hv.consts = consts;
     if (g_vsdump) {
         vs_dump_once(path, &p, consts, base, stride, idx, n, -1);
         if (drawlog_on())
             vs_dump_once(path, &p, consts, base, stride, idx, n, (int)g_drawlog_n);
     }
+    texel = texel_patch(&p, consts);    /* after the dump: vscheck.py checks the game's own program */
+    if (texel > 0)
+        InterlockedIncrement(&g_texel_draws);
+    else if (texel < 0)
+        InterlockedIncrement(&g_texel_fails);
+    hv.key = p.hash;
+    hv.n_insns = p.n_insns;
+    hv.code = p.code;
+    hv.consts = consts;
     inputs = d3dh_vs_inputs(&hv);
     if (!inputs || !n) {
         skip(SKIP_VS_PROGRAM, p.hash);
@@ -2469,7 +2575,7 @@ static void mirror_draw_vp(const char *path, uint32_t xdk_prim, uint32_t n, cons
         draw_viewport(&view);
         vs_probe_once(&p, &hv, verts, vstride, &view, idx, lo, n);
     }
-    if (copy_dst_bound() && !g_vp_copy) {
+    if (texel < 0 && copy_dst_bound() && !g_vp_copy) {
         skip(SKIP_VP_COPY, p.hash);
         if (drawlog_on())
             drawlog(path, xdk_prim, n, MEM32(dev() + DEV_VS_HANDLE), NULL, 0, 0,
@@ -3029,7 +3135,8 @@ static void drawlog(const char *path, uint32_t xdk_prim, uint32_t n, uint32_t fv
             (double)uv[3], w);
     /* S5: the blending and stage-0/1 ops too (XDK values), and the pixel shader. */
     fprintf(stderr, "[D3DB] drawlog   blend %u %X %X op %X atest %u %X ref %X z %u/%u; stage 0 colour %u %X %X alpha"
-            " %u %X %X address %u %u; stage 1 colour %u alpha %u; pixel shader %s; fog %u\n", rs_x(XRS_ALPHABLENDENABLE),
+            " %u %X %X address %u %u; stage 1 colour %u alpha %u; pixel shader %s (texture modes %08X; stages %08X"
+            " %08X %08X %08X); fog %u\n", rs_x(XRS_ALPHABLENDENABLE),
             rs_x(XRS_SRCBLEND), rs_x(XRS_DESTBLEND), rs_x(XRS_BLENDOP), rs_x(XRS_ALPHATESTENABLE), rs_x(XRS_ALPHAFUNC),
             rs_x(XRS_ALPHAREF), rs_x(XRS_ZENABLE), rs_x(XRS_ZWRITEENABLE),
             MEM32(D3D_TEXTURESTATE + 4 * XTSS_COLOROP), MEM32(D3D_TEXTURESTATE + 4 * XTSS_COLORARG1),
@@ -3038,7 +3145,8 @@ static void drawlog(const char *path, uint32_t xdk_prim, uint32_t n, uint32_t fv
             MEM32(D3D_TEXTURESTATE + 4 * XTSS_ADDRESSU), MEM32(D3D_TEXTURESTATE + 4 * XTSS_ADDRESSV),
             MEM32(D3D_TEXTURESTATE + 4 * (D3D_TSS_COUNT + XTSS_COLOROP)),
             MEM32(D3D_TEXTURESTATE + 4 * (D3D_TSS_COUNT + XTSS_ALPHAOP)), MEM32(d + DEV_PIXEL_SHADER) ? "set" : "none",
-            rs_x(XRS_FOGENABLE));
+            rs_x(XRS_PSTEXTUREMODES), MEM32(d + DEV_TEXTURES), MEM32(d + DEV_TEXTURES + 4), MEM32(d + DEV_TEXTURES + 8),
+            MEM32(d + DEV_TEXTURES + 12), rs_x(XRS_FOGENABLE));
     if (v && nv <= 16 && pos == FVF_XYZ) {      /* small draws: every vertex, and the view, in full */
         d3dh_ff_t ff;
         describe_ff(&ff);
@@ -3294,10 +3402,11 @@ static void mirror_swap(void)
                     (long)g_gap[GAP_LIGHTS], (long)g_gap[GAP_TEXTRANSFORM], (long)g_gap[GAP_CPU_LIGHT],
                     (long)g_gap[GAP_SPECULAR], (long)g_gap[GAP_TEXCOORD_SIZE], (long)g_gap[GAP_IMM_W]);
             fprintf(stderr, "[D3DB] host vertex programs: mirrored %ld (host draws %u), shaders %u (fails %u), constant"
-                    " uploads %u, probes %u; sampling a copy, not mirrored %ld; gaps: undeclared register %ld, stream"
-                    " %ld, array type %ld, tessellator %ld, NORESERVEDCONSTANTS %ld\n", (long)g_mirrored_vp,
+                    " uploads %u, probes %u; linear textures scaled to 0..1 %ld (not patchable %ld); sampling a copy,"
+                    " not mirrored %ld; gaps: undeclared register %ld, stream %ld, array type %ld, tessellator %ld,"
+                    " NORESERVEDCONSTANTS %ld\n", (long)g_mirrored_vp,
                     st.vp_draws, st.vs_created, st.vs_fails, st.vs_const_uploads, st.vs_probes,
-                    (long)g_skip[SKIP_VP_COPY], (long)g_vpgap[VPGAP_UNDECLARED], (long)g_vpgap[VPGAP_STREAM],
+                    (long)g_texel_draws, (long)g_texel_fails, (long)g_skip[SKIP_VP_COPY], (long)g_vpgap[VPGAP_UNDECLARED], (long)g_vpgap[VPGAP_STREAM],
                     (long)g_vpgap[VPGAP_FORMAT], (long)g_vpgap[VPGAP_TESS], (long)g_vpgap[VPGAP_NORESERVED]);
             fprintf(stderr, "[D3DB] host copies: CopyRects back buffer -> texture %ld (host %u, fails %u), not"
                     " mirrored %ld; draws sampling a copy: mirrored %ld, vertex program %ld\n", (long)g_copies,
