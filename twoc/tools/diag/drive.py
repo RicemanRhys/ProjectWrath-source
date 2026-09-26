@@ -18,15 +18,18 @@ the hub, A once, stick up 5 s, stick right 5 s.
   --dump-rt  RECOMP_D3D_BRIDGE_DUMP_RT=1: each host dump also writes the host render targets (S4)
   --rtlog    RECOMP_D3D_BRIDGE_RTLOG=1: log render-target draws in full (S4; rtcheck.py re-renders them)
   --psprobe  RECOMP_D3D_BRIDGE_PSPROBE=1: probe each pixel shader once (S4; pscheck.py checks the log)
-  --texcheck RECOMP_D3D_BRIDGE_TEXCHECK=1: write each P8 texture once, as uploaded (S4; needs --dump)
+  --texcheck RECOMP_D3D_BRIDGE_TEXCHECK=1: write each P8 texture once, as uploaded, and each DXT cube map's
+             six faces raw (S4, S5 part 2; needs --dump; skiptex.py decodes the faces)
   --skiptex  RECOMP_D3D_BRIDGE_SKIPTEX=1: write each texture a skipped draw binds, once per kind, and each
              new immediate draw's screen box (step 34; needs --dump; skiptex.py decodes the DXT ones)
   --vsdump   RECOMP_D3D_BRIDGE_VSDUMP=1: each vertex program in full, once (S5; vscheck.py decodes it)
   --vsprobe  RECOMP_D3D_BRIDGE_VSPROBE=1: draw each program's first vertices as points on the host and log
              where they land (S5; vscheck.py --probe compares with its CPU evaluation; use with --vsdump)
-  --vp-copy  RECOMP_D3D_BRIDGE_VP_COPY=1: also mirror program draws that sample a CopyRects copy (S5 part 2)
+  --vp-copy  RECOMP_D3D_BRIDGE_VP_COPY=1: mirror program draws that sample a CopyRects copy even when their
+             texture coordinates can't be scaled from texels (S5 part 2; none such from splash to hub)
   --drawlog=A-B  RECOMP_D3D_BRIDGE_DRAWLOG=A-B: log every draw in guest swaps A-B (path, texture, screen box,
-             texture-coordinate range) and, with --dump, a host dump of each of those swaps (step 35)
+             texture-coordinate range, pixel-shader texture modes and all four stage textures) and, with --dump, a
+             host dump of each of those swaps (step 35)
   --no-pbexec leaves RECOMP_PB_EXEC unset.
   --exe=PATH runs a copy of crash_twoc.exe (so the build can be relinked meanwhile);
              the game still runs in the repo root.
