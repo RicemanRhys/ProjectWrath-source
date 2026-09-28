@@ -161,6 +161,11 @@ static int g_vsprobe;               /* RECOMP_D3D_BRIDGE_VSPROBE: each vertex pr
 static int g_vp_copy;               /* RECOMP_D3D_BRIDGE_VP_COPY: mirror copy-sampling program draws even
                                        when texel_patch can't patch them (a look, S5) */
 static long g_drawlog_from, g_drawlog_to;   /* RECOMP_D3D_BRIDGE_DRAWLOG=A-B: every draw in swaps A-B (step 35) */
+static FILE *g_motion;                     /* RECOMP_D3D_BRIDGE_MOTIONLOG=PATH (step 42) */
+static char g_motion_on_path[MAX_PATH];
+static int g_motion_live;
+static unsigned g_motion_n;
+static uint32_t g_motion_vsc_ret[4], g_motion_draw_ret;  /* who last wrote c0 (a call chain), who drew */
 static char g_check_prefix[512];    /* where the checks write: "<dump dir>\host", as the host dumps */
 
 static const char *const d3db_name[D3DB_COUNT] = {
@@ -574,6 +579,15 @@ void d3db_init(void)
         char *e;
         g_drawlog_from = strtol(getenv("RECOMP_D3D_BRIDGE_DRAWLOG"), &e, 0);
         g_drawlog_to = *e == '-' ? strtol(e + 1, NULL, 0) : g_drawlog_from;
+    }
+    if (d3db_host_on && getenv("RECOMP_D3D_BRIDGE_MOTIONLOG")) {
+        const char *m = getenv("RECOMP_D3D_BRIDGE_MOTIONLOG");
+        g_motion = fopen(m, "w");
+        if (g_motion) {
+            setvbuf(g_motion, NULL, _IOFBF, 4 << 20);
+            snprintf(g_motion_on_path, sizeof(g_motion_on_path), "%s.on", m);
+            fprintf(stderr, "[D3DB] motion log to %s while %s exists\n", m, g_motion_on_path);
+        }
     }
     if (d3db_on)
         coop_watch_cs(GAME_D3D_LOCK);
@@ -2252,6 +2266,35 @@ static void vs_dump_once(const char *path, const vprog_t *p, const float *consts
 
 /* Vertex 0 of each stream for an indexed draw: the vertex buffer's Data,
  * the stream's offset and the base vertex (device +0x1C), as 0x108F40. */
+/* RECOMP_D3D_BRIDGE_MOTIONLOG=PATH (step 42, notes 18.44): while PATH.on exists (checked at each swap),
+ * one compact line per mirrored program or fixed-function indexed draw goes to PATH, and one per swap with
+ * the game's frame counter, so draw-time data can be followed from frame to frame without the drawlog's
+ * cost. Program draws: hash, vertex range, a hash of the constants (c58/c59 left out: the bridge computes
+ * them), a hash of the fetched vertices, vertex lo's first input register, constant slots 96-99 (the
+ * XDK's c0-c3: every program seen reads its transform there) and 124-126 (the skinned programs' first
+ * bone, c28-c30), so a draw's screen anchor can be projected. Fixed-function draws: FVF, vertex range,
+ * texture 0, the world matrix's translation, a hash of the vertices and vertex lo's position. A test
+ * switch: off, nothing is checked. */
+
+static uint32_t fnv32(const void *p, size_t n, uint32_t h)
+{
+    const uint8_t *b = (const uint8_t *)p;
+    while (n--)
+        h = (h ^ *b++) * 16777619u;
+    return h;
+}
+
+static void motion_swap(LONG n)
+{
+    if (!g_motion)
+        return;
+    if (g_motion_live)
+        fprintf(g_motion, "S %ld %u %.4f\n", (long)n, MEM32(GAME_FRAME_COUNTER), now_s());
+    g_motion_live = GetFileAttributesA(g_motion_on_path) != INVALID_FILE_ATTRIBUTES;
+    g_motion_n = 0;
+    fflush(g_motion);
+}
+
 static void stream_bases(uint32_t base[16], uint32_t stride[16])
 {
     uint32_t s, bv = MEM32(dev() + 0x01Cu);
@@ -2635,6 +2678,20 @@ static void mirror_draw_vp(const char *path, uint32_t xdk_prim, uint32_t n, cons
         }
         fputc('\n', stderr);
     }
+    if (g_motion_live) {
+        uint32_t ch = fnv32(consts, 58 * 16, 2166136261u);
+        ch = fnv32(consts + 60 * 4, (VS_CONSTS - 60) * 16, ch);
+        fprintf(g_motion, "V %u %08X %u %u %08X %08X %.5g %.5g %.5g %.5g", g_motion_n++, p.hash, lo, nv, ch,
+                fnv32(verts, (size_t)nv * vstride, 2166136261u), (double)verts[0], (double)verts[1],
+                (double)verts[2], (double)verts[3]);
+        for (i = 96 * 4; i < 100 * 4; i++)          /* the transform (the XDK's c0-c3) */
+            fprintf(g_motion, " %.6g", (double)consts[i]);
+        for (i = 124 * 4; i < 127 * 4; i++)         /* the first bone (c28-c30) */
+            fprintf(g_motion, " %.6g", (double)consts[i]);
+        fprintf(g_motion, " @%08X %08X<%08X<%08X<%08X", g_motion_draw_ret, g_motion_vsc_ret[0],
+                g_motion_vsc_ret[1], g_motion_vsc_ret[2], g_motion_vsc_ret[3]);  /* drawn by, c0 set by */
+        fputc('\n', g_motion);
+    }
     if (d3dh_draw_up(&dr) == 0) {
         count_mirrored(&dr);
         InterlockedIncrement(&g_mirrored_vp);
@@ -2903,6 +2960,13 @@ static void mirror_draw_indexed(const d3db_args_t *a)
     if (drawlog_on() || (g_draw_samples_copy && InterlockedIncrement(&g_ev_copy_draw) <= 10))
         drawlog("Indexed", a->arg[0], n, vs, dr.verts, dr.vert_count, stride,
                 g_draw_samples_copy ? "mirrored, samples a CopyRects copy" : "mirrored");
+    if (g_motion_live) {
+        const float *p0 = (const float *)XBOX_PTR(va);
+        fprintf(g_motion, "F %u %X %u %u %08X %.5g %.5g %.5g %08X %.5g %.5g %.5g\n", g_motion_n++, vs, lo,
+                dr.vert_count, tex[0].key, (double)ff.world[12], (double)ff.world[13], (double)ff.world[14],
+                fnv32(p0, (size_t)dr.vert_count * stride, 2166136261u), (double)p0[0], (double)p0[1],
+                (double)p0[2]);
+    }
     if (d3dh_draw_up(&dr) == 0)
         count_mirrored(&dr);
     free(lit);
@@ -3372,6 +3436,7 @@ static void mirror_swap(void)
     LONG n = InterlockedIncrement(&g_swaps);
     ULONGLONG now;
 
+    motion_swap(n);
     d3dh_present(now_s(), (unsigned)n);
     now = GetTickCount64();
     if (now - g_last_host_ms >= HOST_PERIOD_MS) {
@@ -3515,6 +3580,20 @@ void d3db_enter(int id, d3db_args_t *a)
     a->ret = MEM32(esp);
     a->tid = GetCurrentThreadId();
 
+    /* The motion log's call chain for a write to c0: the return address, then the next three words
+     * on the guest stack that follow a call instruction in the game's code (a heuristic walk). */
+    if (g_motion_live && id == D3DB_VS_CONSTANT && (int)a->arg[0] <= 0 && (int)(a->arg[0] + a->arg[2]) > 0) {
+        uint32_t off, n = 1, v;
+        memset(g_motion_vsc_ret, 0, sizeof(g_motion_vsc_ret));
+        g_motion_vsc_ret[0] = a->ret;
+        for (off = 4; off < 0x400 && n < 4; off += 4) {
+            v = MEM32(esp + off);
+            if (v > 0x11005u && v < 0x135AA0u &&
+                (MEM8(v - 5) == 0xE8 || MEM8(v - 6) == 0xFF || MEM8(v - 2) == 0xFF || MEM8(v - 3) == 0xFF))
+                g_motion_vsc_ret[n++] = v;
+        }
+    }
+
     switch (id) {
     case D3DB_CLEAR: case D3DB_SWAP: case D3DB_DRAW_UP: case D3DB_DRAW:
     case D3DB_DRAW_INDEXED: case D3DB_END: case D3DB_COPYRECTS:
@@ -3655,7 +3734,7 @@ void d3db_leave(int id, d3db_args_t *a)
         case D3DB_CLEAR:         mirror_clear(a);         break;
         case D3DB_SWAP:          mirror_swap();           break;
         case D3DB_DRAW_UP:       mirror_draw_up(a);       break;
-        case D3DB_DRAW_INDEXED:  mirror_draw_indexed(a);  break;
+        case D3DB_DRAW_INDEXED:  g_motion_draw_ret = a->ret; mirror_draw_indexed(a);  break;
         case D3DB_END:           mirror_draw_imm();       break;
         case D3DB_DRAW:          mirror_draw_vertices();  break;
         case D3DB_COPYRECTS:     mirror_copy_rects(a);    break;
