@@ -1448,6 +1448,51 @@ static void cm_MmQueryAllocationSize(void)
     coop_leave(self);
 }
 
+/* ── MmGetPhysicalAddress for DSOUND (notes 18.44) ────────── */
+
+/*
+ * The APU reads everything DSOUND hands it by physical address. DSOUND's
+ * voice array, SGE lists and buffers are contiguous memory (VA 0x80000000 +
+ * physical offset), but it also streams from heap buffers, and asks for their
+ * physical address page by page (0x13DDB7: a packet's pages into its SGE
+ * list). The runtime keeps the contiguous window apart from the RAM at VA 0,
+ * so the two ranges overlap as physical addresses: 0x00B80000 is both a
+ * voice (window) and part of the image (RAM).
+ *
+ * So a DSOUND caller asking about a low-RAM address gets it back with
+ * PHYS_LOWRAM (bit 26) set, and the emulated APU's accessors (a local change
+ * in xboxrecomp's apu_shim.h, apu_phys) read a marked address from RAM and
+ * any other from the contiguous window. Bit 26 is above the 64 MB of RAM;
+ * DSOUND never masks the answer, and page arithmetic (0x13EF51's contiguity
+ * check compares one page's answer with the next) keeps it. Contiguous addresses
+ * and every other caller (XPP) still go to the runtime.
+ */
+#define PA_THUNK              0x0015ABD4u      /* [thunk] = MmGetPhysicalAddress (ordinal 173) */
+#define PA_DSOUND_LO          0x00135AA0u      /* the DSOUND section */
+#define PA_DSOUND_HI          0x001533E4u
+#define PA_LOWRAM             0x04000000u      /* APU_PHYS_LOWRAM (xboxrecomp apu_shim.h, local) */
+static volatile LONG g_pa_lowram;
+
+/* ULONG_PTR MmGetPhysicalAddress(PVOID BaseAddress); ret 4 */
+static void pa_MmGetPhysicalAddress(void)
+{
+    uint32_t ret = MEM32(esp), va = MEM32(esp + 4);
+    coop_thread_t *self;
+
+    if (va >= CM_WINDOW || ret < PA_DSOUND_LO || ret >= PA_DSOUND_HI) {
+        t_coop_kernel_va = MEM32(PA_THUNK);
+        coop_kernel_call();
+        return;
+    }
+    self = coop_enter();
+    eax = va | PA_LOWRAM;
+    if (InterlockedIncrement(&g_pa_lowram) <= 3)
+        fprintf(stderr, "[APU] DSOUND low-RAM buffer %08X -> physical %08X (marked for the APU; caller %08X)\n",
+                va, eax, ret);
+    esp += 8;                              /* ret 4 */
+    coop_leave(self);
+}
+
 /* ── Kernel pool: an arena of its own (notes 18.42) ──────── */
 
 /*
@@ -1766,6 +1811,7 @@ recomp_func_t recomp_lookup_manual(uint32_t xbox_va)
         if (xbox_va == MEM32(CM_ALLOC_EX_THUNK))    return cm_MmAllocateContiguousMemoryEx;
         if (xbox_va == MEM32(CM_FREE_THUNK))        return cm_MmFreeContiguousMemory;
         if (xbox_va == MEM32(CM_QSIZE_THUNK))       return cm_MmQueryAllocationSize;
+        if (xbox_va == MEM32(PA_THUNK))             return pa_MmGetPhysicalAddress;
         if (xbox_va == MEM32(POOL_ALLOC_THUNK))     return pool_ExAllocatePool;
         if (xbox_va == MEM32(POOL_ALLOC_TAG_THUNK)) return pool_ExAllocatePoolWithTag;
         if (xbox_va == MEM32(POOL_FREE_THUNK))      return pool_ExFreePool;
