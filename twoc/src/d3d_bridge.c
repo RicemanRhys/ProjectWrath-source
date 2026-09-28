@@ -3462,6 +3462,11 @@ static void mirror_draw_vertices(void)
  * draws, immediate ones (End) on their own (step 35). */
 static volatile LONG64 g_mirror_ticks[4];
 
+/* Gaps between guest swaps this interval (18.46): the stutter a player
+ * sees, counted in the log so a playtest's own log measures it. */
+static unsigned g_gap25, g_gap50, g_gap100;
+static double g_gap_max;
+
 static void mirror_swap(void)
 {
     LONG n = InterlockedIncrement(&g_swaps);
@@ -3469,6 +3474,24 @@ static void mirror_swap(void)
 
     motion_swap(n);
     d3dh_present(now_s(), (unsigned)n);
+    {
+        static LARGE_INTEGER f, last;
+        LARGE_INTEGER q;
+        double ms;
+
+        QueryPerformanceCounter(&q);
+        if (!f.QuadPart)
+            QueryPerformanceFrequency(&f);
+        if (last.QuadPart) {
+            ms = (double)(q.QuadPart - last.QuadPart) * 1000.0 / (double)f.QuadPart;
+            g_gap25 += ms > 25;
+            g_gap50 += ms > 50;
+            g_gap100 += ms > 100;
+            if (ms > g_gap_max)
+                g_gap_max = ms;
+        }
+        last = q;
+    }
     now = GetTickCount64();
     if (now - g_last_host_ms >= HOST_PERIOD_MS) {
         static SRWLOCK line_lock = SRWLOCK_INIT;
@@ -3495,6 +3518,10 @@ static void mirror_swap(void)
                         " (%.2f ms a frame)\n", st.paced, st.paced - last_paced, st.paced_late,
                         st.paced_late - last_late, st.paced_wait_ms - last_wait_ms,
                         st.paced > last_paced ? (st.paced_wait_ms - last_wait_ms) / (st.paced - last_paced) : 0.0);
+            fprintf(stderr, "[D3DB] host swap gaps this interval: over 25 ms %u, over 50 ms %u, over 100 ms %u,"
+                    " longest %.1f ms\n", g_gap25, g_gap50, g_gap100, g_gap_max);
+            g_gap25 = g_gap50 = g_gap100 = 0;
+            g_gap_max = 0;
             last_paced = st.paced;
             last_late = st.paced_late;
             last_wait_ms = st.paced_wait_ms;

@@ -120,6 +120,7 @@ static IDXGISwapChain1 *g_flip;
 static unsigned g_w, g_h, g_interval;
 static double g_frame_hz;               /* S7: the frame limiter's rate, 0 = off */
 static HANDLE g_latency;                /* vsync pacing (18.45): the frame-latency waitable object */
+#define VSYNC_WAIT_MS 50                /* the longest a present waits for it (18.46) */
 static IDirect3DDevice8 *g_dev;
 static ID3D11Texture2D *g_staging;
 static char g_dump_prefix[512];
@@ -1049,14 +1050,36 @@ static void pace(void)
     double period, left;
 
     if (g_latency) {                    /* vsync pacing: wait for room in the queue */
+        static int misses;
+        DWORD r;
+
+        AcquireSRWLockExclusive(&pace_lock);
         if (!freq.QuadPart)
             QueryPerformanceFrequency(&freq);
         QueryPerformanceCounter(&now);
         left = (double)now.QuadPart;
-        WaitForSingleObjectEx(g_latency, 1000, TRUE);
+        /* A few frames at most. It waited up to a second, and the one time
+         * the display didn't release a frame in time (a load, 1 run in 6)
+         * the game stood still for 1-2 s. Three misses in a row and the
+         * limiter paces for the rest of the run. */
+        r = WaitForSingleObjectEx(g_latency, VSYNC_WAIT_MS, TRUE);
         QueryPerformanceCounter(&now);
         g_st.paced++;
         g_st.paced_wait_ms += ((double)now.QuadPart - left) * 1000.0 / (double)freq.QuadPart;
+        if (r == WAIT_TIMEOUT) {
+            g_st.paced_late++;
+            if (++misses >= 3) {
+                double hz = d3dh_display_hz();
+                g_frame_hz = hz > 0 && g_interval ? hz / g_interval : 60000.0 / 1001.0;
+                g_interval = 0;
+                g_latency = NULL;
+                fprintf(stderr, "[D3DB] host: the display released no frame in %d ms, %d times running;"
+                        " the frame limiter paces from here, %.3f Hz\n", VSYNC_WAIT_MS, misses, g_frame_hz);
+            }
+        } else {
+            misses = 0;
+        }
+        ReleaseSRWLockExclusive(&pace_lock);
         return;
     }
     if (g_frame_hz <= 0)

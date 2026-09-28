@@ -2599,9 +2599,17 @@ static DWORD WINAPI ai_thread(LPVOID unused)
     }
 }
 
+/* RECOMP_APU_IRQ=0 leaves the interrupt undelivered, as before 18.45 (a
+ * switch for comparing runs, 18.46): streams then stop a few seconds in. */
 void twoc_apu_irq_init(void)
 {
+    const char *v = getenv("RECOMP_APU_IRQ");
+
     InitializeCriticalSection(&g_ds_irql);
+    if (v && !strcmp(v, "0")) {
+        fprintf(stderr, "[APU-IRQ] RECOMP_APU_IRQ=0: the APU interrupt is not delivered\n");
+        return;
+    }
     CloseHandle(CreateThread(NULL, 0, ai_thread, NULL, 0, NULL));
 }
 
