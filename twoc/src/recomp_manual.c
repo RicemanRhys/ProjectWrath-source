@@ -2346,6 +2346,20 @@ static int vw_model_idle(uint32_t handle)
     return blocks && handle < 0x100 && !(MEM32(blocks + handle * 0x80 + APU_PAR_STATE) & APU_PAR_STATE_ACTIVE);
 }
 
+/* Whether DSOUND still has the voice on one of its lists (its entry at +0x4C:
+ * next, prev), i.e. whether an idle can still be reported for it. On the
+ * hardware an idle arrives once, as a trap. Here it can come twice, from this
+ * poll's direct report and from the APU interrupt (18.45), and the second
+ * sub_001399D0 unlinked an unlinked voice: its own check (next == the entry)
+ * misses the null prev that sub_0013AAF6 leaves, and sub_0013AAF6 crashed
+ * reading through it. */
+static int vw_voice_linked(uint32_t voice)
+{
+    uint32_t next = MEM32(voice + 0x4C), prev = MEM32(voice + 0x50);
+
+    return next && prev && next != voice + 0x4C;
+}
+
 /* A pending front-end trap, handled; then the voice's idle, if the model has
  * idled it. Caller holds g_vw_isr_lock. */
 static void vw_apu_interrupt(uint32_t kint, uint32_t voice)
@@ -2356,7 +2370,8 @@ static void vw_apu_interrupt(uint32_t kint, uint32_t voice)
         handle = MEM32(APU_FEDECPARAM_VA) & 0xFFFF;
         trapped_voice = MEM32(APU_FEDECMETH_VA) == VW_IDLE_VOICE && handle < 0x100
                         ? MEM32(ctx + 0x330 + handle * 4) : 0;
-        if (trapped_voice && (MEM16(trapped_voice + 0x12) & 0x8000) && vw_model_idle(handle)) {
+        if (trapped_voice && (MEM16(trapped_voice + 0x12) & 0x8000) && vw_model_idle(handle)
+                && vw_voice_linked(trapped_voice)) {
             MEM32(APU_ISTS_VA) = 0;        /* raises the trap's status */
             if (MEM32(APU_ISTS_VA) & APU_ISTS_GINTSTS) {
                 PUSH32(esp, ctx);
@@ -2384,7 +2399,7 @@ static void vw_apu_interrupt(uint32_t kint, uint32_t voice)
     if (!(MEM16(voice + 0x12) & 0x8000))
         return;
     handle = MEM16(voice + 0xA + 2 * MEM8(voice + 0x64));
-    if (vw_model_idle(handle)) {
+    if (vw_model_idle(handle) && vw_voice_linked(voice)) {
         ecx = ctx;
         PUSH32(esp, handle);
         PUSH32(esp, VW_RET);
@@ -2503,7 +2518,7 @@ static void ai_service(uint32_t kint)
         handle = MEM32(APU_FEDECPARAM_VA) & 0xFFFF;
         trapped_voice = MEM32(APU_FEDECMETH_VA) == VW_IDLE_VOICE && handle < 0x100
                         ? MEM32(ctx + 0x330 + handle * 4) : 0;
-        if (!trapped_voice || !vw_model_idle(handle)) {
+        if (!trapped_voice || !vw_model_idle(handle) || !vw_voice_linked(trapped_voice)) {
             ecx = ctx + 8;
             PUSH32(esp, 0);
             PUSH32(esp, VW_RET);
