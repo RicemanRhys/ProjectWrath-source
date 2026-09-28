@@ -70,6 +70,9 @@ static void voice_reset_filters(MCPXAPUState *d, uint16_t v)
 {
     assert(v < MCPX_HW_MAX_VOICES);
     memset(&d->vp.filters[v].svf, 0, sizeof(d->vp.filters[v].svf));
+    memset(d->vp.filters[v].rs_prev, 0, sizeof(d->vp.filters[v].rs_prev));
+    memset(d->vp.filters[v].rs_next, 0, sizeof(d->vp.filters[v].rs_next));
+    d->vp.filters[v].rs_frac = 0;
     hrtf_filter_clear_history(&d->vp.filters[v].hrtf);
     if (d->vp.filters[v].resampler) {
         src_reset(d->vp.filters[v].resampler);
@@ -939,32 +942,80 @@ static int voice_get_samples(MCPXAPUState *d, uint32_t v, float samples[][2],
 }
 
 /* ============================================================
- * Voice resampling (simplified - no libsamplerate)
+ * Voice resampling (linear; libsamplerate is stubbed)
  *
- * Since libsamplerate is stubbed, we do a simple nearest-neighbor
- * resample. This gives us functional audio at the cost of quality.
+ * rate is output samples per source sample (48 kHz over the voice's own
+ * rate, from its pitch), so each output sample moves 1 / rate source samples
+ * on. This used to ignore rate and hand the source samples out one per output
+ * sample: a 44.1 kHz voice played 8.8% fast and high, and every other rate
+ * was wrong by its own ratio (step 1, notes 18.45).
+ *
+ * Linear interpolation between the voice's last two source samples, with the
+ * position a 0.32 fixed-point fraction, so a frame fetches exactly the source
+ * samples it moves past and none is fetched twice or dropped. xemu uses
+ * libsamplerate here; linear is cheaper and its images at 44.1 kHz are
+ * well down in the top octave.
+ *
+ * A voice that gives nothing (paused, off, or a persist stream whose SSL is
+ * empty until the title queues its next packet) returns -1. The old code
+ * returned 0 there, and voice_process loops until it has 32 samples, so a
+ * starved stream spun the frame thread forever with the APU lock held: every
+ * guest VOICE_LOCK then waited on it, and the title stopped. A stream starves
+ * once its packets are refilled from the APU interrupt.
  * ============================================================ */
+
+#define RESAMPLE_MAX_STEP 16  /* source samples per output sample: 768 kHz */
 
 static int voice_resample(MCPXAPUState *d, uint16_t v, float samples[][2],
                           int requested_num, float rate)
 {
-    /* Without libsamplerate, just fetch raw samples at native rate.
-     * Rate < 1.0 means we need more source samples than output samples.
-     * For initial functionality, just get the samples directly. */
-    int sample_count = 0;
-    while (sample_count < requested_num) {
+    MCPXAPUVoiceFilter *f = &d->vp.filters[v];
+    float src[RESAMPLE_MAX_STEP * NUM_SAMPLES_PER_FRAME + 1][2];
+    double step_d = rate > 0.0f ? 1.0 / rate : 1.0;
+    uint64_t step, pos;
+    int need, got = 0, k = 0;
+
+    if (!(step_d <= RESAMPLE_MAX_STEP)) {
+        static int warned;
+        if (!warned++)
+            fprintf(stderr, "[APU] voice %u: resample step %.2f clamped to %d\n",
+                    v, step_d, RESAMPLE_MAX_STEP);
+        step_d = RESAMPLE_MAX_STEP;
+    }
+    step = (uint64_t)(step_d * 4294967296.0 + 0.5);
+    need = (int)((f->rs_frac + step * (uint64_t)requested_num) >> 32);
+
+    while (got < need) {
         int active = voice_get_mask(d, v, NV_PAVS_VOICE_PAR_STATE,
                                     NV_PAVS_VOICE_PAR_STATE_ACTIVE_VOICE);
         if (!active) break;
 
-        int count = voice_get_samples(d, v, &samples[sample_count],
-                                      requested_num - sample_count);
-        if (count < 0) break;
-        if (count == 0) return -1;
-        sample_count += count;
+        int count = voice_get_samples(d, v, &src[got], need - got);
+        if (count <= 0) break;
+        got += count;
     }
-    (void)rate; /* Ignored until we add proper resampling */
-    return sample_count;
+    if (need > 0 && got == 0) return -1;
+    for (int i = got; i < need; i++) {
+        src[i][0] = 0.0f;                 /* the voice ended inside this frame */
+        src[i][1] = 0.0f;
+    }
+
+    pos = f->rs_frac;
+    for (int i = 0; i < requested_num; i++) {
+        float t = (float)((uint32_t)pos * (1.0 / 4294967296.0));
+        samples[i][0] = f->rs_prev[0] + (f->rs_next[0] - f->rs_prev[0]) * t;
+        samples[i][1] = f->rs_prev[1] + (f->rs_next[1] - f->rs_prev[1]) * t;
+        pos += step;
+        for (; pos >= ((uint64_t)1 << 32); pos -= (uint64_t)1 << 32) {
+            f->rs_prev[0] = f->rs_next[0];
+            f->rs_prev[1] = f->rs_next[1];
+            f->rs_next[0] = src[k][0];
+            f->rs_next[1] = src[k][1];
+            k++;
+        }
+    }
+    f->rs_frac = (uint32_t)pos;
+    return requested_num;
 }
 
 /* ============================================================
