@@ -323,7 +323,8 @@ static void traced_sub_0002BCC0(void)
  * suspend is an APC, which the holder of DSOUND's lock can't take at that
  * point either. The game takes critical sections only through the two thunks
  * below (no TryEnter, no AndRegion import), so a per-thread count of enters
- * minus leaves, kept at this boundary, is exact.
+ * minus leaves, kept at this boundary, is exact. DSOUND's IRQL lock (18.45)
+ * counts as one more: a thread at DISPATCH_LEVEL can't take a suspend either.
  */
 #define COOP_NTSUSPEND_THUNK  0x0015AA7Cu      /* [thunk] = NtSuspendThread (ordinal 231) */
 #define COOP_NTRESUME_THUNK   0x0015AA80u      /* [thunk] = NtResumeThread (ordinal 224) */
@@ -357,6 +358,7 @@ static RECOMP_TLS int t_coop_depth;            /* nesting of kernel calls */
 #define COOP_CS_TRACK 32
 static RECOMP_TLS uint32_t t_cs_held[COOP_CS_TRACK]; /* guest CS addresses owned, innermost last */
 static RECOMP_TLS int t_cs_n;                  /* how many (can exceed COOP_CS_TRACK) */
+static RECOMP_TLS int t_ds_irql;               /* DSOUND's IRQL lock nesting, counted as a lock (18.45) */
 static uint32_t g_cs_watch;                     /* coop_watch_cs */
 static volatile LONG g_cs_watch_holders;       /* threads owning it now */
 
@@ -504,7 +506,7 @@ static void coop_kernel_call(void)
             InterlockedDecrement(&g_cs_watch_holders);
     }
     if (self && (enter || leave)) {
-        InterlockedExchange(&self->locks, t_cs_n);
+        InterlockedExchange(&self->locks, t_cs_n + t_ds_irql);
         InterlockedExchange(&self->acquiring, 0);
     }
     coop_leave(self);
@@ -2097,6 +2099,160 @@ void sub_000ECB2B(void)
     esp += 12;                                 /* ret 8 */
 }
 
+/* ── DSOUND's IRQL, made a lock (notes 18.45) ─────────────────── */
+
+/*
+ * DSOUND keeps its interrupt-time code apart from everything else by raising
+ * IRQL: its guard object (constructor sub_001395F1, destructor sub_00139624;
+ * the library's only KfRaiseIrql and KfLowerIrql calls, 67 guarded regions)
+ * raises to DISPATCH_LEVEL unless the thread is there already. On the Xbox's
+ * one CPU that is exclusion: no DPC and no other thread runs until the guard
+ * lowers again, and the ISR only touches what DSOUND leaves safe for it
+ * (sub_001399D0 defers an idle while ctx+0x32C counts a list walk).
+ *
+ * The runtime's IRQL is a per-thread number, its DPCs run on the timer
+ * thread, and the APU's ISR now runs on a thread of its own (below). So they
+ * ran in the middle of a game thread's guarded code: the ISR turned off a
+ * voice a game thread was unlinking, and crashed on the half-unlinked list in
+ * sub_0013AAF6 (where 18.42's first voice-off version crashed too).
+ *
+ * So the outermost raise also takes a recursive host lock, held until the
+ * matching lower, and the ISR and DSOUND's DPC (sub_00139F1B) run holding it:
+ * DSOUND at DISPATCH_LEVEL runs alone again. A thread holding it counts as
+ * holding a lock, so cooperative suspend doesn't park it there. Lock order:
+ * g_vw_isr_lock, then this; guarded code only ever try-acquires the former.
+ */
+static CRITICAL_SECTION g_ds_irql;
+static volatile DWORD g_ds_owner;                  /* outermost holder, for the stall report */
+static volatile uint32_t g_ds_site;                /* its guest return address */
+static volatile ULONGLONG g_ds_since;
+
+static void ds_irql_note(uint32_t site)
+{
+    coop_thread_t *self;
+
+    if (t_ds_irql++ == 0) {
+        g_ds_owner = GetCurrentThreadId();
+        g_ds_site = site;
+        g_ds_since = GetTickCount64();
+        if ((self = coop_self()) != NULL)
+            InterlockedExchange(&self->locks, t_cs_n + t_ds_irql);
+    }
+}
+
+static void ds_irql_enter(uint32_t site)
+{
+    EnterCriticalSection(&g_ds_irql);
+    ds_irql_note(site);
+}
+
+/* The interrupt thread never waits for it: a busy lock leaves the interrupt
+ * pending for its next look. */
+static int ds_irql_try(uint32_t site)
+{
+    if (!TryEnterCriticalSection(&g_ds_irql))
+        return 0;
+    ds_irql_note(site);
+    return 1;
+}
+
+static void ds_irql_leave(void)
+{
+    coop_thread_t *self;
+
+    if (--t_ds_irql == 0) {
+        g_ds_owner = 0;
+        if ((self = coop_self()) != NULL)
+            InterlockedExchange(&self->locks, t_cs_n);
+    }
+    LeaveCriticalSection(&g_ds_irql);
+}
+
+/* The guards that raised on this thread, innermost last, by the guest address
+ * of the guard object (on the stack, so an inner one sits lower). The lock is
+ * released by address rather than by the guard's own raised flag, and a guard
+ * whose stack frame is gone (below esp) without its destructor is released
+ * when that is seen, and logged. */
+#define DS_GUARDS 32
+static RECOMP_TLS uint32_t t_guard[DS_GUARDS], t_guard_site[DS_GUARDS];
+static RECOMP_TLS int t_nguard;
+static volatile LONG g_ds_odd;
+
+static void ds_guard_log(const char *what, uint32_t guard, uint32_t site)
+{
+    if (InterlockedIncrement(&g_ds_odd) <= 10)
+        fprintf(stderr, "[DSIRQL] thread %lu: guard at %08X (from guest %08X) %s\n",
+                (unsigned long)GetCurrentThreadId(), guard, site, what);
+}
+
+static void ds_guard_reap(void)
+{
+    while (t_nguard > 0 && t_guard[t_nguard - 1] < esp) {
+        t_nguard--;
+        ds_guard_log("left its frame without its destructor; released", t_guard[t_nguard], t_guard_site[t_nguard]);
+        ds_irql_leave();
+    }
+}
+
+/* sub_001395F1: the guard's constructor (thiscall, the guard; ret). It
+ * raised if it recorded 1 at +4. */
+extern void sub_001395F1_gen(void);
+void sub_001395F1(void)
+{
+    uint32_t guard = ecx, site = MEM32(esp);
+
+    ds_guard_reap();
+    sub_001395F1_gen();
+    if (MEM32(guard + 4)) {
+        if (t_nguard < DS_GUARDS) {
+            t_guard[t_nguard] = guard;
+            t_guard_site[t_nguard] = site;
+        }
+        t_nguard++;
+        ds_irql_enter(site);
+    }
+}
+
+/* sub_00139624: the guard's destructor (thiscall, the guard; ret). */
+extern void sub_00139624_gen(void);
+void sub_00139624(void)
+{
+    uint32_t guard = ecx, site = MEM32(esp);
+    int raised = MEM32(guard + 4) != 0, i;
+
+    ds_guard_reap();
+    for (i = (t_nguard < DS_GUARDS ? t_nguard : DS_GUARDS) - 1; i >= 0 && t_guard[i] != guard; i--)
+        ;
+    sub_00139624_gen();
+    if (i >= 0) {
+        if (!raised)
+            ds_guard_log("had its raised flag cleared before its destructor; released", guard, t_guard_site[i]);
+        for (; i + 1 < t_nguard && i + 1 < DS_GUARDS; i++) {
+            t_guard[i] = t_guard[i + 1];
+            t_guard_site[i] = t_guard_site[i + 1];
+        }
+        t_nguard--;
+        ds_irql_leave();
+    } else if (raised) {
+        if (t_nguard > DS_GUARDS) {          /* an untracked overflow entry */
+            t_nguard--;
+            ds_irql_leave();
+        } else {
+            ds_guard_log("was destroyed raised, but never recorded", guard, site);
+        }
+    }
+}
+
+/* sub_00139F1B: DSOUND's DPC (stdcall, 4 arguments; ret 16), which runs at
+ * DISPATCH_LEVEL and walks the voice lists unguarded. */
+extern void sub_00139F1B_gen(void);
+void sub_00139F1B(void)
+{
+    ds_irql_enter(0x00139F1Bu);
+    sub_00139F1B_gen();
+    ds_irql_leave();
+}
+
 /* ── DSOUND voice-off: the APU interrupt it waits for (notes 18.42) ── */
 
 /*
@@ -2250,7 +2406,9 @@ void sub_0013ADB8(void)
         if (g_vw_idles == 0 && g_vw_isr_runs == 0)
             fprintf(stderr, "[VOICEOFF] first stopping voice %08X: FECTL %08X ISTS %08X IEN %08X FETFORCE1 %08X\n",
                     voice, MEM32(APU_FECTL_VA), MEM32(APU_ISTS_VA), MEM32(APU_IEN_VA), MEM32(APU_FETFORCE1_VA));
+        ds_irql_enter(0x0013ADB8u);        /* an interrupt: DSOUND's IRQL lock (18.45) */
         vw_apu_interrupt(kint, voice);
+        ds_irql_leave();
         ReleaseSRWLockExclusive(&g_vw_isr_lock);
         if (!(MEM16(voice + 0x12) & 0x8000)) {
             freed = InterlockedIncrement(&g_vw_freed);
@@ -2268,6 +2426,168 @@ void sub_0013ADB8(void)
         last_forced = forced;
         fprintf(stderr, "[VOICEOFF] DSOUND forced a voice off after 5 s (%ld so far)\n", (long)forced);
     }
+}
+
+/* ── The APU's interrupt, delivered (notes 18.45) ─────────────── */
+
+/*
+ * The emulated APU records its interrupts and never raises them: a voice
+ * notifier (stream packet done, voice off) sets FEVINTSTS/FENINTSTS in ISTS, a
+ * trapped front-end method (SE2FE_IDLE_VOICE, which DSOUND asks for) sets
+ * FECTL to TRAPPED, and both set a set_irq flag nothing reads. xemu's frame
+ * thread runs update_irq after every such frame and the PCI line reaches the
+ * CPU at once. Here nothing does, so:
+ *   - streams stopped a few seconds in: DSOUND hands the next packet to a
+ *     stream from its DPC, when the ISR sees the packet-done notifier, and
+ *     the ISR never ran (the [VOICEOFF] lines' "ISR runs 0");
+ *   - a trap halts the whole voice processor (the frame thread skips
+ *     se_frame while FECTL is trapped) until 18.42's voice-off poll happens
+ *     to clear it, which only a released voice's poll does.
+ *
+ * DSOUND's ISR (0x13A0FB -> 0x13A05F; KINTERRUPT 0x153260, context
+ * [0x153264]) reads ISTS and acts only with GINTSTS set: it writes the status
+ * back (write-one-to-clear), ORs it into ctx+0x760, runs the trap handler
+ * sub_00139F42 for FETINTSTS (bit 4: an idle-voice trap goes to
+ * sub_001399D0(handle), then the front end is resumed), and queues its DPC
+ * (ctx+0x770, routine 0x139F1B) for FEVINTSTS (bit 6). The DPC services every
+ * voice and stream's notifiers (sub_001398CD): packets complete, the next
+ * are queued.
+ *
+ * This thread is the interrupt line. Every millisecond it looks at ISTS, IEN
+ * and FECTL; when the APU has something pending and IEN enables it, it writes
+ * 0 to ISTS (write-one-to-clear, so nothing is cleared, but the model's write
+ * path runs update_irq: FETINTSTS for a trap, GINTSTS if IEN has it) and calls
+ * the ISR with DSOUND's KINTERRUPT and context, as the runtime calls a
+ * connected ISR for vblank. The DPC goes to the runtime's queue and the timer
+ * thread runs it.
+ *
+ * A trap is checked first, as the voice-off poll checks it: an idle-voice trap
+ * whose handle the model still has playing, or that no DSOUND voice holds, is
+ * a stale list entry (18.42): the ISR doesn't see it, and the front end is
+ * resumed the way DSOUND's own handler resumes it, sub_0013EE94(0) then (1).
+ * A real one, released or not (a voice that reached its end on its own), goes
+ * to the ISR like any other. (The model keeps running PIO methods while it is
+ * trapped, which the hardware queues, so a game thread's next method can
+ * overwrite FEDECMETH before this looks: such a trap is resumed as stale, and
+ * the voice processor traps on the idle voice again next frame.)
+ *
+ * The thread has a guest stack from the heap (xbox_AllocThreadStack, not a
+ * worker slice: those sit inside the game's static data, 0x780000+) and a TIB
+ * of its own. It shares g_vw_isr_lock with the voice-off poll, so one ISR runs
+ * at a time, and runs the ISR holding DSOUND's IRQL lock (above), as an
+ * interrupt on the one CPU would. It only ever tries both locks: waiting for
+ * DSOUND's while holding g_vw_isr_lock would leave a game thread that holds
+ * DSOUND's and polls a stopping voice (which only tries g_vw_isr_lock)
+ * polling forever. A busy lock leaves the interrupt pending for the next
+ * millisecond. It does nothing until DSOUND has connected its interrupt.
+ */
+#define AI_POLL_MS            1
+#define APU_FECTL_MODE        0xE0u
+
+extern uint32_t xbox_AllocThreadStack(void);
+extern uint32_t xbox_AllocThreadTib(void);
+extern RECOMP_TLS uint32_t g_fs_base;
+
+static volatile LONG g_ai_isr_runs, g_ai_claimed, g_ai_traps, g_ai_stale;
+
+/* One pending interrupt, if any. Caller holds g_vw_isr_lock. */
+static void ai_service(uint32_t kint)
+{
+    uint32_t ctx = MEM32(kint + 4), handle, trapped_voice;
+    uint32_t ists = MEM32(APU_ISTS_VA), ien = MEM32(APU_IEN_VA), fectl = MEM32(APU_FECTL_VA);
+    int trapped = (fectl & APU_FECTL_MODE) == APU_FECTL_TRAPPED;
+
+    if (!(ien & APU_ISTS_GINTSTS) || (!trapped && !(ists & ien & ~APU_ISTS_GINTSTS)))
+        return;
+    if (trapped) {
+        handle = MEM32(APU_FEDECPARAM_VA) & 0xFFFF;
+        trapped_voice = MEM32(APU_FEDECMETH_VA) == VW_IDLE_VOICE && handle < 0x100
+                        ? MEM32(ctx + 0x330 + handle * 4) : 0;
+        if (!trapped_voice || !vw_model_idle(handle)) {
+            ecx = ctx + 8;
+            PUSH32(esp, 0);
+            PUSH32(esp, VW_RET);
+            RECOMP_ABI_CALL(0x0013EE94u, sub_0013EE94);     /* ret 4 */
+            ecx = ctx + 8;
+            PUSH32(esp, 1);
+            PUSH32(esp, VW_RET);
+            RECOMP_ABI_CALL(0x0013EE94u, sub_0013EE94);
+            if (InterlockedIncrement(&g_ai_stale) <= 5)
+                fprintf(stderr, "[APU-IRQ] stale trap: method %08X handle %02X, DSOUND voice %08X; front end resumed\n",
+                        MEM32(APU_FEDECMETH_VA), handle, trapped_voice);
+            return;
+        }
+        InterlockedIncrement(&g_ai_traps);
+    }
+    MEM32(APU_ISTS_VA) = 0;                /* update_irq: FETINTSTS for a trap, GINTSTS */
+    if (!(MEM32(APU_ISTS_VA) & APU_ISTS_GINTSTS))
+        return;
+    PUSH32(esp, ctx);
+    PUSH32(esp, kint);
+    PUSH32(esp, VW_RET);
+    RECOMP_ABI_CALL(VW_ISR, sub_0013A0FB);          /* ret 8 */
+    if (InterlockedIncrement(&g_ai_isr_runs) <= 3)
+        fprintf(stderr, "[APU-IRQ] ISR run %ld: ISTS %08X IEN %08X FECTL %08X -> %s\n",
+                (long)g_ai_isr_runs, ists, ien, fectl, (eax & 1) ? "claimed" : "declined");
+    if (eax & 1)
+        InterlockedIncrement(&g_ai_claimed);
+}
+
+static DWORD WINAPI ai_thread(LPVOID unused)
+{
+    HANDLE timer = CreateWaitableTimerExW(NULL, NULL, CREATE_WAITABLE_TIMER_HIGH_RESOLUTION, TIMER_ALL_ACCESS);
+    LARGE_INTEGER due;
+    ULONGLONG next_log = 0;
+    uint32_t kint;
+    int stall_told = 0;
+
+    (void)unused;
+    if (!timer)
+        timer = CreateWaitableTimerW(NULL, FALSE, NULL);
+    esp = xbox_AllocThreadStack();
+    g_fs_base = xbox_AllocThreadTib();
+    if (!timer || !esp || !g_fs_base) {
+        fprintf(stderr, "[APU-IRQ] no timer, guest stack or TIB; the APU interrupt is not delivered\n");
+        return 0;
+    }
+    due.QuadPart = -10000LL * AI_POLL_MS;
+    for (;;) {
+        SetWaitableTimer(timer, &due, 0, NULL, NULL, FALSE);
+        WaitForSingleObject(timer, INFINITE);
+        if ((kint = vw_kinterrupt()) == 0)
+            continue;
+        if (GetTickCount64() >= next_log) {
+            if (next_log)
+                fprintf(stderr, "[APU-IRQ] ISR runs %ld (claimed %ld), idle-voice traps %ld, stale traps resumed %ld\n",
+                        (long)g_ai_isr_runs, (long)g_ai_claimed, (long)g_ai_traps, (long)g_ai_stale);
+            next_log = GetTickCount64() + 30000;
+        }
+        {
+            DWORD owner = g_ds_owner;
+            ULONGLONG held = owner ? GetTickCount64() - g_ds_since : 0;
+            if (held > 2000 && held < 3000 && !stall_told++)
+                fprintf(stderr, "[APU-IRQ] DSOUND's IRQL lock held %llu ms by thread %lu (from guest %08X)\n",
+                        held, (unsigned long)owner, g_ds_site);
+            if (!owner)
+                stall_told = 0;
+        }
+        if ((MEM32(APU_FECTL_VA) & APU_FECTL_MODE) != APU_FECTL_TRAPPED &&
+            !(MEM32(APU_ISTS_VA) & ~APU_ISTS_GINTSTS))
+            continue;                      /* nothing pending: no locks */
+        if (!TryAcquireSRWLockExclusive(&g_vw_isr_lock))
+            continue;                      /* the voice-off poll is interrupting */
+        if (ds_irql_try(VW_ISR)) {
+            ai_service(kint);
+            ds_irql_leave();
+        }
+        ReleaseSRWLockExclusive(&g_vw_isr_lock);
+    }
+}
+
+void twoc_apu_irq_init(void)
+{
+    InitializeCriticalSection(&g_ds_irql);
+    CloseHandle(CreateThread(NULL, 0, ai_thread, NULL, 0, NULL));
 }
 
 /* ── DSOUND 3D-listener maintenance: null-interface guard ─────────────── */

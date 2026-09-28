@@ -435,6 +435,13 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance,
         d3db_init();
     }
 
+    /* The APU's interrupt line to DSOUND's ISR (recomp_manual.c, notes 18.45).
+     * Idle until DSOUND connects its interrupt. */
+    {
+        extern void twoc_apu_irq_init(void);
+        twoc_apu_irq_init();
+    }
+
     /* Step 7: Call the recompiled entry point */
     printf("\nStarting game...\n");
     fflush(stdout);
