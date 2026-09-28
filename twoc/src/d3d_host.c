@@ -38,6 +38,15 @@
  * short spin; a present later than one whole period restarts the clock
  * instead of hurrying to catch up.
  *
+ * When the monitor's refresh is a whole multiple of that rate (239.76 Hz =
+ * 4 x 59.94 here), d3d_bridge.c asks for DXGI interval N and no limiter
+ * instead (18.45): the display paces, and each frame is shown for exactly N
+ * refreshes. The limiter's clock isn't locked to the display, so its frames
+ * landed 3, 4 or 5 refreshes apart (step 41's micro-stutter). The swap chain
+ * then has a frame-latency waitable object (2 frames), and each present waits
+ * on it where the limiter waited, outside g_lock, so Present itself doesn't
+ * block while holding it.
+ *
  * Presents skip xbox_d3d8's gamma pass; the game's gamma ramp isn't mirrored
  * yet.
  *
@@ -92,7 +101,9 @@
 #include <string.h>
 
 #include "d3d8_internal.h"      /* xbox_d3d8, and its D3D11 accessors */
-#include <dxgi1_2.h>
+#include <dxgi1_3.h>
+#include <dwmapi.h>
+#pragma comment(lib, "dwmapi.lib")
 
 #include "d3d_host.h"
 
@@ -108,6 +119,7 @@ static HWND g_hwnd_dev;                 /* hidden: xbox_d3d8's own swap chain */
 static IDXGISwapChain1 *g_flip;
 static unsigned g_w, g_h, g_interval;
 static double g_frame_hz;               /* S7: the frame limiter's rate, 0 = off */
+static HANDLE g_latency;                /* vsync pacing (18.45): the frame-latency waitable object */
 static IDirect3DDevice8 *g_dev;
 static ID3D11Texture2D *g_staging;
 static char g_dump_prefix[512];
@@ -254,8 +266,20 @@ int d3dh_create(unsigned width, unsigned height, unsigned interval, double frame
             sd.Scaling = DXGI_SCALING_STRETCH;
             sd.SwapEffect = DXGI_SWAP_EFFECT_FLIP_DISCARD;
             sd.AlphaMode = DXGI_ALPHA_MODE_IGNORE;
+            if (g_interval && g_frame_hz <= 0)
+                sd.Flags = DXGI_SWAP_CHAIN_FLAG_FRAME_LATENCY_WAITABLE_OBJECT;
             hr = IDXGIFactory2_CreateSwapChainForHwnd(f, (IUnknown *)d3d8_GetD3D11Device(), g_hwnd, &sd,
                                                       NULL, NULL, &g_flip);
+            if (SUCCEEDED(hr) && sd.Flags) {
+                IDXGISwapChain2 *sc2 = NULL;
+                if (SUCCEEDED(IDXGISwapChain1_QueryInterface(g_flip, &IID_IDXGISwapChain2, (void **)&sc2))) {
+                    IDXGISwapChain2_SetMaximumFrameLatency(sc2, 2);
+                    g_latency = IDXGISwapChain2_GetFrameLatencyWaitableObject(sc2);
+                    IDXGISwapChain2_Release(sc2);
+                }
+                if (!g_latency)
+                    fprintf(stderr, "[D3DB] host: no frame-latency waitable object; presents block in Present\n");
+            }
             IDXGIFactory2_MakeWindowAssociation(f, g_hwnd, DXGI_MWA_NO_ALT_ENTER | DXGI_MWA_NO_WINDOW_CHANGES);
             IDXGIFactory2_Release(f);
         }
@@ -270,9 +294,10 @@ int d3dh_create(unsigned width, unsigned height, unsigned interval, double frame
         fprintf(stderr, "[D3DB] host: xbox_d3d8 CreateDevice failed 0x%08lX\n", (unsigned long)hr);
         return -1;
     }
-    fprintf(stderr, "[D3DB] host device %ux%u, window %p (own thread, flip model), present interval %u, frame limiter"
+    fprintf(stderr, "[D3DB] host device %ux%u, window %p (own thread, flip model), present interval %u%s, frame limiter"
             " %s%.3f Hz%s%s\n",
-            g_w, g_h, (void *)g_hwnd, g_interval, g_frame_hz > 0 ? "" : "off, ", g_frame_hz,
+            g_w, g_h, (void *)g_hwnd, g_interval, g_latency ? " (vsync paced)" : "",
+            g_frame_hz > 0 ? "" : "off, ", g_frame_hz,
             g_dump_prefix[0] ? ", dumps " : "", g_dump_prefix[0] ? g_dump_prefix : "");
     return 0;
 }
@@ -1023,6 +1048,17 @@ static void pace(void)
     LARGE_INTEGER now;
     double period, left;
 
+    if (g_latency) {                    /* vsync pacing: wait for room in the queue */
+        if (!freq.QuadPart)
+            QueryPerformanceFrequency(&freq);
+        QueryPerformanceCounter(&now);
+        left = (double)now.QuadPart;
+        WaitForSingleObjectEx(g_latency, 1000, TRUE);
+        QueryPerformanceCounter(&now);
+        g_st.paced++;
+        g_st.paced_wait_ms += ((double)now.QuadPart - left) * 1000.0 / (double)freq.QuadPart;
+        return;
+    }
     if (g_frame_hz <= 0)
         return;
     AcquireSRWLockExclusive(&pace_lock);
@@ -1071,6 +1107,19 @@ static void pace(void)
     ReleaseSRWLockExclusive(&pace_lock);
 }
 
+/* The composed display's refresh rate (the primary monitor's), 0 if DWM
+ * doesn't say. */
+double d3dh_display_hz(void)
+{
+    DWM_TIMING_INFO ti;
+
+    memset(&ti, 0, sizeof(ti));
+    ti.cbSize = sizeof(ti);
+    if (FAILED(DwmGetCompositionTimingInfo(NULL, &ti)) || !ti.rateRefresh.uiDenominator)
+        return 0;
+    return (double)ti.rateRefresh.uiNumerator / ti.rateRefresh.uiDenominator;
+}
+
 void d3dh_present(double t_s, unsigned swap_no)
 {
     ULONGLONG now;
@@ -1107,6 +1156,37 @@ void d3dh_present(double t_s, unsigned swap_no)
     }
     hr = IDXGISwapChain1_Present(g_flip, g_interval, 0);
     g_st.presents++;
+    {   /* How many DWM compositions apart consecutive presents land: the
+         * index of the first one after each present, from DWM's timing (its
+         * last vblank, its count, the period). DWM composes on demand, so
+         * with nothing else changing the count follows our presents: 1 is a
+         * frame composed on its own, 0 two presents in one composition (one
+         * never shown), more an uneven gap (18.45). */
+        static ULONGLONG last_idx;
+        DWM_TIMING_INFO ti;
+        LARGE_INTEGER q;
+        memset(&ti, 0, sizeof(ti));
+        ti.cbSize = sizeof(ti);
+        QueryPerformanceCounter(&q);
+        if (SUCCEEDED(DwmGetCompositionTimingInfo(NULL, &ti)) && ti.qpcRefreshPeriod) {
+            LONGLONG since = (LONGLONG)q.QuadPart - (LONGLONG)ti.qpcVBlank;
+            static ULONGLONG told_period;
+            if (!told_period) {
+                LARGE_INTEGER f;
+                QueryPerformanceFrequency(&f);
+                told_period = ti.qpcRefreshPeriod;
+                fprintf(stderr, "[D3DB] host: DWM refresh period %.3f ms (rate %u/%u), at present %u\n",
+                        ti.qpcRefreshPeriod * 1000.0 / f.QuadPart, ti.rateRefresh.uiNumerator,
+                        ti.rateRefresh.uiDenominator, g_st.presents);
+            }
+            ULONGLONG idx = ti.cRefresh + (ULONGLONG)((since + (LONGLONG)ti.qpcRefreshPeriod - 1) / (LONGLONG)ti.qpcRefreshPeriod);
+            if (last_idx) {
+                ULONGLONG d = idx - last_idx;
+                g_st.shown[d > 8 ? 8 : d]++;
+            }
+            last_idx = idx;
+        }
+    }
     if (FAILED(hr) && ++g_st.present_fails <= 5)
         fprintf(stderr, "[D3DB] host Present failed 0x%08lX\n", (unsigned long)hr);
     else if (hr != S_OK && ++g_st.present_status <= 5)   /* e.g. DXGI_STATUS_OCCLUDED: not shown */

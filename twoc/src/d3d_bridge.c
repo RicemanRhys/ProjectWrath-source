@@ -662,6 +662,33 @@ static double present_hz(uint32_t xdk)
     }
 }
 
+/* A display whose refresh is a whole multiple of the limiter's rate (4 x
+ * 59.94 = 239.76 Hz here) paces the presents itself (18.45): DXGI interval N
+ * and no limiter, so each frame is shown for exactly N refreshes. The
+ * limiter's clock isn't locked to the display, so its frames landed 3, 4 or 5
+ * refreshes apart: step 41's micro-stutter, with the game's own frames steady.
+ * Only within 0.5% of the rate, for N up to 4 (DXGI's most), and not when
+ * RECOMP_D3D_BRIDGE_INTERVAL or _HZ is set. */
+static void vsync_pacing(unsigned *interval, double *hz)
+{
+    const char *vi = getenv("RECOMP_D3D_BRIDGE_INTERVAL"), *vh = getenv("RECOMP_D3D_BRIDGE_HZ");
+    double r;
+    unsigned n;
+
+    if (*hz <= 0 || *interval || (vi && *vi) || (vh && *vh))
+        return;
+    r = d3dh_display_hz();
+    n = r > 0 ? (unsigned)(r / *hz + 0.5) : 0;
+    if (n < 1 || n > 4 || fabs(r / n - *hz) > 0.005 * *hz) {
+        fprintf(stderr, "[D3DB] display %.3f Hz isn't a multiple of %.3f Hz: the frame limiter paces\n", r, *hz);
+        return;
+    }
+    fprintf(stderr, "[D3DB] display %.3f Hz = %u x %.3f Hz: presents at interval %u, paced by the display\n",
+            r, n, r / n, n);
+    *interval = n;
+    *hz = 0;
+}
+
 /* -DumpDir sets RECOMP_FB_DUMP to "<dir>\shot" for the executor's dumps; the
  * host's go next to them as "<dir>\host". */
 static const char *host_dump_prefix(char *buf, size_t cap)
@@ -684,13 +711,17 @@ static void mirror_create_device(const d3db_args_t *a)
 {
     uint32_t pp = a->arg[4];
     char prefix[512];
+    unsigned interval;
+    double hz;
 
     if (eax != 0 || !pp) {
         fprintf(stderr, "[D3DB] guest CreateDevice returned %08X: no host device\n", eax);
         return;
     }
-    d3dh_create(MEM32(pp + 4 * PP_WIDTH), MEM32(pp + 4 * PP_HEIGHT),
-                present_interval(), present_hz(MEM32(pp + 4 * PP_INTERVAL)),
+    interval = present_interval();
+    hz = present_hz(MEM32(pp + 4 * PP_INTERVAL));
+    vsync_pacing(&interval, &hz);
+    d3dh_create(MEM32(pp + 4 * PP_WIDTH), MEM32(pp + 4 * PP_HEIGHT), interval, hz,
                 host_dump_prefix(prefix, sizeof(prefix)));
     if (host_dump_prefix(prefix, sizeof(prefix)))
         snprintf(g_check_prefix, sizeof(g_check_prefix), "%s", prefix);
@@ -3467,6 +3498,18 @@ static void mirror_swap(void)
             last_paced = st.paced;
             last_late = st.paced_late;
             last_wait_ms = st.paced_wait_ms;
+            {   /* 18.45: DWM compositions between presents (d3d_host.c) */
+                static unsigned last_shown[9];
+                unsigned k, d[9], total = 0;
+                for (k = 0; k < 9; k++) {
+                    d[k] = st.shown[k] - last_shown[k];
+                    last_shown[k] = st.shown[k];
+                    total += d[k];
+                }
+                if (total)
+                    fprintf(stderr, "[D3DB] host presents this interval, by DWM compositions since the last: 0 %u, 1 %u, 2 %u, 3 %u,"
+                            " 4 %u, 5 %u, 6 %u, 7 %u, more %u\n", d[0], d[1], d[2], d[3], d[4], d[5], d[6], d[7], d[8]);
+            }
             fprintf(stderr, "[D3DB] host draws: mirrored %ld (to render targets %ld, with pixel shaders %ld,"
                     " immediate %ld, of them pre-transformed %ld),"
                     " host draws %u (fails %u); not mirrored: target %ld, vertex program %ld, primitive %ld,"

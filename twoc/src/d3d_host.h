@@ -24,6 +24,7 @@ typedef struct {
     unsigned vp_draws, vs_created, vs_fails, vs_const_uploads, vs_probes;         /* vertex programs (S5) */
     unsigned paced, paced_late;                                                   /* frame limiter (S7) */
     double paced_wait_ms;
+    unsigned shown[9];      /* DWM compositions between presents: [0]..[7], [8] more (18.45) */
 } d3dh_stats_t;
 
 /* A state already in xbox_d3d8's (PC D3D8) numbering and values. */
@@ -174,6 +175,7 @@ void d3dh_clear(const d3dh_target_t *target, uint32_t xdk_flags, uint32_t color,
 
 /* End of a guest frame: dump the back buffer when one is due, then present. */
 void d3dh_present(double t_s, unsigned swap_no);
+double d3dh_display_hz(void);           /* the display's refresh rate, 0 if unknown (18.45) */
 
 void d3dh_stats(d3dh_stats_t *out);
 
