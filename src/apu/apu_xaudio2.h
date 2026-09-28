@@ -21,4 +21,8 @@ int xa2_submit_samples(const int16_t *samples, int num_samples);
 /* Get the preferred buffer size in samples. */
 int xa2_get_buffer_size(void);
 
+/* Buffers submitted and not yet played, and how many the voice can hold. */
+int xa2_buffers_queued(void);
+int xa2_max_buffers(void);
+
 #endif /* APU_XAUDIO2_H */

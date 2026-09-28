@@ -268,93 +268,74 @@ void mcpx_apu_monitor_finalize(MCPXAPUState *d)
             g_waveout.frames_written);
 }
 
-void mcpx_apu_monitor_frame(MCPXAPUState *d)
+/* What the monitor has sent, for the [APU-OUT] line every 10 s. */
+static struct {
+    long long t0_ms;
+    long frames, underruns, dropped;
+} g_mon_stats;
+
+static void monitor_stats(MCPXAPUState *d)
 {
-    if ((d->ep_frame_div + 1) % 8) {
+    long long now = qemu_clock_get_ms(QEMU_CLOCK_REALTIME);
+
+    (void)d;
+    if (!g_mon_stats.t0_ms)
+        g_mon_stats.t0_ms = now;
+    if (now - g_mon_stats.t0_ms < 10000)
         return;
-    }
+    fprintf(stderr, "[APU-OUT] %.1f s: %ld frames of 256 (%.0f Hz), %ld underruns, %ld dropped, %d queued\n",
+            (now - g_mon_stats.t0_ms) / 1000.0, g_mon_stats.frames,
+            g_mon_stats.frames * 256000.0 / (now - g_mon_stats.t0_ms),
+            g_mon_stats.underruns, g_mon_stats.dropped,
+            xa2_is_active() ? xa2_buffers_queued() : -1);
+    memset(&g_mon_stats, 0, sizeof(g_mon_stats));
+    g_mon_stats.t0_ms = now;
+}
 
-    /* XAudio2 path: render and submit a buffer */
+/* Hands this APU frame's 256 samples to the device. The frame thread holds
+ * d->lock; a wait for room in the device's queue lets it go. */
+static void monitor_submit(MCPXAPUState *d)
+{
+    int wait_loops = 0;
+
+    g_mon_stats.frames++;
+
     if (xa2_is_active()) {
-        int buf_size = xa2_get_buffer_size();
-        int16_t xa2_tmp[1024][2];  /* matches XA2_BUF_SAMPLES max */
-        int remaining = buf_size;
-        int out_offset = 0;
-
-        while (remaining > 0) {
-            int chunk = (remaining < MIXER_FRAME_SAMPLES) ? remaining : MIXER_FRAME_SAMPLES;
-            memset(d->monitor.frame_buf, 0, sizeof(d->monitor.frame_buf));
-
-            if (g_test_tone.active && !g_audio_muted) {
-                for (int i = 0; i < chunk; i++) {
-                    int16_t s = (int16_t)(sin(g_test_tone.phase) * g_test_tone.amplitude);
-                    d->monitor.frame_buf[i][0] = s;
-                    d->monitor.frame_buf[i][1] = s;
-                    g_test_tone.phase += g_test_tone.phase_inc;
-                    if (g_test_tone.phase >= 2.0 * M_PI)
-                        g_test_tone.phase -= 2.0 * M_PI;
-                }
-            }
-
-            if (!g_audio_muted)
-                mixer_render(d->monitor.frame_buf, chunk);
-
-            memcpy(xa2_tmp + out_offset, d->monitor.frame_buf, chunk * 2 * sizeof(int16_t));
-            out_offset += chunk;
-            remaining -= chunk;
+        while (xa2_buffers_queued() >= xa2_max_buffers() && wait_loops++ < 50) {
+            qemu_mutex_unlock(&d->lock);
+            Sleep(1);
+            qemu_mutex_lock(&d->lock);
         }
-
-        xa2_submit_samples((const int16_t *)xa2_tmp, buf_size);
+        if (xa2_buffers_queued() == 0)
+            g_mon_stats.underruns++;
+        if (!xa2_submit_samples((const int16_t *)d->monitor.frame_buf, MIXER_FRAME_SAMPLES))
+            g_mon_stats.dropped++;
         return;
     }
 
     if (!g_waveout.initialized) return;
 
+    /* waveOut: eight frames fill one buffer. */
     int idx = g_waveout.next_buf;
     WAVEHDR *hdr = &g_waveout.hdrs[idx];
+    static int fill;
 
-    /* Wait if this buffer is still playing (with timeout) */
-    int wait_loops = 0;
-    while (!(hdr->dwFlags & WHDR_DONE) && (hdr->dwFlags & WHDR_INQUEUE)) {
-        qemu_mutex_unlock(&d->lock);
-        Sleep(1);
-        qemu_mutex_lock(&d->lock);
-        if (++wait_loops > 50) break;
-    }
-
-    /* Fill the large waveOut buffer by rendering multiple 256-sample frames */
-    int16_t *out = (int16_t *)g_waveout.bufs[idx];
-    int remaining = WAVEOUT_BUF_SAMPLES;
-    int out_offset = 0;
-
-    while (remaining > 0) {
-        int chunk = (remaining < MIXER_FRAME_SAMPLES) ? remaining : MIXER_FRAME_SAMPLES;
-
-        memset(d->monitor.frame_buf, 0, sizeof(d->monitor.frame_buf));
-
-        /* Test tone (skip if muted) */
-        if (g_test_tone.active && !g_audio_muted) {
-            for (int i = 0; i < chunk; i++) {
-                int16_t s = (int16_t)(sin(g_test_tone.phase) * g_test_tone.amplitude);
-                d->monitor.frame_buf[i][0] = s;
-                d->monitor.frame_buf[i][1] = s;
-                g_test_tone.phase += g_test_tone.phase_inc;
-                if (g_test_tone.phase >= 2.0 * M_PI)
-                    g_test_tone.phase -= 2.0 * M_PI;
-            }
+    if (fill == 0) {
+        /* Wait if this buffer is still playing (with timeout) */
+        while (!(hdr->dwFlags & WHDR_DONE) && (hdr->dwFlags & WHDR_INQUEUE)) {
+            qemu_mutex_unlock(&d->lock);
+            Sleep(1);
+            qemu_mutex_lock(&d->lock);
+            if (++wait_loops > 50) break;
         }
-
-        /* Mix software voices (skip if muted) */
-        if (!g_audio_muted)
-            mixer_render(d->monitor.frame_buf, chunk);
-
-        /* Copy to waveOut buffer */
-        memcpy(out + out_offset * 2, d->monitor.frame_buf, chunk * 2 * sizeof(int16_t));
-        out_offset += chunk;
-        remaining -= chunk;
     }
+    memcpy(g_waveout.bufs[idx][fill], d->monitor.frame_buf,
+           MIXER_FRAME_SAMPLES * 2 * sizeof(int16_t));
+    fill += MIXER_FRAME_SAMPLES;
+    if (fill < WAVEOUT_BUF_SAMPLES)
+        return;
+    fill = 0;
 
-    /* Submit to waveOut */
     hdr->dwFlags &= ~WHDR_DONE;
     waveOutWrite(g_waveout.hwo, hdr, sizeof(WAVEHDR));
 
@@ -362,9 +343,57 @@ void mcpx_apu_monitor_frame(MCPXAPUState *d)
     g_waveout.frames_written++;
 }
 
+/* Every 8th APU frame: frame_buf holds the 256 samples of those 8 frames.
+ * mcpx_apu_dsp_frame wrote the VP's mixbins into it, 32 per frame (or the VP
+ * monitor point added its voices there); a frame whose pipeline didn't run
+ * left its slice at zero, since the buffer is cleared after each submit.
+ *
+ * This used to clear frame_buf and refill it with the test tone and the
+ * software mixer alone, so the VP's output was never heard, and it sent 1,024
+ * (XAudio2) or 2,048 (waveOut) samples for every 256 produced. Now the tone
+ * and the mixer go on top when they're on, and exactly the 256 samples are
+ * submitted. */
+void mcpx_apu_monitor_frame(MCPXAPUState *d)
+{
+    if ((d->ep_frame_div + 1) % 8) {
+        return;
+    }
+
+    if (g_audio_muted) {
+        memset(d->monitor.frame_buf, 0, sizeof(d->monitor.frame_buf));
+    } else {
+        if (g_test_tone.active) {
+            for (int i = 0; i < MIXER_FRAME_SAMPLES; i++) {
+                int s = (int)(sin(g_test_tone.phase) * g_test_tone.amplitude);
+                for (int ch = 0; ch < 2; ch++) {
+                    int m = d->monitor.frame_buf[i][ch] + s;
+                    d->monitor.frame_buf[i][ch] =
+                        (int16_t)(m > 32767 ? 32767 : m < -32768 ? -32768 : m);
+                }
+                g_test_tone.phase += g_test_tone.phase_inc;
+                if (g_test_tone.phase >= 2.0 * M_PI)
+                    g_test_tone.phase -= 2.0 * M_PI;
+            }
+        }
+        mixer_render(d->monitor.frame_buf, MIXER_FRAME_SAMPLES);
+    }
+
+    monitor_submit(d);
+    memset(d->monitor.frame_buf, 0, sizeof(d->monitor.frame_buf));
+    monitor_stats(d);
+}
+
 /* ============================================================
  * Throttle (timing control for frame pacing)
  * ============================================================ */
+
+/* With a device, its queue paces the APU, as xemu's monitor queue does: the
+ * next 256 samples are made once fewer than this many frames wait to be
+ * played. The clock below can't do it alone: this thread's waits last a
+ * timer quantum (15.6 ms by default), a wait that overshoots one frame
+ * restarts the clock, and it made 40-45 kHz, so the device ran dry 12-30
+ * times a second. Waking every quantum drains ~3 frames of 6 queued. */
+#define THROTTLE_QUEUE_TARGET 6
 
 static void throttle(MCPXAPUState *d)
 {
@@ -373,6 +402,18 @@ static void throttle(MCPXAPUState *d)
     }
 
     int64_t now_us = qemu_clock_get_us(QEMU_CLOCK_REALTIME);
+
+    if (xa2_is_active()) {
+        /* A device that stops playing gets 100 ms, then the frame goes out
+         * anyway (the monitor drops it if the queue is still full). */
+        while (!d->pause_requested &&
+               xa2_buffers_queued() >= THROTTLE_QUEUE_TARGET &&
+               qemu_clock_get_us(QEMU_CLOCK_REALTIME) - now_us < 100000) {
+            qemu_cond_timedwait(&d->cond, &d->lock, 1);
+        }
+        d->sleep_acc_us += (int)(qemu_clock_get_us(QEMU_CLOCK_REALTIME) - now_us);
+        return;
+    }
 
     if (d->next_frame_time_us == 0 ||
         now_us - d->next_frame_time_us > EP_FRAME_US) {
