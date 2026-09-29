@@ -2470,7 +2470,10 @@ void sub_0013ADB8(void)
  *     the ISR never ran (the [VOICEOFF] lines' "ISR runs 0");
  *   - a trap halts the whole voice processor (the frame thread skips
  *     se_frame while FECTL is trapped) until 18.42's voice-off poll happens
- *     to clear it, which only a released voice's poll does.
+ *     to clear it, which only a released voice's poll does. (Since
+ *     xboxrecomp 1551271, notes 18.48, the VP renders through a trap and
+ *     only a halted front end stops it: each trap was a gap of silence as
+ *     long as this interrupt took.)
  *
  * DSOUND's ISR (0x13A0FB -> 0x13A05F; KINTERRUPT 0x153260, context
  * [0x153264]) reads ISTS and acts only with GINTSTS set: it writes the status

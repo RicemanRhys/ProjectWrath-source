@@ -158,4 +158,5 @@ def main():
     fc.close()
 
 
-main()
+if __name__ == "__main__":
+    main()
