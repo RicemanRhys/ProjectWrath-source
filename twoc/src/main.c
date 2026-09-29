@@ -262,6 +262,38 @@ static LONG CALLBACK veh_handler(PEXCEPTION_POINTERS ep)
     return EXCEPTION_CONTINUE_SEARCH;
 }
 
+/*
+ * Log files opened write-through (notes 18.47).
+ *
+ * Windows PowerShell's Start-Process -RedirectStandardOutput/-Error, which
+ * run_twoc.ps1 uses, opens the log files with FILE_WRITE_THROUGH, so every
+ * WriteFile waits for the disk: ~60 us a call here, against ~3 us on a
+ * handle opened normally (drive.py's). stdout and stderr are unbuffered, and
+ * the CRT writes an unbuffered stream that isn't a console one byte per
+ * WriteFile, so the 2 s stat lines (~1.6 KB) held a game thread ~100 ms and
+ * the 10 s [D3DB] lines ~140 ms: a stutter every 2 s, with the boot about 7 s
+ * slower. Clearing the flag on the handle makes those writes cost what they
+ * cost under drive.py. Output still reaches the file before each fprintf
+ * returns. Returns 1 if the flag was cleared.
+ */
+static int clear_write_through(DWORD which)
+{
+    typedef LONG (NTAPI *nt_file_info_t)(HANDLE, void *, void *, ULONG, int);
+    HMODULE ntdll = GetModuleHandleA("ntdll.dll");
+    nt_file_info_t query = ntdll ? (nt_file_info_t)GetProcAddress(ntdll, "NtQueryInformationFile") : NULL;
+    nt_file_info_t set = ntdll ? (nt_file_info_t)GetProcAddress(ntdll, "NtSetInformationFile") : NULL;
+    HANDLE h = GetStdHandle(which);
+    ULONG_PTR iosb[2];
+    ULONG mode = 0;
+
+    if (!query || !set || h == NULL || h == INVALID_HANDLE_VALUE || GetFileType(h) != FILE_TYPE_DISK)
+        return 0;
+    if (query(h, iosb, &mode, sizeof mode, 16 /* FileModeInformation */) < 0 || !(mode & 0x2 /* FILE_WRITE_THROUGH */))
+        return 0;
+    mode &= ~0x2u;
+    return set(h, iosb, &mode, sizeof mode, 16) >= 0;
+}
+
 /* ── WinMain ───────────────────────────────────────────────── */
 
 int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance,
@@ -269,15 +301,22 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance,
 {
     void *xbe_data = NULL;
     size_t xbe_size = 0;
+    int wt_out, wt_err;
 
     (void)hInstance;
     (void)hPrevInstance;
     (void)lpCmdLine;
     (void)nCmdShow;
 
+    wt_out = clear_write_through(STD_OUTPUT_HANDLE);
+    wt_err = clear_write_through(STD_ERROR_HANDLE);
+
     /* Unbuffered output for immediate visibility during debugging */
     setvbuf(stdout, NULL, _IONBF, 0);
     setvbuf(stderr, NULL, _IONBF, 0);
+    if (wt_out || wt_err)
+        fprintf(stderr, "[LOG] the launcher opened%s%s write-through; cleared (notes 18.47)\n",
+                wt_out ? " stdout" : "", wt_err ? (wt_out ? " and stderr" : " stderr") : "");
 
     printf("=== Crash Bandicoot: tWoC - Static Recompilation ===\n");
     printf("Loading XBE...\n");

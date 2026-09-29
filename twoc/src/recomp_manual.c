@@ -36,6 +36,7 @@
 
 /* D3DB_CALL and the entry ids for the D3D mirror bridge wrappers (end of file). */
 #include "d3d_bridge.h"
+#include "log_block.h"
 
 /* ── ICALL trace ring buffer ───────────────────────────────── */
 
@@ -1723,12 +1724,13 @@ static void pool_ExQueryPoolBlockSize(void)
     coop_leave(self);
 }
 
+static void heap_watch_lines(void);
+
 /* One [HEAPSTAT] line every 2 s, from whichever thread gets there. */
 static void heap_watch(void)
 {
     static volatile LONG last;
     LONG now = (LONG)GetTickCount(), prev = last;
-    xbox_heap_stats_t s;
 
     if (prev && now - prev < HEAP_WATCH_MS)
         return;
@@ -1736,8 +1738,19 @@ static void heap_watch(void)
         return;
     if (!prev)
         return;                            /* start the clock */
+    heap_watch_lines();
+}
+
+/* The lines, as one write (log_block.h): kept out of heap_watch, which runs
+ * at every kernel call, so the 8 KB block costs nothing on that path. */
+static __declspec(noinline) void heap_watch_lines(void)
+{
+    xbox_heap_stats_t s;
+    log_block_t lb;
+
+    lb.len = 0;
     xbox_HeapStats(&s);
-    fprintf(stderr, "[HEAPSTAT] used %u/%u KiB (%.1f%%); live %u KiB in %u blocks; "
+    log_block_printf(&lb, "[HEAPSTAT] used %u/%u KiB (%.1f%%); live %u KiB in %u blocks; "
                     "free %u KiB in %u blocks, largest %u KiB; VM released %ld (%ld KiB), "
                     "decommits %ld, bridged %ld; reuse slack %u KiB live, max %u KiB, %u events; "
                     "threads: TIBs freed %ld, spawn waits %ld (timeouts %ld, longest %ld ms), guard abandoned %ld\n",
@@ -1755,7 +1768,7 @@ static void heap_watch(void)
         free_b = g_cm_free_bytes;
         free_n = g_cm_free_n;
         ReleaseSRWLockShared(&g_cm_lock);
-        fprintf(stderr, "[CONTIGSTAT] arena high-water %u KiB; live %u KiB, free for reuse %u KiB in %d blocks;"
+        log_block_printf(&lb, "[CONTIGSTAT] arena high-water %u KiB; live %u KiB, free for reuse %u KiB in %d blocks;"
                         " allocs %ld (reused %ld), frees %ld; to the bridge: frees %ld, untracked blocks %ld;"
                         " size queries %ld\n",
                 xbox_ContiguousAllocatedBytes() / 1024, live / 1024, free_b / 1024, free_n,
@@ -1773,7 +1786,7 @@ static void heap_watch(void)
             if (!g_pool_ext[i].used && g_pool_ext[i].size > largest)
                 largest = g_pool_ext[i].size;
         ReleaseSRWLockShared(&g_pool_lock);
-        fprintf(stderr, "[POOLSTAT] arena %u KiB at %08X; live %u KiB in %u blocks, peak %u KiB, largest free %u KiB;"
+        log_block_printf(&lb, "[POOLSTAT] arena %u KiB at %08X; live %u KiB in %u blocks, peak %u KiB, largest free %u KiB;"
                         " allocs %ld, frees %ld; to the heap %ld (arena full %ld)\n",
                 g_pool_base ? POOL_ARENA_SIZE / 1024 : 0, g_pool_base, live / 1024, live_n, peak / 1024, largest / 1024,
                 (long)g_pool_allocs, (long)g_pool_frees, (long)g_pool_to_heap, (long)g_pool_full);
@@ -1791,14 +1804,14 @@ static void heap_watch(void)
             if (g_vr_free[i].size > largest)
                 largest = g_vr_free[i].size;
         ReleaseSRWLockShared(&g_vr_lock);
-        fprintf(stderr, "[VMSTAT] zone %u KiB at %08X: live %u KiB in %d regions (peak %u KiB), free %u KiB in %d ranges"
+        log_block_printf(&lb, "[VMSTAT] zone %u KiB at %08X: live %u KiB in %d regions (peak %u KiB), free %u KiB in %d ranges"
                         " (largest %u KiB); regions %ld, released %ld, to the heap %ld, table full %ld;"
                         " heap live less zone free %u KiB\n",
                 g_vr_zone_size / 1024, g_vr_zone, live_b / 1024, live_n, peak / 1024, free_b / 1024, free_n,
                 largest / 1024, (long)g_vr_cut, (long)g_vr_returned, (long)g_vr_to_heap, (long)g_vr_table_full,
                 (s.live - free_b) / 1024);
     }
-    fflush(stderr);
+    log_block_flush(&lb);
 }
 
 recomp_func_t recomp_lookup_manual(uint32_t xbox_va)

@@ -107,6 +107,7 @@
 
 #include "d3d_bridge.h"
 #include "d3d_host.h"
+#include "log_block.h"
 
 /* ── Guest D3D layout (notes 18.31, step29_option_b_plan.md section 1) ── */
 
@@ -3499,12 +3500,14 @@ static void mirror_swap(void)
         static unsigned last_presents, last_paced, last_late;
         static double last_wait_ms;
         d3dh_stats_t st;
+        log_block_t lb;
         if (!TryAcquireSRWLockExclusive(&line_lock))
             return;
         if (now - g_last_host_ms >= HOST_PERIOD_MS) {
             double dt = g_last_host_ms ? (now - g_last_host_ms) / 1000.0 : now_s();
+            lb.len = 0;         /* the lines go out as one write (log_block.h) */
             d3dh_stats(&st);
-            fprintf(stderr, "[D3DB] host +%.1f s: guest swaps %ld (+%ld, %.1f/s), host presents %u (+%u),"
+            log_block_printf(&lb, "[D3DB] host +%.1f s: guest swaps %ld (+%ld, %.1f/s), host presents %u (+%u),"
                     " frame counter %u; clears %u (colour %u, z/stencil %u, partial colour %u),"
                     " other-target clears %ld; no game lock %ld (%ld while another thread held it),"
                     " D3DX draws %ld; dumps %u, present fails %u, other status %u\n",
@@ -3514,11 +3517,11 @@ static void mirror_swap(void)
                     (long)g_clears_other_rt, (long)g_nolock, (long)g_interleaved, (long)g_d3dx_draws,
                     st.dumps, st.present_fails, st.present_status);
             if (st.paced)       /* S7: the frame limiter */
-                fprintf(stderr, "[D3DB] host limiter: paced %u (+%u), late %u (+%u), waited %.0f ms this interval"
+                log_block_printf(&lb, "[D3DB] host limiter: paced %u (+%u), late %u (+%u), waited %.0f ms this interval"
                         " (%.2f ms a frame)\n", st.paced, st.paced - last_paced, st.paced_late,
                         st.paced_late - last_late, st.paced_wait_ms - last_wait_ms,
                         st.paced > last_paced ? (st.paced_wait_ms - last_wait_ms) / (st.paced - last_paced) : 0.0);
-            fprintf(stderr, "[D3DB] host swap gaps this interval: over 25 ms %u, over 50 ms %u, over 100 ms %u,"
+            log_block_printf(&lb, "[D3DB] host swap gaps this interval: over 25 ms %u, over 50 ms %u, over 100 ms %u,"
                     " longest %.1f ms\n", g_gap25, g_gap50, g_gap100, g_gap_max);
             g_gap25 = g_gap50 = g_gap100 = 0;
             g_gap_max = 0;
@@ -3534,10 +3537,10 @@ static void mirror_swap(void)
                     total += d[k];
                 }
                 if (total)
-                    fprintf(stderr, "[D3DB] host presents this interval, by DWM compositions since the last: 0 %u, 1 %u, 2 %u, 3 %u,"
+                    log_block_printf(&lb, "[D3DB] host presents this interval, by DWM compositions since the last: 0 %u, 1 %u, 2 %u, 3 %u,"
                             " 4 %u, 5 %u, 6 %u, 7 %u, more %u\n", d[0], d[1], d[2], d[3], d[4], d[5], d[6], d[7], d[8]);
             }
-            fprintf(stderr, "[D3DB] host draws: mirrored %ld (to render targets %ld, with pixel shaders %ld,"
+            log_block_printf(&lb, "[D3DB] host draws: mirrored %ld (to render targets %ld, with pixel shaders %ld,"
                     " immediate %ld, of them pre-transformed %ld),"
                     " host draws %u (fails %u); not mirrored: target %ld, vertex program %ld, primitive %ld,"
                     " texture %ld, stream %ld, vertex format %ld, immediate %ld, DrawVertices %ld; textures uploaded"
@@ -3552,23 +3555,23 @@ static void mirror_swap(void)
                     st.tex_uploads, st.p8_uploads, st.cube_uploads, st.tex_upload_fails, st.tex_evictions,
                     (long)g_cube_binds, (long)g_gap[GAP_VALUE],
                     (long)g_gap[GAP_TEXOP], (long)g_gap[GAP_DIFFUSE_ARG], (long)g_gap[GAP_FRONTFACE]);
-            fprintf(stderr, "[D3DB] host fixed function: indexed draws %u, untransformed draws %u (lit by xbox_d3d8"
+            log_block_printf(&lb, "[D3DB] host fixed function: indexed draws %u, untransformed draws %u (lit by xbox_d3d8"
                     " %ld, lit on the CPU %ld); gaps: over 8 lights %ld, texture transform %ld, CPU lighting"
                     " without a diffuse %ld, specular %ld, texcoord format %ld, immediate w not 1 %ld\n",
                     st.indexed_draws, st.ff_draws, (long)g_host_lit_draws, (long)g_cpu_lit_draws,
                     (long)g_gap[GAP_LIGHTS], (long)g_gap[GAP_TEXTRANSFORM], (long)g_gap[GAP_CPU_LIGHT],
                     (long)g_gap[GAP_SPECULAR], (long)g_gap[GAP_TEXCOORD_SIZE], (long)g_gap[GAP_IMM_W]);
-            fprintf(stderr, "[D3DB] host vertex programs: mirrored %ld (host draws %u), shaders %u (fails %u), constant"
+            log_block_printf(&lb, "[D3DB] host vertex programs: mirrored %ld (host draws %u), shaders %u (fails %u), constant"
                     " uploads %u, probes %u; linear textures scaled to 0..1 %ld (not patchable %ld); sampling a copy,"
                     " not mirrored %ld; gaps: undeclared register %ld, stream %ld, array type %ld, tessellator %ld,"
                     " NORESERVEDCONSTANTS %ld\n", (long)g_mirrored_vp,
                     st.vp_draws, st.vs_created, st.vs_fails, st.vs_const_uploads, st.vs_probes,
                     (long)g_texel_draws, (long)g_texel_fails, (long)g_skip[SKIP_VP_COPY], (long)g_vpgap[VPGAP_UNDECLARED], (long)g_vpgap[VPGAP_STREAM],
                     (long)g_vpgap[VPGAP_FORMAT], (long)g_vpgap[VPGAP_TESS], (long)g_vpgap[VPGAP_NORESERVED]);
-            fprintf(stderr, "[D3DB] host copies: CopyRects back buffer -> texture %ld (host %u, fails %u), not"
+            log_block_printf(&lb, "[D3DB] host copies: CopyRects back buffer -> texture %ld (host %u, fails %u), not"
                     " mirrored %ld; draws sampling a copy: mirrored %ld, vertex program %ld\n", (long)g_copies,
                     st.copies, st.copy_fails, (long)g_copies_skipped, (long)g_copy_sampled, (long)g_copy_sampled_vp);
-            fprintf(stderr, "[D3DB] host S4: render targets %u (fails %u), draws to them %u, clears %u, sampled %u"
+            log_block_printf(&lb, "[D3DB] host S4: render targets %u (fails %u), draws to them %u, clears %u, sampled %u"
                     " (while bound as the target %u); pixel-shader draws %u, probes %u; pixel-shader gaps:"
                     " blue %ld, register %ld, output map %ld, blue-to-alpha %ld, mux LSB %ld, texture mode %ld,"
                     " final constants %ld, V1R0 %ld\n",
@@ -3584,7 +3587,7 @@ static void mirror_swap(void)
                 QueryPerformanceFrequency(&f);
                 for (i = 0; i < 4; i++)
                     cur[i] = g_mirror_ticks[i];
-                fprintf(stderr, "[D3DB] host mirror time this interval: draws %.1f ms (immediate %.1f ms), swaps %.1f ms,"
+                log_block_printf(&lb, "[D3DB] host mirror time this interval: draws %.1f ms (immediate %.1f ms), swaps %.1f ms,"
                         " other %.1f ms (%.1f%% of the interval)\n",
                         1000.0 * (cur[0] - last[0]) / f.QuadPart, 1000.0 * (cur[3] - last[3]) / f.QuadPart,
                         1000.0 * (cur[1] - last[1]) / f.QuadPart, 1000.0 * (cur[2] - last[2]) / f.QuadPart,
@@ -3599,9 +3602,9 @@ static void mirror_swap(void)
                     len += snprintf(buf + len, sizeof(buf) - len, " %ld:%ld/%ld",
                                     (long)g_lock_by_thread[i].tid, (long)g_lock_by_thread[i].locked,
                                     (long)g_lock_by_thread[i].calls);
-                fprintf(stderr, "[D3DB] host threads (tid:with game lock/calls):%s\n", len ? buf : " none");
+                log_block_printf(&lb, "[D3DB] host threads (tid:with game lock/calls):%s\n", len ? buf : " none");
             }
-            fflush(stderr);
+            log_block_flush(&lb);
             last_swaps = n;
             last_presents = st.presents;
             g_last_host_ms = now;
