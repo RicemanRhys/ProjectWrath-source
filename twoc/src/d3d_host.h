@@ -25,6 +25,8 @@ typedef struct {
     unsigned paced, paced_late;                                                   /* frame limiter (S7) */
     double paced_wait_ms;
     unsigned shown[9];      /* DWM compositions between presents: [0]..[7], [8] more (18.45) */
+    unsigned displayed[9];  /* refreshes between consecutive displayed frames: [0]..[7], [8] more (18.48) */
+    unsigned display_unmeasured;    /* frame statistics unavailable, or more than one frame shown between two reads */
 } d3dh_stats_t;
 
 /* A state already in xbox_d3d8's (PC D3D8) numbering and values. */

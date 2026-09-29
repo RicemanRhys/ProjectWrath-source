@@ -3540,6 +3540,20 @@ static void mirror_swap(void)
                     log_block_printf(&lb, "[D3DB] host presents this interval, by DWM compositions since the last: 0 %u, 1 %u, 2 %u, 3 %u,"
                             " 4 %u, 5 %u, 6 %u, 7 %u, more %u\n", d[0], d[1], d[2], d[3], d[4], d[5], d[6], d[7], d[8]);
             }
+            {   /* 18.48: refreshes between consecutive frames on screen (d3d_host.c) */
+                static unsigned last_disp[9], last_unmeasured;
+                unsigned k, d[9], total = 0;
+                for (k = 0; k < 9; k++) {
+                    d[k] = st.displayed[k] - last_disp[k];
+                    last_disp[k] = st.displayed[k];
+                    total += d[k];
+                }
+                if (total || st.display_unmeasured != last_unmeasured)
+                    log_block_printf(&lb, "[D3DB] host frames shown this interval, by refreshes since the last shown: 1 %u, 2 %u,"
+                            " 3 %u, 4 %u, 5 %u, 6 %u, 7 %u, more %u; unmeasured %u\n", d[1], d[2], d[3], d[4], d[5],
+                            d[6], d[7], d[8], st.display_unmeasured - last_unmeasured);
+                last_unmeasured = st.display_unmeasured;
+            }
             log_block_printf(&lb, "[D3DB] host draws: mirrored %ld (to render targets %ld, with pixel shaders %ld,"
                     " immediate %ld, of them pre-transformed %ld),"
                     " host draws %u (fails %u); not mirrored: target %ld, vertex program %ld, primitive %ld,"

@@ -1035,6 +1035,75 @@ int d3dh_texture_check(const d3dh_tex_t *t, const char *path)
 
 /* ── Present ───────────────────────────────────────────────── */
 
+/*
+ * Vsync pacing: present mid-refresh (18.48).
+ *
+ * The frame-latency object is signalled at a vblank, so the present that
+ * follows the wait was issued 0.2-0.3 ms after one, on the refresh boundary.
+ * DWM counts a composed flip's sync interval from the vblank it assigns the
+ * present to, and at the boundary that assignment wavers: frames were shown 5
+ * refreshes after the one before and the next 3 after it (PresentMon: 20.8
+ * then 12.5 ms, animation error -/+4 ms), in runs while the phase stayed
+ * there. So after the wait, the present is held until the middle of the
+ * refresh: half DWM's period after its last vblank. It costs ~2 ms of latency.
+ * Two runs each, menu then Arctic Antics: 5.5-7.3% of frames off the 4-refresh
+ * grid before, 2.2% after, and 0-2% in the level. What is left comes in the
+ * menu on a 10 Hz rhythm while our presents stay even, so it's DWM's own.
+ * RECOMP_D3D_BRIDGE_PRESENT_PHASE=MS sets the point (0 presents at once, as
+ * before).
+ */
+static void present_mid_refresh(void)
+{
+    static double target_ms = -1;
+    static HANDLE timer;
+    static LARGE_INTEGER freq;
+    DWM_TIMING_INFO ti;
+    LARGE_INTEGER now;
+    double since, left, period_ms, want, deadline;
+    LONGLONG d;
+
+    if (target_ms < 0) {
+        const char *e = getenv("RECOMP_D3D_BRIDGE_PRESENT_PHASE");
+        target_ms = e && *e ? atof(e) : 1e9;       /* 1e9: half the period, once known */
+        QueryPerformanceFrequency(&freq);
+        timer = CreateWaitableTimerExW(NULL, NULL, 0x00000002 /* CREATE_WAITABLE_TIMER_HIGH_RESOLUTION */,
+                                       TIMER_ALL_ACCESS);
+    }
+    if (target_ms <= 0)
+        return;
+    memset(&ti, 0, sizeof(ti));
+    ti.cbSize = sizeof(ti);
+    if (FAILED(DwmGetCompositionTimingInfo(NULL, &ti)) || !ti.qpcRefreshPeriod)
+        return;
+    period_ms = ti.qpcRefreshPeriod * 1000.0 / freq.QuadPart;
+    want = target_ms < period_ms ? target_ms : period_ms / 2;
+    QueryPerformanceCounter(&now);
+    d = ((LONGLONG)now.QuadPart - (LONGLONG)ti.qpcVBlank) % (LONGLONG)ti.qpcRefreshPeriod;
+    if (d < 0)
+        d += ti.qpcRefreshPeriod;
+    since = d * 1000.0 / freq.QuadPart;
+    left = want - since;
+    if (left < 0 && since > period_ms - 0.7)
+        left += period_ms;              /* just before the next vblank: the middle of the next refresh */
+    if (left <= 0)
+        return;
+    deadline = (double)now.QuadPart + left * freq.QuadPart / 1000.0;
+    for (;;) {
+        QueryPerformanceCounter(&now);
+        left = (deadline - (double)now.QuadPart) * 1000.0 / freq.QuadPart;
+        if (left <= 0)
+            return;
+        if (left > 0.8 && timer) {
+            LARGE_INTEGER due;
+            due.QuadPart = -(LONGLONG)((left - 0.5) * 10000.0);       /* relative, 100 ns */
+            if (SetWaitableTimer(timer, &due, 0, NULL, NULL, FALSE))
+                WaitForSingleObject(timer, INFINITE);
+        } else {
+            YieldProcessor();
+        }
+    }
+}
+
 /* S7: wait for this present's slot on the g_frame_hz clock. Outside g_lock,
  * so a loading thread's host calls never queue behind the wait; the game
  * serialises its swaps anyway, and pace_lock keeps the clock consistent if
@@ -1078,6 +1147,7 @@ static void pace(void)
             }
         } else {
             misses = 0;
+            present_mid_refresh();
         }
         ReleaseSRWLockExclusive(&pace_lock);
         return;
@@ -1208,6 +1278,72 @@ void d3dh_present(double t_s, unsigned swap_no)
                 g_st.shown[d > 8 ? 8 : d]++;
             }
             last_idx = idx;
+        }
+    }
+    {   /* When frames actually reach the screen (18.48): DXGI's frame
+         * statistics name the last present shown and the refresh it was
+         * shown at. Refreshes between consecutive shown frames should all be
+         * g_interval; PresentMon calls this MsBetweenDisplayChange. With
+         * RECOMP_D3D_BRIDGE_DISPLAYLOG=1 each other interval is logged with
+         * where the presents fell against DWM's vblank. */
+        static UINT last_pc, last_prc;
+        static int log_on = -1;
+        static double phase[64];        /* ms after DWM's vblank, by present count mod 64 */
+        static unsigned work[64][5];    /* draws, texture uploads, target draws, copies, us since the last */
+        DXGI_FRAME_STATISTICS fs;
+        DWM_TIMING_INFO ti;
+        LARGE_INTEGER q, f;
+
+        if (log_on < 0) {
+            const char *e = getenv("RECOMP_D3D_BRIDGE_DISPLAYLOG");
+            log_on = e && *e && *e != '0';
+        }
+        memset(&ti, 0, sizeof(ti));
+        ti.cbSize = sizeof(ti);
+        QueryPerformanceCounter(&q);
+        QueryPerformanceFrequency(&f);
+        if (log_on && SUCCEEDED(DwmGetCompositionTimingInfo(NULL, &ti)) && ti.qpcRefreshPeriod) {
+            LONGLONG since = ((LONGLONG)q.QuadPart - (LONGLONG)ti.qpcVBlank) % (LONGLONG)ti.qpcRefreshPeriod;
+            if (since < 0)
+                since += ti.qpcRefreshPeriod;
+            phase[g_st.presents & 63] = since * 1000.0 / f.QuadPart;
+        }
+        if (log_on) {                   /* this frame's work, to set beside a late one */
+            static unsigned last_draws, last_tex, last_rt, last_copies;
+            static LONGLONG last_q;
+            unsigned *w = work[g_st.presents & 63];
+            w[0] = g_st.draws - last_draws;
+            w[1] = g_st.tex_uploads - last_tex;
+            w[2] = g_st.rt_draws - last_rt;
+            w[3] = g_st.copies - last_copies;
+            w[4] = last_q ? (unsigned)((q.QuadPart - last_q) * 1000000 / f.QuadPart) : 0;  /* us since the last present */
+            last_draws = g_st.draws;
+            last_tex = g_st.tex_uploads;
+            last_rt = g_st.rt_draws;
+            last_copies = g_st.copies;
+            last_q = q.QuadPart;
+        }
+        if (SUCCEEDED(IDXGISwapChain1_GetFrameStatistics(g_flip, &fs)) && fs.PresentCount) {
+            if (fs.PresentCount != last_pc) {
+                if (last_pc && fs.PresentCount == last_pc + 1) {
+                    UINT d = fs.PresentRefreshCount - last_prc;
+                    g_st.displayed[d > 8 ? 8 : d]++;
+                    if (log_on && d != g_interval) {
+                        unsigned *a = work[(fs.PresentCount - 1) & 63], *b = work[fs.PresentCount & 63];
+                        fprintf(stderr, "[D3DB] host display: present %u shown %u refreshes after the one before"
+                                " (presents at +%.2f, +%.2f ms after a vblank; %u presents made; work before/this:"
+                                " draws %u/%u, uploads %u/%u, target draws %u/%u, copies %u/%u, us since the last %u/%u)\n",
+                                fs.PresentCount, d, phase[(fs.PresentCount - 1) & 63], phase[fs.PresentCount & 63],
+                                g_st.presents, a[0], b[0], a[1], b[1], a[2], b[2], a[3], b[3], a[4], b[4]);
+                    }
+                } else if (last_pc) {
+                    g_st.display_unmeasured++;
+                }
+                last_pc = fs.PresentCount;
+                last_prc = fs.PresentRefreshCount;
+            }
+        } else {
+            g_st.display_unmeasured++;
         }
     }
     if (FAILED(hr) && ++g_st.present_fails <= 5)
