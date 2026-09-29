@@ -29,6 +29,7 @@
 #include "xbox_memory_layout.h"
 #include "recomp_icall_feedback.h"
 #include <stdio.h>
+#include <io.h>
 /* stdlib.h is load-bearing, not tidiness. Without it C89 implicit declaration
  * makes malloc return `int`, so bridge_spawn_thread truncated its heap pointer
  * to 32 bits and sign-extended it into a `struct bridge_thread_start *`. Every
@@ -8865,8 +8866,18 @@ static void kernel_thunk_dispatch(void)
         DWORD now = GetTickCount();
         if (last_summary_tick == 0) last_summary_tick = now;
         if (now - last_summary_tick >= 2000 && g_kernel_call_count > 200) {
-            fprintf(stderr, "  [KERNEL] summary: %d total calls, latest ordinal %u (slot %d) esp=0x%08X\n",
-                    g_kernel_call_count, ordinal, slot, g_esp);
+            /* Formatted into one buffer and written once. stderr is
+             * unbuffered, and the CRT writes an unbuffered stream that
+             * isn't a console one byte per WriteFile: into a log file
+             * opened write-through (PowerShell's Start-Process redirection)
+             * these seven lines held the calling game thread ~15 ms every
+             * 2 s. Same bytes, one call. */
+            char sum[1024];
+            int len;
+
+            len = snprintf(sum, sizeof sum,
+                           "  [KERNEL] summary: %d total calls, latest ordinal %u (slot %d) esp=0x%08X\n",
+                           g_kernel_call_count, ordinal, slot, g_esp);
             /* And which ones, ranked. "Latest" names whatever the sample
              * happened to land on; the question behind this line is what a
              * title sitting still is actually asking the kernel for, and
@@ -8885,11 +8896,19 @@ static void kernel_thunk_dispatch(void)
                     if (best < 0)
                         break;
                     shown_ord[best] = 1;
-                    fprintf(stderr, "  [KERNEL]   ordinal %3d x%llu\n", best,
-                            (unsigned long long)g_ordinal_calls[best]);
+                    if (len >= 0 && len < (int)sizeof sum)
+                        len += snprintf(sum + len, sizeof sum - len, "  [KERNEL]   ordinal %3d x%llu\n", best,
+                                        (unsigned long long)g_ordinal_calls[best]);
                 }
             }
-            fflush(stderr);
+            if (len > (int)sizeof sum - 1)
+                len = (int)sizeof sum - 1;  /* can't happen: seven short lines */
+            if (len > 0) {
+                _lock_file(stderr);
+                fflush(stderr);
+                _write(_fileno(stderr), sum, (unsigned)len);
+                _unlock_file(stderr);
+            }
             last_summary_tick = now;
         }
     }
