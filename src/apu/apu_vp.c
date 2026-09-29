@@ -1244,7 +1244,14 @@ void mcpx_apu_vp_frame(MCPXAPUState *d,
 
             if (!voice_get_mask(d, v, NV_PAVS_VOICE_PAR_STATE,
                                 NV_PAVS_VOICE_PAR_STATE_ACTIVE_VOICE)) {
-                fe_method(d, SE2FE_IDLE_VOICE, v);
+                /* While the front end is trapped the idle voice waits, as an
+                 * SE2FE method waits in the hardware's queue: reporting it
+                 * would overwrite the trapped method and handle the ISR is
+                 * about to read. It is reported on the first frame after the
+                 * resume. */
+                if ((d->regs[NV_PAPU_FECTL] & NV_PAPU_FECTL_FEMETHMODE)
+                        != NV_PAPU_FECTL_FEMETHMODE_TRAPPED)
+                    fe_method(d, SE2FE_IDLE_VOICE, v);
             } else {
                 /* Process voice directly (single-threaded) */
                 voice_process(d, mixbins, d->vp.sample_buf, v, list);

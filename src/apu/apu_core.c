@@ -136,7 +136,7 @@ void mcpx_apu_write(void *opaque, hwaddr addr, uint64_t val,
          * successful DirectSound create, that hang is not confined to audio.
          *
          * Resume whenever the write is not switching the block off; the thread
-         * re-checks FECTL itself and idles again if it is halted or trapped. */
+         * re-checks FECTL itself and skips the pipeline while it is halted. */
         {
             uint32_t sectl = qatomic_read(&d->regs[NV_PAPU_SECTL]);
             uint32_t fectl = qatomic_read(&d->regs[NV_PAPU_FECTL]);
@@ -492,12 +492,20 @@ static void *mcpx_apu_frame_thread(void *arg)
          * The VP/DSP pipeline (se_frame) only runs when registers allow it. */
         throttle(d);
 
+        /* A trapped front end stops the method queue, not the voice
+         * processor: the VP keeps rendering the voices it has while the
+         * title's ISR handles the trap (and holds back further idle-voice
+         * methods, mcpx_apu_vp_frame). Skipping the whole frame there made
+         * every trap a gap of silence as long as the interrupt took: in a
+         * level with voices starting and stopping, 13-23% of frames in
+         * 150-260 gaps of up to 21 ms every 10 s. Halted still stops it.
+         * FEMETHMODE is a field, and TRAPPED (0xE0) holds HALTED's bit
+         * (0x80), so the mode is compared whole. */
         int xcntmode = GET_MASK(qatomic_read(&d->regs[NV_PAPU_SECTL]),
                                 NV_PAPU_SECTL_XCNTMODE);
         uint32_t fectl = qatomic_read(&d->regs[NV_PAPU_FECTL]);
         bool apu_active = (xcntmode != NV_PAPU_SECTL_XCNTMODE_OFF) &&
-                          !(fectl & NV_PAPU_FECTL_FEMETHMODE_TRAPPED) &&
-                          !(fectl & NV_PAPU_FECTL_FEMETHMODE_HALTED);
+                          (fectl & NV_PAPU_FECTL_FEMETHMODE) != NV_PAPU_FECTL_FEMETHMODE_HALTED;
 
         if (apu_active && !g_test_tone.active) {
             /* Full pipeline: VP voices → DSP → monitor → waveOut */
