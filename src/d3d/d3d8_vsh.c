@@ -549,7 +549,7 @@ int d3d8_vsh_generate_hlsl(const NV2AVshProgram *program,
         "    o.tex2 = oT2.xyz;\n"
         "    o.tex3 = oT3.xyz;\n"
         "    o.fog = saturate(oFog.x);\n"          /* vertex fog: the factor */
-        "    o.viewpos = float4(0.0, 0.0, -oFog.x, 1.0);\n"   /* table fog: the NV2A fogs from oFog.x */
+        "    o.viewpos = float4(0.0, 0.0, oFog.x, 1.0);\n"   /* table fog: the NV2A fogs from oFog.x */
         "    return o;\n"
         "}\n");
 

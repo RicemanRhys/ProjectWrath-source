@@ -249,6 +249,9 @@ typedef struct NV2APSConstants {
     UINT  alpha_test_enable;                /* 0 or 1 */
     UINT  fog_enable;                       /* 0 or 1 */
     UINT  alpha_only[NV2A_MAX_TEXTURES];     /* A8 sampling uses white RGB */
+    float fog_params[4];                    /* start, end, density, table fog mode (D3DFOGMODE) */
+    UINT  fog_flags;                        /* bit 0: table fog, bit 1: range fog */
+    UINT  fog_pad[3];
 } NV2APSConstants;
 
 /* ================================================================

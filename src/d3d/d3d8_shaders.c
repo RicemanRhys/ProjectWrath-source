@@ -405,7 +405,7 @@ static const char g_ps_tail[] =
     "        current.rgb = lerp(FogColor.rgb, current.rgb, input.fog);\n"
     "\n"
     "    if (PSFlags & 8u) {\n"  /* table fog: compute fog per-pixel from view-space depth */
-    "        float dist = (PSFlags & 16u) ? length(input.viewpos.xyz) : -input.viewpos.z;\n"
+    "        float dist = (PSFlags & 16u) ? length(input.viewpos.xyz) : input.viewpos.z;\n"  /* D3D view space: +z ahead */
     "        float f = compute_pfog(dist);\n"
     "        current.rgb = lerp(FogColor.rgb, current.rgb, f);\n"
     "    }\n"

@@ -516,6 +516,8 @@ int d3d8_combiners_generate_hlsl(const NV2ACombinerState *state,
     EMIT("    uint   alpha_test_enable;\n");
     EMIT("    uint   fog_enable;\n");
     EMIT("    uint4  alpha_only;\n");
+    EMIT("    float4 fog_params;\n");   /* start, end, density, table fog mode */
+    EMIT("    uint   fog_flags;\n");    /* bit 0: table fog, bit 1: range fog */
     EMIT("};\n\n");
 
     /* ---- Input structure ---- */
@@ -527,7 +529,22 @@ int d3d8_combiners_generate_hlsl(const NV2ACombinerState *state,
     EMIT("    float3 tc1     : TEXCOORD1;\n");
     EMIT("    float3 tc2     : TEXCOORD2;\n");
     EMIT("    float3 tc3     : TEXCOORD3;\n");
+    EMIT("    float  fog     : TEXCOORD4;\n");   /* vertex fog: the factor */
+    EMIT("    float4 viewpos : TEXCOORD5;\n");   /* table fog: view-space position */
     EMIT("};\n\n");
+
+    /* The fog factor, as the fixed-function pixel shader computes it:
+     * table fog per pixel from the view-space depth, else the vertex's. */
+    EMIT("float fog_factor(PS_IN input) {\n");
+    EMIT("    if (!fog_enable) return 1.0;\n");
+    EMIT("    if (!(fog_flags & 1u)) return saturate(input.fog);\n");
+    EMIT("    float dist = (fog_flags & 2u) ? length(input.viewpos.xyz) : input.viewpos.z;\n");
+    EMIT("    uint mode = (uint)fog_params.w;\n");
+    EMIT("    if (mode == 1u) return saturate(exp(-fog_params.z * dist));\n");
+    EMIT("    if (mode == 2u) { float e = fog_params.z * dist; return saturate(exp(-e * e)); }\n");
+    EMIT("    if (mode == 3u) return saturate((fog_params.y - dist) / max(fog_params.y - fog_params.x, 1e-6));\n");
+    EMIT("    return 1.0;\n");
+    EMIT("}\n\n");
 
     /* ---- Main function ---- */
     EMIT("float4 main(PS_IN input) : SV_TARGET {\n");
@@ -537,7 +554,8 @@ int d3d8_combiners_generate_hlsl(const NV2ACombinerState *state,
     EMIT("    float4 r_zero = float4(0, 0, 0, 0);\n");
     EMIT("    float4 r_c0   = c0[0];\n");
     EMIT("    float4 r_c1   = c1[0];\n");
-    EMIT("    float4 r_fog  = fog_color;\n");
+    /* The NV2A's fog register: the fog colour, and the fog factor in alpha. */
+    EMIT("    float4 r_fog  = float4(fog_color.rgb, fog_factor(input));\n");
 
     /* Vertex colors: Xbox D3DCOLOR is BGRA in memory, the vertex shader
      * should have already swizzled to RGBA. */
@@ -765,11 +783,19 @@ int d3d8_combiners_generate_hlsl(const NV2ACombinerState *state,
         EMIT("    }\n\n");
     }
 
-    /* ---- Fog ---- */
-    EMIT("    /* Fog application */\n");
-    EMIT("    if (fog_enable) {\n");
-    EMIT("        result.rgb = lerp(fog_color.rgb, result.rgb, r_fog.a);\n");
-    EMIT("    }\n\n");
+    /* ---- Fog ----
+     * On the NV2A fog is the final combiner's own work (A = FOG.a, B = the
+     * colour, C = FOG.rgb). A final combiner that reads FOG has fogged
+     * already; otherwise fog as D3D's default final combiner would. */
+    for (i = 0; i < 7; i++)
+        if (state->final_input[i].reg == NV2A_REG_FOG)
+            break;
+    if (i == 7) {
+        EMIT("    /* Fog application */\n");
+        EMIT("    if (fog_enable) {\n");
+        EMIT("        result.rgb = lerp(fog_color.rgb, result.rgb, r_fog.a);\n");
+        EMIT("    }\n\n");
+    }
 
     /* ---- Alpha test ---- */
     EMIT("    /* Alpha test */\n");
@@ -1049,6 +1075,16 @@ BOOL d3d8_combiners_prepare_draw(void)
         cb->alpha_func = rs[D3DRS_ALPHAFUNC];
         cb->alpha_test_enable = rs[D3DRS_ALPHATESTENABLE] ? 1 : 0;
         cb->fog_enable = rs[D3DRS_FOGENABLE] ? 1 : 0;
+        if (rs[D3DRS_FOGTABLEMODE] != D3DFOG_NONE) {
+            memcpy(&cb->fog_params[0], &rs[D3DRS_FOGSTART], sizeof(float));
+            memcpy(&cb->fog_params[1], &rs[D3DRS_FOGEND], sizeof(float));
+            memcpy(&cb->fog_params[2], &rs[D3DRS_FOGDENSITY], sizeof(float));
+            cb->fog_params[3] = (float)rs[D3DRS_FOGTABLEMODE];
+            cb->fog_flags = 1u | (rs[D3DRS_RANGEFOGENABLE] ? 2u : 0u);
+        } else {
+            cb->fog_params[0] = cb->fog_params[1] = cb->fog_params[2] = cb->fog_params[3] = 0.0f;
+            cb->fog_flags = 0;
+        }
         for (i = 0; i < NV2A_MAX_TEXTURES; i++) {
             D3DFORMAT format = d3d8_base_format(d3d8_GetStageTexture(i));
             cb->alpha_only[i] = format == D3DFMT_A8 || format == D3DFMT_LIN_A8;
