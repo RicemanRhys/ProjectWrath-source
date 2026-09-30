@@ -913,7 +913,13 @@ static int voice_get_samples(MCPXAPUState *d, uint32_t v, float samples[][2],
         }
     }
 
-    if (cbo >= ebo) {
+    /* ebo is the last sample (the loop above runs while cbo <= ebo), so the
+     * segment or buffer is done once cbo has passed it. This was cbo >= ebo,
+     * as in xemu: a request that filled up exactly at cbo == ebo moved on
+     * before sample ebo was played, dropping the last sample of a stream
+     * segment or of a loop about once in 30 (the resampler asks for ~30
+     * source samples a frame), a click each time (notes 18.49). */
+    if (cbo > ebo) {
         if (stream) {
             d->vp.ssl[v].ssl_seg += 1;
             cbo = 0;
