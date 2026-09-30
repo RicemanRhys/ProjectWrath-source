@@ -51,6 +51,7 @@ sys.path.insert(0, os.path.join(REPO, "xboxrecomp"))
 import tools.recomp.lifter as lifter          # noqa: E402
 import tools.recomp.translator as translator  # noqa: E402
 from tools.recomp.__main__ import main        # noqa: E402
+import lift_frndint                           # noqa: E402  frndint by the control word's RC (notes 18.50)
 
 # Conditions that read only ZF and CF.
 WIDTH_FREE = frozenset({"je", "jz", "jne", "jnz", "jb", "jnae", "jc", "jae", "jnb", "jnc",
@@ -271,3 +272,4 @@ if __name__ == "__main__":
     finally:
         print("lift_flag_join: %d block join(s) merged across cmp/test widths, %d predecessor(s) "
               "write joined flags" % (joins[0], mixed[0]))
+        print("lift_frndint: %d frndint site(s) round by the control word" % len(lift_frndint.sites))

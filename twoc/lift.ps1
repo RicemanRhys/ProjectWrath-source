@@ -10,7 +10,8 @@ $ErrorActionPreference = 'Stop'
 $repo = Split-Path -Parent $PSScriptRoot
 Set-Location (Join-Path $repo 'xboxrecomp')
 # Through twoc\tools\lift_flag_join.py: tools.recomp plus a flag join across cmp/test widths, without
-# which some jcc lift to a never-taken `_flags` fallback (notes 18.43). Same arguments.
+# which some jcc lift to a never-taken `_flags` fallback (notes 18.43), and frndint rounding by the
+# control word (twoc\tools\lift_frndint.py, notes 18.50). Same arguments.
 & (Join-Path $repo '.venv\Scripts\python.exe') (Join-Path $repo 'twoc\tools\lift_flag_join.py') `
     (Join-Path $repo 'game_files\default.xbe') `
     --all --split 1000 `
