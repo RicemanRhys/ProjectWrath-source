@@ -647,21 +647,22 @@ int d3d8_combiners_generate_hlsl(const NV2ACombinerState *state,
             EMIT("        float3 sum_rgb = ab_rgb + cd_rgb;\n");
         }
 
-        /* Apply output mapping (scale/bias) */
+        /* Apply output mapping (scale/bias); the NV2A clamps every
+         * general-combiner output to [-1, 1]. */
         const char *omp = output_map_prefix(rgb_out->output_map);
         const char *oms = output_map_suffix(rgb_out->output_map);
 
         /* Write to destination registers */
         if (rgb_out->ab_dst != NV2A_REG_ZERO) {
-            EMIT("        %s.rgb = %sab_rgb%s;\n",
+            EMIT("        %s.rgb = clamp(%sab_rgb%s, -1.0, 1.0);\n",
                  reg_name(rgb_out->ab_dst), omp, oms);
         }
         if (rgb_out->cd_dst != NV2A_REG_ZERO) {
-            EMIT("        %s.rgb = %scd_rgb%s;\n",
+            EMIT("        %s.rgb = clamp(%scd_rgb%s, -1.0, 1.0);\n",
                  reg_name(rgb_out->cd_dst), omp, oms);
         }
         if (rgb_out->sum_dst != NV2A_REG_ZERO) {
-            EMIT("        %s.rgb = %ssum_rgb%s;\n",
+            EMIT("        %s.rgb = clamp(%ssum_rgb%s, -1.0, 1.0);\n",
                  reg_name(rgb_out->sum_dst), omp, oms);
         }
 
@@ -700,15 +701,15 @@ int d3d8_combiners_generate_hlsl(const NV2ACombinerState *state,
         oms = output_map_suffix(alpha_out->output_map);
 
         if (alpha_out->ab_dst != NV2A_REG_ZERO) {
-            EMIT("        %s.a = %sab_a%s;\n",
+            EMIT("        %s.a = clamp(%sab_a%s, -1.0, 1.0);\n",
                  reg_name(alpha_out->ab_dst), omp, oms);
         }
         if (alpha_out->cd_dst != NV2A_REG_ZERO) {
-            EMIT("        %s.a = %scd_a%s;\n",
+            EMIT("        %s.a = clamp(%scd_a%s, -1.0, 1.0);\n",
                  reg_name(alpha_out->cd_dst), omp, oms);
         }
         if (alpha_out->sum_dst != NV2A_REG_ZERO) {
-            EMIT("        %s.a = %ssum_a%s;\n",
+            EMIT("        %s.a = clamp(%ssum_a%s, -1.0, 1.0);\n",
                  reg_name(alpha_out->sum_dst), omp, oms);
         }
 
