@@ -1182,10 +1182,15 @@ static unsigned translate_ps(d3dh_ps_t *ps)
     abcd = rs_x(XPS_FINAL_ABCD);
     efg = rs_x(XPS_FINAL_EFG);
     n_host = n;
-    if (!abcd && !efg) {                /* no final combiner: r0 */
-        PUT(PPS_FINAL_ABCD, 12u << 24);             /* D = r0 */
-        PUT(PPS_FINAL_EFG, (12u | 0x10) << 16);     /* G = r0.a */
-    } else {
+    if (!abcd && !efg) {
+        /* No final combiner of its own: D3D's default (0x108140), which fogs
+         * (A = FOG.a, B = r0, C = FOG.rgb) when FOGENABLE is on, and takes
+         * V1 + r0 instead of r0 when SPECULARENABLE is. G = r0.a. */
+        uint32_t col = rs_x(XRS_SPECULARENABLE) ? 14u : 12u;
+        abcd = rs_x(XRS_FOGENABLE) ? 0x13000300u | (col << 16) : col;
+        efg = 0x1C80u;
+    }
+    {
         if (reads_const(abcd, efg)) {
             if (n < 8) {
                 c0[n] = rs_x(XPS_FINALCONST0);
@@ -3256,6 +3261,19 @@ static void drawlog(const char *path, uint32_t xdk_prim, uint32_t n, uint32_t fv
             MEM32(D3D_TEXTURESTATE + 4 * (D3D_TSS_COUNT + XTSS_ALPHAOP)), MEM32(d + DEV_PIXEL_SHADER) ? "set" : "none",
             rs_x(XRS_PSTEXTUREMODES), MEM32(d + DEV_TEXTURES), MEM32(d + DEV_TEXTURES + 4), MEM32(d + DEV_TEXTURES + 8),
             MEM32(d + DEV_TEXTURES + 12), rs_x(XRS_FOGENABLE));
+    /* Step 48: the fog and the final combiner (XDK values; the floats as they are). */
+    {
+        uint32_t fs = rs_x(XRS_FOGSTART), fe = rs_x(XRS_FOGEND), fd = rs_x(XRS_FOGDENSITY);
+        float f_s, f_e, f_d;
+        memcpy(&f_s, &fs, 4);
+        memcpy(&f_e, &fe, 4);
+        memcpy(&f_d, &fd, 4);
+        fprintf(stderr, "[D3DB] drawlog   fog table %u start %g end %g density %g colour %08X range %u; specular %u"
+                " lighting %u; final %08X %08X count %X; vs %08X\n", rs_x(XRS_FOGTABLEMODE), (double)f_s,
+                (double)f_e, (double)f_d, rs_x(XRS_FOGCOLOR), rs_x(XRS_RANGEFOGENABLE), rs_x(XRS_SPECULARENABLE),
+                rs_x(XRS_LIGHTING), rs_x(XPS_FINAL_ABCD), rs_x(XPS_FINAL_EFG), rs_x(XPS_COMBINERCOUNT),
+                MEM32(d + DEV_VS_HANDLE));
+    }
     if (v && nv <= 16 && pos == FVF_XYZ) {      /* small draws: every vertex, and the view, in full */
         d3dh_ff_t ff;
         describe_ff(&ff);
