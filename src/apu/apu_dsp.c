@@ -25,6 +25,7 @@
 #include "apu_state.h"
 #include "fpconv.h"
 
+#include <math.h>
 #include <stdlib.h>
 #include <string.h>
 
@@ -79,19 +80,79 @@ static void dsp_ack_init(void)
                 s_dsp_ack_count, s_dsp_ack[0]);
 }
 
-/* SUM EVERY MIXBIN THE GUEST ROUTED TO, NOT JUST THE FIRST TWO.
+/* HOW THE BINS BECOME STEREO WITHOUT THE GP.
  *
- * Default ON. RECOMP_APU_MIXDOWN_ALL=0 restores the previous two-bin read,
- * because this changes audible output for every title and an escape hatch
- * costs one branch. */
-static int mcpx_apu_mixdown_all(void)
+ * On hardware the GP runs DirectSound's effects image, and that program, not
+ * the VP, decides how each mixbin reaches the speakers. Measured against xemu
+ * running the real image (Crash Bandicoot: The Wrath of Cortex, the Arctic
+ * Antics attract demo, notes 18.49):
+ *
+ *   - the speaker bins leave at the level the VP wrote them. Headroom is
+ *     applied once, in the VP (1 << submix_headroom), and the image does not
+ *     undo it: the menu music and the level's 2D ambience match xemu;
+ *   - the 3D voices' HRTF submix bins (the four named by hrtf_submix, the
+ *     crosstalk bins 6-9 by DirectSound's convention) come out about 11 dB
+ *     below unity (median -10.9 dB over 17 windows, quartiles -12.1 and
+ *     -8.8), measured from music-to-rest ratios, which a compressor in the
+ *     playback chain leaves alone;
+ *   - the I3DL2 send (bin 10) and the FX sends are inputs to the image's
+ *     effects, not outputs. Summed dry at unit gain they made the effects
+ *     and the hub's ambience 6-10 dB louder than the music.
+ *
+ * So by default: front left/right at unity, center and the back pair at
+ * -3 dB into both sides, LFE dropped (a stereo fold-down), the HRTF submix
+ * bins at -11 dB (RECOMP_APU_XTLK_DB overrides), every other bin dropped.
+ * No reverb: that needs the DSP.
+ *
+ * RECOMP_APU_MIXDOWN=all is the previous mixdown (every bin summed at unit
+ * gain, even bins left and odd right), =front the one before that (bins 0 and
+ * 1 only). RECOMP_APU_MIXDOWN_ALL=0 still means front. */
+enum { MIXDOWN_GP, MIXDOWN_ALL, MIXDOWN_FRONT };
+
+static int mcpx_apu_mixdown_mode(void)
 {
-    static int on = -1;
-    if (on < 0) {
-        const char *e = getenv("RECOMP_APU_MIXDOWN_ALL");
-        on = (e && *e) ? (atoi(e) != 0) : 1;
+    static int mode = -1;
+    if (mode < 0) {
+        const char *e = getenv("RECOMP_APU_MIXDOWN");
+        const char *a = getenv("RECOMP_APU_MIXDOWN_ALL");
+        mode = MIXDOWN_GP;
+        if (e && !strcmp(e, "all"))
+            mode = MIXDOWN_ALL;
+        else if ((e && !strcmp(e, "front")) || (a && *a && atoi(a) == 0))
+            mode = MIXDOWN_FRONT;
     }
-    return on;
+    return mode;
+}
+
+static float mcpx_apu_xtlk_gain(void)
+{
+    static float g = -1.0f;
+    if (g < 0.0f) {
+        const char *e = getenv("RECOMP_APU_XTLK_DB");
+        g = powf(10.0f, (float)((e && *e) ? atof(e) : -11.0) / 20.0f);
+    }
+    return g;
+}
+
+/* Per-bin gains to the left and right outputs for MIXDOWN_GP. The HRTF
+ * submixes are guest state (NV1BA0_PIO_SET_HRTF_SUBMIXES): 0 and 1 are the
+ * left pair, 2 and 3 the right. A title that never sets them leaves them at
+ * 0, a speaker bin, which is then counted once, as a speaker bin. */
+static void mixdown_weights(MCPXAPUState *d, float wl[NUM_MIXBINS], float wr[NUM_MIXBINS])
+{
+    const float c3 = 0.70710678f, gx = mcpx_apu_xtlk_gain();
+    memset(wl, 0, sizeof(float) * NUM_MIXBINS);
+    memset(wr, 0, sizeof(float) * NUM_MIXBINS);
+    wl[0] = 1.0f;  wr[1] = 1.0f;          /* front left, front right */
+    wl[2] = c3;    wr[2] = c3;            /* center */
+    wl[4] = c3;    wr[5] = c3;            /* back left, back right */
+    for (int k = 0; k < 4; k++) {
+        int b = d->vp.hrtf_submix[k];
+        if (b < 6 || b >= NUM_MIXBINS || wl[b] != 0.0f || wr[b] != 0.0f)
+            continue;
+        if (k < 2) wl[b] = gx;
+        else       wr[b] = gx;
+    }
 }
 
 static void dsp_ack_frame(MCPXAPUState *d)
@@ -160,6 +221,8 @@ void mcpx_apu_dsp_frame(MCPXAPUState *d,
     dsp_ack_frame(d);
 
     if (d->monitor.point != MCPX_APU_DEBUG_MON_VP) {
+        float wl[NUM_MIXBINS], wr[NUM_MIXBINS];
+        mixdown_weights(d, wl, wr);
         for (int i = 0; i < NUM_SAMPLES_PER_FRAME; i++) {
             /* Bins 2..31 used to be computed and then dropped on the floor.
              * On hardware the GP and EP mix the submixes down; here they are
@@ -189,7 +252,15 @@ void mcpx_apu_dsp_frame(MCPXAPUState *d,
              * counts. This is not what a real EP does; it is the cheapest
              * mixdown that stops discarding audio. */
             float left, right;
-            if (mcpx_apu_mixdown_all()) {
+            int mode = mcpx_apu_mixdown_mode();
+            if (mode == MIXDOWN_GP) {
+                left = 0.0f;
+                right = 0.0f;
+                for (int b = 0; b < NUM_MIXBINS; ++b) {
+                    left  += wl[b] * mixbins[b][i];
+                    right += wr[b] * mixbins[b][i];
+                }
+            } else if (mode == MIXDOWN_ALL) {
                 left = 0.0f;
                 right = 0.0f;
                 for (int b = 0; b < NUM_MIXBINS; ++b) {
