@@ -928,6 +928,10 @@ uint32_t g_xbox_image_hi = 0;
 uint32_t g_xbox_code_lo = 0;
 uint32_t g_xbox_code_hi = 0;
 
+/* Worker stack slices start above the image (see XBOX_WORKER_STACK_* in the
+ * header); XBOX_STACK_BASE until the image is loaded. */
+uint32_t g_xbox_worker_stack_base = XBOX_STACK_BASE;
+
 /* Global registers for recompiled code (via recomp_types.h) */
 /* Each guest thread's TIB. The first thread uses the one the loader built;
  * a spawned thread gets its own from xbox_AllocThreadTib(). */
@@ -1613,6 +1617,27 @@ BOOL xbox_MemoryLayoutInit(const void *xbe_data, size_t xbe_size)
 
         fprintf(stderr, "  Loaded %d/%u sections (%zu bytes total)\n",
                 sections_loaded, num_sections, total_bytes);
+
+        /* Worker stack slices above the image, 64 KB aligned, leaving the
+         * main thread at least 1 MB at the top of the stack region. An image
+         * too large for that keeps the old place and says so. */
+        {
+            uint32_t base = (g_xbox_image_hi + 0xFFFFu) & ~0xFFFFu;
+            if (base < XBOX_STACK_BASE)
+                base = XBOX_STACK_BASE;
+            if ((uint64_t)base + XBOX_WORKER_STACK_SIZE * XBOX_WORKER_STACK_COUNT
+                    <= (uint64_t)XBOX_STACK_TOP - 0x100000u) {
+                g_xbox_worker_stack_base = base;
+                fprintf(stderr, "  Worker stack slices: %u x %u KB at Xbox VA 0x%08X..0x%08X "
+                                "(above the image, which ends at 0x%08X)\n",
+                        (unsigned)XBOX_WORKER_STACK_COUNT, XBOX_WORKER_STACK_SIZE / 1024,
+                        base, (unsigned)XBOX_WORKER_STACK_END, g_xbox_image_hi);
+            } else {
+                fprintf(stderr, "  WARNING: worker stack slices left at 0x%08X, inside "
+                                "the image (ends 0x%08X): no room above it\n",
+                        g_xbox_worker_stack_base, g_xbox_image_hi);
+            }
+        }
         if (sections_short) {
             fprintf(stderr,
                     "  ERROR: %d section(s) had no data in the image -- the XBE "

@@ -378,14 +378,22 @@ extern RECOMP_TLS uint32_t g_fs_base;
  * code from the host's own message-loop thread, that thread needs a guest stack
  * (its g_esp starts at 0), which is what a worker slice provides.
  *
- * These slices carve the low end of the same 8 MB stack region xbox_AllocThreadStack
- * uses, and a title uses one model or the other -- never both -- so they do not
- * coexist at runtime. For a title that never calls xbox_worker_stack_alloc
- * (every default-model title), this is unused address space and dead code, so
- * adding it changes nothing for them.
+ * These slices carve the 8 MB stack region, below the main thread's stack.
+ * They start above the loaded image, not at XBOX_STACK_BASE: the region begins
+ * at 0x00780000, and an image can run past that. Crash's .data runs to
+ * 0x00945758, and slice 0 (0x00780000..0x007C0000) sat inside a 3 MB block the
+ * game clears and carves into pieces of its own, so the timer thread's DPCs and
+ * the vblank ISR ran their frames over the game's data. xbox_AllocThreadStack
+ * moved to the heap for the same reason (Half-Life 2). Here the slices stay in
+ * the stack region, so the SEH walk's stack-range check still accepts their
+ * frames. Set once the image is loaded (xbox_MemoryLayoutInit); until then
+ * XBOX_STACK_BASE, which is where they always were for a small image.
+ *
+ * Local change (notes 18.49), not pushed.
  */
 #define XBOX_WORKER_STACK_SIZE   (256 * 1024)
-#define XBOX_WORKER_STACK_BASE   XBOX_STACK_BASE             /* 0x00780000 */
+extern uint32_t g_xbox_worker_stack_base;
+#define XBOX_WORKER_STACK_BASE   g_xbox_worker_stack_base
 #define XBOX_WORKER_STACK_COUNT  16                          /* 4 MB total */
 #define XBOX_WORKER_STACK_END    (XBOX_WORKER_STACK_BASE + \
                                   XBOX_WORKER_STACK_SIZE * XBOX_WORKER_STACK_COUNT)
