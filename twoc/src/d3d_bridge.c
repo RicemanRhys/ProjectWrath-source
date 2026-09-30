@@ -1510,8 +1510,9 @@ static void ps_probe_once(void)
         const uint32_t *in = g_probe_in[k];
         rc = d3dh_ps_probe(&ps, in[0], in[1], in + 2, &out);
         fprintf(stderr, "[D3DB] ps probe %d.%d: %s %08X; gaps %X; v0 %08X v1 %08X t %08X %08X %08X %08X;"
-                " token %08X; def %s tm %08X\n", g_ps_seen_n - 1, k, rc ? "FAILED" : "result", out, gaps, in[0],
-                in[1], in[2], in[3], in[4], in[5], ps.token, line, rs_x(XRS_PSTEXTUREMODES));
+                " token %08X; def %s tm %08X; fog %u specular %u\n", g_ps_seen_n - 1, k, rc ? "FAILED" : "result",
+                out, gaps, in[0], in[1], in[2], in[3], in[4], in[5], ps.token, line, rs_x(XRS_PSTEXTUREMODES),
+                rs_x(XRS_FOGENABLE) ? 1u : 0u, rs_x(XRS_SPECULARENABLE) ? 1u : 0u);
     }
 }
 

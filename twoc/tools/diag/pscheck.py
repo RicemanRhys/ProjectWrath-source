@@ -16,7 +16,8 @@ the NV2A register-combiner rules and compares, channel by channel, within
 The rules (NV_register_combiners, as xemu implements them):
   - registers: ZERO 0, C0 1, C1 2, FOG 3, V0 4, V1 5, T0-T3 8-11, R0 12, R1 13,
     V1R0_SUM 14 and EF_PROD 15 (final combiner only). R0.a starts as T0.a,
-    R0.rgb and R1 as 0. FOG is 0 here (the probe turns fog off).
+    R0.rgb and R1 as 0. FOG is (0, 0, 0, 1): the probe draws with fog off, and
+    a vertex's fog factor is 1 then.
   - an input byte: register [3:0], [4] alpha (in the alpha portion and for G:
     alpha when set, else blue), mapping [7:5].
   - PS_COMBINERINPUTS: A [31:24], B, C, D [7:0]. PS_COMBINEROUTPUTS: CD dst
@@ -25,7 +26,9 @@ The rules (NV_register_combiners, as xemu implements them):
   - mux: CD when R0.a >= 0.5 (MSB mode), else AB. Stage outputs clamp to
     [-1, 1]. PSCOMBINERCOUNT: count [7:0], MUX_MSB bit 8, UNIQUE_C0 bit 12,
     UNIQUE_C1 bit 16 (otherwise every stage reads stage 0's constant).
-  - final combiner (unless ABCD and EFG are both 0, which outputs R0):
+  - final combiner (step 48: with ABCD and EFG both 0, D3D's own default,
+    0x108140: FOG.a*B + (1-FOG.a)*FOG.rgb with B = V1+R0 (clamped) when the
+    probe line says specular 1, else R0; so V1+R0 or R0 here):
     rgb = A*B + (1-A)*C + D, alpha = G; its constants are RS 43/44; E*F is
     EF_PROD and V1+R0 is V1R0_SUM (COMPLEMENT flags 0x40/0x20, CLAMP 0x80).
   - PSTextureModes: 5 bits per stage; NONE 0 reads 0, PROJECT2D/3D and
@@ -85,7 +88,7 @@ def inputs4(v):
     return [(v >> 24) & 255, (v >> 16) & 255, (v >> 8) & 255, v & 255]
 
 
-def evaluate(d, tm, v0, v1, tex):
+def evaluate(d, tm, v0, v1, tex, spec=0):
     count = d[53]
     n = max(1, min(8, count & 255))
     regs = {r: [0.0] * 4 for r in range(16)}
@@ -94,6 +97,7 @@ def evaluate(d, tm, v0, v1, tex):
         mode = (tm >> (5 * s)) & 31
         regs[8 + s] = argb(tex[s]) if mode else [0.0] * 4
     regs[12] = [0.0, 0.0, 0.0, regs[8][3]]
+    regs[3] = [0.0, 0.0, 0.0, 1.0]
     for i in range(n):
         regs[1] = argb(d[10 + (i if count & 0x1000 else 0)])
         regs[2] = argb(d[18 + (i if count & 0x10000 else 0)])
@@ -130,6 +134,8 @@ def evaluate(d, tm, v0, v1, tex):
             regs[dst][3] = val
     abcd, efg = d[8], d[9]
     if not abcd and not efg:
+        if spec:
+            return [clamp(x + y, 0.0, 1.0) for x, y in zip(regs[5][:3], regs[12][:3])] + [clamp(regs[12][3], 0.0, 1.0)]
         return [clamp(x, 0.0, 1.0) for x in regs[12]]
     regs[1], regs[2] = argb(d[43]), argb(d[44])
     e = read(regs, (efg >> 24) & 255, "rgb")
@@ -191,7 +197,7 @@ def main():
     tol = int(opts.get("tol", "3"))
     rx = re.compile(r"\[D3DB\] ps probe (\d+\.\d+): (result|FAILED) ([0-9A-F]{8}); gaps ([0-9A-F]+); v0 ([0-9A-F]{8}) "
                     r"v1 ([0-9A-F]{8}) t ([0-9A-F]{8}) ([0-9A-F]{8}) ([0-9A-F]{8}) ([0-9A-F]{8}); token ([0-9A-F]{8}); "
-                    r"def ((?:[0-9A-F]{8} ?){57}) tm ([0-9A-F]{8})")
+                    r"def ((?:[0-9A-F]{8} ?){57}) tm ([0-9A-F]{8})(?:; fog (\d) specular (\d))?")
     total = passed = 0
     for line in open(log, encoding="latin1"):
         m = rx.search(line)
@@ -203,7 +209,7 @@ def main():
         tex = [int(m.group(i), 16) for i in range(7, 11)]
         d = [int(x, 16) for x in m.group(12).split()]
         tm = int(m.group(13), 16)
-        ref = evaluate(d, tm, v0, v1, tex)
+        ref = evaluate(d, tm, v0, v1, tex, int(m.group(15) or 0))
         ref8 = [int(round(x * 255)) for x in ref]
         got = argb(res)
         got8 = [int(round(x * 255)) for x in got]
