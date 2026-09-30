@@ -1,0 +1,196 @@
+diff --git a/twoc/CMakeLists.txt b/twoc/CMakeLists.txt
+index 37f94cc..2f95688 100644
+--- a/twoc/CMakeLists.txt
++++ b/twoc/CMakeLists.txt
+@@ -96,6 +96,7 @@ target_link_libraries(${PROJECT_NAME} PRIVATE
+ if(MSVC)
+     target_link_options(${PROJECT_NAME} PRIVATE
+         /LARGEADDRESSAWARE
++        /MAP   # TMP step 47
+     )
+     # The generated code files can be very large. Increase object file section limit.
+     # /MP: compile the five ~190K-line generated files in parallel.
+diff --git a/twoc/src/d3d_bridge.c b/twoc/src/d3d_bridge.c
+index 10b673e..9dea3f5 100644
+--- a/twoc/src/d3d_bridge.c
++++ b/twoc/src/d3d_bridge.c
+@@ -101,6 +101,7 @@
+ #include <math.h>
+ 
+ #include <windows.h>
++#include <tlhelp32.h>
+ 
+ #define RECOMP_GENERATED_CODE
+ #include "recomp/gen/recomp_funcs.h"
+@@ -2316,12 +2317,136 @@ static uint32_t fnv32(const void *p, size_t n, uint32_t h)
+     return h;
+ }
+ 
++/* TMP step 47: TMP_WATCH=VA hardware write watch on guest VA (4 bytes) on every other thread;
++ * TMP_WATCH2=VA a second one. Each hit: one line "W frame rip value" to TMP_WATCHLOG. */
++static HANDLE tmp_wlog;
++static uint32_t tmp_draw_esp;
++
++/* TMP step 47: from the lifted sub_00090BE0's end. out: +0 t, +4 local, +8 block, +0xC mask, +0x10 byte;
++ * what a true floor gives, and each disagreement (TMP_ANIMLOG). */
++void tmp_anim_log(uint32_t out, uint32_t anim, uint32_t ret)
++{
++    static FILE *f;
++    static unsigned calls, bad, lines;
++    float t = MEMF(out);
++    int nb = (int)MEM32(anim + 8), kc, yc, ic, sc, mc;
++    float lc;
++    if (!getenv("TMP_ANIMLOG"))
++        return;
++    if (!f) {
++        f = fopen(getenv("TMP_ANIMLOG"), "w");
++        if (!f)
++            return;
++        setvbuf(f, NULL, _IOFBF, 1 << 20);
++    }
++    kc = (int)floor(((double)t - 1.0) * 0.03125);
++    if (kc >= nb)
++        kc = nb - 1;
++    lc = (float)((double)t - (double)(kc << 5));
++    yc = (int)floor((double)lc) - 1;
++    ic = (uint8_t)(yc / 8);
++    sc = yc % 8;
++    mc = (uint8_t)((1u << ((sc + 1) & 31)) - 1);
++    calls++;
++    if ((int)MEM32(out + 8) != kc || MEMF(out + 4) != lc || (int)MEM32(out + 0x10) != ic || (int)MEM32(out + 0xC) != mc) {
++        bad++;
++        if (lines++ < 200000)
++            fprintf(f, "X %u %08X %08X nb %d t %.4f | k %d/%d local %.4f/%.4f byte %u/%d mask %02X/%02X\n",
++                    MEM32(GAME_FRAME_COUNTER), ret, anim, nb, (double)t, (int)MEM32(out + 8), kc,
++                    (double)MEMF(out + 4), (double)lc, MEM32(out + 0x10), ic, MEM32(out + 0xC), mc);
++    }
++    if ((calls & 0x3FFF) == 0) {
++        fprintf(f, "N calls %u disagree %u\n", calls, bad);
++        fflush(f);
++    }
++}
++static volatile uint32_t tmp_waddr[2];
++static LONG CALLBACK tmp_watch_veh(EXCEPTION_POINTERS *e)
++{
++    if (e->ExceptionRecord->ExceptionCode == EXCEPTION_SINGLE_STEP && (e->ContextRecord->Dr6 & 3)) {
++        char b[160];
++        DWORD w;
++        int k = (e->ContextRecord->Dr6 & 1) ? 0 : 1;
++        int len = wsprintfA(b, "W%d %u %p %08X %u\n", k, MEM32(GAME_FRAME_COUNTER), (void *)e->ContextRecord->Rip,
++                            MEM32(tmp_waddr[k]), GetCurrentThreadId());
++        WriteFile(tmp_wlog, b, len, &w, NULL);
++        e->ContextRecord->Dr6 = 0;
++        return EXCEPTION_CONTINUE_EXECUTION;
++    }
++    return EXCEPTION_CONTINUE_SEARCH;
++}
++static DWORD WINAPI tmp_watch_thread(void *arg)
++{
++    (void)arg;
++    for (;;) {
++        HANDLE snap = CreateToolhelp32Snapshot(TH32CS_SNAPTHREAD, 0);
++        THREADENTRY32 te;
++        te.dwSize = sizeof(te);
++        if (snap != INVALID_HANDLE_VALUE && Thread32First(snap, &te)) {
++            do {
++                HANDLE th;
++                CONTEXT c;
++                if (te.th32OwnerProcessID != GetCurrentProcessId() || te.th32ThreadID == GetCurrentThreadId())
++                    continue;
++                th = OpenThread(THREAD_ALL_ACCESS, FALSE, te.th32ThreadID);
++                if (!th)
++                    continue;
++                SuspendThread(th);
++                memset(&c, 0, sizeof(c));
++                c.ContextFlags = CONTEXT_DEBUG_REGISTERS;
++                if (GetThreadContext(th, &c)) {
++                    c.Dr0 = XBOX_PTR(tmp_waddr[0]);
++                    c.Dr7 = (1u << 0) | (1u << 16) | (3u << 18);           /* L0, write, 4 bytes */
++                    if (tmp_waddr[1]) {
++                        c.Dr1 = XBOX_PTR(tmp_waddr[1]);
++                        c.Dr7 |= (1u << 2) | (1u << 20) | (3u << 22);
++                    }
++                    SetThreadContext(th, &c);
++                }
++                ResumeThread(th);
++                CloseHandle(th);
++            } while (Thread32Next(snap, &te));
++        }
++        if (snap != INVALID_HANDLE_VALUE)
++            CloseHandle(snap);
++        Sleep(500);
++    }
++}
++static void tmp_watch_start(void)
++{
++    static int started;
++    if (started || !getenv("TMP_WATCH"))
++        return;
++    started = 1;
++    tmp_waddr[0] = strtoul(getenv("TMP_WATCH"), NULL, 16);
++    if (getenv("TMP_WATCH2"))
++        tmp_waddr[1] = strtoul(getenv("TMP_WATCH2"), NULL, 16);
++    tmp_wlog = CreateFileA(getenv("TMP_WATCHLOG"), GENERIC_WRITE, FILE_SHARE_READ, NULL, CREATE_ALWAYS, 0, NULL);
++    AddVectoredExceptionHandler(1, tmp_watch_veh);
++    CreateThread(NULL, 0, tmp_watch_thread, NULL, 0, NULL);
++    fprintf(stderr, "[TMP] watching %08X %08X, exe base %p\n", tmp_waddr[0], tmp_waddr[1], (void *)GetModuleHandleA(NULL));
++}
++
+ static void motion_swap(LONG n)
+ {
++    if (g_motion_live)
++        tmp_watch_start();
+     if (!g_motion)
+         return;
+-    if (g_motion_live)
++    if (g_motion_live) {
++        static FILE *tmp_obj;   /* TMP step 47: the player object each swap */
+         fprintf(g_motion, "S %ld %u %.4f\n", (long)n, MEM32(GAME_FRAME_COUNTER), now_s());
++        if (getenv("TMP_OBJ")) {
++            if (!tmp_obj)
++                tmp_obj = fopen(getenv("TMP_OBJ"), "wb");
++            if (tmp_obj) {
++                uint32_t hdr[2] = { (uint32_t)n, MEM32(GAME_FRAME_COUNTER) };
++                fwrite(hdr, 4, 2, tmp_obj);
++                fwrite((const void *)XBOX_PTR(0x8F5120), 1, 0x2000, tmp_obj);
++                fflush(tmp_obj);
++            }
++        }
++    }
+     g_motion_live = GetFileAttributesA(g_motion_on_path) != INVALID_FILE_ATTRIBUTES;
+     g_motion_n = 0;
+     fflush(g_motion);
+@@ -2723,6 +2848,25 @@ static void mirror_draw_vp(const char *path, uint32_t xdk_prim, uint32_t n, cons
+         fprintf(g_motion, " @%08X %08X<%08X<%08X<%08X", g_motion_draw_ret, g_motion_vsc_ret[0],
+                 g_motion_vsc_ret[1], g_motion_vsc_ret[2], g_motion_vsc_ret[3]);  /* drawn by, c0 set by */
+         fputc('\n', g_motion);
++        {   /* TMP step 47: the render item (arg of sub_000B7040, next to its return 0xA5D63) and its matrix */
++            uint32_t off, it = 0;
++            for (off = 0; off < 0x800; off += 4)
++                if (MEM32(tmp_draw_esp + off) == 0x000A5D63u) { it = MEM32(tmp_draw_esp + off + 4); break; }
++            if (it) {
++                uint32_t m = MEM32(it + 0x18), j;
++                fprintf(g_motion, "I %08X %08X %08X", it, m, MEM32(it + 0x1C));
++                if (m)
++                    for (j = 0; j < 16; j++)
++                        fprintf(g_motion, " %.5g", (double)MEMF(m + 4 * j));
++                fputc('\n', g_motion);
++            }
++        }
++        if (getenv("TMP_BONES")) {   /* TMP step 47: every constant from c28 on */
++            fprintf(g_motion, "B");
++            for (i = 124 * 4; i < VS_CONSTS * 4; i++)
++                fprintf(g_motion, " %.5g", (double)consts[i]);
++            fputc('\n', g_motion);
++        }
+     }
+     if (d3dh_draw_up(&dr) == 0) {
+         count_mirrored(&dr);
+@@ -3666,6 +3810,7 @@ void d3db_enter(int id, d3db_args_t *a)
+         a->arg[i] = MEM32(esp + 4 + 4 * i);
+     a->ret = MEM32(esp);
+     a->tid = GetCurrentThreadId();
++    tmp_draw_esp = esp;   /* TMP step 47 */
+ 
+     /* The motion log's call chain for a write to c0: the return address, then the next three words
+      * on the guest stack that follow a call instruction in the game's code (a heuristic walk). */
