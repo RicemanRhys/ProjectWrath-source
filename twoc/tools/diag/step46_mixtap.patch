@@ -1,0 +1,108 @@
+diff --git a/src/apu/apu_vp.c b/src/apu/apu_vp.c
+index 9590124..bf8497f 100644
+--- a/src/apu/apu_vp.c
++++ b/src/apu/apu_vp.c
+@@ -89,6 +89,73 @@ static bool voice_should_mute(uint16_t v)
+  * Utility functions
+  * ============================================================ */
+ 
++
++/* ---- TEMP MIX TAP (step 46) ---- */
++#include <math.h>
++static int mixtap_on = -1;
++static double mt_bin_e[NUM_MIXBINS];
++static unsigned mt_frames;
++typedef struct { unsigned frames; double in_e, out_e[8]; uint32_t fmt, psl, vbin, misc; int bin[8]; uint16_t vol[8]; float ea_max, rate; } MtVoice;
++static MtVoice mt_v[MCPX_HW_MAX_VOICES];
++static int mixtap(void) { if (mixtap_on < 0) { const char *e = getenv("RECOMP_APU_MIXTAP"); mixtap_on = e && *e == '1'; } return mixtap_on; }
++static void mixtap_voice(MCPXAPUState *d, uint16_t v, const int *bin, const uint16_t *vol, const float *gain,
++                         float samples[][2], unsigned channels, float ea, float rate)
++{
++    MtVoice *m = &mt_v[v];
++    m->frames++;
++    for (int i = 0; i < NUM_SAMPLES_PER_FRAME; i++)
++        for (unsigned c = 0; c < channels; c++) m->in_e += samples[i][c] * samples[i][c];
++    for (int b = 0; b < 8; b++) {
++        double e = 0;
++        for (int i = 0; i < NUM_SAMPLES_PER_FRAME; i++) { float x = gain[b] * samples[i][b % channels]; e += x * x; }
++        m->out_e[b] += e; m->bin[b] = bin[b]; m->vol[b] = vol[b];
++    }
++    m->fmt = voice_get_mask(d, v, NV_PAVS_VOICE_CFG_FMT, 0xFFFFFFFF);
++    m->vbin = voice_get_mask(d, v, NV_PAVS_VOICE_CFG_VBIN, 0xFFFFFFFF);
++    m->misc = voice_get_mask(d, v, NV_PAVS_VOICE_CFG_MISC, 0xFFFFFFFF);
++    m->psl = voice_get_mask(d, v, NV_PAVS_VOICE_CUR_PSL_START, 0xFFFFFFFF);
++    if (ea > m->ea_max) m->ea_max = ea;
++    m->rate = rate;
++}
++static double mt_db(double e, unsigned n) { return n && e > 0 ? 10.0 * log10(e / n) : -199.0; }
++static void mixtap_frame(MCPXAPUState *d, float mixbins[NUM_MIXBINS][NUM_SAMPLES_PER_FRAME])
++{
++    { static FILE *df; static int dinit;
++      if (!dinit) { const char *pth = getenv("RECOMP_APU_BINDUMP"); dinit = 1; if (pth) df = fopen(pth, "wb"); }
++      if (df) { static const int sel[8] = {0, 1, 6, 7, 8, 9, 10, 2}; float fr[NUM_SAMPLES_PER_FRAME][8];
++        for (int i = 0; i < NUM_SAMPLES_PER_FRAME; i++) for (int k = 0; k < 8; k++) fr[i][k] = mixbins[sel[k]][i];
++        fwrite(fr, sizeof fr, 1, df); } }
++    for (int b = 0; b < NUM_MIXBINS; b++)
++        for (int i = 0; i < NUM_SAMPLES_PER_FRAME; i++) mt_bin_e[b] += mixbins[b][i] * mixbins[b][i];
++    if (++mt_frames < 7500) return;
++    {
++        char buf[16384]; int n = 0;
++        unsigned ns = mt_frames * NUM_SAMPLES_PER_FRAME;
++        n += snprintf(buf + n, sizeof buf - n, "[MIXTAP] 5 s: hrtf_headroom %u hrtf_submix %u %u %u %u; bins (dBFS rms / headroom):",
++                      d->vp.hrtf_headroom, d->vp.hrtf_submix[0], d->vp.hrtf_submix[1], d->vp.hrtf_submix[2], d->vp.hrtf_submix[3]);
++        for (int b = 0; b < NUM_MIXBINS; b++)
++            n += snprintf(buf + n, sizeof buf - n, " %d:%.1f/%u", b, mt_db(mt_bin_e[b], ns), d->vp.submix_headroom[b]);
++        n += snprintf(buf + n, sizeof buf - n, "\n");
++        for (int v = 0; v < MCPX_HW_MAX_VOICES && n < (int)sizeof buf - 600; v++) {
++            MtVoice *m = &mt_v[v];
++            if (!m->frames) continue;
++            n += snprintf(buf + n, sizeof buf - n, "[MIXTAP]  v%03X %s%s%s%s fmt %08X vbin %08X misc %08X psl %08X rate %.3f frames %u ea %.2f in %.1f |",
++                          v, v < MCPX_HW_MAX_3D_VOICES ? "3D" : "2D", (m->fmt & NV_PAVS_VOICE_CFG_FMT_STEREO) ? " st" : " mo",
++                          (m->fmt & NV_PAVS_VOICE_CFG_FMT_DATA_TYPE) ? " stream" : " buffer",
++                          (m->fmt & NV_PAVS_VOICE_CFG_FMT_MULTIPASS) ? " MP" : "",
++                          m->fmt, m->vbin, m->misc, m->psl, m->rate, m->frames, m->ea_max,
++                          mt_db(m->in_e, m->frames * NUM_SAMPLES_PER_FRAME));
++            for (int b = 0; b < 8; b++)
++                if ((m->vol[b] & 0xFFF) != 0xFFF)
++                    n += snprintf(buf + n, sizeof buf - n, " b%d v-%.1fdB o%.1f", m->bin[b], (m->vol[b] & 0xFFF) / 64.0,
++                                  mt_db(m->out_e[b], m->frames * NUM_SAMPLES_PER_FRAME));
++            n += snprintf(buf + n, sizeof buf - n, "\n");
++        }
++        fwrite(buf, 1, n, stderr); fflush(stderr);
++    }
++    memset(mt_bin_e, 0, sizeof mt_bin_e); memset(mt_v, 0, sizeof mt_v); mt_frames = 0;
++}
++/* ---- END TEMP MIX TAP ---- */
+ static float clampf(float v, float mn, float mx)
+ {
+     if (v < mn) return mn;
+@@ -1187,6 +1254,7 @@ static void voice_process(MCPXAPUState *d,
+     }
+ 
+     /* Mix into bins */
++    float mt_g[8];
+     for (int b = 0; b < 8; b++) {
+         float g = ea_value;
+         float hr;
+@@ -1196,10 +1264,12 @@ static void voice_process(MCPXAPUState *d,
+             hr = (float)(1 << d->vp.submix_headroom[bin[b]]);
+         }
+         g *= attenuate(vol[b]) / hr;
++        mt_g[b] = g;
+         for (int i = 0; i < NUM_SAMPLES_PER_FRAME; i++) {
+             mixbins[bin[b]][i] += g * samples[i][b % channels];
+         }
+     }
++    if (mixtap()) mixtap_voice(d, v, bin, vol, mt_g, samples, channels, ea_value, rate);
+ 
+     /* VP monitor mix */
+     if (d->monitor.point == MCPX_APU_DEBUG_MON_VP) {
+@@ -1266,6 +1336,8 @@ void mcpx_apu_vp_frame(MCPXAPUState *d,
+         }
+     }
+ 
++    if (mixtap()) mixtap_frame(d, mixbins);
++
+     /* VP monitor output */
+     if (d->monitor.point == MCPX_APU_DEBUG_MON_VP) {
+         int16_t isamp[NUM_SAMPLES_PER_FRAME * 2];
