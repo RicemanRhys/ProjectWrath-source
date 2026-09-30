@@ -50,7 +50,7 @@
  * from the vertex colour (the menu's ambient and emissive), which xbox_d3d8
  * ignores, the bridge lights a copy of the vertices on the CPU by D3D8's
  * rules and the host draws it unlit (cpu_light). Immediate-mode and
- * DrawVertices draws, and vertex programs, aren't mirrored yet.
+ * DrawVertices draws, and vertex programs, weren't mirrored yet.
  * Step 35 (notes 18.37) adds immediate mode (Begin, SetVertexData2f/4f,
  * End: the menu's planets and particles), buffered as the game sets each
  * attribute and drawn at End (mirror_draw_imm), and CopyRects from the back
@@ -71,6 +71,9 @@
  * a mip chain padded to 128 bytes; the hub's DXT5 0x07780F2D) and texel
  * addressing for linear textures in program draws (texel_patch: the hub's
  * water refraction samples the CopyRects copy at screen pixels).
+ * Step 48 (notes 18.51) adds DrawVertices (mirror_draw_vertices: the
+ * levels' snow and particles) and D3D's default final combiner for a pixel
+ * shader without one (translate_ps: fog, and V1 + r0 with specular).
  * Three checks, off by default: RECOMP_D3D_BRIDGE_PSPROBE (draw each pixel
  * shader once with fixed inputs; tools/diag/pscheck.py), _TEXCHECK (write
  * each P8 texture as uploaded) and _RTLOG (log render-target draws in full;
@@ -770,7 +773,8 @@ enum {
     XRS_LIGHTING = 92, XRS_SPECULARENABLE, XRS_LOCALVIEWER, XRS_COLORVERTEX,
     XRS_SPECULARMATERIALSOURCE = 100, XRS_DIFFUSEMATERIALSOURCE, XRS_AMBIENTMATERIALSOURCE,
     XRS_EMISSIVEMATERIALSOURCE,
-    XRS_AMBIENT = 105,
+    XRS_AMBIENT = 105, XRS_POINTSIZE, XRS_POINTSIZE_MIN, XRS_POINTSPRITEENABLE, XRS_POINTSCALEENABLE,
+    XRS_POINTSCALE_A, XRS_POINTSCALE_B, XRS_POINTSCALE_C, XRS_POINTSIZE_MAX,
     XRS_PSTEXTUREMODES = 117, XRS_VERTEXBLEND, XRS_FOGCOLOR, XRS_FILLMODE, XRS_BACKFILLMODE,
     XRS_TWOSIDEDLIGHTING, XRS_NORMALIZENORMALS, XRS_ZENABLE, XRS_STENCILENABLE, XRS_STENCILFAIL,
     XRS_FRONTFACE, XRS_CULLMODE, XRS_TEXTUREFACTOR, XRS_ZBIAS,
@@ -1314,7 +1318,7 @@ enum {
     SKIP_STREAM,        /* DrawIndexedVertices: no stream 0, or a stride under the FVF's size */
     SKIP_FVF,           /* an FVF with blend weights (XYZB*) */
     SKIP_IMMEDIATE,     /* Begin/SetVertexData/End (S4 part 2) */
-    SKIP_VERTICES,      /* DrawVertices (never seen) */
+    SKIP_VERTICES,      /* DrawVertices with no stream-0 vertices for its FVF (step 48) */
     SKIP_VP_COPY,       /* a vertex program sampling a CopyRects copy (S5 part 2) */
     SKIP_COUNT
 };
@@ -2586,6 +2590,153 @@ static int texel_patch(vprog_t *p, float *consts)
     }
     return (int)patched;
 }
+/* Step 48 (notes 18.51): point sprites. The NV2A draws a point as a square
+ * oPts.x pixels wide (the program's size, else RS POINTSIZE), and with
+ * POINTSPRITEENABLE its texture coordinates run 0..1 across it; D3D11 draws
+ * a point as one pixel. So a program point list becomes a quad per point:
+ * each point's vertex four times with one more input register vC = (corner x,
+ * corner y, u, v), corners +-0.5, and the program gets
+ *   MAD oPos.xy, vC, Rk.xxxx, R12      (Rk: the size; oPos is in screen pixels)
+ *   MOV oT0.xy, vC.zwzw                (with POINTSPRITEENABLE)
+ * appended, each instruction that writes oPts.x also writing the free temp
+ * Rk (or, with no writer, Rk read as c[K] = POINTSIZE). Returns the input
+ * register used for vC, or -1 when nothing is free (the draw then goes out
+ * as points, counted). Microcode fields as in texel_patch. */
+static volatile LONG g_sprite_draws, g_sprite_fails, g_ev_sprite;
+
+static int sprite_patch(vprog_t *p, float *consts, int sprite)
+{
+    uint32_t used = 1u << 12, vin = 1, cread[VS_CONSTS / 32 + 1] = { 0 }, i, k, v, K = 0, writers = 0;
+    uint32_t h = 2166136261u, *w;
+    int rel_lo = VS_CONSTS;
+
+    for (i = 0; i < p->n_insns; i++) {
+        const uint32_t *x = p->code + 4 * i;
+        uint32_t mac = VF(x[1], 21, 4), ilu = VF(x[1], 25, 3), cm = VF(x[3], 28, 2);
+        uint32_t am = VF(x[2], 26, 2), bm = VF(x[2], 11, 2), c = VF(x[1], 13, 8);
+        if (am == 1) used |= 1u << VF(x[2], 28, 4);
+        if (bm == 1) used |= 1u << VF(x[2], 13, 4);
+        if (cm == 1) used |= 1u << ((VF(x[2], 0, 2) << 2) | VF(x[3], 30, 2));
+        if (am == 2 || bm == 2 || cm == 2) vin |= 1u << VF(x[1], 9, 4);
+        if (mac && VF(x[3], 24, 4)) used |= 1u << VF(x[3], 20, 4);
+        if (ilu && VF(x[3], 16, 4)) used |= 1u << (mac ? 1 : VF(x[3], 20, 4));
+        if (am == 3 || bm == 3 || cm == 3) {
+            if (VF(x[3], 1, 1)) {
+                if ((int)c < rel_lo)
+                    rel_lo = (int)c;
+            } else if (c < VS_CONSTS) {
+                cread[c / 32] |= 1u << (c % 32);
+            }
+        }
+        if (VF(x[3], 11, 1) && VF(x[3], 3, 8) == 6 && (VF(x[3], 12, 4) & 8)) {
+            if (VF(x[3], 2, 1) ? (mac || VF(x[3], 16, 4)) : VF(x[3], 24, 4))
+                return -1;              /* its unit already writes a temp (or the ILU's is R1) */
+            writers++;
+        }
+    }
+    for (k = 12; k-- > 0 && (used & (1u << k));)
+        ;
+    for (v = 15; v > 0 && (vin & (1u << v)); v--)
+        ;
+    if (k > 11 || !v || p->n_insns + 2 > VS_MAX_INSNS)
+        return -1;
+    if (!writers) {
+        for (K = VS_CONSTS - 1; K > 59; K--)
+            if (!(cread[K / 32] & (1u << (K % 32))) && !((int)K >= rel_lo && (int)K < rel_lo + 64))
+                break;
+        if (K <= 59)
+            return -1;
+        memcpy(&consts[4 * K], (const void *)XBOX_PTR(D3D_RENDERSTATE + 4 * XRS_POINTSIZE), 4);
+    }
+    for (i = 0; i < p->n_insns; i++) {
+        uint32_t om;
+        w = p->code + 4 * i;
+        om = VF(w[3], 12, 4);
+        if (!VF(w[3], 11, 1) || VF(w[3], 3, 8) != 6 || !(om & 8))
+            continue;
+        if (VF(w[3], 2, 1))             /* the ILU alone: its temp write goes to R[r] */
+            w[3] = (w[3] & ~(0xFu << 16) & ~(0xFu << 20)) | (8u << 16) | (k << 20);
+        else
+            w[3] = (w[3] & ~(0xFu << 24) & ~(0xFu << 20)) | (8u << 24) | (k << 20);
+    }
+    p->code[4 * (p->n_insns - 1) + 3] &= ~1u;          /* no longer the final one */
+    w = p->code + 4 * p->n_insns++;
+    w[0] = 0;
+    w[1] = (4u << 21) | (K << 13) | (v << 9) | 0x1Bu;                 /* MAD; A = vC.xyzw */
+    w[2] = (2u << 26) | (writers ? (k << 13) | (1u << 11) : (3u << 11)) | (0x1Bu << 2) | 3u;  /* B = Rk.xxxx or
+                                                                          c[K].xxxx, C = R12 (high bits) */
+    w[3] = (1u << 28) | (0xCu << 12) | (1u << 11) | (sprite ? 0u : 1u);  /* C = R12 (low bits 0), oPos.xy */
+    if (sprite) {
+        w = p->code + 4 * p->n_insns++;
+        w[0] = 0;
+        w[1] = (1u << 21) | (v << 9) | 0xBBu;                         /* MOV; A = vC.zwzw */
+        w[2] = (2u << 26) | (0x1Bu << 17) | (1u << 11) | (0x1Bu << 2);
+        w[3] = (1u << 28) | (0xCu << 12) | (1u << 11) | (9u << 3) | 1u;    /* oT0.xy, final */
+    }
+    for (i = 0; i < p->n_insns * 4; i++)
+        h = (h ^ p->code[i]) * 16777619u;
+    p->hash = h ? h : 1;
+    return (int)v;
+}
+
+/* With POINTSPRITEENABLE and no pixel shader, D3D's texture-stage combiner
+ * starts at stage 3 (sub_0010A9B0: the NV2A generates sprite coordinates
+ * for texture 3), so the sprite takes stage 3's state and texture and
+ * stages 0-2 aren't combined. The host gets stage 3 as its stage 0, on the
+ * coordinates sprite_patch writes to oT0, and nothing after it. */
+static void sprite_stages(d3dh_draw_t *dr, d3dh_state_t tss[4][16])
+{
+    unsigned i, s;
+
+    dr->tex[0] = dr->tex[3];
+    memcpy(tss[0], tss[3], sizeof(tss[0]));
+    dr->n_tss[0] = dr->n_tss[3];
+    for (i = 0; i < dr->n_tss[0]; i++)
+        if (tss[0][i].state == PTSS_TEXCOORDINDEX)
+            tss[0][i].value = 0;
+    for (s = 1; s < 4; s++) {
+        dr->tex[s] = NULL;
+        for (i = 0; i < dr->n_tss[s]; i++)
+            if (tss[s][i].state == PTSS_COLOROP || tss[s][i].state == PTSS_ALPHAOP)
+                tss[s][i].value = 1;    /* DISABLE */
+    }
+}
+
+/* The quads for sprite_patch: each of `n` point records (`nr` float4
+ * registers) four times, with vC's float4 inserted at column `col`, and six
+ * indices a quad. Freed by the caller. */
+static float *sprite_vertices(const float *pts, uint32_t n, uint32_t nr, uint32_t col, uint16_t **list)
+{
+    static const float corner[4][4] = {
+        { -0.5f, -0.5f, 0.0f, 0.0f }, { 0.5f, -0.5f, 1.0f, 0.0f }, { 0.5f, 0.5f, 1.0f, 1.0f }, { -0.5f, 0.5f, 0.0f, 1.0f },
+    };
+    float *out = (float *)malloc((size_t)n * 4 * (nr + 1) * 16);
+    uint32_t i, c;
+
+    *list = (uint16_t *)malloc((size_t)n * 6 * sizeof(uint16_t));
+    if (!out || !*list) {
+        free(out);
+        free(*list);
+        *list = NULL;
+        return NULL;
+    }
+    for (i = 0; i < n; i++) {
+        const float *src = pts + (size_t)i * nr * 4;
+        for (c = 0; c < 4; c++) {
+            float *dst = out + ((size_t)i * 4 + c) * (nr + 1) * 4;
+            memcpy(dst, src, (size_t)col * 16);
+            memcpy(dst + 4 * col, corner[c], 16);
+            memcpy(dst + 4 * (col + 1), src + 4 * col, (size_t)(nr - col) * 16);
+        }
+        (*list)[6 * i + 0] = (uint16_t)(4 * i);
+        (*list)[6 * i + 1] = (uint16_t)(4 * i + 1);
+        (*list)[6 * i + 2] = (uint16_t)(4 * i + 2);
+        (*list)[6 * i + 3] = (uint16_t)(4 * i);
+        (*list)[6 * i + 4] = (uint16_t)(4 * i + 2);
+        (*list)[6 * i + 5] = (uint16_t)(4 * i + 3);
+    }
+    return out;
+}
 #undef VF
 
 /* A draw with a vertex program (S5 part 1), UP (`idx` NULL: vertices 0 to
@@ -2610,7 +2761,7 @@ static void mirror_draw_vp(const char *path, uint32_t xdk_prim, uint32_t n, cons
     d3dh_draw_t dr;
     uint16_t inputs, *list = NULL;
     uint32_t lo = 0, hi = 0, nv, prim = 0, count = 0, k = 0, i, vstride;
-    int texel;
+    int texel, vc = -1;
 
     if (describe_vprog(&p) != 0) {
         skip(SKIP_VS_PROGRAM, MEM32(dev() + DEV_VS_HANDLE));
@@ -2627,6 +2778,11 @@ static void mirror_draw_vp(const char *path, uint32_t xdk_prim, uint32_t n, cons
         InterlockedIncrement(&g_texel_draws);
     else if (texel < 0)
         InterlockedIncrement(&g_texel_fails);
+    if (xdk_prim == 1 && !idx && n <= 16383) {          /* a point list: quads (step 48) */
+        vc = sprite_patch(&p, consts, rs_x(XRS_POINTSPRITEENABLE) != 0);
+        if (vc < 0)
+            InterlockedIncrement(&g_sprite_fails);
+    }
     hv.key = p.hash;
     hv.n_insns = p.n_insns;
     hv.code = p.code;
@@ -2658,10 +2814,29 @@ static void mirror_draw_vp(const char *path, uint32_t xdk_prim, uint32_t n, cons
         free(list);
         return;
     }
-    verts = vp_vertices(&p, inputs, base, stride, lo, nv, &vstride);
+    verts = vp_vertices(&p, vc >= 0 ? inputs & ~(1u << vc) : inputs, base, stride, lo, nv, &vstride);
     if (!verts) {
         free(list);
         return;
+    }
+    if (vc >= 0) {                      /* each point a quad, vC in its register's column */
+        uint32_t nr = vstride / 16, col = 0, r;
+        float *quads;
+        for (r = 0; r < (uint32_t)vc; r++)
+            col += (inputs >> r) & 1;
+        quads = sprite_vertices(verts, nv, nr, col, &list);
+        free(verts);
+        if (!quads)
+            return;
+        verts = quads;
+        vstride += 16;
+        prim = 4;                       /* TRIANGLELIST */
+        count = 2 * nv;
+        k = 6 * nv;
+        nv *= 4;
+        InterlockedIncrement(&g_sprite_draws);
+        event(&g_ev_sprite, 8, "point sprites: program %08X, %u points as quads (vC = v%d, sprite %u), %s", p.hash,
+              nv / 4, vc, rs_x(XRS_POINTSPRITEENABLE), path);
     }
     if (g_vsprobe) {                    /* before anything can skip the draw: the program is what's checked */
         d3dh_draw_t view;
@@ -2693,6 +2868,13 @@ static void mirror_draw_vp(const char *path, uint32_t xdk_prim, uint32_t n, cons
     dr.indices = list;
     dr.index_count = k;
     dr.vprog = &hv;
+    if (vc >= 0) {                      /* a sprite faces the viewer: never culled */
+        for (i = 0; i < dr.n_rs; i++)
+            if (rs[i].state == PRS_CULLMODE)
+                rs[i].value = 1;
+        if (rs_x(XRS_POINTSPRITEENABLE) && !dr.ps)
+            sprite_stages(&dr, tss);
+    }
     event(&g_ev_vp, 12, "vertex program %08X (%u instructions, reads %04X): %s prim %u, %u vertices from %u, %u regs,"
           " target %08X, pixel shader %s, tex0 %08X", p.hash, p.n_insns, inputs, path, xdk_prim, nv, lo, vstride / 16,
           dr.target.data, dr.ps ? "set" : "none", tex[0].key);
@@ -2743,7 +2925,7 @@ static void mirror_draw_vp(const char *path, uint32_t xdk_prim, uint32_t n, cons
  * xbox_d3d8, with the state read from D3D's shadows at this point. S4 adds
  * render targets and pixel shaders; step 34 the fixed-function state for
  * untransformed vertices. */
-static void mirror_draw_up(const d3db_args_t *a)
+static void mirror_draw_up_path(const d3db_args_t *a, const char *path)
 {
     uint32_t d = dev(), vs, count = 0, prim;
     d3dh_state_t rs[64], tss[4][16];
@@ -2760,7 +2942,7 @@ static void mirror_draw_up(const d3db_args_t *a)
     vs = MEM32(d + DEV_VS_HANDLE);
     if (vs & 1) {                       /* S5: a vertex program */
         uint32_t base[16] = { a->arg[2] }, stride[16] = { a->arg[3] };
-        mirror_draw_vp("UP", a->arg[0], a->arg[1], NULL, base, stride);
+        mirror_draw_vp(path, a->arg[0], a->arg[1], NULL, base, stride);
         return;
     }
     prim = xl_prim(a->arg[0], a->arg[1], &count);
@@ -2818,11 +3000,16 @@ static void mirror_draw_up(const d3db_args_t *a)
     if (g_rtlog && dr.target.data)
         rt_log_draw(a, &dr, &tex[0]);
     if (drawlog_on() || (g_draw_samples_copy && InterlockedIncrement(&g_ev_copy_draw) <= 10))
-        drawlog("UP", a->arg[0], a->arg[1], vs, dr.verts, dr.vert_count, dr.stride,
+        drawlog(path, a->arg[0], a->arg[1], vs, dr.verts, dr.vert_count, dr.stride,
                 g_draw_samples_copy ? "mirrored, samples a CopyRects copy" : "mirrored");
     if (d3dh_draw_up(&dr) == 0)
         count_mirrored(&dr);
     free(lit);
+}
+
+static void mirror_draw_up(const d3db_args_t *a)
+{
+    mirror_draw_up_path(a, "UP");
 }
 
 /* An XDK primitive over `n` indices as xbox_d3d8 can draw it indexed, with
@@ -3462,19 +3649,52 @@ static void mirror_copy_rects(const d3db_args_t *a)
           t.width, t.height, t.format, sz ? " linear" : "", n, rc == 0 ? "copied" : "FAILED");
 }
 
-/* DrawVertices (never seen, splash to hub): counted, and checked. */
-static void mirror_draw_vertices(void)
-{
-    uint32_t vs = MEM32(dev() + DEV_VS_HANDLE);
+/* DrawVertices(PrimitiveType, StartVertex, VertexCount) (0x101B20; never
+ * seen splash to hub, the levels' snow and particles, step 48): vertices
+ * StartVertex on of the bound streams. D3D sets up the vertex arrays with no
+ * base vertex for it (sub_00108F40(0), where the indexed draw passes the
+ * device's +0x1C). A program draw takes every stream from there; a
+ * fixed-function one is stream 0's vertices drawn as a UP draw would be. */
+static volatile LONG g_mirrored_vertices, g_ev_vertices;
+#define DV_SEEN_MAX 32
+static uint32_t g_dv_seen[DV_SEEN_MAX];
 
-    draw_checks();
-    if (vs & 1) {
-        skip(SKIP_VS_PROGRAM, vs);
-        if (g_skiptex && g_check_prefix[0])
-            skip_tex_once("vpdraw");
-    } else {
-        skip(SKIP_VERTICES, vs);
+static void mirror_draw_vertices(const d3db_args_t *a)
+{
+    uint32_t vs = MEM32(dev() + DEV_VS_HANDLE), start = a->arg[1], n = a->arg[2], base[16], stride[16], s;
+    d3db_args_t up;
+
+    for (s = 0; s < 16; s++) {
+        uint32_t vb = MEM32(D3D_STREAMS + 12 * s + 8);
+        stride[s] = MEM32(D3D_STREAMS + 12 * s);
+        base[s] = vb ? phys_to_va(MEM32(vb + RES_DATA)) + MEM32(D3D_STREAMS + 12 * s + 4) + start * stride[s] : 0;
     }
+    InterlockedIncrement(&g_mirrored_vertices);
+    for (s = 0; s < DV_SEEN_MAX && g_dv_seen[s] && g_dv_seen[s] != (vs ^ (a->arg[0] << 28)); s++)
+        ;
+    if (s < DV_SEEN_MAX && !g_dv_seen[s]) {     /* each kind (primitive, vertex shader) once */
+        g_dv_seen[s] = vs ^ (a->arg[0] << 28);
+        event(&g_ev_vertices, DV_SEEN_MAX, "DrawVertices prim %u vertices %u from %u, vs %08X, stream 0 stride %u"
+              " at %08X, stream 1 stride %u, pixel shader %s, point size %08X sprite %u scale %u, guest swap %ld",
+              a->arg[0], n, start, vs, stride[0], base[0], stride[1], MEM32(dev() + DEV_PIXEL_SHADER) ? "set" : "none",
+              rs_x(XRS_POINTSIZE), rs_x(XRS_POINTSPRITEENABLE), rs_x(XRS_POINTSCALEENABLE), (long)g_swaps);
+    }
+    if (vs & 1) {                       /* a vertex program */
+        draw_checks();
+        mirror_draw_vp("Vertices", a->arg[0], n, NULL, base, stride);
+        return;
+    }
+    if (!n || !base[0] || stride[0] < fvf_size(vs)) {
+        draw_checks();
+        skip(SKIP_VERTICES, stride[0]);
+        return;
+    }
+    up = *a;
+    up.arg[0] = a->arg[0];
+    up.arg[1] = n;
+    up.arg[2] = base[0];
+    up.arg[3] = stride[0];
+    mirror_draw_up_path(&up, "Vertices");
 }
 
 /* Time spent in the mirror (translate + host call, in d3db_leave), in QPC
@@ -3574,14 +3794,14 @@ static void mirror_swap(void)
                 last_unmeasured = st.display_unmeasured;
             }
             log_block_printf(&lb, "[D3DB] host draws: mirrored %ld (to render targets %ld, with pixel shaders %ld,"
-                    " immediate %ld, of them pre-transformed %ld),"
+                    " immediate %ld, of them pre-transformed %ld; DrawVertices calls %ld),"
                     " host draws %u (fails %u); not mirrored: target %ld, vertex program %ld, primitive %ld,"
                     " texture %ld, stream %ld, vertex format %ld, immediate %ld, DrawVertices %ld; textures uploaded"
                     " %u (P8 %u, cube %u, fails %u, evictions %u; cube binds %ld); translation gaps: value %ld, texop"
                     " %ld, diffuse arg %ld,"
                     " frontface %ld\n",
                     (long)g_mirrored_draws, (long)g_mirrored_rt_draws, (long)g_mirrored_ps_draws,
-                    (long)g_mirrored_imm, (long)g_mirrored_imm_rhw, st.draws,
+                    (long)g_mirrored_imm, (long)g_mirrored_imm_rhw, (long)g_mirrored_vertices, st.draws,
                     st.draw_fails, (long)g_skip[SKIP_TARGET], (long)g_skip[SKIP_VS_PROGRAM],
                     (long)g_skip[SKIP_PRIM], (long)g_skip[SKIP_TEXTURE], (long)g_skip[SKIP_STREAM],
                     (long)g_skip[SKIP_FVF], (long)g_skip[SKIP_IMMEDIATE], (long)g_skip[SKIP_VERTICES],
@@ -3595,11 +3815,13 @@ static void mirror_swap(void)
                     (long)g_gap[GAP_LIGHTS], (long)g_gap[GAP_TEXTRANSFORM], (long)g_gap[GAP_CPU_LIGHT],
                     (long)g_gap[GAP_SPECULAR], (long)g_gap[GAP_TEXCOORD_SIZE], (long)g_gap[GAP_IMM_W]);
             log_block_printf(&lb, "[D3DB] host vertex programs: mirrored %ld (host draws %u), shaders %u (fails %u), constant"
-                    " uploads %u, probes %u; linear textures scaled to 0..1 %ld (not patchable %ld); sampling a copy,"
+                    " uploads %u, probes %u; linear textures scaled to 0..1 %ld (not patchable %ld); point sprites as quads %ld"
+                    " (not patchable %ld); sampling a copy,"
                     " not mirrored %ld; gaps: undeclared register %ld, stream %ld, array type %ld, tessellator %ld,"
                     " NORESERVEDCONSTANTS %ld\n", (long)g_mirrored_vp,
                     st.vp_draws, st.vs_created, st.vs_fails, st.vs_const_uploads, st.vs_probes,
-                    (long)g_texel_draws, (long)g_texel_fails, (long)g_skip[SKIP_VP_COPY], (long)g_vpgap[VPGAP_UNDECLARED], (long)g_vpgap[VPGAP_STREAM],
+                    (long)g_texel_draws, (long)g_texel_fails, (long)g_sprite_draws, (long)g_sprite_fails,
+                    (long)g_skip[SKIP_VP_COPY], (long)g_vpgap[VPGAP_UNDECLARED], (long)g_vpgap[VPGAP_STREAM],
                     (long)g_vpgap[VPGAP_FORMAT], (long)g_vpgap[VPGAP_TESS], (long)g_vpgap[VPGAP_NORESERVED]);
             log_block_printf(&lb, "[D3DB] host copies: CopyRects back buffer -> texture %ld (host %u, fails %u), not"
                     " mirrored %ld; draws sampling a copy: mirrored %ld, vertex program %ld\n", (long)g_copies,
@@ -3842,7 +4064,7 @@ void d3db_leave(int id, d3db_args_t *a)
         case D3DB_DRAW_UP:       mirror_draw_up(a);       break;
         case D3DB_DRAW_INDEXED:  g_motion_draw_ret = a->ret; mirror_draw_indexed(a);  break;
         case D3DB_END:           mirror_draw_imm();       break;
-        case D3DB_DRAW:          mirror_draw_vertices();  break;
+        case D3DB_DRAW:          mirror_draw_vertices(a); break;
         case D3DB_COPYRECTS:     mirror_copy_rects(a);    break;
         }
         QueryPerformanceCounter(&t1);
