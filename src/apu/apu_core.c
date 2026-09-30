@@ -510,6 +510,17 @@ static void *mcpx_apu_frame_thread(void *arg)
         if (apu_active && !g_test_tone.active) {
             /* Full pipeline: VP voices → DSP → monitor → waveOut */
             se_frame(d);
+        } else if (xcntmode != NV_PAPU_SECTL_XCNTMODE_OFF &&
+                   !g_test_tone.active && !g_mixer_active_count) {
+            /* Halted: DirectSound stops the front end for a moment to edit
+             * voice lists. Making frames here made each halt a gap of
+             * silence as long as the halt (0.4-2.4% of frames in a level).
+             * xemu makes none and lets its output queue carry the sound;
+             * so does this: the device plays what is queued (up to
+             * THROTTLE_QUEUE_TARGET frames) and the pipeline catches up on
+             * the resume. A halt longer than the queue is still an
+             * underrun, counted on the [APU-OUT] line (notes 18.49). */
+            qemu_cond_timedwait(&d->cond, &d->lock, 1);
         } else {
             /* Lightweight: just monitor frame (test tone + software mixer) */
             mcpx_apu_monitor_frame(d);
