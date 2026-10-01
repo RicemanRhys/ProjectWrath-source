@@ -613,6 +613,12 @@ static IDirect3DBaseTexture8 *tex_get(const d3dh_tex_t *t)
     return e->tex;
 }
 
+void d3dh_dump_range(unsigned from, unsigned to)
+{
+    g_dump_from = from;
+    g_dump_to = to;
+}
+
 void d3dh_texture_touch(uint32_t data)
 {
     uint32_t i;

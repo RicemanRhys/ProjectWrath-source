@@ -163,6 +163,8 @@ int d3dh_copy_back(const d3dh_target_t *dst, const int32_t *rects, const int32_t
 
 /* A guest lock at physical address `data`: drop cached textures that hold it. */
 void d3dh_texture_touch(uint32_t data);
+/* Dump the back buffer at each guest swap in [from, to] (needs a dump prefix). */
+void d3dh_dump_range(unsigned from, unsigned to);
 
 /* Create the window (on its own thread) and the host device. `interval` is
  * the DXGI sync interval for every present; `frame_hz`, if above 0, is the

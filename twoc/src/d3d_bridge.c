@@ -165,6 +165,7 @@ static int g_vsprobe;               /* RECOMP_D3D_BRIDGE_VSPROBE: each vertex pr
 static int g_vp_copy;               /* RECOMP_D3D_BRIDGE_VP_COPY: mirror copy-sampling program draws even
                                        when texel_patch can't patch them (a look, S5) */
 static long g_drawlog_from, g_drawlog_to;   /* RECOMP_D3D_BRIDGE_DRAWLOG=A-B: every draw in swaps A-B (step 35) */
+static char g_drawlog_trigger[MAX_PATH]; /* RECOMP_D3D_BRIDGE_DRAWLOG_TRIGGER: the next N swaps once this file appears */
 static FILE *g_motion;                     /* RECOMP_D3D_BRIDGE_MOTIONLOG=PATH (step 42) */
 static char g_motion_on_path[MAX_PATH];
 static int g_motion_live;
@@ -583,6 +584,11 @@ void d3db_init(void)
         char *e;
         g_drawlog_from = strtol(getenv("RECOMP_D3D_BRIDGE_DRAWLOG"), &e, 0);
         g_drawlog_to = *e == '-' ? strtol(e + 1, NULL, 0) : g_drawlog_from;
+    }
+    if (d3db_host_on && getenv("RECOMP_D3D_BRIDGE_DRAWLOG_TRIGGER")) {
+        snprintf(g_drawlog_trigger, sizeof(g_drawlog_trigger), "%s", getenv("RECOMP_D3D_BRIDGE_DRAWLOG_TRIGGER"));
+        fprintf(stderr, "[D3DB] draw log on demand: the swaps after %s appears (it holds their count)\n",
+                g_drawlog_trigger);
     }
     if (d3db_host_on && getenv("RECOMP_D3D_BRIDGE_MOTIONLOG")) {
         const char *m = getenv("RECOMP_D3D_BRIDGE_MOTIONLOG");
@@ -2337,6 +2343,31 @@ static void motion_swap(LONG n)
     fflush(g_motion);
 }
 
+/* RECOMP_D3D_BRIDGE_DRAWLOG_TRIGGER (step 49, a check): when the file
+ * appears, the draw log (and the host's dumps) cover the next N swaps, N
+ * read from the file (default 3); the file is then deleted. For a scene
+ * someone reaches by hand, where the swap numbers aren't known in advance. */
+static void drawlog_trigger(LONG n)
+{
+    static unsigned polls;
+    FILE *f;
+    long k = 3;
+
+    if (!g_drawlog_trigger[0] || ++polls % 15)
+        return;
+    f = fopen(g_drawlog_trigger, "r");
+    if (!f)
+        return;
+    if (fscanf(f, "%ld", &k) != 1 || k < 1 || k > 600)
+        k = 3;
+    fclose(f);
+    DeleteFileA(g_drawlog_trigger);
+    g_drawlog_from = n + 1;
+    g_drawlog_to = n + k;
+    d3dh_dump_range((unsigned)(n + 1), (unsigned)(n + k));
+    fprintf(stderr, "[D3DB] draw log triggered: swaps %ld-%ld\n", (long)(n + 1), (long)(n + k));
+}
+
 static void stream_bases(uint32_t base[16], uint32_t stride[16])
 {
     uint32_t s, bv = MEM32(dev() + 0x01Cu);
@@ -3713,6 +3744,7 @@ static void mirror_swap(void)
     ULONGLONG now;
 
     motion_swap(n);
+    drawlog_trigger(n);
     d3dh_present(now_s(), (unsigned)n);
     {
         static LARGE_INTEGER f, last;
