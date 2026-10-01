@@ -68,7 +68,7 @@ typedef struct {
  * d3d_bridge.c translate_ps) and the token for its SetPixelShader. */
 typedef struct {
     uint32_t token;                     /* 0: no pixel shader (fixed function) */
-    d3dh_state_t rs[54];
+    d3dh_state_t rs[56];
     unsigned n_rs;
 } d3dh_ps_t;
 

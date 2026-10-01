@@ -1025,6 +1025,7 @@ enum {
 enum {
     PPS_ALPHAINPUTS = 200, PPS_FINAL_ABCD = 208, PPS_FINAL_EFG = 209, PPS_RGBINPUTS = 210, PPS_RGBOUTPUTS = 218,
     PPS_ALPHAOUTPUTS = 226, PPS_COMBINERCOUNT = 234, PPS_CONST0 = 235, PPS_CONST1 = 243, PPS_TEXTUREMODES = 251,
+    PPS_DOTMAPPING = 252, PPS_INPUTTEXTURE = 253,
 };
 
 /* What xbox_d3d8's combiner translator can't express, by kind: counted once
@@ -1036,7 +1037,7 @@ enum {
     PSGAP_OUTMAP,       /* an output mapping with no xbox_d3d8 equivalent */
     PSGAP_BLUE_TO_ALPHA,/* AB/CD blue-to-alpha */
     PSGAP_MUX_LSB,      /* a mux on r0.a's LSB; xbox_d3d8 muxes on the MSB */
-    PSGAP_TEXMODE,      /* a texture mode other than NONE, 2D, 3D, CUBEMAP */
+    PSGAP_TEXMODE,      /* a texture mode xbox_d3d8 has no route for (step 49: the dot-product ones added) */
     PSGAP_FINALCONST,   /* final-combiner constants with all 8 stages in use */
     PSGAP_V1R0,         /* COMPLEMENT_V1/R0 on the V1R0 sum */
     PSGAP_COUNT
@@ -1125,6 +1126,14 @@ static uint32_t xps_texmode(uint32_t m, unsigned *gaps)
     case 1: return 0;
     case 2: return 1;
     case 3: return 2;
+    /* Step 49: the dot-product modes (xbox_d3d8 local, d3d8_combiners.h) */
+    case 0x11: return 4;                /* DOTPRODUCT */
+    case 0x0C: return 5;                /* DOT_RFLCT_SPEC (texm3x3vspec) */
+    case 0x0B: return 6;                /* DOT_RFLCT_DIFF */
+    case 0x0E: return 7;                /* DOT_STR_CUBE */
+    case 0x09: return 8;                /* DOT_ST */
+    case 0x0D: return 9;                /* DOT_STR_3D */
+    case 0x0A: return 10;               /* DOT_ZW */
     }
     psgap(gaps, PSGAP_TEXMODE, "texture mode", m);
     return 3;
@@ -1230,6 +1239,8 @@ static unsigned translate_ps(d3dh_ps_t *ps)
     for (i = 0, v = 0; i < 4; i++)
         v |= xps_texmode((tm >> (5 * i)) & 31, &gaps) << (4 * i);
     PUT(PPS_TEXTUREMODES, v);
+    PUT(PPS_DOTMAPPING, rs_x(XPS_DOTMAPPING));         /* the XDK's layout, which xbox_d3d8 reads (step 49) */
+    PUT(PPS_INPUTTEXTURE, rs_x(XPS_INPUTTEXTURE));
 #undef PUT
     token = n_host | (v << 8);
     ps->token = token;
@@ -2023,8 +2034,10 @@ static int setup_draw(d3dh_draw_t *dr, uint32_t fvf, d3dh_tex_t tex[4], d3dh_sta
             if (j < CUBE_SEEN_MAX && !g_cube_seen[j]) {         /* each kind of cube draw once */
                 g_cube_seen[j] = key;
                 event(&g_ev_cube, CUBE_SEEN_MAX, "cube map %08X on stage %u: vertex shader %08X, pixel shader %08X"
-                      " (texture modes %08X), target %08X, textures %08X %08X %08X %08X", tex[s].key, s,
+                      " (texture modes %08X, dot mapping %X, input texture %X), target %08X, textures %08X %08X"
+                      " %08X %08X", tex[s].key, s,
                       MEM32(d + DEV_VS_HANDLE), MEM32(d + DEV_PIXEL_SHADER), rs_x(XRS_PSTEXTUREMODES),
+                      rs_x(XPS_DOTMAPPING), rs_x(XPS_INPUTTEXTURE),
                       MEM32(d + DEV_RENDER_TARGET), MEM32(d + DEV_TEXTURES), MEM32(d + DEV_TEXTURES + 4),
                       MEM32(d + DEV_TEXTURES + 8), MEM32(d + DEV_TEXTURES + 12));
             }
@@ -2544,17 +2557,20 @@ static volatile LONG g_texel_draws, g_texel_fails, g_ev_texel;
 static int texel_patch(vprog_t *p, float *consts)
 {
     uint32_t used = 1u << 12, cread[VS_CONSTS / 32 + 1] = { 0 }, i, s, patched = 0, h = 2166136261u;
+    uint32_t touch[VS_MAX_INSNS];       /* the temps each instruction reads or writes (step 49) */
     int rel_lo = VS_CONSTS;
 
     for (i = 0; i < p->n_insns; i++) {
         const uint32_t *w = p->code + 4 * i;
         uint32_t mac = VF(w[1], 21, 4), ilu = VF(w[1], 25, 3), cm = VF(w[3], 28, 2);
-        uint32_t am = VF(w[2], 26, 2), bm = VF(w[2], 11, 2), c = VF(w[1], 13, 8);
-        if (am == 1) used |= 1u << VF(w[2], 28, 4);
-        if (bm == 1) used |= 1u << VF(w[2], 13, 4);
-        if (cm == 1) used |= 1u << ((VF(w[2], 0, 2) << 2) | VF(w[3], 30, 2));
-        if (mac && VF(w[3], 24, 4)) used |= 1u << VF(w[3], 20, 4);
-        if (ilu && VF(w[3], 16, 4)) used |= 1u << (mac ? 1 : VF(w[3], 20, 4));
+        uint32_t am = VF(w[2], 26, 2), bm = VF(w[2], 11, 2), c = VF(w[1], 13, 8), t = 0;
+        if (am == 1) t |= 1u << VF(w[2], 28, 4);
+        if (bm == 1) t |= 1u << VF(w[2], 13, 4);
+        if (cm == 1) t |= 1u << ((VF(w[2], 0, 2) << 2) | VF(w[3], 30, 2));
+        if (mac && VF(w[3], 24, 4)) t |= 1u << VF(w[3], 20, 4);
+        if (ilu && VF(w[3], 16, 4)) t |= 1u << (mac ? 1 : VF(w[3], 20, 4));
+        touch[i] = t;
+        used |= t;
         if (am == 3 || bm == 3 || cm == 3) {
             if (VF(w[3], 1, 1)) {
                 if ((int)c < rel_lo)
@@ -2566,26 +2582,38 @@ static int texel_patch(vprog_t *p, float *consts)
     }
     for (s = 0; s < 4; s++) {
         uint32_t hdr = MEM32(dev() + DEV_TEXTURES + 4 * s), sz = hdr ? MEM32(hdr + RES_SIZE) : 0, k, K, n = 0;
+        uint32_t first = 0, late = 0;
         if (!sz)
             continue;                   /* none, or swizzled / compressed: 0..1 as on the host */
         for (i = 0; i < p->n_insns; i++) {
             uint32_t w3 = p->code[4 * i + 3], w1 = p->code[4 * i + 1];
             if (!VF(w3, 11, 1) || VF(w3, 3, 8) != 9 + s || !(VF(w3, 12, 4) & 0xC))
                 continue;
-            n++;
+            if (!n++)
+                first = i;
             if (VF(w3, 2, 1) ? (VF(w1, 21, 4) || VF(w3, 16, 4)) : VF(w3, 24, 4))
                 return -1;              /* its unit already writes a temp (or the ILU's is R1) */
         }
         if (!n)
             continue;                   /* the program doesn't write oTn.xy */
+        for (i = first + 1; i < p->n_insns; i++)
+            late |= touch[i];
+        /* A temp the program never touches; else (step 49: Wa-Wa's programs
+         * use R0-R11) one nothing reads or writes after the first writer. */
         for (k = 11; k >= 2 && (used & (1u << k)); k--)
             ;
+        if (k < 2)
+            for (k = 11; k >= 2 && (late & (1u << k)); k--)
+                ;
         for (K = VS_CONSTS - 1; K > 59; K--)
             if (!(cread[K / 32] & (1u << (K % 32))) && !((int)K >= rel_lo && (int)K < rel_lo + 64))
                 break;
         if (k < 2 || K <= 59 || p->n_insns >= VS_MAX_INSNS)
             return -1;
         used |= 1u << k;
+        for (i = first; i < p->n_insns; i++)
+            touch[i] |= 1u << k;        /* taken from the first writer on, for the next stage */
+        touch[p->n_insns] = 1u << k;    /* the MUL appended below */
         cread[K / 32] |= 1u << (K % 32);
         for (i = 0; i < p->n_insns; i++) {
             uint32_t *w = p->code + 4 * i, om = VF(w[3], 12, 4);
@@ -3468,7 +3496,7 @@ static void drawlog(const char *path, uint32_t xdk_prim, uint32_t n, uint32_t fv
             (double)uv[3], w);
     /* S5: the blending and stage-0/1 ops too (XDK values), and the pixel shader. */
     fprintf(stderr, "[D3DB] drawlog   blend %u %X %X op %X atest %u %X ref %X z %u/%u; stage 0 colour %u %X %X alpha"
-            " %u %X %X address %u %u; stage 1 colour %u alpha %u; pixel shader %s (texture modes %08X; stages %08X"
+            " %u %X %X address %u %u; stage 1 colour %u alpha %u; pixel shader %s (texture modes %08X, dot mapping %X, input texture %X; stages %08X"
             " %08X %08X %08X); fog %u\n", rs_x(XRS_ALPHABLENDENABLE),
             rs_x(XRS_SRCBLEND), rs_x(XRS_DESTBLEND), rs_x(XRS_BLENDOP), rs_x(XRS_ALPHATESTENABLE), rs_x(XRS_ALPHAFUNC),
             rs_x(XRS_ALPHAREF), rs_x(XRS_ZENABLE), rs_x(XRS_ZWRITEENABLE),
@@ -3478,7 +3506,7 @@ static void drawlog(const char *path, uint32_t xdk_prim, uint32_t n, uint32_t fv
             MEM32(D3D_TEXTURESTATE + 4 * XTSS_ADDRESSU), MEM32(D3D_TEXTURESTATE + 4 * XTSS_ADDRESSV),
             MEM32(D3D_TEXTURESTATE + 4 * (D3D_TSS_COUNT + XTSS_COLOROP)),
             MEM32(D3D_TEXTURESTATE + 4 * (D3D_TSS_COUNT + XTSS_ALPHAOP)), MEM32(d + DEV_PIXEL_SHADER) ? "set" : "none",
-            rs_x(XRS_PSTEXTUREMODES), MEM32(d + DEV_TEXTURES), MEM32(d + DEV_TEXTURES + 4), MEM32(d + DEV_TEXTURES + 8),
+            rs_x(XRS_PSTEXTUREMODES), rs_x(XPS_DOTMAPPING), rs_x(XPS_INPUTTEXTURE), MEM32(d + DEV_TEXTURES), MEM32(d + DEV_TEXTURES + 4), MEM32(d + DEV_TEXTURES + 8),
             MEM32(d + DEV_TEXTURES + 12), rs_x(XRS_FOGENABLE));
     /* Step 48: the fog and the final combiner (XDK values; the floats as they are). */
     {
