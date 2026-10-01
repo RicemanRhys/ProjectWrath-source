@@ -138,7 +138,26 @@ typedef enum NV2ATextureMode {
     NV2A_TEXMODE_3D      = 1,  /* 3D / volume texture */
     NV2A_TEXMODE_CUBEMAP = 2,  /* Cube map */
     NV2A_TEXMODE_NONE    = 3,  /* No texture bound */
+    /* The dot-product modes (PS_TEXTUREMODES_*, as xemu's psh.c draws
+     * them). Each dots its texture coordinate's xyz with an earlier
+     * stage's texel, expanded by that stage's dot mapping. */
+    NV2A_TEXMODE_DOTPRODUCT     = 4,  /* stage 1 or 2: a dot product; samples nothing (t = 0) */
+    NV2A_TEXMODE_DOT_RFLCT_SPEC = 5,  /* stage 3: cube at the eye vector reflected about (dot1, dot2, dot3) */
+    NV2A_TEXMODE_DOT_RFLCT_DIFF = 6,  /* stage 2: cube at (dot1, dot2, dot of stage 3's coordinate) */
+    NV2A_TEXMODE_DOT_STR_CUBE   = 7,  /* stage 3: cube at (dot1, dot2, dot3) */
+    NV2A_TEXMODE_DOT_ST         = 8,  /* stage 2: 2D at (dot1, dot2) */
+    NV2A_TEXMODE_DOT_STR_3D     = 9,  /* stage 3: 3D at (dot1, dot2, dot3) */
+    NV2A_TEXMODE_DOT_ZW         = 10, /* stage 2 or 3: a dot product for depth (not drawn: t = 0) */
 } NV2ATextureMode;
+
+/* PS_DOTMAPPING_*: how a dot-product stage expands its input texel. */
+typedef enum NV2ADotMapping {
+    NV2A_DOTMAP_ZERO_TO_ONE     = 0,
+    NV2A_DOTMAP_MINUS1_TO_1_D3D = 1,
+    NV2A_DOTMAP_MINUS1_TO_1_GL  = 2,
+    NV2A_DOTMAP_MINUS1_TO_1     = 3,
+    /* 4-7: the HILO mappings (16-bit signed or unsigned pairs) */
+} NV2ADotMapping;
 
 /* ================================================================
  * Combiner Stage Input / Output Descriptors
@@ -226,6 +245,12 @@ typedef struct NV2ACombinerState {
 
     /* --- Texture modes --- */
     NV2ATextureMode tex_mode[NV2A_MAX_TEXTURES];
+
+    /* --- Dot-product stages (D3DRS_PSDOTMAPPING, D3DRS_PSINPUTTEXTURE) ---
+     * dot_map[s]: stage s's NV2ADotMapping (stages 1-3); input_tex[s]:
+     * the stage whose texel it dots with (stage 1 always 0). */
+    int dot_map[NV2A_MAX_TEXTURES];
+    int input_tex[NV2A_MAX_TEXTURES];
 
     /* --- Flags --- */
     DWORD flags;     /* Dot mapping and other flags from token bits 24-31 */

@@ -287,6 +287,22 @@ void d3d8_combiners_from_render_states(const DWORD *rs,
     state->final_c0 = state->c0[state->num_stages > 0 ? state->num_stages - 1 : 0];
     state->final_c1 = state->c1[state->num_stages > 0 ? state->num_stages - 1 : 0];
 
+    /* Dot-product stages, in the XDK's layout (PS_DOTMAPPING and
+     * PS_INPUTTEXTURE): mappings for stages 1-3 in bits 0, 4 and 8; the
+     * input stage for stage 2 in bit 16, for stage 3 in bits 20-21. */
+    {
+        DWORD dm = rs[D3DRS_PSDOTMAPPING], it = rs[D3DRS_PSINPUTTEXTURE];
+
+        state->dot_map[0] = 0;
+        state->dot_map[1] = (int)(dm & 0xF);
+        state->dot_map[2] = (int)((dm >> 4) & 0xF);
+        state->dot_map[3] = (int)((dm >> 8) & 0xF);
+        state->input_tex[0] = 0;
+        state->input_tex[1] = 0;
+        state->input_tex[2] = (int)((it >> 16) & 0x1);
+        state->input_tex[3] = (int)((it >> 20) & 0x3);
+    }
+
     /* Read texture modes from render state if not already set by token */
     if (state->tex_mode[0] == 0 && state->tex_mode[1] == 0 &&
         state->tex_mode[2] == 0 && state->tex_mode[3] == 0) {
@@ -491,18 +507,39 @@ int d3d8_combiners_generate_hlsl(const NV2ACombinerState *state,
 
     /* ---- Texture samplers ---- */
     for (i = 0; i < NV2A_MAX_TEXTURES; i++) {
-        if (state->tex_mode[i] != NV2A_TEXMODE_NONE) {
-            if (state->tex_mode[i] == NV2A_TEXMODE_CUBEMAP) {
-                EMIT("TextureCube  tex%d : register(t%d);\n", i, i);
-            } else if (state->tex_mode[i] == NV2A_TEXMODE_3D) {
-                EMIT("Texture3D    tex%d : register(t%d);\n", i, i);
-            } else {
-                EMIT("Texture2D    tex%d : register(t%d);\n", i, i);
-            }
-            EMIT("SamplerState samp%d : register(s%d);\n", i, i);
+        switch (state->tex_mode[i]) {
+        case NV2A_TEXMODE_NONE:
+        case NV2A_TEXMODE_DOTPRODUCT:
+        case NV2A_TEXMODE_DOT_ZW:
+            continue;                   /* samples nothing */
+        case NV2A_TEXMODE_CUBEMAP:
+        case NV2A_TEXMODE_DOT_RFLCT_SPEC:
+        case NV2A_TEXMODE_DOT_RFLCT_DIFF:
+        case NV2A_TEXMODE_DOT_STR_CUBE:
+            EMIT("TextureCube  tex%d : register(t%d);\n", i, i);
+            break;
+        case NV2A_TEXMODE_3D:
+        case NV2A_TEXMODE_DOT_STR_3D:
+            EMIT("Texture3D    tex%d : register(t%d);\n", i, i);
+            break;
+        default:
+            EMIT("Texture2D    tex%d : register(t%d);\n", i, i);
+            break;
         }
+        EMIT("SamplerState samp%d : register(s%d);\n", i, i);
     }
     EMIT("\n");
+
+    /* The dot mappings: a texel's rgb expanded as the NV2A does before a
+     * dot-product stage uses it (xemu's sign1/sign2/sign3). The HILO
+     * mappings (4-7) fall back to 0..1, as xemu's do. */
+    EMIT("float nv_sign1(float x) { x *= 255.0; return (x - 128.0) / 127.0; }\n");
+    EMIT("float nv_sign2(float x) { x *= 255.0; return x >= 128.0 ? (x - 255.5) / 127.5 : (x + 0.5) / 127.5; }\n");
+    EMIT("float nv_sign3(float x) { x *= 255.0; return x >= 128.0 ? (x - 256.0) / 127.0 : x / 127.0; }\n");
+    EMIT("float3 dotmap0(float4 c) { return c.rgb; }\n");
+    EMIT("float3 dotmap1(float4 c) { return float3(nv_sign1(c.r), nv_sign1(c.g), nv_sign1(c.b)); }\n");
+    EMIT("float3 dotmap2(float4 c) { return float3(nv_sign2(c.r), nv_sign2(c.g), nv_sign2(c.b)); }\n");
+    EMIT("float3 dotmap3(float4 c) { return float3(nv_sign3(c.r), nv_sign3(c.g), nv_sign3(c.b)); }\n\n");
 
     /* ---- Constant buffer ---- */
     EMIT("cbuffer CombinerCB : register(b0) {\n");
@@ -525,10 +562,10 @@ int d3d8_combiners_generate_hlsl(const NV2ACombinerState *state,
     EMIT("    float4 pos     : SV_POSITION;\n");
     EMIT("    float4 color0  : COLOR0;\n");
     EMIT("    float4 color1  : COLOR1;\n");
-    EMIT("    float3 tc0     : TEXCOORD0;\n");
-    EMIT("    float3 tc1     : TEXCOORD1;\n");
-    EMIT("    float3 tc2     : TEXCOORD2;\n");
-    EMIT("    float3 tc3     : TEXCOORD3;\n");
+    EMIT("    float4 tc0     : TEXCOORD0;\n");
+    EMIT("    float4 tc1     : TEXCOORD1;\n");
+    EMIT("    float4 tc2     : TEXCOORD2;\n");
+    EMIT("    float4 tc3     : TEXCOORD3;\n");
     EMIT("    float  fog     : TEXCOORD4;\n");   /* vertex fog: the factor */
     EMIT("    float4 viewpos : TEXCOORD5;\n");   /* table fog: view-space position */
     EMIT("};\n\n");
@@ -562,24 +599,64 @@ int d3d8_combiners_generate_hlsl(const NV2ACombinerState *state,
     EMIT("    float4 r_v0   = input.color0;\n");
     EMIT("    float4 r_v1   = input.color1;\n");
 
-    /* Texture samples */
+    /* Texture samples. A dot-product stage dots its coordinate's xyz with
+     * an earlier stage's texel (input_tex), expanded by its dot mapping;
+     * the later stages of the group sample with those dots (xemu psh.c). */
+    EMIT("    float dot1 = 0.0, dot2 = 0.0, dot3 = 0.0, dot2n = 0.0;\n");
     for (i = 0; i < NV2A_MAX_TEXTURES; i++) {
-        if (state->tex_mode[i] == NV2A_TEXMODE_NONE) {
+        int dm = state->dot_map[i] >= 0 && state->dot_map[i] <= 3 ? state->dot_map[i] : 0;
+        int in = state->input_tex[i] >= 0 && state->input_tex[i] < i ? state->input_tex[i] : 0;
+        NV2ATextureMode mode = state->tex_mode[i];
+
+        if (i == 0 && mode >= NV2A_TEXMODE_DOTPRODUCT)
+            mode = NV2A_TEXMODE_NONE;   /* no dot product on stage 0 */
+        if (i == 1 && mode != NV2A_TEXMODE_DOTPRODUCT && mode >= NV2A_TEXMODE_DOTPRODUCT)
+            mode = NV2A_TEXMODE_DOTPRODUCT;     /* stage 1 can only dot (the others need earlier dots) */
+        if (mode >= NV2A_TEXMODE_DOTPRODUCT)
+            EMIT("    dot%d = dot(input.tc%d.xyz, dotmap%d(r_t%d));\n", i, i, dm, in);
+        switch (mode) {
+        case NV2A_TEXMODE_NONE:
+        case NV2A_TEXMODE_DOTPRODUCT:
+        case NV2A_TEXMODE_DOT_ZW:
             EMIT("    float4 r_t%d = float4(0, 0, 0, 0);\n", i);
-        } else if (state->tex_mode[i] == NV2A_TEXMODE_CUBEMAP) {
+            break;
+        case NV2A_TEXMODE_CUBEMAP:
             /* Cube map: use the full 3-component reflection/TCI vector */
-            EMIT("    float4 r_t%d = tex%d.Sample(samp%d, input.tc%d);\n",
-                 i, i, i, i);
-        } else if (state->tex_mode[i] == NV2A_TEXMODE_3D) {
+            EMIT("    float4 r_t%d = tex%d.Sample(samp%d, input.tc%d.xyz);\n", i, i, i, i);
+            break;
+        case NV2A_TEXMODE_3D:
             /* 3D texture: use the full 3-component coordinate */
-            EMIT("    float4 r_t%d = tex%d.Sample(samp%d, input.tc%d);\n",
-                 i, i, i, i);
-        } else {
-            EMIT("    float4 r_t%d = tex%d.Sample(samp%d, input.tc%d.xy);\n",
-                 i, i, i, i);
+            EMIT("    float4 r_t%d = tex%d.Sample(samp%d, input.tc%d.xyz);\n", i, i, i, i);
+            break;
+        case NV2A_TEXMODE_DOT_ST:
+            EMIT("    float4 r_t%d = tex%d.Sample(samp%d, float2(dot%d, dot%d));\n", i, i, i, i - 1, i);
+            break;
+        case NV2A_TEXMODE_DOT_RFLCT_DIFF: {
+            /* The normal's third component dots stage 3's coordinate. */
+            int dm3 = state->dot_map[3] >= 0 && state->dot_map[3] <= 3 ? state->dot_map[3] : 0;
+            int in3 = state->input_tex[3] >= 0 && state->input_tex[3] < i ? state->input_tex[3] : 0;
+            EMIT("    dot2n = dot(input.tc3.xyz, dotmap%d(r_t%d));\n", dm3, in3);
+            EMIT("    float4 r_t%d = tex%d.Sample(samp%d, float3(dot1, dot2, dot2n));\n", i, i, i);
+            break;
+        }
+        case NV2A_TEXMODE_DOT_RFLCT_SPEC:
+            /* The eye vector is the three coordinates' w; the cube is
+             * sampled at it reflected about the normal (dot1, dot2, dot3). */
+            EMIT("    float3 n_%d = float3(dot1, dot2, dot3);\n", i);
+            EMIT("    float3 e_%d = float3(input.tc1.w, input.tc2.w, input.tc3.w);\n", i);
+            EMIT("    float4 r_t%d = tex%d.Sample(samp%d, 2.0 * n_%d * dot(n_%d, e_%d) / dot(n_%d, n_%d) - e_%d);\n",
+                 i, i, i, i, i, i, i, i, i);
+            break;
+        case NV2A_TEXMODE_DOT_STR_CUBE:
+        case NV2A_TEXMODE_DOT_STR_3D:
+            EMIT("    float4 r_t%d = tex%d.Sample(samp%d, float3(dot1, dot2, dot3));\n", i, i, i);
+            break;
+        default:
+            EMIT("    float4 r_t%d = tex%d.Sample(samp%d, input.tc%d.xy);\n", i, i, i, i);
+            break;
         }
         /* Preserve disabled stages and sampled alpha. */
-        if (state->tex_mode[i] != NV2A_TEXMODE_NONE)
+        if (mode != NV2A_TEXMODE_NONE && mode != NV2A_TEXMODE_DOTPRODUCT && mode != NV2A_TEXMODE_DOT_ZW)
             EMIT("    if (alpha_only[%d]) r_t%d.rgb = 1.0;\n", i, i);
     }
 
