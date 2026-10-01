@@ -742,6 +742,9 @@ static int describe_target(d3dh_target_t *t, int *z_off);
 /* (Count, pRects, Flags, Color, Z, Stencil). The census never saw rects.
  * S4: a render-to-texture target is cleared on its host render target; the
  * tint check applies to the back buffer only. */
+static int drawlog_on(void);
+static unsigned g_drawlog_n;
+
 static void mirror_clear(const d3db_args_t *a)
 {
     d3dh_target_t t;
@@ -755,6 +758,10 @@ static void mirror_clear(const d3db_args_t *a)
     memcpy(&z, &a->arg[4], 4);
     event(t.data ? &g_ev_clear_rt : &g_ev_clear, 12, "Clear flags %X colour %08X z %g stencil %u, target %08X -> host",
           a->arg[2], a->arg[3], (double)z, a->arg[5], t.data);
+    if (drawlog_on())                   /* step 49: where the clears fall among the draws */
+        fprintf(stderr, "[D3DB] drawlog swap %ld clear before #%u: flags %X colour %08X z %g stencil %u, target %08X%s\n",
+                (long)g_swaps + 1, g_drawlog_n, a->arg[2], a->arg[3], (double)z, a->arg[5], t.data,
+                z_off ? " (no depth surface)" : "");
     if (g_rtlog && t.data)
         fprintf(stderr, "[D3DB] rtclear target %08X flags %X colour %08X\n", t.data, a->arg[2], a->arg[3]);
     if (g_tint && !t.data) {        /* frame k (0-based): R = k & 0xFF, G = k >> 8 & 0xFF, B = 0x80 */
@@ -775,6 +782,8 @@ enum {
     XRS_SRCBLEND, XRS_DESTBLEND, XRS_ZWRITEENABLE, XRS_DITHERENABLE, XRS_SHADEMODE,
     XRS_COLORWRITEENABLE, XRS_STENCILZFAIL, XRS_STENCILPASS, XRS_STENCILFUNC, XRS_STENCILREF,
     XRS_STENCILMASK, XRS_STENCILWRITEMASK, XRS_BLENDOP,
+    XRS_POLYGONOFFSETZSLOPESCALE = 77, XRS_POLYGONOFFSETZOFFSET, XRS_POINTOFFSETENABLE, XRS_WIREFRAMEOFFSETENABLE,
+    XRS_SOLIDOFFSETENABLE,
     XRS_FOGENABLE = 82, XRS_FOGTABLEMODE, XRS_FOGSTART, XRS_FOGEND, XRS_FOGDENSITY, XRS_RANGEFOGENABLE,
     XRS_LIGHTING = 92, XRS_SPECULARENABLE, XRS_LOCALVIEWER, XRS_COLORVERTEX,
     XRS_SPECULARMATERIALSOURCE = 100, XRS_DIFFUSEMATERIALSOURCE, XRS_AMBIENTMATERIALSOURCE,
@@ -1397,6 +1406,20 @@ static void sig_forget(uint32_t data)
 }
 
 static volatile LONG g_cube_binds, g_ev_cube;  /* draws' stages that bound a cube map (S5 part 2) */
+static volatile LONG g_null_stages;             /* stages in use with no texture: opaque black (step 49) */
+#define NULL_TEXTURE_KEY 0xFFFFFFF0u            /* the host texture for them (no guest header or Data) */
+
+/* Whether the texture stage combiner reaches stage `s`: D3D stops at the
+ * first stage whose COLOROP is DISABLE (XDK 1), and so does a stage's own. */
+static int stage_reached(unsigned s)
+{
+    unsigned k;
+
+    for (k = 0; k <= s; k++)
+        if (MEM32(D3D_TEXTURESTATE + 4 * (k * D3D_TSS_COUNT + XTSS_COLOROP)) == 1)
+            return 0;
+    return 1;
+}
 #define CUBE_SEEN_MAX 16
 static uint32_t g_cube_seen[CUBE_SEEN_MAX];     /* shaders, stage and texture modes: each kind logged once */
 
@@ -2025,6 +2048,23 @@ static int setup_draw(d3dh_draw_t *dr, uint32_t fvf, d3dh_tex_t tex[4], d3dh_sta
             return -1;
         }
         dr->tex[s] = r ? &tex[s] : NULL;
+        if (!r && !MEM32(d + DEV_PIXEL_SHADER) && stage_reached(s)) {
+            /* Step 49: a stage in use with no texture. The NV2A reads such a
+             * stage (texture mode NONE) as opaque black, 0,0,0,1, as xemu
+             * models it; an unbound D3D11 view reads 0,0,0,0, so a
+             * MODULATE(TEXTURE, DIFFUSE) stage lost the diffuse alpha (Crash's
+             * shadow: two of its three darkening passes added nothing). */
+            static const uint32_t black = 0xFF000000u;
+            memset(&tex[s], 0, sizeof(tex[s]));
+            tex[s].key = tex[s].data = NULL_TEXTURE_KEY;
+            tex[s].format = 0x06;       /* A8R8G8B8 */
+            tex[s].width = tex[s].height = tex[s].levels = 1;
+            tex[s].bits = (const uint8_t *)&black;
+            tex[s].bytes = 4;
+            tex[s].sig = 1;
+            dr->tex[s] = &tex[s];
+            InterlockedIncrement(&g_null_stages);
+        }
         if (r > 0 && tex[s].cube) {
             uint32_t key = MEM32(d + DEV_VS_HANDLE) ^ (MEM32(d + DEV_PIXEL_SHADER) * 31u) ^ (s << 28) ^
                            (rs_x(XRS_PSTEXTUREMODES) * 17u), j;
@@ -3521,6 +3561,35 @@ static void drawlog(const char *path, uint32_t xdk_prim, uint32_t n, uint32_t fv
                 rs_x(XRS_LIGHTING), rs_x(XPS_FINAL_ABCD), rs_x(XPS_FINAL_EFG), rs_x(XPS_COMBINERCOUNT),
                 MEM32(d + DEV_VS_HANDLE));
     }
+    /* Step 49: depth and stencil, and the depth offset (ZBIAS sets the
+     * polygon offset states; xbox_d3d8 has no depth bias). */
+    {
+        uint32_t ss = rs_x(XRS_POLYGONOFFSETZSLOPESCALE), zo = rs_x(XRS_POLYGONOFFSETZOFFSET);
+        float f_ss, f_zo;
+        memcpy(&f_ss, &ss, 4);
+        memcpy(&f_zo, &zo, 4);
+        fprintf(stderr, "[D3DB] drawlog   zfunc %X; stencil %u func %X ref %X mask %X write %X ops %X %X %X; zbias %u,"
+                " offset solid %u slope %g units %g; cull %X; colour write %X\n", rs_x(XRS_ZFUNC),
+                rs_x(XRS_STENCILENABLE), rs_x(XRS_STENCILFUNC), rs_x(XRS_STENCILREF), rs_x(XRS_STENCILMASK),
+                rs_x(XRS_STENCILWRITEMASK), rs_x(XRS_STENCILFAIL), rs_x(XRS_STENCILZFAIL), rs_x(XRS_STENCILPASS),
+                rs_x(XRS_ZBIAS), rs_x(XRS_SOLIDOFFSETENABLE), (double)f_ss, (double)f_zo, rs_x(XRS_CULLMODE),
+                rs_x(XRS_COLORWRITEENABLE));
+    }
+    if (v && nv <= 16 && pos == FVF_XYZRHW) {   /* step 49: small pre-transformed draws, with their colour */
+        uint32_t c_off = 16 + ((fvf & FVF_NORMAL) ? 12 : 0) + ((fvf & FVF_PSIZE) ? 4 : 0);
+        fprintf(stderr, "[D3DB] drawlog   pre-transformed");
+        for (i = 0; i < nv; i++) {
+            const float *p = (const float *)(v + (size_t)i * stride);
+            fprintf(stderr, " (%.4g %.4g %.4g %.4g", (double)p[0], (double)p[1], (double)p[2], (double)p[3]);
+            if (fvf & FVF_DIFFUSE) {
+                uint32_t col;
+                memcpy(&col, v + (size_t)i * stride + c_off, 4);
+                fprintf(stderr, " %08X", col);
+            }
+            fputc(')', stderr);
+        }
+        fputc('\n', stderr);
+    }
     if (v && nv <= 16 && pos == FVF_XYZ) {      /* small draws: every vertex, and the view, in full */
         d3dh_ff_t ff;
         describe_ff(&ff);
@@ -3857,7 +3926,7 @@ static void mirror_swap(void)
                     " immediate %ld, of them pre-transformed %ld; DrawVertices calls %ld),"
                     " host draws %u (fails %u); not mirrored: target %ld, vertex program %ld, primitive %ld,"
                     " texture %ld, stream %ld, vertex format %ld, immediate %ld, DrawVertices %ld; textures uploaded"
-                    " %u (P8 %u, cube %u, fails %u, evictions %u; cube binds %ld); translation gaps: value %ld, texop"
+                    " %u (P8 %u, cube %u, fails %u, evictions %u; cube binds %ld; unbound stages as black %ld); translation gaps: value %ld, texop"
                     " %ld, diffuse arg %ld,"
                     " frontface %ld\n",
                     (long)g_mirrored_draws, (long)g_mirrored_rt_draws, (long)g_mirrored_ps_draws,
@@ -3866,7 +3935,7 @@ static void mirror_swap(void)
                     (long)g_skip[SKIP_PRIM], (long)g_skip[SKIP_TEXTURE], (long)g_skip[SKIP_STREAM],
                     (long)g_skip[SKIP_FVF], (long)g_skip[SKIP_IMMEDIATE], (long)g_skip[SKIP_VERTICES],
                     st.tex_uploads, st.p8_uploads, st.cube_uploads, st.tex_upload_fails, st.tex_evictions,
-                    (long)g_cube_binds, (long)g_gap[GAP_VALUE],
+                    (long)g_cube_binds, (long)g_null_stages, (long)g_gap[GAP_VALUE],
                     (long)g_gap[GAP_TEXOP], (long)g_gap[GAP_DIFFUSE_ARG], (long)g_gap[GAP_FRONTFACE]);
             log_block_printf(&lb, "[D3DB] host fixed function: indexed draws %u, untransformed draws %u (lit by xbox_d3d8"
                     " %ld, lit on the CPU %ld); gaps: over 8 lights %ld, texture transform %ld, CPU lighting"
