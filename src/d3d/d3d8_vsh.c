@@ -364,12 +364,13 @@ static void emit_mac_op(StrBuf *sb, const NV2AVshInstruction *inst)
     case NV2A_VSH_MAC_MOV:
         sb_append(sb, "        m = "); emit_source(sb, A); break;
     case NV2A_VSH_MAC_MUL:
-        sb_append(sb, "        m = "); emit_source(sb, A); sb_append(sb, " * "); emit_source(sb, B); break;
+        sb_append(sb, "        m = nv_mul("); emit_source(sb, A); sb_append(sb, ", "); emit_source(sb, B);
+        sb_append(sb, ")"); break;
     case NV2A_VSH_MAC_ADD:
         sb_append(sb, "        m = "); emit_source(sb, A); sb_append(sb, " + "); emit_source(sb, C); break;
     case NV2A_VSH_MAC_MAD:
-        sb_append(sb, "        m = "); emit_source(sb, A); sb_append(sb, " * "); emit_source(sb, B);
-        sb_append(sb, " + "); emit_source(sb, C); break;
+        sb_append(sb, "        m = nv_mul("); emit_source(sb, A); sb_append(sb, ", "); emit_source(sb, B);
+        sb_append(sb, ") + "); emit_source(sb, C); break;
     case NV2A_VSH_MAC_DP3:
         sb_append(sb, "        m = dot("); emit_source(sb, A); sb_append(sb, ".xyz, "); emit_source(sb, B);
         sb_append(sb, ".xyz).xxxx"); break;
@@ -445,6 +446,18 @@ int d3d8_vsh_generate_hlsl(const NV2AVshProgram *program,
         "    float4 c[%d];\n"
         "};\n"
         "\n"
+        /* MUL and MAD as the NV2A multiplies (and xemu's _MUL): anything times
+         * 0 is 0, inf and NaN included. A program can rely on it: Crash's
+         * morph program scales stream-1 deltas by c[122].x = 0 for meshes
+         * without morph data, whose stream 1 is then whatever lies there. */
+        "float4 nv_mul(float4 a, float4 b) {\n"
+        "    float4 r = a * b;\n"
+        "    r.x = (a.x == 0.0 || b.x == 0.0) ? 0.0 : r.x;\n"
+        "    r.y = (a.y == 0.0 || b.y == 0.0) ? 0.0 : r.y;\n"
+        "    r.z = (a.z == 0.0 || b.z == 0.0) ? 0.0 : r.z;\n"
+        "    r.w = (a.w == 0.0 || b.w == 0.0) ? 0.0 : r.w;\n"
+        "    return r;\n"
+        "}\n"
         "float4 nv_rcc(float x) {\n"
         "    float r = 1.0 / x;\n"
         "    r = r >= 0.0 ? clamp(r, 5.42101e-20, 1.884467e+19) : clamp(r, -1.884467e+19, -5.42101e-20);\n"
@@ -692,7 +705,7 @@ static VshCacheEntry *compile_shader(const DWORD *microcode, int num_insns,
     if (getenv("XBOX_D3D8_VSH_HLSL"))
         fprintf(stderr, "--- NV2A VS 0x%08X ---\n%s\n--- End ---\n", hash, hlsl_buf);
 
-    /* Compile HLSL to bytecode */
+    /* Compile HLSL to bytecode (nv_mul's zero test survives level 3: eq/or/movc) */
     hr = D3DCompile(hlsl_buf, (SIZE_T)hlsl_len, "nv2a_vsh",
                     NULL, NULL, "main", "vs_5_0",
                     D3DCOMPILE_OPTIMIZATION_LEVEL3, 0,
