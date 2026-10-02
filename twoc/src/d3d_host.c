@@ -603,7 +603,12 @@ static IDirect3DBaseTexture8 *tex_get(const d3dh_tex_t *t)
     g_tex_clock++;
     for (i = 0; i < TEX_CACHE_SLOTS; i++) {
         host_tex_t *s = &g_tex[(h + i) & (TEX_CACHE_SLOTS - 1)];
-        if (s->tex && s->desc.key == t->key) {
+        /* Step 52: a header and its level count. A stage with MIPFILTER
+         * NONE gets level 0 alone (d3d_bridge.c), so one header bound to
+         * two stages that filter differently is two host textures; keyed
+         * by the header alone, each stage replaced the other's every draw
+         * (Bamboozled's ball rings: its highlight map on stages 1 and 2). */
+        if (s->tex && s->desc.key == t->key && s->desc.levels == t->levels) {
             e = s;
             break;
         }
@@ -847,9 +852,17 @@ int d3dh_draw_up(const d3dh_draw_t *d)
     vp.MinZ = d->vp_minz;
     vp.MaxZ = d->vp_maxz;
     g_dev->lpVtbl->SetViewport(g_dev, &vp);
-    /* Textures before stage states: xbox_d3d8's SetTexture edits COLOROP. */
-    for (s = 0; s < 4; s++)
-        g_dev->lpVtbl->SetTexture(g_dev, s, d->tex[s] ? tex_get(d->tex[s]) : NULL);
+    /* Textures before stage states: xbox_d3d8's SetTexture edits COLOROP.
+     * All four are fetched before any is bound (step 52): a fetch that
+     * replaces a cache entry unbinds every stage, which took the stages
+     * already bound for this draw with it. */
+    {
+        IDirect3DBaseTexture8 *bound[4];
+        for (s = 0; s < 4; s++)
+            bound[s] = d->tex[s] ? tex_get(d->tex[s]) : NULL;
+        for (s = 0; s < 4; s++)
+            g_dev->lpVtbl->SetTexture(g_dev, s, bound[s]);
+    }
     for (s = 0; s < 4; s++)
         for (i = 0; i < d->n_tss[s]; i++)
             g_dev->lpVtbl->SetTextureStageState(g_dev, s, (D3DTEXTURESTAGESTATETYPE)d->tss[s][i].state,
