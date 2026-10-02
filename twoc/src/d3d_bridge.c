@@ -1526,21 +1526,29 @@ static const uint32_t g_probe_in[PROBE_SETS][6] = {
 static uint32_t g_ps_seen[PS_SEEN_MAX];
 static int g_ps_seen_n;
 
+/* FNV-1a over the current def (RS 0-56) and texture modes (RS 117): a
+ * pixel shader's identity, as the probe and the draw log name it. */
+static uint32_t ps_def_hash(void)
+{
+    uint32_t h = 2166136261u, i;
+
+    for (i = 0; i < XPS_DEF_DWORDS; i++)
+        h = (h ^ rs_x(i)) * 16777619u;
+    return (h ^ rs_x(XRS_PSTEXTUREMODES)) * 16777619u;
+}
+
 /* Each distinct pixel shader, the first time a draw (any path) uses one:
  * translated, drawn on the host once per probe set, and logged with its XDK
  * def (RS 0-56 and 117) so tools/diag/pscheck.py can evaluate the same def
  * on the CPU and compare. */
 static void ps_probe_once(void)
 {
-    uint32_t h = 2166136261u, i, out = 0;
+    uint32_t h = ps_def_hash(), i, out = 0;
     unsigned gaps;
     d3dh_ps_t ps;
     char line[1024];
     int len = 0, rc, k;
 
-    for (i = 0; i < XPS_DEF_DWORDS; i++)
-        h = (h ^ rs_x(i)) * 16777619u;
-    h = (h ^ rs_x(XRS_PSTEXTUREMODES)) * 16777619u;
     for (i = 0; i < (uint32_t)g_ps_seen_n; i++)
         if (g_ps_seen[i] == h)
             return;
@@ -1554,9 +1562,9 @@ static void ps_probe_once(void)
         const uint32_t *in = g_probe_in[k];
         rc = d3dh_ps_probe(&ps, in[0], in[1], in + 2, &out);
         fprintf(stderr, "[D3DB] ps probe %d.%d: %s %08X; gaps %X; v0 %08X v1 %08X t %08X %08X %08X %08X;"
-                " token %08X; def %s tm %08X; fog %u specular %u\n", g_ps_seen_n - 1, k, rc ? "FAILED" : "result",
-                out, gaps, in[0], in[1], in[2], in[3], in[4], in[5], ps.token, line, rs_x(XRS_PSTEXTUREMODES),
-                rs_x(XRS_FOGENABLE) ? 1u : 0u, rs_x(XRS_SPECULARENABLE) ? 1u : 0u);
+                " token %08X; def %s tm %08X; fog %u specular %u; hash %08X\n", g_ps_seen_n - 1, k,
+                rc ? "FAILED" : "result", out, gaps, in[0], in[1], in[2], in[3], in[4], in[5], ps.token, line,
+                rs_x(XRS_PSTEXTUREMODES), rs_x(XRS_FOGENABLE) ? 1u : 0u, rs_x(XRS_SPECULARENABLE) ? 1u : 0u, h);
     }
 }
 
@@ -3631,10 +3639,10 @@ static void drawlog(const char *path, uint32_t xdk_prim, uint32_t n, uint32_t fv
         memcpy(&f_e, &fe, 4);
         memcpy(&f_d, &fd, 4);
         fprintf(stderr, "[D3DB] drawlog   fog table %u start %g end %g density %g colour %08X range %u; specular %u"
-                " lighting %u; final %08X %08X count %X; vs %08X\n", rs_x(XRS_FOGTABLEMODE), (double)f_s,
-                (double)f_e, (double)f_d, rs_x(XRS_FOGCOLOR), rs_x(XRS_RANGEFOGENABLE), rs_x(XRS_SPECULARENABLE),
-                rs_x(XRS_LIGHTING), rs_x(XPS_FINAL_ABCD), rs_x(XPS_FINAL_EFG), rs_x(XPS_COMBINERCOUNT),
-                MEM32(d + DEV_VS_HANDLE));
+                " lighting %u; final %08X %08X count %X; vs %08X; pixel shader def %08X\n", rs_x(XRS_FOGTABLEMODE),
+                (double)f_s, (double)f_e, (double)f_d, rs_x(XRS_FOGCOLOR), rs_x(XRS_RANGEFOGENABLE),
+                rs_x(XRS_SPECULARENABLE), rs_x(XRS_LIGHTING), rs_x(XPS_FINAL_ABCD), rs_x(XPS_FINAL_EFG),
+                rs_x(XPS_COMBINERCOUNT), MEM32(d + DEV_VS_HANDLE), MEM32(d + DEV_PIXEL_SHADER) ? ps_def_hash() : 0);
     }
     /* Step 50: the palettes bound to P8 stages, and their content. */
     {
@@ -3862,6 +3870,9 @@ static void mirror_copy_rects(const d3db_args_t *a)
         }
     event(&g_ev_copy_host, 12, "CopyRects back buffer -> Data %08X (%ux%u format %02X%s), %u rects: host %s", t.data,
           t.width, t.height, t.format, sz ? " linear" : "", n, rc == 0 ? "copied" : "FAILED");
+    if (drawlog_on())                   /* step 52: where the copies fall among the draws */
+        fprintf(stderr, "[D3DB] drawlog swap %ld copy before #%u: CopyRects back buffer -> Data %08X, %u rects, host %s\n",
+                (long)g_swaps + 1, g_drawlog_n, t.data, n, rc == 0 ? "copied" : "FAILED");
 }
 
 /* DrawVertices(PrimitiveType, StartVertex, VertexCount) (0x101B20; never

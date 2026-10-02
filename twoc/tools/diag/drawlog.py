@@ -24,13 +24,13 @@ import sys
 
 HDR = re.compile(r"\[D3DB\] drawlog swap (\d+) #(\d+) (\S+) prim (\d+) n (\d+) fvf (\S+) (.*?); tex0 (\S+) "
                  r"\(fmt (\S+), (\d+)x(\d+), data (\S+)\) tex1 (\S+); target (\S+);")
-CLEAR = re.compile(r"\[D3DB\] drawlog swap (\d+) clear before #(\d+): (.*)")
+CLEAR = re.compile(r"\[D3DB\] drawlog swap (\d+) (clear|copy) before #(\d+): (.*)")
 VSDUMP = re.compile(r"\[D3DB\] vsdump (\w{8})\.(\d+) (\w+) ?(.*)")
 
 
 def parse(path, swaps=None, clears=None):
     """The draws of `swaps` (all if None); a vsdump for draw N precedes N's
-    header. Clears go to the `clears` list if one is given."""
+    header. Clears and copies (step 52) go to the `clears` list if one is given."""
     recs, cur, pend = [], None, {}
     for line in open(path, "rb"):
         line = line.decode("latin1").rstrip("\r\n")
@@ -53,7 +53,7 @@ def parse(path, swaps=None, clears=None):
         m = CLEAR.match(line)
         if m:
             if clears is not None and (not swaps or int(m.group(1)) in swaps):
-                clears.append((int(m.group(1)), int(m.group(2)), m.group(3)))
+                clears.append((int(m.group(1)), int(m.group(3)), m.group(2) + ": " + m.group(4)))
             continue
         m = VSDUMP.match(line)
         if m:
@@ -91,7 +91,7 @@ def main():
     ci = 0
     for r in recs:
         while ci < len(clears) and clears[ci][1] <= r["no"]:
-            print("     clear: %s" % clears[ci][2])
+            print("     %s" % clears[ci][2])
             ci += 1
         if "--blended" in opts and " blend 1 " not in " " + r["lines"][1][17:] if len(r["lines"]) > 1 else False:
             continue
@@ -101,7 +101,7 @@ def main():
             continue
         print(summary(r))
     for c in clears[ci:]:
-        print("     clear: %s" % c[2])
+        print("     %s" % c[2])
 
 
 if __name__ == "__main__":
