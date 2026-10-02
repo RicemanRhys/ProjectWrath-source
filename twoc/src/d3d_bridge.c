@@ -3636,6 +3636,17 @@ static void drawlog(const char *path, uint32_t xdk_prim, uint32_t n, uint32_t fv
                 rs_x(XRS_LIGHTING), rs_x(XPS_FINAL_ABCD), rs_x(XPS_FINAL_EFG), rs_x(XPS_COMBINERCOUNT),
                 MEM32(d + DEV_VS_HANDLE));
     }
+    /* Step 50: the palettes bound to P8 stages, and their content. */
+    {
+        unsigned s;
+        for (s = 0; s < 4; s++) {
+            uint32_t th = MEM32(d + DEV_TEXTURES + 4 * s), pal = MEM32(d + DEV_PALETTES + 4 * s);
+            if (th && ((MEM32(th + RES_FORMAT) >> 8) & 0xFF) == XDK_FMT_P8)
+                fprintf(stderr, "[D3DB] drawlog   stage %u palette %08X data %08X sig %08X\n", s, pal, res_data(pal),
+                        pal ? content_sig((const uint8_t *)XBOX_PTR(phys_to_va(res_data(pal))),
+                                          4 * (256u >> ((MEM32(pal + RES_COMMON) >> 30) & 3))) : 0);
+        }
+    }
     /* Step 49: depth and stencil, and the depth offset (ZBIAS sets the
      * polygon offset states; xbox_d3d8 has no depth bias). */
     {
