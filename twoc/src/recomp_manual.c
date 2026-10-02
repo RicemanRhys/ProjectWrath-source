@@ -1415,7 +1415,7 @@ static void cm_MmFreeContiguousMemory(void)
     InterlockedIncrement(&g_cm_frees);
     if (!freed)
         InterlockedIncrement(&g_cm_untracked);   /* free list full: this block stays leaked */
-    esp += 8;                              /* ret 4 */
+    esp += 8;                             /* ret 4 */
     coop_leave(self);
     heap_watch();
 }
@@ -2519,7 +2519,27 @@ extern uint32_t xbox_AllocThreadStack(void);
 extern uint32_t xbox_AllocThreadTib(void);
 extern RECOMP_TLS uint32_t g_fs_base;
 
-static volatile LONG g_ai_isr_runs, g_ai_claimed, g_ai_traps, g_ai_stale;
+static volatile LONG g_ai_isr_runs, g_ai_claimed, g_ai_traps, g_ai_stale, g_ai_cleared;
+
+/*
+ * A trap's status left over once it is handled (Sea Shell's pause crash). The
+ * model sets FETINTSTS at every ISTS write while the front end is trapped
+ * (update_irq), and DSOUND's ISR writes the status back to clear it before
+ * its trap handler resumes the front end: so the write sets it again, and it
+ * is still set, with GINTSTS, after the trap is handled. FECTL keeps the trap
+ * reason and FEDECMETH/FEDECPARAM the trapped method, so the next look ran
+ * the ISR again on them: sub_00139F42 reported the same idle voice a second
+ * time, sub_001399D0(handle). Within a millisecond the voice is usually
+ * still as the first report left it (its list entry pointing at itself) and
+ * DSOUND skips it, but the pause screen stops and frees every voice at once:
+ * the second report found a freed voice (next and prev 0), and
+ * sub_0013AAF6's unlink read through the null prev (fault at 0xFFFFFFBE,
+ * prev - 0x4C + 0xA). In xemu the line stays asserted and the ISR runs again
+ * at once, before any thread can free the voice. A trap interrupts once, so
+ * the status of a trap no longer pending is cleared (write-one-to-clear; the
+ * model sets it again only while trapped) instead of being delivered.
+ */
+#define APU_ISTS_FETINTSTS    0x10u
 
 /* One pending interrupt, if any. Caller holds g_vw_isr_lock. */
 static void ai_service(uint32_t kint)
@@ -2528,6 +2548,11 @@ static void ai_service(uint32_t kint)
     uint32_t ists = MEM32(APU_ISTS_VA), ien = MEM32(APU_IEN_VA), fectl = MEM32(APU_FECTL_VA);
     int trapped = (fectl & APU_FECTL_MODE) == APU_FECTL_TRAPPED;
 
+    if (!trapped && (fectl & APU_FECTL_MODE) == 0 && (ists & APU_ISTS_FETINTSTS)) {
+        MEM32(APU_ISTS_VA) = APU_ISTS_FETINTSTS;
+        ists = MEM32(APU_ISTS_VA);
+        InterlockedIncrement(&g_ai_cleared);
+    }
     if (!(ien & APU_ISTS_GINTSTS) || (!trapped && !(ists & ien & ~APU_ISTS_GINTSTS)))
         return;
     if (trapped) {
@@ -2589,8 +2614,10 @@ static DWORD WINAPI ai_thread(LPVOID unused)
             continue;
         if (GetTickCount64() >= next_log) {
             if (next_log)
-                fprintf(stderr, "[APU-IRQ] ISR runs %ld (claimed %ld), idle-voice traps %ld, stale traps resumed %ld\n",
-                        (long)g_ai_isr_runs, (long)g_ai_claimed, (long)g_ai_traps, (long)g_ai_stale);
+                fprintf(stderr, "[APU-IRQ] ISR runs %ld (claimed %ld), idle-voice traps %ld, stale traps resumed %ld,"
+                                " handled traps' status cleared %ld\n",
+                        (long)g_ai_isr_runs, (long)g_ai_claimed, (long)g_ai_traps, (long)g_ai_stale,
+                        (long)g_ai_cleared);
             next_log = GetTickCount64() + 30000;
         }
         {
