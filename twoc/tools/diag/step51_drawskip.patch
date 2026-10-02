@@ -1,0 +1,86 @@
+diff --git a/twoc/src/d3d_bridge.c b/twoc/src/d3d_bridge.c
+index 4cfc58e..6b7ab91 100644
+--- a/twoc/src/d3d_bridge.c
++++ b/twoc/src/d3d_bridge.c
+@@ -1675,8 +1675,21 @@ static int skip_tex_once(const char *kind)
+ }
+ 
+ /* Every draw, on any path, before the path is mirrored or skipped. */
++static unsigned tmp_draw_i, tmp_skip_a = 1u << 30, tmp_skip_b;   /* TMP step 51: TMP_DRAWSKIP=A-B */
++static int tmp_skipping(void)
++{
++    return tmp_draw_i - 1 >= tmp_skip_a && tmp_draw_i - 1 <= tmp_skip_b;
++}
+ static void draw_checks(void)
+ {
++    static int init;
++    if (!init) {
++        const char *e = getenv("TMP_DRAWSKIP");
++        init = 1;
++        if (e && sscanf(e, "%u-%u", &tmp_skip_a, &tmp_skip_b) == 2)
++            fprintf(stderr, "[TMP] skipping draws %u-%u of each swap\n", tmp_skip_a, tmp_skip_b);
++    }
++    tmp_draw_i++;
+     if (g_psprobe && MEM32(dev() + DEV_PIXEL_SHADER))
+         ps_probe_once();
+     if (g_texcheck && g_check_prefix[0])
+@@ -2030,6 +2043,8 @@ static int setup_draw(d3dh_draw_t *dr, uint32_t fvf, d3dh_tex_t tex[4], d3dh_sta
+     uint32_t d = dev(), s, i;
+     int z_off, cpu = 0;
+ 
++    if (tmp_skipping())   /* TMP step 51 */
++        return -1;
+     if (describe_target(&dr->target, &z_off) != 0) {
+         skip(SKIP_TARGET, MEM32(d + DEV_RENDER_TARGET));
+         return -1;
+@@ -2935,6 +2950,8 @@ static void mirror_draw_vp(const char *path, uint32_t xdk_prim, uint32_t n, cons
+     uint32_t lo = 0, hi = 0, nv, prim = 0, count = 0, k = 0, i, vstride;
+     int texel, vc = -1;
+ 
++    if (tmp_skipping())   /* TMP step 51 */
++        return;
+     if (describe_vprog(&p) != 0) {
+         skip(SKIP_VS_PROGRAM, MEM32(dev() + DEV_VS_HANDLE));
+         return;
+@@ -3708,6 +3725,8 @@ static void mirror_draw_imm(void)
+ 
+     draw_checks();
+     g_imm.open = 0;
++    if (getenv("TMP_SKIP_ADD") && rs_x(XRS_ALPHABLENDENABLE) && rs_x(XRS_DESTBLEND) == 1)  /* TMP step 51 */
++        return;
+     if (vs & 1) {
+         skip(SKIP_VS_PROGRAM, vs);
+         if (g_vsdump) {                 /* none from splash to hub (S5) */
+@@ -3773,6 +3792,10 @@ static void mirror_draw_imm(void)
+     memset(tex, 0, sizeof(tex));
+     memset(&dr, 0, sizeof(dr));
+     cpu = setup_draw(&dr, vs, tex, rs, tss, &ps, &ff);
++    if (getenv("TMP_NOFOG_ADD") && rs_x(XRS_ALPHABLENDENABLE) && rs_x(XRS_DESTBLEND) == 1)  /* TMP step 51 */
++        for (i = 0; i < dr.n_rs; i++)
++            if (rs[i].state == PRS_FOGENABLE)
++                rs[i].value = 0;
+     if (cpu < 0) {
+         if (drawlog_on())
+             drawlog("Immediate", g_imm.prim, g_imm.n, vs, v, n, stride, "skipped");
+@@ -3926,6 +3949,21 @@ static void mirror_swap(void)
+ {
+     LONG n = InterlockedIncrement(&g_swaps);
+     ULONGLONG now;
++    if ((n % 300) == 0)
++        fprintf(stderr, "[TMP] swap %ld: %u draws in the last swap\n", (long)n, tmp_draw_i);
++    tmp_draw_i = 0;   /* TMP step 51 */
++    if (getenv("TMP_DRAWSKIP_FILE") && (n % 15) == 0) {
++        FILE *f = fopen(getenv("TMP_DRAWSKIP_FILE"), "r");
++        unsigned a2, b2;
++        if (f) {
++            if (fscanf(f, "%u-%u", &a2, &b2) == 2 && (a2 != tmp_skip_a || b2 != tmp_skip_b)) {
++                tmp_skip_a = a2;
++                tmp_skip_b = b2;
++                fprintf(stderr, "[TMP] swap %ld: skipping draws %u-%u\n", (long)n, a2, b2);
++            }
++            fclose(f);
++        }
++    }
+ 
+     motion_swap(n);
+     drawlog_trigger(n);
