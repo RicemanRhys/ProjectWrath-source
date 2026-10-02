@@ -4044,11 +4044,13 @@ static void mirror_swap(void)
             log_block_printf(&lb, "[D3DB] host copies: CopyRects back buffer -> texture %ld (host %u, fails %u), not"
                     " mirrored %ld; draws sampling a copy: mirrored %ld, vertex program %ld\n", (long)g_copies,
                     st.copies, st.copy_fails, (long)g_copies_skipped, (long)g_copy_sampled, (long)g_copy_sampled_vp);
-            log_block_printf(&lb, "[D3DB] host S4: render targets %u (fails %u), draws to them %u, clears %u, sampled %u"
+            log_block_printf(&lb, "[D3DB] host S4: render targets %u (fails %u; released with their memory %u,"
+                    " evicted %u), draws to them %u, clears %u, sampled %u"
                     " (while bound as the target %u); pixel-shader draws %u, probes %u; pixel-shader gaps:"
                     " blue %ld, register %ld, output map %ld, blue-to-alpha %ld, mux LSB %ld, texture mode %ld,"
                     " final constants %ld, V1R0 %ld\n",
-                    st.rt_created, st.rt_fails, st.rt_draws, st.rt_clears, st.rt_sampled, st.rt_feedback,
+                    st.rt_created, st.rt_fails, st.rt_released, st.rt_evicted, st.rt_draws, st.rt_clears,
+                    st.rt_sampled, st.rt_feedback,
                     st.ps_draws, st.ps_probes, (long)g_psgap[PSGAP_BLUE], (long)g_psgap[PSGAP_REG],
                     (long)g_psgap[PSGAP_OUTMAP], (long)g_psgap[PSGAP_BLUE_TO_ALPHA], (long)g_psgap[PSGAP_MUX_LSB],
                     (long)g_psgap[PSGAP_TEXMODE], (long)g_psgap[PSGAP_FINALCONST], (long)g_psgap[PSGAP_V1R0]);
@@ -4348,4 +4350,14 @@ void d3db_mark(const char *label)
         return;
     fprintf(stderr, "[D3DB] +%.1f s mark: %s\n", now_s(), label);
     cen_dump(1, label);
+}
+
+/* Step 52: the guest freed a contiguous block (VA 0x80000000 + its physical
+ * address, phys_to_va's inverse): a render target whose Data was in it is
+ * gone, and a later texture or target at that Data starts afresh. */
+void d3db_memory_freed(uint32_t va, uint32_t bytes)
+{
+    if (!d3db_host_on || va < 0x80000000u)
+        return;
+    d3dh_memory_freed(va - 0x80000000u, bytes);
 }

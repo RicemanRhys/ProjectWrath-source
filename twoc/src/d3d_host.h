@@ -17,6 +17,7 @@ typedef struct {
     unsigned draws, draw_fails;
     unsigned tex_uploads, tex_upload_fails, tex_evictions;
     unsigned rt_created, rt_fails, rt_draws, rt_clears, rt_sampled, rt_feedback;  /* S4 */
+    unsigned rt_released, rt_evicted;                                             /* step 52 */
     unsigned p8_uploads, ps_draws, ps_probes;                                     /* S4 */
     unsigned cube_uploads;                                                        /* S5 part 2 */
     unsigned indexed_draws, ff_draws, lit_draws;                                  /* fixed-function 3D */
@@ -163,6 +164,9 @@ int d3dh_copy_back(const d3dh_target_t *dst, const int32_t *rects, const int32_t
 
 /* A guest lock at physical address `data`: drop cached textures that hold it. */
 void d3dh_texture_touch(uint32_t data);
+/* Step 52: the guest freed contiguous memory at physical [data, data + bytes):
+ * release the render targets whose Data was in it. */
+void d3dh_memory_freed(uint32_t data, uint32_t bytes);
 /* Dump the back buffer at each guest swap in [from, to] (needs a dump prefix). */
 void d3dh_dump_range(unsigned from, unsigned to);
 

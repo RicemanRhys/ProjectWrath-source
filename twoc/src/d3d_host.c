@@ -132,14 +132,21 @@ static int g_frame_work;                /* mirrored work since the last present 
 static int g_dump_rt;                   /* RECOMP_D3D_BRIDGE_DUMP_RT: render targets too (S4) */
 static d3dh_stats_t g_st;
 
-/* S4: host render-target textures, by guest Data. */
-#define RT_SLOTS 16
+/* S4: host render-target textures, by guest Data. A target lives until the
+ * guest frees its memory (d3dh_memory_freed) or, with every slot in use, it
+ * is the least recently used one (step 52). Before, 16 slots were never given
+ * back: the title and every level load make six new 128x128 targets, so by
+ * Sea Shell's first visit the last slot went to its 640x480 underwater
+ * target and the pause still's 256x256 one got none (the still was black). */
+#define RT_SLOTS 32
 typedef struct {
     uint32_t data, width, height, format;
     IDirect3DTexture8 *tex;
     IDirect3DSurface8 *surf, *depth;
+    unsigned last_use;
 } host_rt_t;
 static host_rt_t g_rt[RT_SLOTS];
+static unsigned g_rt_clock;
 static int g_cur_target = -1;           /* -1 the back buffer, else a g_rt index; -2 unknown */
 
 /* ── Window thread ─────────────────────────────────────────── */
@@ -310,39 +317,60 @@ int d3dh_ready(void)
 
 /* ── Render targets (S4) ───────────────────────────────────── */
 
+/* Release render target i. Called with g_lock held. */
+static void rt_release(int i)
+{
+    int s;
+
+    if (g_cur_target == i) {
+        g_dev->lpVtbl->SetRenderTarget(g_dev, NULL, NULL);
+        g_cur_target = -1;
+    }
+    for (s = 0; s < 4; s++)             /* xbox_d3d8 keeps the bound pointer */
+        g_dev->lpVtbl->SetTexture(g_dev, s, NULL);
+    g_rt[i].depth->lpVtbl->Release(g_rt[i].depth);
+    g_rt[i].surf->lpVtbl->Release(g_rt[i].surf);
+    g_rt[i].tex->lpVtbl->Release(g_rt[i].tex);
+    memset(&g_rt[i], 0, sizeof(g_rt[i]));
+}
+
 /* The host render target for guest Data, created on first use. Called with
  * g_lock held. Returns its index, or -1. */
 static int rt_find(const d3dh_target_t *t, int create)
 {
-    int i, s, free_i = -1;
+    int i, free_i = -1, lru = -1;
     IDirect3DTexture8 *tex = NULL;
     IDirect3DSurface8 *surf = NULL, *depth = NULL;
     HRESULT hr;
 
     for (i = 0; i < RT_SLOTS; i++) {
         if (g_rt[i].tex && g_rt[i].data == t->data) {
-            if (g_rt[i].width == t->width && g_rt[i].height == t->height && g_rt[i].format == t->format)
+            if (g_rt[i].width == t->width && g_rt[i].height == t->height && g_rt[i].format == t->format) {
+                g_rt[i].last_use = ++g_rt_clock;
                 return i;
+            }
             if (!create)
                 return -1;
-            if (g_cur_target == i) {    /* the guest reused the memory for another shape */
-                g_dev->lpVtbl->SetRenderTarget(g_dev, NULL, NULL);
-                g_cur_target = -1;
-            }
-            for (s = 0; s < 4; s++)     /* xbox_d3d8 keeps the bound pointer */
-                g_dev->lpVtbl->SetTexture(g_dev, s, NULL);
-            g_rt[i].depth->lpVtbl->Release(g_rt[i].depth);
-            g_rt[i].surf->lpVtbl->Release(g_rt[i].surf);
-            g_rt[i].tex->lpVtbl->Release(g_rt[i].tex);
-            memset(&g_rt[i], 0, sizeof(g_rt[i]));
+            rt_release(i);              /* the guest reused the memory for another shape */
             free_i = i;
             break;
         }
         if (!g_rt[i].tex && free_i < 0)
             free_i = i;
+        if (g_rt[i].tex && i != g_cur_target && (lru < 0 || g_rt[i].last_use < g_rt[lru].last_use))
+            lru = i;
     }
-    if (!create || free_i < 0)
+    if (!create)
         return -1;
+    if (free_i < 0) {                   /* every slot in use: the least recently used one goes */
+        if (lru < 0)
+            return -1;
+        if (++g_st.rt_evicted <= 5)
+            fprintf(stderr, "[D3DB] host render targets full: target %d (guest Data %08X, %ux%u) evicted for"
+                    " Data %08X\n", lru, g_rt[lru].data, g_rt[lru].width, g_rt[lru].height, t->data);
+        rt_release(lru);
+        free_i = lru;
+    }
     hr = g_dev->lpVtbl->CreateTexture(g_dev, t->width, t->height, 1, D3DUSAGE_RENDERTARGET, (D3DFORMAT)t->format,
                                       D3DPOOL_DEFAULT, &tex);
     if (SUCCEEDED(hr))
@@ -369,6 +397,7 @@ static int rt_find(const d3dh_target_t *t, int create)
     g_rt[free_i].tex = tex;
     g_rt[free_i].surf = surf;
     g_rt[free_i].depth = depth;
+    g_rt[free_i].last_use = ++g_rt_clock;
     g_st.rt_created++;
     fprintf(stderr, "[D3DB] host render target %d for guest Data %08X: %ux%u format %02X\n", free_i, t->data,
             t->width, t->height, t->format);
@@ -400,6 +429,21 @@ static int bind_target(const d3dh_target_t *t)
         g_cur_target = i;
     }
     return 0;
+}
+
+void d3dh_memory_freed(uint32_t data, uint32_t bytes)
+{
+    int i;
+
+    if (!g_ready)
+        return;
+    EnterCriticalSection(&g_lock);
+    for (i = 0; i < RT_SLOTS; i++)
+        if (g_rt[i].tex && g_rt[i].data >= data && g_rt[i].data - data < bytes) {
+            rt_release(i);
+            g_st.rt_released++;
+        }
+    LeaveCriticalSection(&g_lock);
 }
 
 /* ── Clear ─────────────────────────────────────────────────── */
@@ -550,6 +594,7 @@ static IDirect3DBaseTexture8 *tex_get(const d3dh_tex_t *t)
 
     for (i = 0; i < RT_SLOTS; i++)      /* S4: what the host rendered, not guest memory */
         if (g_rt[i].tex && g_rt[i].data == t->data) {
+            g_rt[i].last_use = ++g_rt_clock;
             g_st.rt_sampled++;
             if (g_cur_target == (int)i)
                 g_st.rt_feedback++;     /* D3D11 unbinds the view: the stage samples black */

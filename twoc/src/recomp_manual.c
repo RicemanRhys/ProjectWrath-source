@@ -1415,7 +1415,8 @@ static void cm_MmFreeContiguousMemory(void)
     InterlockedIncrement(&g_cm_frees);
     if (!freed)
         InterlockedIncrement(&g_cm_untracked);   /* free list full: this block stays leaked */
-    esp += 8;                             /* ret 4 */
+    d3db_memory_freed(base, extent);       /* the mirror's render targets in it (bridge on) */
+    esp += 8;                              /* ret 4 */
     coop_leave(self);
     heap_watch();
 }

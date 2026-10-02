@@ -59,6 +59,7 @@ void d3db_init(void);
 void d3db_enter(int id, d3db_args_t *a);
 void d3db_leave(int id, d3db_args_t *a);
 void d3db_mark(const char *label);  /* close the census interval at a phase boundary */
+void d3db_memory_freed(uint32_t va, uint32_t bytes);   /* MmFreeContiguousMemory, bridge on (step 52) */
 
 /* A wrapper body: the lifted function first, then (bridge on) the mirror. */
 #define D3DB_CALL(id, gen) do {                 \
