@@ -2135,6 +2135,79 @@ static uint8_t *cpu_lit_copy(const void *verts, uint32_t count, uint32_t stride,
     return c;
 }
 
+/* Step 50 (notes 18.53): texel_patch's fixed-function side. The NV2A
+ * addresses a linear texture in texels and xbox_d3d8 samples over 0..1, so
+ * a fixed-function draw (UP, indexed, immediate) with a linear texture on a
+ * stage gets its vertices copied (`*owned`, freed by the caller; a CPU-lit
+ * copy is reused) with the coordinate set that stage reads (TEXCOORDINDEX)
+ * divided by the texture's width and height. H2 Oh No's underwater pass
+ * draws its 640x480 linear target over the screen with coordinates 0..639 x
+ * 0..479; read as 0..1 and clamped, the screen was one texel's colour. A
+ * stage with texture generation, or a set two linear stages read at different
+ * sizes, is left as it was and counted. */
+static volatile LONG g_ff_texel_draws, g_ff_texel_gaps, g_ev_ff_texel;
+
+static void ff_texel_scale(d3dh_draw_t *dr, uint32_t fvf, uint8_t **owned)
+{
+    static const uint8_t pos[8] = { 0, 12, 16, 16, 20, 24, 28, 32 };
+    static const uint8_t tc[4] = { 8, 12, 16, 4 };
+    uint32_t sets = (fvf >> 8) & 15, off, set_off[8], done = 0, s, i;
+    float sw[8], sh[8];
+    uint8_t *c;
+
+    for (s = 0; s < 4; s++) {
+        const d3dh_tex_t *t = dr->tex[s];
+        uint32_t tci, set;
+        if (!t || !t->pitch)
+            continue;                   /* none, or not linear */
+        tci = MEM32(D3D_TEXTURESTATE + 4 * (s * D3D_TSS_COUNT + XTSS_TEXCOORDINDEX));
+        set = tci & 0xFFFF;
+        if ((tci >> 16) || set >= sets || set >= 8) {
+            InterlockedIncrement(&g_ff_texel_gaps);
+            continue;
+        }
+        if (done & (1u << set)) {
+            if (sw[set] != 1.0f / t->width || sh[set] != 1.0f / t->height)
+                InterlockedIncrement(&g_ff_texel_gaps);
+            continue;
+        }
+        done |= 1u << set;
+        sw[set] = 1.0f / t->width;
+        sh[set] = 1.0f / t->height;
+        event(&g_ev_ff_texel, 8, "fixed-function draw (FVF %X): linear texture %08X (%ux%u) on stage %u, coordinate"
+              " set %u scaled to 0..1", fvf, t->key, t->width, t->height, s, set);
+    }
+    if (!done || !dr->vert_count)
+        return;
+    off = pos[(fvf & FVF_POSITION_MASK) >> 1] + ((fvf & FVF_NORMAL) ? 12 : 0) + ((fvf & FVF_PSIZE) ? 4 : 0) +
+          ((fvf & FVF_DIFFUSE) ? 4 : 0) + ((fvf & FVF_SPECULAR) ? 4 : 0);
+    for (i = 0; i < sets && i < 8; i++) {
+        set_off[i] = off;
+        off += tc[(fvf >> (16 + 2 * i)) & 3];
+    }
+    c = *owned;
+    if (!c) {
+        c = (uint8_t *)malloc((size_t)dr->vert_count * dr->stride);
+        if (!c)
+            return;
+        memcpy(c, dr->verts, (size_t)dr->vert_count * dr->stride);
+        *owned = c;
+    }
+    for (i = 0; i < 8; i++) {
+        uint32_t v, two = ((fvf >> (16 + 2 * i)) & 3) != 3;    /* TEXCOORDSIZE1 has u alone */
+        if (!(done & (1u << i)))
+            continue;
+        for (v = 0; v < dr->vert_count; v++) {
+            float *p = (float *)(c + (size_t)v * dr->stride + set_off[i]);
+            p[0] *= sw[i];
+            if (two)
+                p[1] *= sh[i];
+        }
+    }
+    dr->verts = c;
+    InterlockedIncrement(&g_ff_texel_draws);
+}
+
 static void count_mirrored(const d3dh_draw_t *dr)
 {
     InterlockedIncrement(&g_mirrored_draws);
@@ -3063,6 +3136,7 @@ static void mirror_draw_up_path(const d3db_args_t *a, const char *path)
         if (lit)
             dr.verts = lit;
     }
+    ff_texel_scale(&dr, vs, &lit);
 
     /* The first few draws, raw XDK values; render-target draws have their own
      * allowance, as the splash uses up the first. */
@@ -3243,6 +3317,7 @@ static void mirror_draw_indexed(const d3db_args_t *a)
         if (lit)
             dr.verts = lit;
     }
+    ff_texel_scale(&dr, vs, &lit);
 
     /* The first draws in full, to check the scrape: vertex 0 of the range
      * before and after lighting, and the fixed-function state. */
@@ -3703,6 +3778,7 @@ static void mirror_draw_imm(void)
         if (lit)
             dr.verts = lit;
     }
+    ff_texel_scale(&dr, vs, &lit);
     if (g_ev_imm < 10) {
         const float *s = g_imm.buf;
         event(&g_ev_imm, 10, "Immediate prim %u, %u vertices, FVF %X (stride %u) -> host prim %u count %u; vertex 0:"
@@ -3939,10 +4015,12 @@ static void mirror_swap(void)
                     (long)g_gap[GAP_TEXOP], (long)g_gap[GAP_DIFFUSE_ARG], (long)g_gap[GAP_FRONTFACE]);
             log_block_printf(&lb, "[D3DB] host fixed function: indexed draws %u, untransformed draws %u (lit by xbox_d3d8"
                     " %ld, lit on the CPU %ld); gaps: over 8 lights %ld, texture transform %ld, CPU lighting"
-                    " without a diffuse %ld, specular %ld, texcoord format %ld, immediate w not 1 %ld\n",
+                    " without a diffuse %ld, specular %ld, texcoord format %ld, immediate w not 1 %ld; linear textures"
+                    " scaled to 0..1 %ld (not scaled %ld)\n",
                     st.indexed_draws, st.ff_draws, (long)g_host_lit_draws, (long)g_cpu_lit_draws,
                     (long)g_gap[GAP_LIGHTS], (long)g_gap[GAP_TEXTRANSFORM], (long)g_gap[GAP_CPU_LIGHT],
-                    (long)g_gap[GAP_SPECULAR], (long)g_gap[GAP_TEXCOORD_SIZE], (long)g_gap[GAP_IMM_W]);
+                    (long)g_gap[GAP_SPECULAR], (long)g_gap[GAP_TEXCOORD_SIZE], (long)g_gap[GAP_IMM_W],
+                    (long)g_ff_texel_draws, (long)g_ff_texel_gaps);
             log_block_printf(&lb, "[D3DB] host vertex programs: mirrored %ld (host draws %u), shaders %u (fails %u), constant"
                     " uploads %u, probes %u; linear textures scaled to 0..1 %ld (not patchable %ld); point sprites as quads %ld"
                     " (not patchable %ld); sampling a copy,"
