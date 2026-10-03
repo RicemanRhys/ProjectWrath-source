@@ -61,6 +61,16 @@ void d3db_leave(int id, d3db_args_t *a);
 void d3db_mark(const char *label);  /* close the census interval at a phase boundary */
 void d3db_memory_freed(uint32_t va, uint32_t bytes);   /* MmFreeContiguousMemory, bridge on (step 52) */
 
+/* 16:9 (notes 18.56). RECOMP_WIDESCREEN=1 (16:9) or =W:H, with the bridge
+ * on: the host picture's width over height. 0 when off, and then nothing
+ * below changes anything. */
+extern double d3db_wide;
+/* sub_000956B0's wrapper (recomp_manual.c): what to scale a camera's aspect
+ * (height over width) by for the projection it is about to build; 1 leaves
+ * it. Only the 4:3 aspect, and only into the back buffer or a target of its
+ * size. */
+float d3db_camera_aspect_scale(uint32_t camera, float aspect);
+
 /* A wrapper body: the lifted function first, then (bridge on) the mirror. */
 #define D3DB_CALL(id, gen) do {                 \
         d3db_args_t a_;                         \

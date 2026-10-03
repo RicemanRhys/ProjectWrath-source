@@ -24,6 +24,9 @@
 #                fence mirror completes the push buffers, and the bridge's host present paces the game at
 #                59.94 Hz (RECOMP_D3D_BRIDGE_HZ overrides the rate, 0 turns the limiter off). No -DumpDir
 #                shots from the executor, only the host's hostNNN.bmp
+#   -Widescreen  RECOMP_WIDESCREEN=1 (needs -Bridge or -HostOnly; notes 18.56): 16:9. The game widens every
+#                projection that renders to the screen (the camera aspect, sub_000956B0) and the host renders
+#                a 16:9 picture (full-width 2D stretched, the HUD and menus pillarboxed). Off, nothing changes
 #
 # Usage, from anywhere (script execution is off by default on this machine, so bypass it for this process):
 #   powershell -NoProfile -ExecutionPolicy Bypass -File twoc\run_twoc.ps1
@@ -44,7 +47,8 @@ param(
     [switch]$FastTitle,
     [switch]$AutoStart,
     [switch]$Bridge,
-    [switch]$HostOnly
+    [switch]$HostOnly,
+    [switch]$Widescreen
 )
 $ErrorActionPreference = 'Stop'
 $repo = Split-Path -Parent $PSScriptRoot
@@ -62,6 +66,7 @@ if ($Window) { $env:RECOMP_FB_WINDOW = '1' }
 if ($FastTitle) { $env:RECOMP_DEV_FAST_TITLE = '1' } else { Remove-Item Env:RECOMP_DEV_FAST_TITLE -ErrorAction SilentlyContinue }
 if ($AutoStart) { $env:RECOMP_DEV_AUTOSTART  = '1' } else { Remove-Item Env:RECOMP_DEV_AUTOSTART  -ErrorAction SilentlyContinue }
 if ($Bridge)    { $env:RECOMP_D3D_BRIDGE     = '1' } else { Remove-Item Env:RECOMP_D3D_BRIDGE     -ErrorAction SilentlyContinue }
+if ($Widescreen) { $env:RECOMP_WIDESCREEN    = '1' } else { Remove-Item Env:RECOMP_WIDESCREEN     -ErrorAction SilentlyContinue }
 if ($DumpDir) {
     New-Item -ItemType Directory -Force -Path $DumpDir | Out-Null
     $env:RECOMP_FB_DUMP = Join-Path (Resolve-Path $DumpDir) 'shot'

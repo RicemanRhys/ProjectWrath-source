@@ -289,6 +289,34 @@ static void traced_sub_0002BCC0(void)
     sub_0002BCC0();
 }
 
+/* ── 16:9: the camera aspect (notes 18.54, 18.56) ──────────── */
+
+/* sub_000956B0(camera) (cdecl) builds the frame's projection: it copies the
+ * camera's 0x60-byte block to 0x242620, then reads fov and aspect (height
+ * over width, 0.75) at +0x40/+0x44 for the projection's x scale, cot(fov/2) *
+ * aspect, and the frustum tangent the culling uses, tan(fov/2) / aspect.
+ * Nothing else reads the aspect, so with RECOMP_WIDESCREEN (bridge on) the
+ * camera's aspect is scaled for the call (0.75 -> 0.5625 at 16:9) and put
+ * back after it: the view is wider and so is the culling, for every camera
+ * that renders to the screen. Off, the lifted function runs as before. */
+extern void sub_000956B0_gen(void);
+void sub_000956B0(void)
+{
+    uint32_t cam = MEM32(esp + 4), saved;
+    float scale;
+
+    if (d3db_wide <= 0 || !cam) {
+        sub_000956B0_gen();
+        return;
+    }
+    saved = MEM32(cam + 0x44);
+    scale = d3db_camera_aspect_scale(cam, MEMF(cam + 0x44));
+    if (scale != 1.0f)
+        MEMF(cam + 0x44) *= scale;
+    sub_000956B0_gen();
+    MEM32(cam + 0x44) = saved;
+}
+
 /* ── Cooperative NtSuspendThread / NtResumeThread ──────────── */
 
 /*

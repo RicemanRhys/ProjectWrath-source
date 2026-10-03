@@ -171,6 +171,7 @@ static char g_motion_on_path[MAX_PATH];
 static int g_motion_live;
 static unsigned g_motion_n;
 static uint32_t g_motion_vsc_ret[4], g_motion_draw_ret;  /* who last wrote c0 (a call chain), who drew */
+static uint32_t g_draw_ret;         /* the draw call's guest return address, for the draw log (18.56) */
 static char g_check_prefix[512];    /* where the checks write: "<dump dir>\host", as the host dumps */
 
 static const char *const d3db_name[D3DB_COUNT] = {
@@ -566,6 +567,78 @@ static int env_on(const char *name)
     return v && *v && strcmp(v, "0") != 0;
 }
 
+/* ── 16:9 (notes 18.54, 18.56) ──────────────────────────────────
+ *
+ * RECOMP_WIDESCREEN=1 (16:9) or =W:H, with the bridge on. The game builds
+ * every projection in sub_000956B0 from the camera's aspect (height over
+ * width, 0.75), which sets the projection's width and the frustum culling
+ * together (18.54); its wrapper in recomp_manual.c scales that aspect by
+ * d3db_camera_aspect_scale for the call. The host then renders a wider back
+ * buffer (d3d_host.c). Off, or with the bridge off, d3db_wide is 0 and
+ * nothing here runs. */
+double d3db_wide;
+static uint32_t g_guest_w, g_guest_h;      /* the guest back buffer (CreateDevice) */
+static volatile LONG g_wide_cameras, g_wide_kept, g_ev_wide;
+
+static void wide_init(void)
+{
+    const char *v = getenv("RECOMP_WIDESCREEN");
+    double w = 16.0, h = 9.0;
+
+    if (!v || !*v || strcmp(v, "0") == 0)
+        return;
+    if (!d3db_host_on) {
+        fprintf(stderr, "[WIDE] RECOMP_WIDESCREEN needs the bridge (RECOMP_D3D_BRIDGE=1, run_twoc.ps1 -Bridge or"
+                " -HostOnly): off\n");
+        return;
+    }
+    if (strchr(v, ':') && (sscanf(v, "%lf:%lf", &w, &h) != 2 || w <= 0 || h <= 0 || w / h <= 4.0 / 3.0 + 1e-6)) {
+        fprintf(stderr, "[WIDE] RECOMP_WIDESCREEN=%s: not W:H wider than 4:3; off\n", v);
+        return;
+    }
+    d3db_wide = w / h;
+    fprintf(stderr, "[WIDE] widescreen on: %.4f (%g:%g); 4:3 camera aspects x %.4f\n", d3db_wide, w, h,
+            (4.0 / 3.0) / d3db_wide);
+}
+
+/* Whether the current render target is the back buffer or a target of its
+ * size (H2 Oh No's underwater pass renders the level into one). */
+static int screen_target(void)
+{
+    uint32_t rt = MEM32(dev() + DEV_RENDER_TARGET), f, sz, w, h;
+
+    if (!rt || strcmp(surface_kind(rt), "back") == 0)
+        return 1;
+    f = MEM32(rt + RES_FORMAT);
+    sz = MEM32(rt + RES_SIZE);
+    w = sz ? (sz & 0xFFF) + 1 : 1u << ((f >> 20) & 15);
+    h = sz ? ((sz >> 12) & 0xFFF) + 1 : 1u << ((f >> 24) & 15);
+    return w == g_guest_w && h == g_guest_h;
+}
+
+float d3db_camera_aspect_scale(uint32_t camera, float aspect)
+{
+    static uint32_t seen[32][2];
+    static int n_seen;
+    uint32_t rt = MEM32(dev() + DEV_RENDER_TARGET), a, i;
+    int wide;
+
+    if (d3db_wide <= 0)
+        return 1.0f;
+    wide = aspect > 0.74f && aspect < 0.76f && screen_target();
+    InterlockedIncrement(wide ? &g_wide_cameras : &g_wide_kept);
+    memcpy(&a, &aspect, 4);
+    for (i = 0; i < (uint32_t)n_seen && (seen[i][0] != camera || seen[i][1] != (a ^ rt)); i++)
+        ;
+    if (i == (uint32_t)n_seen && n_seen < 32) {     /* each camera, aspect and target once */
+        seen[n_seen][0] = camera;
+        seen[n_seen++][1] = a ^ rt;
+        event(&g_ev_wide, 32, "camera %08X aspect %.4f into %s %08X (Data %08X): %s", camera, (double)aspect,
+              surface_kind(rt), rt, res_data(rt), wide ? "widened" : "kept");
+    }
+    return wide ? (float)((4.0 / 3.0) / d3db_wide) : 1.0f;
+}
+
 void d3db_init(void)
 {
     d3db_host_on = env_on("RECOMP_D3D_BRIDGE");
@@ -599,6 +672,7 @@ void d3db_init(void)
             fprintf(stderr, "[D3DB] motion log to %s while %s exists\n", m, g_motion_on_path);
         }
     }
+    wide_init();
     if (d3db_on)
         coop_watch_cs(GAME_D3D_LOCK);
     g_t0_ms = g_last_dump_ms = GetTickCount64();
@@ -728,6 +802,8 @@ static void mirror_create_device(const d3db_args_t *a)
         fprintf(stderr, "[D3DB] guest CreateDevice returned %08X: no host device\n", eax);
         return;
     }
+    g_guest_w = MEM32(pp + 4 * PP_WIDTH);
+    g_guest_h = MEM32(pp + 4 * PP_HEIGHT);
     interval = present_interval();
     hz = present_hz(MEM32(pp + 4 * PP_INTERVAL));
     vsync_pacing(&interval, &hz);
@@ -3611,10 +3687,10 @@ static void drawlog(const char *path, uint32_t xdk_prim, uint32_t n, uint32_t fv
         }
     }
     fprintf(stderr, "[D3DB] drawlog swap %ld #%u %s prim %u n %u fvf %X %s; tex0 %08X (fmt %02X, %ux%u, data %08X)"
-            " tex1 %08X; target %s; box (%.1f, %.1f)-(%.1f, %.1f)%s uv (%.4g, %.4g)-(%.4g, %.4g)%s\n",
+            " tex1 %08X; target %s; from %08X; box (%.1f, %.1f)-(%.1f, %.1f)%s uv (%.4g, %.4g)-(%.4g, %.4g)%s\n",
             (long)g_swaps + 1, g_drawlog_n++, path, xdk_prim, n, fvf, outcome, t0, (f0 >> 8) & 0xFF,
             t0 ? 1u << ((f0 >> 20) & 15) : 0, t0 ? 1u << ((f0 >> 24) & 15) : 0, res_data(t0), t1,
-            surface_kind(MEM32(d + DEV_RENDER_TARGET)), (double)box[0], (double)box[1], (double)box[2],
+            surface_kind(MEM32(d + DEV_RENDER_TARGET)), g_draw_ret, (double)box[0], (double)box[1], (double)box[2],
             (double)box[3], behind ? " (some behind the eye)" : "", (double)uv[0], (double)uv[1], (double)uv[2],
             (double)uv[3], w);
     /* S5: the blending and stage-0/1 ops too (XDK values), and the pixel shader. */
@@ -4081,6 +4157,9 @@ static void mirror_swap(void)
                 for (i = 0; i < 4; i++)
                     last[i] = cur[i];
             }
+            if (d3db_wide > 0)  /* 18.56 */
+                log_block_printf(&lb, "[D3DB] host widescreen: projections widened %ld, kept %ld\n",
+                                 (long)g_wide_cameras, (long)g_wide_kept);
             {
                 char buf[512];
                 int i, len = 0;
@@ -4292,10 +4371,10 @@ void d3db_leave(int id, d3db_args_t *a)
         case D3DB_CREATE_DEVICE: mirror_create_device(a); break;
         case D3DB_CLEAR:         mirror_clear(a);         break;
         case D3DB_SWAP:          mirror_swap();           break;
-        case D3DB_DRAW_UP:       mirror_draw_up(a);       break;
-        case D3DB_DRAW_INDEXED:  g_motion_draw_ret = a->ret; mirror_draw_indexed(a);  break;
-        case D3DB_END:           mirror_draw_imm();       break;
-        case D3DB_DRAW:          mirror_draw_vertices(a); break;
+        case D3DB_DRAW_UP:       g_draw_ret = a->ret; mirror_draw_up(a); break;
+        case D3DB_DRAW_INDEXED:  g_motion_draw_ret = g_draw_ret = a->ret; mirror_draw_indexed(a);  break;
+        case D3DB_END:           g_draw_ret = a->ret; mirror_draw_imm(); break;
+        case D3DB_DRAW:          g_draw_ret = a->ret; mirror_draw_vertices(a); break;
         case D3DB_COPYRECTS:     mirror_copy_rects(a);    break;
         }
         QueryPerformanceCounter(&t1);
