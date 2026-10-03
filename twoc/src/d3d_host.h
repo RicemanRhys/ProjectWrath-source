@@ -214,5 +214,8 @@ void d3dh_resize(unsigned host_w, unsigned host_h, double wide);
 void d3dh_set_pacing(unsigned interval, double frame_hz);
 /* The window's monitor's nominal refresh rate (its mode), 0 if unknown. */
 double d3dh_monitor_hz(void);
+/* For the controller poll (recomp_manual.c): 1 while the overlay is open;
+ * *closes counts the times it has closed. Callable with the bridge off. */
+int d3dh_overlay_input(unsigned *closes);
 
 #endif

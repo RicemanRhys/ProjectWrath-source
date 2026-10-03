@@ -3233,6 +3233,53 @@ void sub_0015429F(void)
  * port tokens handed out by the hand-written open (sub_00154249 below), so
  * the port comes straight from it.
  */
+/*
+ * Step 54 (notes 18.57): the settings overlay's controller gate. The overlay
+ * takes the keyboard and mouse only and holds the game in its present, so
+ * the game doesn't poll while it is open; should a poll come anyway, it gets
+ * an idle pad (counted). And whatever button or trigger is held at the first
+ * poll after the overlay closes stays masked until it is released, so a
+ * press made while it was open never reaches the game. The sticks pass. The
+ * overlay never opened: nothing here changes the state.
+ */
+extern int d3dh_overlay_input(unsigned *closes);
+
+static void overlay_gate(DWORD port, XBOX_INPUT_STATE *s)
+{
+    static unsigned seen[XBOX_MAX_CONTROLLERS], polled_open;
+    static uint16_t mask_btn[XBOX_MAX_CONTROLLERS];
+    static uint8_t mask_an[XBOX_MAX_CONTROLLERS][8];
+    unsigned closes, i;
+
+    if (port >= XBOX_MAX_CONTROLLERS)
+        return;
+    if (d3dh_overlay_input(&closes)) {
+        memset(&s->Gamepad, 0, sizeof(s->Gamepad));
+        polled_open++;
+        return;
+    }
+    if (closes != seen[port]) {         /* closed since this port's last poll */
+        seen[port] = closes;
+        mask_btn[port] = s->Gamepad.wButtons;
+        for (i = 0; i < 8; i++)
+            mask_an[port][i] = s->Gamepad.bAnalogButtons[i] >= XBOX_ANALOG_BUTTON_THRESHOLD;
+        fprintf(stderr, "[XPP] port %u after the settings overlay: %u polls answered idle while it was open;"
+                " held buttons=0x%04X analog=%u%u%u%u%u%u%u%u masked until released\n", (unsigned)port, polled_open,
+                mask_btn[port], mask_an[port][0], mask_an[port][1], mask_an[port][2], mask_an[port][3],
+                mask_an[port][4], mask_an[port][5], mask_an[port][6], mask_an[port][7]);
+        polled_open = 0;
+    }
+    mask_btn[port] &= s->Gamepad.wButtons;      /* released: no longer masked */
+    s->Gamepad.wButtons &= (uint16_t)~mask_btn[port];
+    for (i = 0; i < 8; i++)
+        if (mask_an[port][i]) {
+            if (s->Gamepad.bAnalogButtons[i] < XBOX_ANALOG_BUTTON_THRESHOLD)
+                mask_an[port][i] = 0;
+            else
+                s->Gamepad.bAnalogButtons[i] = 0;
+        }
+}
+
 void sub_001542AB(void)
 {
     static uint64_t hits;
@@ -3249,6 +3296,8 @@ void sub_001542AB(void)
     }
     result = xbox_InputGetState(port, &state);
     dev_autostart_poll(port, &state, &result);
+    if (result == ERROR_SUCCESS)
+        overlay_gate(port, &state);     /* step 54 */
     if (result == ERROR_SUCCESS) {
         /* Log digital/analog button changes (not thumbsticks, which drift),
          * so a run shows whether real player input reached the game. */

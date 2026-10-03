@@ -1984,6 +1984,14 @@ void d3dh_set_apply(d3dh_apply_fn fn)
     g_apply = fn;
 }
 
+static volatile LONG g_ovl_closes;      /* times the overlay has closed (the controller gate) */
+
+int d3dh_overlay_input(unsigned *closes)
+{
+    *closes = (unsigned)g_ovl_closes;
+    return g_ovl_open != 0;
+}
+
 /* The visible swap chain again, with `flags` (the frame-latency object or
  * not), at its current size. A flag can't change in ResizeBuffers. Called
  * with g_lock held, from the only presenting thread (the overlay's). */
@@ -2263,6 +2271,7 @@ static void overlay_pause(void)
             InterlockedExchange(&g_ovl_open, 0);
     }
     twoc_audio_mute(0);
+    InterlockedIncrement(&g_ovl_closes);
     if (dirty)
         note = twoc_settings_save(&s) == 0 ? "Saved to crash_twoc.ini." : "crash_twoc.ini couldn't be written.";
     QueryPerformanceCounter(&now);
