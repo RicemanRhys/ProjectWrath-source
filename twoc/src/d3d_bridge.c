@@ -578,13 +578,72 @@ static int env_on(const char *name)
  * nothing here runs. */
 double d3db_wide;
 static uint32_t g_guest_w, g_guest_h;      /* the guest back buffer (CreateDevice) */
-static volatile LONG g_wide_cameras, g_wide_kept, g_ev_wide;
+static unsigned g_render_w, g_render_h;     /* RECOMP_RENDER_SIZE; 0 if not asked for */
+static volatile LONG g_wide_cameras, g_wide_kept, g_ev_wide, g_wide_ff_pillar;
+
+/* RECOMP_RENDER_SIZE=WxH or =native (the primary monitor's mode), with the
+ * bridge on: the host renders at that size, or the largest of the picture's
+ * aspect that fits in it (d3dh_create's host size, host_size). Independent
+ * of RECOMP_WIDESCREEN: at 4:3 it is a sharper 4:3 picture. */
+static void render_size_init(void)
+{
+    const char *v = getenv("RECOMP_RENDER_SIZE");
+    unsigned w = 0, h = 0;
+
+    if (!v || !*v || strcmp(v, "0") == 0)
+        return;
+    if (!d3db_host_on) {
+        fprintf(stderr, "[WIDE] RECOMP_RENDER_SIZE needs the bridge (RECOMP_D3D_BRIDGE=1): ignored\n");
+        return;
+    }
+    if (_stricmp(v, "native") == 0) {
+        DEVMODEA dm;
+        memset(&dm, 0, sizeof(dm));
+        dm.dmSize = sizeof(dm);
+        if (EnumDisplaySettingsA(NULL, ENUM_CURRENT_SETTINGS, &dm)) {
+            w = dm.dmPelsWidth;
+            h = dm.dmPelsHeight;
+        }
+    } else if (sscanf(v, "%ux%u", &w, &h) != 2 && sscanf(v, "%uX%u", &w, &h) != 2) {
+        w = h = 0;
+    }
+    if (w < 64 || h < 64 || w > 8192 || h > 8192) {
+        fprintf(stderr, "[WIDE] RECOMP_RENDER_SIZE=%s: not WxH (64-8192) or native; ignored\n", v);
+        return;
+    }
+    g_render_w = w;
+    g_render_h = h;
+}
+
+/* The host back buffer for the guest's gw x gh: the picture's aspect (the
+ * guest's, or d3db_wide), at the guest's height, or the largest that fits in
+ * RECOMP_RENDER_SIZE. Widths even. Neither set: the guest's own size. */
+static void host_size(uint32_t gw, uint32_t gh, unsigned *w, unsigned *h)
+{
+    double r = d3db_wide > 0 ? d3db_wide : (double)gw / (double)gh;
+
+    *w = gw;
+    *h = gh;
+    if (!g_render_w) {
+        if (d3db_wide > 0)
+            *w = 2 * (unsigned)(gh * r / 2.0 + 0.5);
+        return;
+    }
+    if ((double)g_render_w / g_render_h > r) {
+        *h = g_render_h;
+        *w = 2 * (unsigned)(g_render_h * r / 2.0 + 0.5);
+    } else {
+        *w = g_render_w & ~1u;
+        *h = (unsigned)(g_render_w / r + 0.5);
+    }
+}
 
 static void wide_init(void)
 {
     const char *v = getenv("RECOMP_WIDESCREEN");
     double w = 16.0, h = 9.0;
 
+    render_size_init();
     if (!v || !*v || strcmp(v, "0") == 0)
         return;
     if (!d3db_host_on) {
@@ -795,7 +854,7 @@ static void mirror_create_device(const d3db_args_t *a)
 {
     uint32_t pp = a->arg[4];
     char prefix[512];
-    unsigned interval;
+    unsigned interval, host_w, host_h;
     double hz;
 
     if (eax != 0 || !pp) {
@@ -807,7 +866,8 @@ static void mirror_create_device(const d3db_args_t *a)
     interval = present_interval();
     hz = present_hz(MEM32(pp + 4 * PP_INTERVAL));
     vsync_pacing(&interval, &hz);
-    d3dh_create(MEM32(pp + 4 * PP_WIDTH), MEM32(pp + 4 * PP_HEIGHT), interval, hz,
+    host_size(g_guest_w ? g_guest_w : 640, g_guest_h ? g_guest_h : 480, &host_w, &host_h);
+    d3dh_create(g_guest_w, g_guest_h, host_w, host_h, d3db_wide, g_render_w != 0, interval, hz,
                 host_dump_prefix(prefix, sizeof(prefix)));
     if (host_dump_prefix(prefix, sizeof(prefix)))
         snprintf(g_check_prefix, sizeof(g_check_prefix), "%s", prefix);
@@ -2188,6 +2248,13 @@ static int setup_draw(d3dh_draw_t *dr, uint32_t fvf, d3dh_tex_t tex[4], d3dh_sta
     if ((fvf & FVF_POSITION_MASK) == FVF_XYZ) {
         describe_ff(ff);
         dr->ff = ff;
+        /* 18.56: a projection the game didn't widen (the menus' and the
+         * text's own, perspective or 640x480 ortho: x scale / y scale 0.75)
+         * keeps its 4:3 shape, pillarboxed; a widened one (0.5625) fills. */
+        if (d3db_wide > 0 && ff->proj[5] != 0.0f && fabs(fabs(ff->proj[0] / ff->proj[5]) - 0.75) < 0.005) {
+            dr->pillar = 1;
+            InterlockedIncrement(&g_wide_ff_pillar);
+        }
         cpu = needs_cpu_lighting(fvf);
     }
     for (i = 0; i < dr->n_rs; i++) {
@@ -4157,9 +4224,11 @@ static void mirror_swap(void)
                 for (i = 0; i < 4; i++)
                     last[i] = cur[i];
             }
-            if (d3db_wide > 0)  /* 18.56 */
-                log_block_printf(&lb, "[D3DB] host widescreen: projections widened %ld, kept %ld\n",
-                                 (long)g_wide_cameras, (long)g_wide_kept);
+            if (d3db_wide > 0 || g_render_w)    /* 18.56 */
+                log_block_printf(&lb, "[D3DB] host widescreen: projections widened %ld, kept %ld; fixed-function"
+                                 " draws with a 4:3 projection pillarboxed %ld; pre-transformed draws stretched %u,"
+                                 " pillarboxed %u; copies not scaled %u\n", (long)g_wide_cameras, (long)g_wide_kept,
+                                 (long)g_wide_ff_pillar, st.rhw_full, st.rhw_pillar, st.copy_unscaled);
             {
                 char buf[512];
                 int i, len = 0;

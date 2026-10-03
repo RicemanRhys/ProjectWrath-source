@@ -117,7 +117,10 @@ static volatile LONG g_ready;
 static HWND g_hwnd;                     /* visible: the flip-model swap chain */
 static HWND g_hwnd_dev;                 /* hidden: xbox_d3d8's own swap chain */
 static IDXGISwapChain1 *g_flip;
-static unsigned g_w, g_h, g_interval;
+static unsigned g_w, g_h, g_interval;   /* g_w, g_h: the host back buffer */
+static unsigned g_gw, g_gh;             /* the guest back buffer (18.56) */
+static double g_wide;                   /* 18.56: the host picture's width / height if wider than the guest's, else 0 */
+static int g_dpi_aware;                 /* 18.56: the window in real pixels (a render size was asked for) */
 static double g_frame_hz;               /* S7: the frame limiter's rate, 0 = off */
 static HANDLE g_latency;                /* vsync pacing (18.45): the frame-latency waitable object */
 #define VSYNC_WAIT_MS 50                /* the longest a present waits for it (18.46) */
@@ -140,7 +143,8 @@ static d3dh_stats_t g_st;
  * target and the pause still's 256x256 one got none (the still was black). */
 #define RT_SLOTS 32
 typedef struct {
-    uint32_t data, width, height, format;
+    uint32_t data, width, height, format;   /* the guest's description */
+    uint32_t hw, hh;                        /* the host texture's size (18.56: a screen-sized one is the host's) */
     IDirect3DTexture8 *tex;
     IDirect3DSurface8 *surf, *depth;
     unsigned last_use;
@@ -148,6 +152,68 @@ typedef struct {
 static host_rt_t g_rt[RT_SLOTS];
 static unsigned g_rt_clock;
 static int g_cur_target = -1;           /* -1 the back buffer, else a g_rt index; -2 unknown */
+
+/* ── Guest pixels on the host (18.56) ──────────────────────────
+ *
+ * The host back buffer can be bigger than the guest's (RECOMP_RENDER_SIZE)
+ * and wider (RECOMP_WIDESCREEN). The guest keeps drawing for its own 640x480,
+ * and the host maps its pixels: on the back buffer, x and y scale by
+ * host / guest, so the viewport, and with it 3D and vertex programs, covers
+ * the whole host picture (the game widens its projection to match,
+ * d3db_camera_aspect_scale). Pre-transformed 2D that spans the guest's whole
+ * width (fades, full-screen passes, the stencil shadow's quad) is stretched
+ * the same way; other 2D (the HUD, menus, text) keeps its 4:3 shape,
+ * pillarboxed in the middle: both axes scale by the height, centred. Every
+ * other render target keeps its size, mapped 1:1. Off, both scales are 1 and
+ * nothing moves. */
+typedef struct {
+    float sx, sy, ox, oy;
+} xmap_t;
+
+static int screen_target(const d3dh_target_t *t)
+{
+    return !t->data;
+}
+
+static void target_map(const d3dh_target_t *t, int pillar, xmap_t *m)
+{
+    m->ox = m->oy = 0.0f;
+    m->sx = m->sy = 1.0f;
+    if (!screen_target(t) || (g_w == g_gw && g_h == g_gh))
+        return;
+    m->sx = (float)g_w / (float)g_gw;
+    m->sy = (float)g_h / (float)g_gh;
+    if (pillar && g_wide > 0) {
+        m->sx = m->sy;
+        m->ox = ((float)g_w - (float)g_gw * m->sy) * 0.5f;
+    }
+}
+
+static int map_identity(const xmap_t *m)
+{
+    return m->sx == 1.0f && m->sy == 1.0f && m->ox == 0.0f && m->oy == 0.0f;
+}
+
+static LONG map_coord(float o, float s, uint32_t v)
+{
+    return (LONG)(o + (float)v * s + 0.5f);
+}
+
+static void map_viewport(D3DVIEWPORT8 *vp, const xmap_t *m)
+{
+    LONG x0, y0, x1, y1;
+
+    if (map_identity(m))
+        return;
+    x0 = map_coord(m->ox, m->sx, vp->X);
+    y0 = map_coord(m->oy, m->sy, vp->Y);
+    x1 = map_coord(m->ox, m->sx, vp->X + vp->Width);
+    y1 = map_coord(m->oy, m->sy, vp->Y + vp->Height);
+    vp->X = (DWORD)x0;
+    vp->Y = (DWORD)y0;
+    vp->Width = (DWORD)(x1 - x0);
+    vp->Height = (DWORD)(y1 - y0);
+}
 
 /* ── Window thread ─────────────────────────────────────────── */
 
@@ -170,9 +236,10 @@ static DWORD WINAPI win_thread(LPVOID p)
 {
     win_args_t *args = (win_args_t *)p;
     WNDCLASSA wc;
-    RECT r;
+    RECT r, wa = { 0, 0, 0, 0 };
     MSG msg;
     DWORD style = WS_OVERLAPPED | WS_CAPTION | WS_SYSMENU | WS_MINIMIZEBOX;
+    int aware = 0;
 
     memset(&wc, 0, sizeof(wc));
     wc.lpfnWndProc = wnd_proc;
@@ -186,11 +253,50 @@ static DWORD WINAPI win_thread(LPVOID p)
     r.top = 0;
     r.right = (LONG)g_w;
     r.bottom = (LONG)g_h;
-    AdjustWindowRect(&r, style, FALSE);
-    g_hwnd_dev = CreateWindowExA(0, WIN_CLASS, WIN_TITLE " (device)", style, 0, 0,
+    if (g_dpi_aware) {
+        /* 18.56: a render size was asked for, so the window's pixels are the
+         * monitor's (the process isn't DPI aware, and Windows would scale a
+         * 1920x1080 client by 225% here). This thread only: the rest of the
+         * process, and the window without a render size, stay as before.
+         * The client is the back buffer, shrunk to the work area if needed. */
+        typedef HANDLE(WINAPI * set_ctx_t)(HANDLE);
+        set_ctx_t set_ctx = (set_ctx_t)GetProcAddress(GetModuleHandleA("user32.dll"),
+                                                      "SetThreadDpiAwarenessContext");
+        if (set_ctx && set_ctx((HANDLE)-4 /* DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2 */)) {
+            aware = 1;
+            if (SystemParametersInfoA(SPI_GETWORKAREA, 0, &wa, 0)) {
+                LONG aw = (wa.right - wa.left) * 9 / 10, ah = (wa.bottom - wa.top) * 9 / 10;
+                if (r.right > aw || r.bottom > ah) {
+                    double k = (double)aw / r.right < (double)ah / r.bottom ? (double)aw / r.right
+                                                                             : (double)ah / r.bottom;
+                    r.right = (LONG)(r.right * k);
+                    r.bottom = (LONG)(r.bottom * k);
+                }
+            }
+        } else {
+            fprintf(stderr, "[D3DB] host: no per-monitor DPI awareness; Windows scales the window\n");
+        }
+    }
+    {
+        LONG cw = r.right, ch = r.bottom;
+        AdjustWindowRect(&r, style, FALSE);
+        g_hwnd_dev = CreateWindowExA(0, WIN_CLASS, WIN_TITLE " (device)", style, 0, 0,
+                                     r.right - r.left, r.bottom - r.top, NULL, NULL, wc.hInstance, NULL);
+        g_hwnd = CreateWindowExA(0, WIN_CLASS, WIN_TITLE, style, CW_USEDEFAULT, CW_USEDEFAULT,
                                  r.right - r.left, r.bottom - r.top, NULL, NULL, wc.hInstance, NULL);
-    g_hwnd = CreateWindowExA(0, WIN_CLASS, WIN_TITLE, style, CW_USEDEFAULT, CW_USEDEFAULT,
-                             r.right - r.left, r.bottom - r.top, NULL, NULL, wc.hInstance, NULL);
+        if (g_hwnd && aware) {          /* the frame at this monitor's DPI: client exactly cw x ch, centred */
+            RECT c, w;
+            GetClientRect(g_hwnd, &c);
+            GetWindowRect(g_hwnd, &w);
+            r.right = (w.right - w.left) + cw - (c.right - c.left);
+            r.bottom = (w.bottom - w.top) + ch - (c.bottom - c.top);
+            SetWindowPos(g_hwnd, NULL, wa.left + ((wa.right - wa.left) - r.right) / 2,
+                         wa.top + ((wa.bottom - wa.top) - r.bottom) / 2, r.right, r.bottom,
+                         SWP_NOZORDER | SWP_NOACTIVATE);
+            GetClientRect(g_hwnd, &c);
+            fprintf(stderr, "[D3DB] host window: client %ldx%ld real pixels\n", c.right - c.left, c.bottom - c.top);
+        }
+    }
     if (g_hwnd)
         ShowWindow(g_hwnd, SW_SHOWNOACTIVATE);
     SetEvent(args->made);
@@ -205,7 +311,8 @@ static DWORD WINAPI win_thread(LPVOID p)
 
 /* ── Device ────────────────────────────────────────────────── */
 
-int d3dh_create(unsigned width, unsigned height, unsigned interval, double frame_hz, const char *dump_prefix)
+int d3dh_create(unsigned width, unsigned height, unsigned host_w, unsigned host_h, double wide, int dpi_aware,
+                unsigned interval, double frame_hz, const char *dump_prefix)
 {
     static LONG once;
     win_args_t args;
@@ -217,8 +324,12 @@ int d3dh_create(unsigned width, unsigned height, unsigned interval, double frame
     if (InterlockedExchange(&once, 1))
         return g_ready ? 0 : -1;        /* the game creates its device once */
     InitializeCriticalSection(&g_lock);
-    g_w = width ? width : 640;
-    g_h = height ? height : 480;
+    g_gw = width ? width : 640;
+    g_gh = height ? height : 480;
+    g_w = host_w ? host_w : g_gw;
+    g_h = host_h ? host_h : g_gh;
+    g_wide = wide;
+    g_dpi_aware = dpi_aware;
     g_interval = interval;
     g_frame_hz = frame_hz > 0 ? frame_hz : 0;
     if (dump_prefix) {
@@ -302,6 +413,10 @@ int d3dh_create(unsigned width, unsigned height, unsigned interval, double frame
         fprintf(stderr, "[D3DB] host: xbox_d3d8 CreateDevice failed 0x%08lX\n", (unsigned long)hr);
         return -1;
     }
+    if (g_w != g_gw || g_h != g_gh)     /* 18.56 */
+        fprintf(stderr, "[D3DB] host renders %ux%u for the guest's %ux%u: %s; full-width 2D stretched, other 2D"
+                " %s\n", g_w, g_h, g_gw, g_gh, g_wide > 0 ? "widescreen" : "4:3",
+                g_wide > 0 ? "pillarboxed to 4:3" : "scaled");
     fprintf(stderr, "[D3DB] host device %ux%u, window %p (own thread, flip model), present interval %u%s, frame limiter"
             " %s%.3f Hz%s%s\n",
             g_w, g_h, (void *)g_hwnd, g_interval, g_latency ? " (vsync paced)" : "",
@@ -339,6 +454,7 @@ static void rt_release(int i)
 static int rt_find(const d3dh_target_t *t, int create)
 {
     int i, free_i = -1, lru = -1;
+    uint32_t hw, hh;
     IDirect3DTexture8 *tex = NULL;
     IDirect3DSurface8 *surf = NULL, *depth = NULL;
     HRESULT hr;
@@ -371,12 +487,14 @@ static int rt_find(const d3dh_target_t *t, int create)
         rt_release(lru);
         free_i = lru;
     }
-    hr = g_dev->lpVtbl->CreateTexture(g_dev, t->width, t->height, 1, D3DUSAGE_RENDERTARGET, (D3DFORMAT)t->format,
+    hw = t->width;
+    hh = t->height;
+    hr = g_dev->lpVtbl->CreateTexture(g_dev, hw, hh, 1, D3DUSAGE_RENDERTARGET, (D3DFORMAT)t->format,
                                       D3DPOOL_DEFAULT, &tex);
     if (SUCCEEDED(hr))
         hr = tex->lpVtbl->GetSurfaceLevel(tex, 0, &surf);
     if (SUCCEEDED(hr))
-        hr = g_dev->lpVtbl->CreateDepthStencilSurface(g_dev, t->width, t->height, D3DFMT_D24S8,
+        hr = g_dev->lpVtbl->CreateDepthStencilSurface(g_dev, hw, hh, D3DFMT_D24S8,
                                                       D3DMULTISAMPLE_NONE, &depth);
     if (FAILED(hr) || !surf || !depth) {
         if (depth)
@@ -394,13 +512,19 @@ static int rt_find(const d3dh_target_t *t, int create)
     g_rt[free_i].width = t->width;
     g_rt[free_i].height = t->height;
     g_rt[free_i].format = t->format;
+    g_rt[free_i].hw = hw;
+    g_rt[free_i].hh = hh;
     g_rt[free_i].tex = tex;
     g_rt[free_i].surf = surf;
     g_rt[free_i].depth = depth;
     g_rt[free_i].last_use = ++g_rt_clock;
     g_st.rt_created++;
-    fprintf(stderr, "[D3DB] host render target %d for guest Data %08X: %ux%u format %02X\n", free_i, t->data,
-            t->width, t->height, t->format);
+    if (hw != t->width || hh != t->height)
+        fprintf(stderr, "[D3DB] host render target %d for guest Data %08X: %ux%u format %02X, at %ux%u on the host\n",
+                free_i, t->data, t->width, t->height, t->format, hw, hh);
+    else
+        fprintf(stderr, "[D3DB] host render target %d for guest Data %08X: %ux%u format %02X\n", free_i, t->data,
+                t->width, t->height, t->format);
     /* Start from black, as the guest's memory was (never seen otherwise). */
     g_dev->lpVtbl->SetRenderTarget(g_dev, surf, depth);
     g_dev->lpVtbl->Clear(g_dev, 0, NULL, D3DCLEAR_TARGET | D3DCLEAR_ZBUFFER | D3DCLEAR_STENCIL, 0, 1.0f, 0);
@@ -691,7 +815,8 @@ void d3dh_texture_touch(uint32_t data)
  * copied and rescaled, x' = (x - vp.X) * back_w / vp.W (y likewise), which
  * the viewport then maps back to pixel x. Identity for a full-screen
  * viewport on the back buffer (the splash). Called with g_lock held. */
-static const void *rescale_rhw(const void *verts, uint32_t count, uint32_t stride, const D3DVIEWPORT8 *vp)
+static const void *rescale_rhw_map(const void *verts, uint32_t count, uint32_t stride, const D3DVIEWPORT8 *vp,
+                                   const xmap_t *m)
 {
     static uint8_t *buf;
     static size_t cap;
@@ -699,7 +824,8 @@ static const void *rescale_rhw(const void *verts, uint32_t count, uint32_t strid
     float sx, sy;
     uint32_t i;
 
-    if (!vp->Width || !vp->Height || (vp->X == 0 && vp->Y == 0 && vp->Width == g_w && vp->Height == g_h))
+    if (!vp->Width || !vp->Height ||
+        (vp->X == 0 && vp->Y == 0 && vp->Width == g_w && vp->Height == g_h && map_identity(m)))
         return verts;
     if (n > cap) {
         uint8_t *nb = (uint8_t *)realloc(buf, n);
@@ -713,10 +839,32 @@ static const void *rescale_rhw(const void *verts, uint32_t count, uint32_t strid
     sy = (float)g_h / (float)vp->Height;
     for (i = 0; i < count; i++) {
         float *p = (float *)(buf + (size_t)i * stride);
-        p[0] = (p[0] - (float)vp->X) * sx;
-        p[1] = (p[1] - (float)vp->Y) * sy;
+        p[0] = (m->ox + p[0] * m->sx - (float)vp->X) * sx;     /* 18.56: guest pixels to the host's first */
+        p[1] = (m->oy + p[1] * m->sy - (float)vp->Y) * sy;
     }
     return buf;
+}
+
+static const void *rescale_rhw(const void *verts, uint32_t count, uint32_t stride, const D3DVIEWPORT8 *vp)
+{
+    static const xmap_t one = { 1.0f, 1.0f, 0.0f, 0.0f };
+
+    return rescale_rhw_map(verts, count, stride, vp, &one);
+}
+
+/* 18.56: whether a pre-transformed draw spans the guest's whole width (then
+ * it is stretched with the 3D, else pillarboxed). */
+static int rhw_full_width(const void *verts, uint32_t count, uint32_t stride)
+{
+    float lo = 1e30f, hi = -1e30f;
+    uint32_t i;
+
+    for (i = 0; i < count; i++) {
+        float x = *(const float *)((const uint8_t *)verts + (size_t)i * stride);
+        lo = x < lo ? x : lo;
+        hi = x > hi ? x : hi;
+    }
+    return lo <= 1.0f && hi >= (float)g_gw - 1.0f;
 }
 
 /* Fixed-function 3D: world, view and projection, the material, and the
@@ -833,6 +981,7 @@ static int vs_bind(const d3dh_vprog_t *p)
 int d3dh_draw_up(const d3dh_draw_t *d)
 {
     D3DVIEWPORT8 vp;
+    xmap_t map;
     HRESULT hr;
     unsigned i, s;
     const void *verts;
@@ -851,6 +1000,8 @@ int d3dh_draw_up(const d3dh_draw_t *d)
     vp.Height = d->vp_h;
     vp.MinZ = d->vp_minz;
     vp.MaxZ = d->vp_maxz;
+    target_map(&d->target, d->pillar, &map);    /* 18.56: guest pixels to the host's */
+    map_viewport(&vp, &map);
     g_dev->lpVtbl->SetViewport(g_dev, &vp);
     /* Textures before stage states: xbox_d3d8's SetTexture edits COLOROP.
      * All four are fetched before any is bound (step 52): a fetch that
@@ -892,8 +1043,18 @@ int d3dh_draw_up(const d3dh_draw_t *d)
         g_st.vp_draws++;
     } else {
         g_dev->lpVtbl->SetVertexShader(g_dev, d->fvf);
-        verts = (d->fvf & D3DFVF_POSITION_MASK) == D3DFVF_XYZRHW ? rescale_rhw(d->verts, d->vert_count, d->stride, &vp)
-                                                                   : d->verts;
+        verts = d->verts;
+        if ((d->fvf & D3DFVF_POSITION_MASK) == D3DFVF_XYZRHW) {
+            if (g_wide > 0 && screen_target(&d->target)) {      /* 18.56: full width stretches, the rest 4:3 */
+                int full = rhw_full_width(d->verts, d->vert_count, d->stride);
+                if (full)
+                    g_st.rhw_full++;
+                else
+                    g_st.rhw_pillar++;
+                target_map(&d->target, !full, &map);
+            }
+            verts = rescale_rhw_map(d->verts, d->vert_count, d->stride, &vp, &map);
+        }
     }
     if (d->indices) {                   /* xbox_d3d8 uploads vert_count vertices from `verts` */
         hr = g_dev->lpVtbl->DrawIndexedPrimitiveUP(g_dev, (D3DPRIMITIVETYPE)d->prim, 0, d->vert_count,

@@ -28,6 +28,8 @@ typedef struct {
     unsigned shown[9];      /* DWM compositions between presents: [0]..[7], [8] more (18.45) */
     unsigned displayed[9];  /* refreshes between consecutive displayed frames: [0]..[7], [8] more (18.48) */
     unsigned display_unmeasured;    /* frame statistics unavailable, or more than one frame shown between two reads */
+    unsigned rhw_full, rhw_pillar;  /* 18.56: pre-transformed draws on a scaled screen, stretched / pillarboxed */
+    unsigned copy_unscaled;         /* 18.56: copies into a target the host couldn't scale them to */
 } d3dh_stats_t;
 
 /* A state already in xbox_d3d8's (PC D3D8) numbering and values. */
@@ -116,6 +118,7 @@ typedef struct {
     d3dh_target_t target;
     const d3dh_ps_t *ps;                /* NULL: fixed function */
     const d3dh_vprog_t *vprog;          /* S5, NULL: the FVF `fvf` */
+    int pillar;                         /* 18.56: a 3D draw with a 4:3 projection: its viewport pillarboxed */
 } d3dh_draw_t;
 
 /* S5: the registers a program reads (bit n = vn), 0 if it reads none or
@@ -170,11 +173,17 @@ void d3dh_memory_freed(uint32_t data, uint32_t bytes);
 /* Dump the back buffer at each guest swap in [from, to] (needs a dump prefix). */
 void d3dh_dump_range(unsigned from, unsigned to);
 
-/* Create the window (on its own thread) and the host device. `interval` is
- * the DXGI sync interval for every present; `frame_hz`, if above 0, is the
- * frame limiter's rate (S7): each present waits for its slot on that clock.
- * Returns 0 on success. */
-int  d3dh_create(unsigned width, unsigned height, unsigned interval, double frame_hz, const char *dump_prefix);
+/* Create the window (on its own thread) and the host device. `width` and
+ * `height` are the guest's back buffer; `host_w` and `host_h` the host's
+ * (18.56: the guest's at 4:3 unless RECOMP_WIDESCREEN or RECOMP_RENDER_SIZE
+ * asks for more), and `wide` the host picture's width over height when it is
+ * wider than the guest's (0: not). With `dpi_aware` the window is sized in
+ * real pixels (a render size was asked for); otherwise Windows scales it, as
+ * before. `interval` is the DXGI sync interval for every present;
+ * `frame_hz`, if above 0, is the frame limiter's rate (S7): each present
+ * waits for its slot on that clock. Returns 0 on success. */
+int  d3dh_create(unsigned width, unsigned height, unsigned host_w, unsigned host_h, double wide, int dpi_aware,
+                 unsigned interval, double frame_hz, const char *dump_prefix);
 int  d3dh_ready(void);
 
 /* Clear with XDK flags: TARGET 0xF0 (all four channel bits), ZBUFFER 1,
