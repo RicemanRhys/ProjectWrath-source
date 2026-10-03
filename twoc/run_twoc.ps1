@@ -31,6 +31,9 @@
 #                that size (the largest of the picture's aspect that fits: 1920x1080 is 1440x1080 at 4:3, all of it
 #                at 16:9), in a window sized in real pixels; "native" is the monitor's mode. Without it the host
 #                renders at the game's 480 lines, as before
+#   -Fullscreen  RECOMP_FULLSCREEN=1 (needs -Bridge or -HostOnly; notes 18.57): the host window starts borderless
+#                over its monitor, the picture letterboxed at its own aspect. Alt+Enter on the window switches
+#                between that and the window at any time
 #
 # Usage, from anywhere (script execution is off by default on this machine, so bypass it for this process):
 #   powershell -NoProfile -ExecutionPolicy Bypass -File twoc\run_twoc.ps1
@@ -41,6 +44,7 @@
 #   ... -File twoc\run_twoc.ps1 -Bridge -Seconds 900    # play, with the mirrored picture in its own window
 #   ... -File twoc\run_twoc.ps1 -HostOnly -Seconds 900  # play on the mirror alone, at 60 fps
 #   ... -File twoc\run_twoc.ps1 -HostOnly -Widescreen -RenderSize 1920x1080 -Seconds 900   # 16:9 at 1080p
+#   ... -File twoc\run_twoc.ps1 -HostOnly -Widescreen -RenderSize native -Fullscreen -Seconds 900
 #
 # Logs go to run_twoc.out.log and run_twoc.err.log in the repo root (gitignored). The BMPs are named
 # shot000.bmp, shot001.bmp ...; the executor writes the first eight frames that contain geometry and one
@@ -54,7 +58,8 @@ param(
     [switch]$Bridge,
     [switch]$HostOnly,
     [switch]$Widescreen,
-    [string]$RenderSize
+    [string]$RenderSize,
+    [switch]$Fullscreen
 )
 $ErrorActionPreference = 'Stop'
 $repo = Split-Path -Parent $PSScriptRoot
@@ -74,6 +79,7 @@ if ($AutoStart) { $env:RECOMP_DEV_AUTOSTART  = '1' } else { Remove-Item Env:RECO
 if ($Bridge)    { $env:RECOMP_D3D_BRIDGE     = '1' } else { Remove-Item Env:RECOMP_D3D_BRIDGE     -ErrorAction SilentlyContinue }
 if ($Widescreen) { $env:RECOMP_WIDESCREEN    = '1' } else { Remove-Item Env:RECOMP_WIDESCREEN     -ErrorAction SilentlyContinue }
 if ($RenderSize) { $env:RECOMP_RENDER_SIZE   = $RenderSize } else { Remove-Item Env:RECOMP_RENDER_SIZE -ErrorAction SilentlyContinue }
+if ($Fullscreen) { $env:RECOMP_FULLSCREEN    = '1' } else { Remove-Item Env:RECOMP_FULLSCREEN     -ErrorAction SilentlyContinue }
 if ($DumpDir) {
     New-Item -ItemType Directory -Force -Path $DumpDir | Out-Null
     $env:RECOMP_FB_DUMP = Join-Path (Resolve-Path $DumpDir) 'shot'

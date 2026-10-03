@@ -93,6 +93,14 @@
  * S5 part 2 (notes 18.39): cube maps go into the same cache as xbox_d3d8
  * cube textures, uploaded face by face (tex_upload); its fixed-function and
  * combiner pixel shaders sample a bound cube with the coordinates' xyz.
+ *
+ * Step 54 (notes 18.57): borderless fullscreen. Alt+Enter on the window, or
+ * RECOMP_FULLSCREEN=1 at the start (run_twoc.ps1 -Fullscreen), turns the
+ * window into a borderless popup over its monitor, and back. The window
+ * thread restyles the window; the visible swap chain follows the client
+ * size at the next present (flip_fit), and the picture is drawn into it
+ * letterboxed at its own aspect (blit). In a window the swap chain keeps the
+ * host back buffer's size and the present copies it as before.
  */
 
 #include <stdio.h>
@@ -103,6 +111,7 @@
 #include "d3d8_internal.h"      /* xbox_d3d8, and its D3D11 accessors */
 #include <dxgi1_3.h>
 #include <dwmapi.h>
+#include <d3dcompiler.h>
 #pragma comment(lib, "dwmapi.lib")
 
 #include "d3d_host.h"
@@ -134,6 +143,16 @@ static ULONGLONG g_last_dump_ms;
 static int g_frame_work;                /* mirrored work since the last present */
 static int g_dump_rt;                   /* RECOMP_D3D_BRIDGE_DUMP_RT: render targets too (S4) */
 static d3dh_stats_t g_st;
+
+/* Step 54: borderless fullscreen. g_fs and the client size are the window
+ * thread's; g_buf_w x g_buf_h is the visible swap chain's, changed only by a
+ * present (flip_fit). */
+static volatile LONG g_fs;              /* the window is borderless over its monitor */
+static int g_fs_at_start;               /* RECOMP_FULLSCREEN */
+static volatile LONG g_client_w, g_client_h;
+static unsigned g_buf_w, g_buf_h;
+static UINT g_flip_flags;               /* the swap chain's flags, for ResizeBuffers */
+#define WM_TWOC_FULLSCREEN (WM_APP + 1) /* wParam 1 on, 0 off, 2 toggle */
 
 /* S4: host render-target textures, by guest Data. A target lives until the
  * guest frees its memory (d3dh_memory_freed) or, with every slot in use, it
@@ -218,13 +237,74 @@ static void map_viewport(D3DVIEWPORT8 *vp, const xmap_t *m)
 
 /* ── Window thread ─────────────────────────────────────────── */
 
+/* Step 54: borderless fullscreen on the window's monitor, or back to the
+ * window as it was. Window thread only. */
+static void set_fullscreen(HWND hwnd, int on)
+{
+    static WINDOWPLACEMENT placed;
+    static LONG style;
+    MONITORINFO mi;
+
+    if (!on == !g_fs)
+        return;
+    if (on) {
+        memset(&mi, 0, sizeof(mi));
+        mi.cbSize = sizeof(mi);
+        placed.length = sizeof(placed);
+        GetWindowPlacement(hwnd, &placed);
+        style = GetWindowLongA(hwnd, GWL_STYLE);
+        if (!GetMonitorInfoA(MonitorFromWindow(hwnd, MONITOR_DEFAULTTONEAREST), &mi))
+            return;
+        InterlockedExchange(&g_fs, 1);
+        SetWindowLongA(hwnd, GWL_STYLE, (style & ~(LONG)(WS_OVERLAPPEDWINDOW)) | (LONG)WS_POPUP);
+        SetWindowPos(hwnd, HWND_TOP, mi.rcMonitor.left, mi.rcMonitor.top, mi.rcMonitor.right - mi.rcMonitor.left,
+                     mi.rcMonitor.bottom - mi.rcMonitor.top, SWP_FRAMECHANGED | SWP_NOOWNERZORDER | SWP_SHOWWINDOW);
+        fprintf(stderr, "[D3DB] host window: borderless fullscreen, %ldx%ld at %ld,%ld (Alt+Enter: back)\n",
+                mi.rcMonitor.right - mi.rcMonitor.left, mi.rcMonitor.bottom - mi.rcMonitor.top, mi.rcMonitor.left,
+                mi.rcMonitor.top);
+    } else {
+        InterlockedExchange(&g_fs, 0);
+        SetWindowLongA(hwnd, GWL_STYLE, style);
+        SetWindowPlacement(hwnd, &placed);
+        SetWindowPos(hwnd, NULL, 0, 0, 0, 0,
+                     SWP_NOMOVE | SWP_NOSIZE | SWP_NOZORDER | SWP_NOOWNERZORDER | SWP_FRAMECHANGED);
+        fprintf(stderr, "[D3DB] host window: windowed\n");
+    }
+}
+
 static LRESULT CALLBACK wnd_proc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp)
 {
-    if (msg == WM_CLOSE) {
+    switch (msg) {
+    case WM_CLOSE:
         fprintf(stderr, "[D3DB] host window closed: ending the process\n");
         fflush(stderr);
         TerminateProcess(GetCurrentProcess(), 0);
         return 0;
+    case WM_SIZE:                       /* the swap chain follows at the next present */
+        if (hwnd == g_hwnd && wp != SIZE_MINIMIZED) {
+            InterlockedExchange(&g_client_w, (LONG)LOWORD(lp));
+            InterlockedExchange(&g_client_h, (LONG)HIWORD(lp));
+        }
+        break;
+    case WM_SYSKEYDOWN:                 /* Alt+Enter (step 54); the game reads no keys */
+        if (wp == VK_RETURN && (lp & (1 << 29)) && !(lp & (1 << 30))) {
+            set_fullscreen(hwnd, !g_fs);
+            return 0;
+        }
+        break;
+    case WM_SYSCHAR:                    /* no beep for Alt+Enter */
+        if (wp == '\r')
+            return 0;
+        break;
+    case WM_TWOC_FULLSCREEN:
+        set_fullscreen(hwnd, wp == 2 ? !g_fs : (int)wp);
+        return 0;
+    case WM_SETCURSOR:                  /* no pointer over the fullscreen picture */
+        if (g_fs && LOWORD(lp) == HTCLIENT) {
+            SetCursor(NULL);
+            return TRUE;
+        }
+        break;
     }
     return DefWindowProcA(hwnd, msg, wp, lp);
 }
@@ -298,8 +378,12 @@ static DWORD WINAPI win_thread(LPVOID p)
             fprintf(stderr, "[D3DB] host window: client %ldx%ld real pixels\n", c.right - c.left, c.bottom - c.top);
         }
     }
-    if (g_hwnd)
+    if (g_hwnd && g_fs_at_start) {      /* step 54: RECOMP_FULLSCREEN; the player asked for it, so it takes focus */
+        set_fullscreen(g_hwnd, 1);
+        SetForegroundWindow(g_hwnd);
+    } else if (g_hwnd) {
         ShowWindow(g_hwnd, SW_SHOWNOACTIVATE);
+    }
     SetEvent(args->made);
     if (!g_hwnd || !g_hwnd_dev)
         return 1;
@@ -333,6 +417,10 @@ int d3dh_create(unsigned width, unsigned height, unsigned host_w, unsigned host_
     g_dpi_aware = dpi_aware;
     g_interval = interval;
     g_frame_hz = frame_hz > 0 ? frame_hz : 0;
+    {
+        const char *fs = getenv("RECOMP_FULLSCREEN");
+        g_fs_at_start = fs && *fs && strcmp(fs, "0") != 0;
+    }
     if (dump_prefix) {
         const char *every = getenv("RECOMP_D3D_BRIDGE_DUMP_EVERY");
         const char *rt = getenv("RECOMP_D3D_BRIDGE_DUMP_RT");
@@ -390,6 +478,9 @@ int d3dh_create(unsigned width, unsigned height, unsigned host_w, unsigned host_
                 sd.Flags = DXGI_SWAP_CHAIN_FLAG_FRAME_LATENCY_WAITABLE_OBJECT;
             hr = IDXGIFactory2_CreateSwapChainForHwnd(f, (IUnknown *)d3d8_GetD3D11Device(), g_hwnd, &sd,
                                                       NULL, NULL, &g_flip);
+            g_flip_flags = sd.Flags;
+            g_buf_w = sd.Width;
+            g_buf_h = sd.Height;
             if (SUCCEEDED(hr) && sd.Flags) {
                 IDXGISwapChain2 *sc2 = NULL;
                 if (SUCCEEDED(IDXGISwapChain1_QueryInterface(g_flip, &IID_IDXGISwapChain2, (void **)&sc2))) {
@@ -1452,6 +1543,264 @@ double d3dh_display_hz(void)
     return (double)ti.rateRefresh.uiNumerator / ti.rateRefresh.uiDenominator;
 }
 
+/* ── The picture into the visible swap chain (step 54) ─────────
+ *
+ * In a window the swap chain has the host back buffer's size, and a present
+ * copies one into the other (as since 18.33). Borderless fullscreen gives it
+ * the client's size instead (flip_fit), and the frame is drawn into it
+ * letterboxed at its own aspect, linearly filtered, over black (blit): the
+ * frame is copied into g_shot (xbox_d3d8's swap-chain buffer can't be
+ * sampled) and drawn as one triangle. The blit saves and restores every
+ * piece of D3D11 state it sets, since xbox_d3d8 keeps its own bindings. */
+static ID3D11VertexShader *g_blit_vs;
+static ID3D11PixelShader *g_blit_ps;
+static ID3D11SamplerState *g_blit_samp;
+static ID3D11Texture2D *g_shot;         /* the frame being shown, sampled by the blit */
+static ID3D11ShaderResourceView *g_shot_srv;
+static int g_blit_state;                /* 0 not tried, 1 ready, -1 failed */
+
+static const char g_blit_hlsl[] =
+    "Texture2D t : register(t0);\n"
+    "SamplerState s : register(s0);\n"
+    "struct V { float4 p : SV_Position; float2 uv : TEXCOORD0; };\n"
+    "V vs(uint id : SV_VertexID)\n"
+    "{\n"
+    "    V o;\n"
+    "    o.uv = float2((id << 1) & 2, id & 2);\n"
+    "    o.p = float4(o.uv * float2(2, -2) + float2(-1, 1), 0, 1);\n"
+    "    return o;\n"
+    "}\n"
+    "float4 ps(V i) : SV_Target { return float4(t.Sample(s, i.uv).rgb, 1); }\n";
+
+/* Called with g_lock held. */
+static int blit_init(void)
+{
+    ID3D11Device *d = d3d8_GetD3D11Device();
+    ID3DBlob *vs = NULL, *ps = NULL, *err = NULL;
+    D3D11_SAMPLER_DESC sd;
+    HRESULT hr;
+
+    if (g_blit_state)
+        return g_blit_state > 0 ? 0 : -1;
+    g_blit_state = -1;
+    hr = D3DCompile(g_blit_hlsl, sizeof(g_blit_hlsl) - 1, "twoc_blit", NULL, NULL, "vs", "vs_4_0", 0, 0, &vs, &err);
+    if (SUCCEEDED(hr))
+        hr = D3DCompile(g_blit_hlsl, sizeof(g_blit_hlsl) - 1, "twoc_blit", NULL, NULL, "ps", "ps_4_0", 0, 0, &ps, &err);
+    if (SUCCEEDED(hr))
+        hr = ID3D11Device_CreateVertexShader(d, ID3D10Blob_GetBufferPointer(vs), ID3D10Blob_GetBufferSize(vs), NULL,
+                                             &g_blit_vs);
+    if (SUCCEEDED(hr))
+        hr = ID3D11Device_CreatePixelShader(d, ID3D10Blob_GetBufferPointer(ps), ID3D10Blob_GetBufferSize(ps), NULL,
+                                            &g_blit_ps);
+    if (SUCCEEDED(hr)) {
+        memset(&sd, 0, sizeof(sd));
+        sd.Filter = D3D11_FILTER_MIN_MAG_MIP_LINEAR;
+        sd.AddressU = sd.AddressV = sd.AddressW = D3D11_TEXTURE_ADDRESS_CLAMP;
+        sd.ComparisonFunc = D3D11_COMPARISON_NEVER;
+        sd.MaxLOD = D3D11_FLOAT32_MAX;
+        hr = ID3D11Device_CreateSamplerState(d, &sd, &g_blit_samp);
+    }
+    if (FAILED(hr))
+        fprintf(stderr, "[D3DB] host blit not available (0x%08lX%s%s): fullscreen shows the frame unscaled\n",
+                (unsigned long)hr, err ? ": " : "", err ? (const char *)ID3D10Blob_GetBufferPointer(err) : "");
+    else
+        g_blit_state = 1;
+    if (vs)
+        ID3D10Blob_Release(vs);
+    if (ps)
+        ID3D10Blob_Release(ps);
+    if (err)
+        ID3D10Blob_Release(err);
+    return g_blit_state > 0 ? 0 : -1;
+}
+
+/* Copy `src` into g_shot (made again when its size or format changes).
+ * Called with g_lock held. */
+static int shot_take(ID3D11Texture2D *src)
+{
+    D3D11_TEXTURE2D_DESC sd, hd;
+
+    ID3D11Texture2D_GetDesc(src, &sd);
+    if (g_shot) {
+        ID3D11Texture2D_GetDesc(g_shot, &hd);
+        if (hd.Width != sd.Width || hd.Height != sd.Height || hd.Format != sd.Format) {
+            ID3D11ShaderResourceView_Release(g_shot_srv);
+            ID3D11Texture2D_Release(g_shot);
+            g_shot_srv = NULL;
+            g_shot = NULL;
+        }
+    }
+    if (!g_shot) {
+        hd = sd;
+        hd.MipLevels = 1;
+        hd.ArraySize = 1;
+        hd.SampleDesc.Count = 1;
+        hd.SampleDesc.Quality = 0;
+        hd.Usage = D3D11_USAGE_DEFAULT;
+        hd.BindFlags = D3D11_BIND_SHADER_RESOURCE;
+        hd.CPUAccessFlags = 0;
+        hd.MiscFlags = 0;
+        if (FAILED(ID3D11Device_CreateTexture2D(d3d8_GetD3D11Device(), &hd, NULL, &g_shot)))
+            return -1;
+        if (FAILED(ID3D11Device_CreateShaderResourceView(d3d8_GetD3D11Device(), (ID3D11Resource *)g_shot, NULL,
+                                                         &g_shot_srv))) {
+            ID3D11Texture2D_Release(g_shot);
+            g_shot = NULL;
+            return -1;
+        }
+    }
+    ID3D11DeviceContext_CopyResource(d3d8_GetD3D11Context(), (ID3D11Resource *)g_shot, (ID3D11Resource *)src);
+    return 0;
+}
+
+/* Draw g_shot into `dst` (the swap chain's buffer, w x h), centred at its
+ * own aspect over black. Called with g_lock held. Returns 0 on success. */
+static int blit_draw(ID3D11Texture2D *dst, unsigned w, unsigned h)
+{
+    ID3D11DeviceContext *ctx = d3d8_GetD3D11Context();
+    ID3D11RenderTargetView *rtv = NULL;
+    D3D11_TEXTURE2D_DESC sd;
+    D3D11_VIEWPORT vp;
+    static const FLOAT black[4] = { 0, 0, 0, 1 };
+    double k;
+    struct {                            /* the state the blit sets, to put back */
+        ID3D11RenderTargetView *rtv[D3D11_SIMULTANEOUS_RENDER_TARGET_COUNT];
+        ID3D11DepthStencilView *dsv;
+        D3D11_VIEWPORT vp[D3D11_VIEWPORT_AND_SCISSORRECT_OBJECT_COUNT_PER_PIPELINE];
+        UINT n_vp, sample_mask, stencil_ref;
+        ID3D11RasterizerState *rs;
+        ID3D11BlendState *bs;
+        FLOAT blend_factor[4];
+        ID3D11DepthStencilState *dss;
+        ID3D11ShaderResourceView *srv;
+        ID3D11SamplerState *samp;
+        ID3D11VertexShader *vs;
+        ID3D11PixelShader *ps;
+        ID3D11GeometryShader *gs;
+        ID3D11InputLayout *il;
+        D3D11_PRIMITIVE_TOPOLOGY topo;
+    } old;
+    int i;
+
+    if (!g_shot || blit_init() != 0 ||
+        FAILED(ID3D11Device_CreateRenderTargetView(d3d8_GetD3D11Device(), (ID3D11Resource *)dst, NULL, &rtv)))
+        return -1;
+    ID3D11Texture2D_GetDesc(g_shot, &sd);
+    k = (double)w / sd.Width < (double)h / sd.Height ? (double)w / sd.Width : (double)h / sd.Height;
+    vp.Width = (FLOAT)(int)(sd.Width * k + 0.5);
+    vp.Height = (FLOAT)(int)(sd.Height * k + 0.5);
+    vp.TopLeftX = (FLOAT)(int)((w - vp.Width) / 2);
+    vp.TopLeftY = (FLOAT)(int)((h - vp.Height) / 2);
+    vp.MinDepth = 0;
+    vp.MaxDepth = 1;
+
+    memset(&old, 0, sizeof(old));
+    ID3D11DeviceContext_OMGetRenderTargets(ctx, D3D11_SIMULTANEOUS_RENDER_TARGET_COUNT, old.rtv, &old.dsv);
+    old.n_vp = D3D11_VIEWPORT_AND_SCISSORRECT_OBJECT_COUNT_PER_PIPELINE;
+    ID3D11DeviceContext_RSGetViewports(ctx, &old.n_vp, old.vp);
+    ID3D11DeviceContext_RSGetState(ctx, &old.rs);
+    ID3D11DeviceContext_OMGetBlendState(ctx, &old.bs, old.blend_factor, &old.sample_mask);
+    ID3D11DeviceContext_OMGetDepthStencilState(ctx, &old.dss, &old.stencil_ref);
+    ID3D11DeviceContext_PSGetShaderResources(ctx, 0, 1, &old.srv);
+    ID3D11DeviceContext_PSGetSamplers(ctx, 0, 1, &old.samp);
+    ID3D11DeviceContext_VSGetShader(ctx, &old.vs, NULL, NULL);
+    ID3D11DeviceContext_PSGetShader(ctx, &old.ps, NULL, NULL);
+    ID3D11DeviceContext_GSGetShader(ctx, &old.gs, NULL, NULL);
+    ID3D11DeviceContext_IAGetInputLayout(ctx, &old.il);
+    ID3D11DeviceContext_IAGetPrimitiveTopology(ctx, &old.topo);
+
+    ID3D11DeviceContext_OMSetRenderTargets(ctx, 1, &rtv, NULL);
+    ID3D11DeviceContext_ClearRenderTargetView(ctx, rtv, black);
+    ID3D11DeviceContext_RSSetViewports(ctx, 1, &vp);
+    ID3D11DeviceContext_RSSetState(ctx, NULL);
+    ID3D11DeviceContext_OMSetBlendState(ctx, NULL, NULL, 0xFFFFFFFFu);
+    ID3D11DeviceContext_OMSetDepthStencilState(ctx, NULL, 0);
+    ID3D11DeviceContext_IASetInputLayout(ctx, NULL);
+    ID3D11DeviceContext_IASetPrimitiveTopology(ctx, D3D11_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
+    ID3D11DeviceContext_VSSetShader(ctx, g_blit_vs, NULL, 0);
+    ID3D11DeviceContext_GSSetShader(ctx, NULL, NULL, 0);
+    ID3D11DeviceContext_PSSetShader(ctx, g_blit_ps, NULL, 0);
+    ID3D11DeviceContext_PSSetShaderResources(ctx, 0, 1, &g_shot_srv);
+    ID3D11DeviceContext_PSSetSamplers(ctx, 0, 1, &g_blit_samp);
+    ID3D11DeviceContext_Draw(ctx, 3, 0);
+
+    ID3D11DeviceContext_OMSetRenderTargets(ctx, D3D11_SIMULTANEOUS_RENDER_TARGET_COUNT, old.rtv, old.dsv);
+    ID3D11DeviceContext_RSSetViewports(ctx, old.n_vp, old.vp);
+    ID3D11DeviceContext_RSSetState(ctx, old.rs);
+    ID3D11DeviceContext_OMSetBlendState(ctx, old.bs, old.blend_factor, old.sample_mask);
+    ID3D11DeviceContext_OMSetDepthStencilState(ctx, old.dss, old.stencil_ref);
+    ID3D11DeviceContext_PSSetShaderResources(ctx, 0, 1, &old.srv);
+    ID3D11DeviceContext_PSSetSamplers(ctx, 0, 1, &old.samp);
+    ID3D11DeviceContext_VSSetShader(ctx, old.vs, NULL, 0);
+    ID3D11DeviceContext_PSSetShader(ctx, old.ps, NULL, 0);
+    ID3D11DeviceContext_GSSetShader(ctx, old.gs, NULL, 0);
+    ID3D11DeviceContext_IASetInputLayout(ctx, old.il);
+    ID3D11DeviceContext_IASetPrimitiveTopology(ctx, old.topo);
+    for (i = 0; i < D3D11_SIMULTANEOUS_RENDER_TARGET_COUNT; i++)
+        if (old.rtv[i])
+            ID3D11RenderTargetView_Release(old.rtv[i]);
+    if (old.dsv)
+        ID3D11DepthStencilView_Release(old.dsv);
+    if (old.rs)
+        ID3D11RasterizerState_Release(old.rs);
+    if (old.bs)
+        ID3D11BlendState_Release(old.bs);
+    if (old.dss)
+        ID3D11DepthStencilState_Release(old.dss);
+    if (old.srv)
+        ID3D11ShaderResourceView_Release(old.srv);
+    if (old.samp)
+        ID3D11SamplerState_Release(old.samp);
+    if (old.vs)
+        ID3D11VertexShader_Release(old.vs);
+    if (old.ps)
+        ID3D11PixelShader_Release(old.ps);
+    if (old.gs)
+        ID3D11GeometryShader_Release(old.gs);
+    if (old.il)
+        ID3D11InputLayout_Release(old.il);
+    ID3D11RenderTargetView_Release(rtv);
+    return 0;
+}
+
+/* Without the blit: the frame's top-left corner, as much as fits. */
+static void copy_unscaled(ID3D11Texture2D *dst, ID3D11Texture2D *src)
+{
+    D3D11_TEXTURE2D_DESC sd;
+    D3D11_BOX box;
+
+    ID3D11Texture2D_GetDesc(src, &sd);
+    box.left = box.top = box.front = 0;
+    box.right = sd.Width < g_buf_w ? sd.Width : g_buf_w;
+    box.bottom = sd.Height < g_buf_h ? sd.Height : g_buf_h;
+    box.back = 1;
+    ID3D11DeviceContext_CopySubresourceRegion(d3d8_GetD3D11Context(), (ID3D11Resource *)dst, 0, 0, 0, 0,
+                                              (ID3D11Resource *)src, 0, &box);
+}
+
+/* The visible swap chain's size: the client's in borderless fullscreen, the
+ * host back buffer's in a window. Called with g_lock held, before the frame
+ * is copied in (no buffer of it is held). */
+static void flip_fit(void)
+{
+    unsigned w = g_fs ? (unsigned)g_client_w : g_w, h = g_fs ? (unsigned)g_client_h : g_h;
+    HRESULT hr;
+
+    if (!w || !h || (w == g_buf_w && h == g_buf_h))
+        return;
+    hr = IDXGISwapChain1_ResizeBuffers(g_flip, 0, w, h, DXGI_FORMAT_UNKNOWN, g_flip_flags);
+    if (FAILED(hr)) {
+        static int told;
+        if (!told++)
+            fprintf(stderr, "[D3DB] host swap chain not resized to %ux%u: 0x%08lX\n", w, h, (unsigned long)hr);
+        return;
+    }
+    g_buf_w = w;
+    g_buf_h = h;
+    fprintf(stderr, "[D3DB] host swap chain %ux%u (%s)\n", w, h,
+            g_buf_w == g_w && g_buf_h == g_h ? "the frame copied" : "the frame drawn letterboxed");
+}
+
 void d3dh_present(double t_s, unsigned swap_no)
 {
     ULONGLONG now;
@@ -1476,11 +1825,17 @@ void d3dh_present(double t_s, unsigned swap_no)
         g_st.dumps++;
         fprintf(stderr, "[D3DB] host dump %s at +%.1f s, guest swap %u\n", path, t_s, swap_no);
     }
+    flip_fit();                         /* step 54 */
     {   /* xbox_d3d8's back buffer -> the visible flip-model swap chain */
         ID3D11Texture2D *src = NULL, *dst = NULL;
         if (SUCCEEDED(IDXGISwapChain_GetBuffer(d3d8_GetSwapChain(), 0, &IID_ID3D11Texture2D, (void **)&src)) &&
-            SUCCEEDED(IDXGISwapChain1_GetBuffer(g_flip, 0, &IID_ID3D11Texture2D, (void **)&dst)))
-            ID3D11DeviceContext_CopyResource(d3d8_GetD3D11Context(), (ID3D11Resource *)dst, (ID3D11Resource *)src);
+            SUCCEEDED(IDXGISwapChain1_GetBuffer(g_flip, 0, &IID_ID3D11Texture2D, (void **)&dst))) {
+            if (g_buf_w == g_w && g_buf_h == g_h)
+                ID3D11DeviceContext_CopyResource(d3d8_GetD3D11Context(), (ID3D11Resource *)dst,
+                                                 (ID3D11Resource *)src);
+            else if (shot_take(src) != 0 || blit_draw(dst, g_buf_w, g_buf_h) != 0)
+                copy_unscaled(dst, src);
+        }
         if (src)
             ID3D11Texture2D_Release(src);
         if (dst)
