@@ -585,10 +585,11 @@ static volatile LONG g_wide_cameras, g_wide_kept, g_ev_wide, g_wide_ff_pillar;
  * bridge on: the host renders at that size, or the largest of the picture's
  * aspect that fits in it (d3dh_create's host size, host_size). Independent
  * of RECOMP_WIDESCREEN: at 4:3 it is a sharper 4:3 picture. */
+static int render_size_parse(const char *v, unsigned *pw, unsigned *ph);
+
 static void render_size_init(void)
 {
     const char *v = getenv("RECOMP_RENDER_SIZE");
-    unsigned w = 0, h = 0;
 
     if (!v || !*v || strcmp(v, "0") == 0)
         return;
@@ -596,6 +597,18 @@ static void render_size_init(void)
         fprintf(stderr, "[WIDE] RECOMP_RENDER_SIZE needs the bridge (RECOMP_D3D_BRIDGE=1): ignored\n");
         return;
     }
+    render_size_parse(v, &g_render_w, &g_render_h);
+}
+
+/* "WxH" or "native" into *pw x *ph; "" or "0" is 0 x 0 (the guest's size).
+ * Returns -1 (and 0 x 0) for anything else. Step 54: also the overlay's. */
+static int render_size_parse(const char *v, unsigned *pw, unsigned *ph)
+{
+    unsigned w = 0, h = 0;
+
+    *pw = *ph = 0;
+    if (!v || !*v || strcmp(v, "0") == 0)
+        return 0;
     if (_stricmp(v, "native") == 0) {
         DEVMODEA dm;
         memset(&dm, 0, sizeof(dm));
@@ -609,10 +622,11 @@ static void render_size_init(void)
     }
     if (w < 64 || h < 64 || w > 8192 || h > 8192) {
         fprintf(stderr, "[WIDE] RECOMP_RENDER_SIZE=%s: not WxH (64-8192) or native; ignored\n", v);
-        return;
+        return -1;
     }
-    g_render_w = w;
-    g_render_h = h;
+    *pw = w;
+    *ph = h;
+    return 0;
 }
 
 /* The host back buffer for the guest's gw x gh: the picture's aspect (the
@@ -832,6 +846,92 @@ static void vsync_pacing(unsigned *interval, double *hz)
     *hz = 0;
 }
 
+/* Step 54 (notes 18.57): the player's pacing (RECOMP_PACING, the overlay).
+ * auto is the above, as before. vsync: the display, at the whole interval
+ * nearest its rate over the game's (the game then runs at the display's
+ * rate over it, its own speed only on a multiple). limiter: the limiter, no
+ * vsync. limiter+vsync: the limiter, and each present on a refresh. With the
+ * executor pacing (no limiter rate) nothing changes. */
+static uint32_t g_pp_interval;          /* the game's XDK presentation interval (CreateDevice) */
+static int g_pacing_mode;               /* the TWOC_PACING_* in effect */
+
+static void pacing_for(int mode, int live, unsigned *interval, double *hz)
+{
+    double r;
+    unsigned n;
+
+    *interval = present_interval();
+    *hz = present_hz(g_pp_interval);
+    if (mode == TWOC_PACING_AUTO && !live) {
+        vsync_pacing(interval, hz);     /* at the start: as before */
+        return;
+    }
+    if (*hz <= 0)
+        return;
+    /* During the run DWM's rate follows our presents on a variable-refresh
+     * display, so the monitor's nominal rate decides (d3dh_monitor_hz). */
+    r = d3dh_monitor_hz();
+    if (r <= 0)
+        r = d3dh_display_hz();
+    if (mode == TWOC_PACING_AUTO) {
+        const char *vi = getenv("RECOMP_D3D_BRIDGE_INTERVAL"), *vh = getenv("RECOMP_D3D_BRIDGE_HZ");
+        n = r > 0 ? (unsigned)(r / *hz + 0.5) : 0;
+        if ((vi && *vi) || (vh && *vh) || *interval || n < 1 || n > 4 || fabs(r / n - *hz) > 0.005 * *hz) {
+            fprintf(stderr, "[D3DB] pacing auto: monitor %.3f Hz isn't a multiple of %.3f Hz: the frame limiter"
+                    " paces\n", r, *hz);
+            return;
+        }
+        fprintf(stderr, "[D3DB] pacing auto: monitor %.3f Hz = %u x %.3f Hz: presents at interval %u, paced by"
+                " the display\n", r, n, r / n, n);
+        *interval = n;
+        *hz = 0;
+        return;
+    }
+    switch (mode) {
+    case TWOC_PACING_VSYNC:
+        n = r > 0 ? (unsigned)(r / *hz + 0.5) : 1;
+        n = n < 1 ? 1 : n > 4 ? 4 : n;
+        fprintf(stderr, "[D3DB] pacing vsync: monitor %.3f Hz / %u = %.3f frames a second (the game's %.3f)\n", r, n,
+                r > 0 ? r / n : 0.0, *hz);
+        *interval = n;
+        *hz = 0;
+        break;
+    case TWOC_PACING_LIMITER:
+        *interval = 0;
+        break;
+    case TWOC_PACING_LIMITER_VSYNC:
+        *interval = 1;
+        break;
+    }
+}
+
+/* Step 54: settings changed in the overlay, on the presenting thread with
+ * the game held. The aspect takes effect at the game's next projection, the
+ * host picture and the pacing at once. */
+static void settings_apply(const twoc_settings_t *s)
+{
+    double wide = 0;
+    unsigned rw, rh, w, h, interval;
+    double hz;
+
+    if (s->widescreen && s->wide_h > 0 && s->wide_w / s->wide_h > 4.0 / 3.0 + 1e-6)
+        wide = s->wide_w / s->wide_h;
+    if (wide != d3db_wide)
+        fprintf(stderr, "[WIDE] widescreen %s (live)\n", wide > 0 ? "on" : "off");
+    d3db_wide = wide;
+    if (render_size_parse(s->render_size, &rw, &rh) == 0) {
+        g_render_w = rw;
+        g_render_h = rh;
+    }
+    host_size(g_guest_w ? g_guest_w : 640, g_guest_h ? g_guest_h : 480, &w, &h);
+    d3dh_resize(w, h, d3db_wide);
+    if (s->pacing != g_pacing_mode) {   /* only when the pacing itself changed */
+        g_pacing_mode = s->pacing;
+        pacing_for(s->pacing, 1, &interval, &hz);
+        d3dh_set_pacing(interval, hz);
+    }
+}
+
 /* -DumpDir sets RECOMP_FB_DUMP to "<dir>\shot" for the executor's dumps; the
  * host's go next to them as "<dir>\host". */
 static const char *host_dump_prefix(char *buf, size_t cap)
@@ -863,12 +963,13 @@ static void mirror_create_device(const d3db_args_t *a)
     }
     g_guest_w = MEM32(pp + 4 * PP_WIDTH);
     g_guest_h = MEM32(pp + 4 * PP_HEIGHT);
-    interval = present_interval();
-    hz = present_hz(MEM32(pp + 4 * PP_INTERVAL));
-    vsync_pacing(&interval, &hz);
+    g_pp_interval = MEM32(pp + 4 * PP_INTERVAL);
+    g_pacing_mode = twoc_pacing_parse(getenv("RECOMP_PACING"));
+    pacing_for(g_pacing_mode, 0, &interval, &hz);      /* auto: as before */
     host_size(g_guest_w ? g_guest_w : 640, g_guest_h ? g_guest_h : 480, &host_w, &host_h);
     d3dh_create(g_guest_w, g_guest_h, host_w, host_h, d3db_wide, g_render_w != 0, interval, hz,
                 host_dump_prefix(prefix, sizeof(prefix)));
+    d3dh_set_apply(settings_apply);
     if (host_dump_prefix(prefix, sizeof(prefix)))
         snprintf(g_check_prefix, sizeof(g_check_prefix), "%s", prefix);
 }

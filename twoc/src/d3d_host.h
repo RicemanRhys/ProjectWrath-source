@@ -196,4 +196,23 @@ double d3dh_display_hz(void);           /* the display's refresh rate, 0 if unkn
 
 void d3dh_stats(d3dh_stats_t *out);
 
+/* ── Step 54 (notes 18.57): the settings overlay and live settings ──
+ *
+ * Esc on the host window opens the overlay at the next present: that present
+ * holds the game until it closes. Settings the host can't apply itself (the
+ * aspect, the render size, the pacing: d3d_bridge.c decides them) go to the
+ * callback set here, on the presenting thread, without the host's lock. */
+#include "settings.h"
+typedef void (*d3dh_apply_fn)(const twoc_settings_t *s);
+void d3dh_set_apply(d3dh_apply_fn fn);
+/* The host picture at a new size and aspect (`wide` as for d3dh_create).
+ * From the first change on, a host render target of that size stands in for
+ * xbox_d3d8's back buffer, whose size is fixed; screen-sized render targets
+ * are made again at their next use. */
+void d3dh_resize(unsigned host_w, unsigned host_h, double wide);
+/* New pacing, as d3dh_create's `interval` and `frame_hz`. */
+void d3dh_set_pacing(unsigned interval, double frame_hz);
+/* The window's monitor's nominal refresh rate (its mode), 0 if unknown. */
+double d3dh_monitor_hz(void);
+
 #endif

@@ -101,6 +101,17 @@
  * size at the next present (flip_fit), and the picture is drawn into it
  * letterboxed at its own aspect (blit). In a window the swap chain keeps the
  * host back buffer's size and the present copies it as before.
+ *
+ * Step 54 (notes 18.57): the settings overlay. Esc on the window opens it at
+ * the next present, which then holds the game (overlay_pause) and draws Dear
+ * ImGui (overlay.cpp) over the frame it was about to show until Esc again.
+ * Its keyboard and mouse go to ImGui only; the game reads no keys. Settings
+ * apply at once: fullscreen (the window thread), anisotropic filtering (each
+ * draw's stage states), the volume (host_audio.cpp), and through d3d_bridge.c
+ * the aspect, the render size (d3dh_resize: a render target of the new size
+ * stands in for xbox_d3d8's fixed back buffer) and the pacing
+ * (d3dh_set_pacing: the swap chain made again when it needs the other kind).
+ * Without Esc, and with RECOMP_ANISOTROPY unset, nothing here runs.
  */
 
 #include <stdio.h>
@@ -115,8 +126,9 @@
 #pragma comment(lib, "dwmapi.lib")
 
 #include "d3d_host.h"
+#include "overlay.h"
 
-#define WIN_CLASS           "TwocD3DBridge"
+#define WIN_CLASS          "TwocD3DBridge"
 #define WIN_TITLE           "Crash TWOC - D3D bridge (host)"
 #define DUMP_FIRST_FRAMES   8
 #define DUMP_PERIOD_MS      10000
@@ -153,6 +165,18 @@ static volatile LONG g_client_w, g_client_h;
 static unsigned g_buf_w, g_buf_h;
 static UINT g_flip_flags;               /* the swap chain's flags, for ResizeBuffers */
 #define WM_TWOC_FULLSCREEN (WM_APP + 1) /* wParam 1 on, 0 off, 2 toggle */
+#define WM_TWOC_FIT (WM_APP + 2)        /* the host picture's size changed: fit the window to it */
+
+/* Step 54: the settings overlay and live settings (overlay.cpp). */
+static unsigned g_dev_w, g_dev_h;       /* xbox_d3d8's own back buffer: its size is fixed */
+static struct {                         /* stands in for it after a live size change (d3dh_resize) */
+    IDirect3DTexture8 *tex;
+    IDirect3DSurface8 *surf, *depth;
+} g_bb;
+static volatile LONG g_aniso = 1;       /* RECOMP_ANISOTROPY: 1 leaves the game's filtering */
+static volatile LONG g_ovl_open;        /* Esc: the next present runs the overlay */
+static SRWLOCK g_pause_lock = SRWLOCK_INIT;
+static d3dh_apply_fn g_apply;
 
 /* S4: host render-target textures, by guest Data. A target lives until the
  * guest frees its memory (d3dh_memory_freed) or, with every slot in use, it
@@ -272,8 +296,71 @@ static void set_fullscreen(HWND hwnd, int on)
     }
 }
 
+/* Step 54: a live change of the host picture's size. In a window, the client
+ * becomes the new size, shrunk to 90% of the work area if needed, around the
+ * window's centre (in this window's own pixels: real ones if it was made DPI
+ * aware, Windows' scaled ones if not). Fullscreen keeps the monitor. */
+static void fit_window(HWND hwnd)
+{
+    RECT w, c, wa;
+    LONG cw = (LONG)g_w, ch = (LONG)g_h, fw, fh, cx, cy;
+
+    if (g_fs || !SystemParametersInfoA(SPI_GETWORKAREA, 0, &wa, 0))
+        return;
+    if (cw > (wa.right - wa.left) * 9 / 10 || ch > (wa.bottom - wa.top) * 9 / 10) {
+        double k = (double)(wa.right - wa.left) * 0.9 / cw < (double)(wa.bottom - wa.top) * 0.9 / ch
+                       ? (double)(wa.right - wa.left) * 0.9 / cw
+                       : (double)(wa.bottom - wa.top) * 0.9 / ch;
+        cw = (LONG)(cw * k);
+        ch = (LONG)(ch * k);
+    }
+    GetWindowRect(hwnd, &w);
+    GetClientRect(hwnd, &c);
+    fw = (w.right - w.left) - (c.right - c.left) + cw;
+    fh = (w.bottom - w.top) - (c.bottom - c.top) + ch;
+    cx = (w.left + w.right) / 2;
+    cy = (w.top + w.bottom) / 2;
+    cx = cx - fw / 2 < wa.left ? wa.left + fw / 2 : cx;
+    cy = cy - fh / 2 < wa.top ? wa.top + fh / 2 : cy;
+    SetWindowPos(hwnd, NULL, cx - fw / 2, cy - fh / 2, fw, fh, SWP_NOZORDER | SWP_NOACTIVATE);
+}
+
+/* Step 54: messages for the open overlay, in the swap chain's pixels. */
+static int overlay_message(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp)
+{
+    RECT c;
+    float sx = 1.0f, sy = 1.0f;
+
+    if (!g_ovl_open)
+        return 0;
+    switch (msg) {
+    case WM_MOUSEMOVE: case WM_LBUTTONDOWN: case WM_LBUTTONUP: case WM_LBUTTONDBLCLK: case WM_RBUTTONDOWN:
+    case WM_RBUTTONUP: case WM_RBUTTONDBLCLK: case WM_MOUSEWHEEL: case WM_KEYDOWN: case WM_KEYUP: case WM_SYSKEYUP:
+    case WM_SETFOCUS: case WM_KILLFOCUS:
+        break;
+    default:
+        return 0;
+    }
+    if (GetClientRect(hwnd, &c) && c.right > 0 && c.bottom > 0 && g_buf_w && g_buf_h) {
+        sx = (float)g_buf_w / (float)c.right;
+        sy = (float)g_buf_h / (float)c.bottom;
+    }
+    ovl_input(msg, wp, lp, sx, sy);
+    return msg != WM_SETFOCUS && msg != WM_KILLFOCUS && msg != WM_SYSKEYUP;
+}
+
 static LRESULT CALLBACK wnd_proc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp)
 {
+    if (hwnd == g_hwnd && msg == WM_KEYDOWN && wp == VK_ESCAPE) {
+        if (!(lp & (1 << 30)) && g_ready) { /* step 54: Esc opens and closes the settings overlay */
+            if (!g_ovl_open)
+                ovl_opened();
+            InterlockedExchange(&g_ovl_open, !g_ovl_open);
+        }
+        return 0;
+    }
+    if (hwnd == g_hwnd && overlay_message(hwnd, msg, wp, lp))
+        return 0;
     switch (msg) {
     case WM_CLOSE:
         fprintf(stderr, "[D3DB] host window closed: ending the process\n");
@@ -299,8 +386,11 @@ static LRESULT CALLBACK wnd_proc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp)
     case WM_TWOC_FULLSCREEN:
         set_fullscreen(hwnd, wp == 2 ? !g_fs : (int)wp);
         return 0;
-    case WM_SETCURSOR:                  /* no pointer over the fullscreen picture */
-        if (g_fs && LOWORD(lp) == HTCLIENT) {
+    case WM_TWOC_FIT:
+        fit_window(hwnd);
+        return 0;
+    case WM_SETCURSOR:                  /* no pointer over the fullscreen picture, unless the overlay is open */
+        if (g_fs && !g_ovl_open && LOWORD(lp) == HTCLIENT) {
             SetCursor(NULL);
             return TRUE;
         }
@@ -417,9 +507,15 @@ int d3dh_create(unsigned width, unsigned height, unsigned host_w, unsigned host_
     g_dpi_aware = dpi_aware;
     g_interval = interval;
     g_frame_hz = frame_hz > 0 ? frame_hz : 0;
+    g_dev_w = g_w;
+    g_dev_h = g_h;
     {
-        const char *fs = getenv("RECOMP_FULLSCREEN");
+        const char *fs = getenv("RECOMP_FULLSCREEN"), *an = getenv("RECOMP_ANISOTROPY");
+        int a = an ? atoi(an) : 1;
         g_fs_at_start = fs && *fs && strcmp(fs, "0") != 0;
+        g_aniso = a >= 16 ? 16 : a >= 8 ? 8 : a >= 4 ? 4 : a >= 2 ? 2 : 1;
+        if (g_aniso > 1)
+            fprintf(stderr, "[D3DB] host: anisotropic filtering %ldx on linearly filtered stages\n", g_aniso);
     }
     if (dump_prefix) {
         const char *every = getenv("RECOMP_D3D_BRIDGE_DUMP_EVERY");
@@ -531,7 +627,7 @@ static void rt_release(int i)
 
     if (g_cur_target == i) {
         g_dev->lpVtbl->SetRenderTarget(g_dev, NULL, NULL);
-        g_cur_target = -1;
+        g_cur_target = g_bb.tex ? -2 : -1;      /* step 54: the stand-in back buffer is bound at the next use */
     }
     for (s = 0; s < 4; s++)             /* xbox_d3d8 keeps the bound pointer */
         g_dev->lpVtbl->SetTexture(g_dev, s, NULL);
@@ -632,7 +728,10 @@ static int bind_target(const d3dh_target_t *t)
 
     if (!t->data) {
         if (g_cur_target != -1) {
-            g_dev->lpVtbl->SetRenderTarget(g_dev, NULL, NULL);     /* the default views */
+            if (g_bb.tex)               /* step 54: the host picture's size changed */
+                g_dev->lpVtbl->SetRenderTarget(g_dev, g_bb.surf, g_bb.depth);
+            else
+                g_dev->lpVtbl->SetRenderTarget(g_dev, NULL, NULL);     /* the default views */
             g_cur_target = -1;
         }
         return 0;
@@ -917,7 +1016,7 @@ static const void *rescale_rhw_map(const void *verts, uint32_t count, uint32_t s
     uint32_t i;
 
     if (!vp->Width || !vp->Height ||
-        (vp->X == 0 && vp->Y == 0 && vp->Width == g_w && vp->Height == g_h && map_identity(m)))
+        (vp->X == 0 && vp->Y == 0 && vp->Width == g_dev_w && vp->Height == g_dev_h && map_identity(m)))
         return verts;
     if (n > cap) {
         uint8_t *nb = (uint8_t *)realloc(buf, n);
@@ -927,8 +1026,8 @@ static const void *rescale_rhw_map(const void *verts, uint32_t count, uint32_t s
         cap = n;
     }
     memcpy(buf, verts, n);
-    sx = (float)g_w / (float)vp->Width;
-    sy = (float)g_h / (float)vp->Height;
+    sx = (float)g_dev_w / (float)vp->Width;     /* step 54: xbox_d3d8's back buffer, whatever is bound */
+    sy = (float)g_dev_h / (float)vp->Height;
     for (i = 0; i < count; i++) {
         float *p = (float *)(buf + (size_t)i * stride);
         p[0] = (m->ox + p[0] * m->sx - (float)vp->X) * sx;     /* 18.56: guest pixels to the host's first */
@@ -1106,10 +1205,31 @@ int d3dh_draw_up(const d3dh_draw_t *d)
         for (s = 0; s < 4; s++)
             g_dev->lpVtbl->SetTexture(g_dev, s, bound[s]);
     }
-    for (s = 0; s < 4; s++)
-        for (i = 0; i < d->n_tss[s]; i++)
-            g_dev->lpVtbl->SetTextureStageState(g_dev, s, (D3DTEXTURESTAGESTATETYPE)d->tss[s][i].state,
-                                                d->tss[s][i].value);
+    for (s = 0; s < 4; s++) {
+        /* Step 54, RECOMP_ANISOTROPY: a textured stage the game filters
+         * linearly both ways samples anisotropically instead. The bridge
+         * sends every stage state with every draw, so off is the game's own. */
+        LONG aniso = d->tex[s] ? g_aniso : 1;
+        if (aniso > 1) {
+            uint32_t mag = 0, min = 0;
+            for (i = 0; i < d->n_tss[s]; i++) {
+                if (d->tss[s][i].state == D3DTSS_MAGFILTER)
+                    mag = d->tss[s][i].value;
+                else if (d->tss[s][i].state == D3DTSS_MINFILTER)
+                    min = d->tss[s][i].value;
+            }
+            if (mag != D3DTEXF_LINEAR || min != D3DTEXF_LINEAR)
+                aniso = 1;
+        }
+        for (i = 0; i < d->n_tss[s]; i++) {
+            uint32_t v = d->tss[s][i].value;
+            if (aniso > 1 && d->tss[s][i].state == D3DTSS_MINFILTER)
+                v = D3DTEXF_ANISOTROPIC;
+            else if (aniso > 1 && d->tss[s][i].state == D3DTSS_MAXANISOTROPY)
+                v = (uint32_t)aniso;
+            g_dev->lpVtbl->SetTextureStageState(g_dev, s, (D3DTEXTURESTAGESTATETYPE)d->tss[s][i].state, v);
+        }
+    }
     for (i = 0; i < d->n_rs; i++) {
         g_dev->lpVtbl->SetRenderState(g_dev, (D3DRENDERSTATETYPE)d->rs[i].state, d->rs[i].value);
         if (d->rs[i].state == D3DRS_LIGHTING)
@@ -1171,6 +1291,22 @@ int d3dh_draw_up(const d3dh_draw_t *d)
 
 #define XDK_FMT_LIN_A8B8G8R8 0x3F      /* R8G8B8A8 in xbox_d3d8, the back buffer's DXGI format */
 
+/* The host back buffer's texture, referenced: xbox_d3d8's swap-chain buffer,
+ * or since a live size change its stand-in (step 54). NULL if unavailable. */
+static ID3D11Texture2D *back_tex(void)
+{
+    ID3D11Texture2D *t = NULL;
+
+    if (g_bb.tex) {
+        t = ((D3D8Texture *)g_bb.tex)->d3d11_texture;
+        ID3D11Texture2D_AddRef(t);
+        return t;
+    }
+    if (FAILED(IDXGISwapChain_GetBuffer(d3d8_GetSwapChain(), 0, &IID_ID3D11Texture2D, (void **)&t)))
+        return NULL;
+    return t;
+}
+
 int d3dh_copy_back(const d3dh_target_t *dst, const int32_t *rects, const int32_t *points, unsigned n)
 {
     d3dh_target_t t = *dst;
@@ -1187,7 +1323,7 @@ int d3dh_copy_back(const d3dh_target_t *dst, const int32_t *rects, const int32_t
     t.format = XDK_FMT_LIN_A8B8G8R8;
     EnterCriticalSection(&g_lock);
     i = rt_find(&t, 1);
-    if (i >= 0 && SUCCEEDED(IDXGISwapChain_GetBuffer(d3d8_GetSwapChain(), 0, &IID_ID3D11Texture2D, (void **)&bb))) {
+    if (i >= 0 && (bb = back_tex()) != NULL) {
         static const d3dh_target_t back = { 0, 0, 0, 0 };
         xmap_t ms, md;                  /* 18.56: the guest's rects and points in host pixels */
         target_map(&back, 0, &ms);
@@ -1322,9 +1458,9 @@ static void dump_texture(ID3D11Texture2D *src, ID3D11Texture2D **staging, const 
 
 static void dump_back_buffer(const char *path)
 {
-    ID3D11Texture2D *bb = NULL;
+    ID3D11Texture2D *bb = back_tex();
 
-    if (FAILED(IDXGISwapChain_GetBuffer(d3d8_GetSwapChain(), 0, &IID_ID3D11Texture2D, (void **)&bb)))
+    if (!bb)
         return;
     dump_texture(bb, &g_staging, path, 0);
     ID3D11Texture2D_Release(bb);
@@ -1801,6 +1937,340 @@ static void flip_fit(void)
             g_buf_w == g_w && g_buf_h == g_h ? "the frame copied" : "the frame drawn letterboxed");
 }
 
+/* ── Live settings and the overlay (step 54, notes 18.57) ───── */
+
+/* The nominal refresh rate of the window's monitor (its display mode, as a
+ * rational: 239.76 here), 0 if unknown. DWM's rate (d3dh_display_hz) follows
+ * the presents on a variable-refresh display (277.97 Hz once, mid-run), so a
+ * pacing chosen during the run uses this one. */
+double d3dh_monitor_hz(void)
+{
+    MONITORINFOEXA mi;
+    UINT32 np = 0, nm = 0, i;
+    DISPLAYCONFIG_PATH_INFO *paths;
+    DISPLAYCONFIG_MODE_INFO *modes;
+    double hz = 0;
+
+    memset(&mi, 0, sizeof(mi));
+    mi.cbSize = sizeof(mi);
+    if (!g_hwnd || !GetMonitorInfoA(MonitorFromWindow(g_hwnd, MONITOR_DEFAULTTONEAREST), (MONITORINFO *)&mi) ||
+        GetDisplayConfigBufferSizes(QDC_ONLY_ACTIVE_PATHS, &np, &nm) != ERROR_SUCCESS)
+        return 0;
+    paths = (DISPLAYCONFIG_PATH_INFO *)calloc(np, sizeof(*paths));
+    modes = (DISPLAYCONFIG_MODE_INFO *)calloc(nm, sizeof(*modes));
+    if (paths && modes && QueryDisplayConfig(QDC_ONLY_ACTIVE_PATHS, &np, paths, &nm, modes, NULL) == ERROR_SUCCESS)
+        for (i = 0; i < np && hz == 0; i++) {
+            DISPLAYCONFIG_SOURCE_DEVICE_NAME sn;
+            memset(&sn, 0, sizeof(sn));
+            sn.header.type = DISPLAYCONFIG_DEVICE_INFO_GET_SOURCE_NAME;
+            sn.header.size = sizeof(sn);
+            sn.header.adapterId = paths[i].sourceInfo.adapterId;
+            sn.header.id = paths[i].sourceInfo.id;
+            if (DisplayConfigGetDeviceInfo(&sn.header) == ERROR_SUCCESS) {
+                char name[64];
+                WideCharToMultiByte(CP_ACP, 0, sn.viewGdiDeviceName, -1, name, sizeof(name), NULL, NULL);
+                if (_stricmp(name, mi.szDevice) == 0 && paths[i].targetInfo.refreshRate.Denominator)
+                    hz = (double)paths[i].targetInfo.refreshRate.Numerator /
+                         paths[i].targetInfo.refreshRate.Denominator;
+            }
+        }
+    free(paths);
+    free(modes);
+    return hz;
+}
+
+void d3dh_set_apply(d3dh_apply_fn fn)
+{
+    g_apply = fn;
+}
+
+/* The visible swap chain again, with `flags` (the frame-latency object or
+ * not), at its current size. A flag can't change in ResizeBuffers. Called
+ * with g_lock held, from the only presenting thread (the overlay's). */
+static int recreate_flip(UINT flags)
+{
+    IDXGIFactory2 *f = NULL;
+    DXGI_SWAP_CHAIN_DESC1 sd;
+    HRESULT hr = E_FAIL;
+    int attempt;
+
+    if (FAILED(IDXGISwapChain_GetParent(d3d8_GetSwapChain(), &IID_IDXGIFactory2, (void **)&f)))
+        return -1;
+    IDXGISwapChain1_Release(g_flip);
+    g_flip = NULL;
+    if (g_latency) {
+        CloseHandle(g_latency);
+        g_latency = NULL;
+    }
+    ID3D11DeviceContext_Flush(d3d8_GetD3D11Context());
+    memset(&sd, 0, sizeof(sd));
+    sd.Width = g_buf_w;
+    sd.Height = g_buf_h;
+    sd.Format = DXGI_FORMAT_R8G8B8A8_UNORM;
+    sd.SampleDesc.Count = 1;
+    sd.BufferUsage = DXGI_USAGE_RENDER_TARGET_OUTPUT;
+    sd.BufferCount = 2;
+    sd.Scaling = DXGI_SCALING_STRETCH;
+    sd.SwapEffect = DXGI_SWAP_EFFECT_FLIP_DISCARD;
+    sd.AlphaMode = DXGI_ALPHA_MODE_IGNORE;
+    for (attempt = 0; attempt < 20 && !g_flip; attempt++) {    /* the old one lets go of the window shortly */
+        sd.Flags = attempt < 10 ? flags : g_flip_flags;
+        hr = IDXGIFactory2_CreateSwapChainForHwnd(f, (IUnknown *)d3d8_GetD3D11Device(), g_hwnd, &sd, NULL, NULL,
+                                                  &g_flip);
+        if (FAILED(hr))
+            Sleep(10);
+    }
+    if (g_flip) {
+        g_flip_flags = sd.Flags;
+        if (sd.Flags) {
+            IDXGISwapChain2 *sc2 = NULL;
+            if (SUCCEEDED(IDXGISwapChain1_QueryInterface(g_flip, &IID_IDXGISwapChain2, (void **)&sc2))) {
+                IDXGISwapChain2_SetMaximumFrameLatency(sc2, 2);
+                g_latency = IDXGISwapChain2_GetFrameLatencyWaitableObject(sc2);
+                IDXGISwapChain2_Release(sc2);
+            }
+        }
+        IDXGIFactory2_MakeWindowAssociation(f, g_hwnd, DXGI_MWA_NO_ALT_ENTER | DXGI_MWA_NO_WINDOW_CHANGES);
+    } else {
+        fprintf(stderr, "[D3DB] host swap chain not made again (0x%08lX): the host stops presenting\n",
+                (unsigned long)hr);
+        InterlockedExchange(&g_ready, 0);
+    }
+    IDXGIFactory2_Release(f);
+    return g_flip && sd.Flags == flags ? 0 : -1;
+}
+
+void d3dh_set_pacing(unsigned interval, double frame_hz)
+{
+    UINT want = interval && frame_hz <= 0 ? DXGI_SWAP_CHAIN_FLAG_FRAME_LATENCY_WAITABLE_OBJECT : 0;
+
+    if (!g_ready)
+        return;
+    EnterCriticalSection(&g_lock);
+    if (want != g_flip_flags && recreate_flip(want) != 0) {
+        LeaveCriticalSection(&g_lock);
+        fprintf(stderr, "[D3DB] host pacing unchanged: the swap chain couldn't be made for it\n");
+        return;
+    }
+    g_interval = interval;
+    g_frame_hz = frame_hz > 0 ? frame_hz : 0;
+    LeaveCriticalSection(&g_lock);
+    fprintf(stderr, "[D3DB] host pacing now: present interval %u%s, frame limiter %s%.3f Hz\n", g_interval,
+            g_latency ? " (vsync paced)" : "", g_frame_hz > 0 ? "" : "off, ", g_frame_hz);
+}
+
+void d3dh_resize(unsigned host_w, unsigned host_h, double wide)
+{
+    IDirect3DTexture8 *tex = NULL;
+    IDirect3DSurface8 *surf = NULL, *depth = NULL;
+    HRESULT hr = S_OK;
+    int i;
+
+    if (!g_ready || !host_w || !host_h)
+        return;
+    EnterCriticalSection(&g_lock);
+    g_wide = wide;
+    if (host_w == g_w && host_h == g_h) {
+        LeaveCriticalSection(&g_lock);
+        return;
+    }
+    if (host_w != g_dev_w || host_h != g_dev_h) {
+        hr = g_dev->lpVtbl->CreateTexture(g_dev, host_w, host_h, 1, D3DUSAGE_RENDERTARGET,
+                                          (D3DFORMAT)XDK_FMT_LIN_A8B8G8R8, D3DPOOL_DEFAULT, &tex);
+        if (SUCCEEDED(hr))
+            hr = tex->lpVtbl->GetSurfaceLevel(tex, 0, &surf);
+        if (SUCCEEDED(hr))
+            hr = g_dev->lpVtbl->CreateDepthStencilSurface(g_dev, host_w, host_h, D3DFMT_D24S8, D3DMULTISAMPLE_NONE,
+                                                          &depth);
+        if (FAILED(hr) || !surf || !depth) {
+            if (depth)
+                depth->lpVtbl->Release(depth);
+            if (surf)
+                surf->lpVtbl->Release(surf);
+            if (tex)
+                tex->lpVtbl->Release(tex);
+            LeaveCriticalSection(&g_lock);
+            fprintf(stderr, "[D3DB] host picture not resized to %ux%u (0x%08lX): stays %ux%u\n", host_w, host_h,
+                    (unsigned long)hr, g_w, g_h);
+            return;
+        }
+    }
+    for (i = 0; i < RT_SLOTS; i++)      /* screen-sized targets: made again at the new size at their next use */
+        if (g_rt[i].tex && g_rt[i].width == g_gw && g_rt[i].height == g_gh)
+            rt_release(i);
+    g_dev->lpVtbl->SetRenderTarget(g_dev, NULL, NULL);
+    if (g_bb.tex) {
+        g_bb.depth->lpVtbl->Release(g_bb.depth);
+        g_bb.surf->lpVtbl->Release(g_bb.surf);
+        g_bb.tex->lpVtbl->Release(g_bb.tex);
+    }
+    g_bb.tex = tex;                     /* NULL at xbox_d3d8's own size: its back buffer again */
+    g_bb.surf = surf;
+    g_bb.depth = depth;
+    if (g_bb.tex) {
+        g_dev->lpVtbl->SetRenderTarget(g_dev, g_bb.surf, g_bb.depth);
+        g_dev->lpVtbl->Clear(g_dev, 0, NULL, D3DCLEAR_TARGET | D3DCLEAR_ZBUFFER | D3DCLEAR_STENCIL, 0, 1.0f, 0);
+    }
+    g_cur_target = -1;
+    if (g_staging) {                    /* the dumps' copy has the old size */
+        ID3D11Texture2D_Release(g_staging);
+        g_staging = NULL;
+    }
+    fprintf(stderr, "[D3DB] host picture %ux%u -> %ux%u (%s)%s\n", g_w, g_h, host_w, host_h,
+            wide > 0 ? "widescreen" : "4:3", g_bb.tex ? ", in a render target of its own" : "");
+    g_w = host_w;
+    g_h = host_h;
+    LeaveCriticalSection(&g_lock);
+    PostMessageA(g_hwnd, WM_TWOC_FIT, 0, 0);
+}
+
+/* The overlay's UI scale: the swap chain's pixels per client pixel, times
+ * the monitor's scale when the window is in real pixels. */
+static float overlay_scale(void)
+{
+    typedef UINT(WINAPI * dpi_t)(HWND);
+    static dpi_t dpi_for;
+    static int tried;
+    RECT c;
+    float k = 1.0f;
+
+    if (!tried) {
+        tried = 1;
+        dpi_for = (dpi_t)GetProcAddress(GetModuleHandleA("user32.dll"), "GetDpiForWindow");
+    }
+    if (GetClientRect(g_hwnd, &c) && c.right > 0)
+        k = (float)g_buf_w / (float)c.right;
+    if (g_dpi_aware && dpi_for)
+        k *= (float)dpi_for(g_hwnd) / 96.0f;
+    return k < 0.75f ? 0.75f : k;
+}
+
+/* What changed between `was` and `s`, applied now; then `was` = `s`. */
+static void overlay_apply(twoc_settings_t *was, const twoc_settings_t *s)
+{
+    if (!s->fullscreen != !was->fullscreen)
+        PostMessageA(g_hwnd, WM_TWOC_FULLSCREEN, s->fullscreen ? 1 : 0, 0);
+    if (s->anisotropy != was->anisotropy) {
+        InterlockedExchange(&g_aniso, s->anisotropy);
+        fprintf(stderr, "[D3DB] host: anisotropic filtering %s%dx\n", s->anisotropy > 1 ? "" : "off, ",
+                s->anisotropy);
+    }
+    if (s->volume != was->volume)
+        twoc_audio_set_volume(s->volume);
+    if (g_apply && (s->widescreen != was->widescreen || s->wide_w != was->wide_w || s->wide_h != was->wide_h ||
+                    strcmp(s->render_size, was->render_size) != 0 || s->pacing != was->pacing))
+        g_apply(s);                     /* d3d_bridge.c: the aspect, the render size, the pacing */
+    *was = *s;
+}
+
+/* Esc was pressed: hold this thread (the game's, in its Swap) and draw the
+ * overlay over the frame it was about to show, until Esc again or Resume.
+ * Every other thread that presents meanwhile waits on g_pause_lock, so the
+ * game stands still: no update, no draw, no controller read. The emulated
+ * APU runs on its own threads and keeps playing looped voices, so the game's
+ * audio session is muted meanwhile (host_audio.cpp). */
+static void overlay_pause(void)
+{
+    static int ready;                   /* 0 not tried, 1 the overlay works, -1 it doesn't */
+    static twoc_settings_t s, was;
+    static int have;
+    static const char *note;
+    LARGE_INTEGER freq, t0, last, now;
+    LONG fs_seen;
+    unsigned frames = 0;
+    int dirty = 0, ok;
+
+    AcquireSRWLockExclusive(&g_pause_lock);
+    if (!g_ovl_open || !g_ready) {
+        ReleaseSRWLockExclusive(&g_pause_lock);
+        return;
+    }
+    EnterCriticalSection(&g_lock);
+    if (!ready)
+        ready = ovl_init(d3d8_GetD3D11Device(), d3d8_GetD3D11Context()) == 0 && blit_init() == 0 ? 1 : -1;
+    ok = ready > 0;
+    if (ok) {                           /* the frame the game just finished, held while paused */
+        ID3D11Texture2D *src = back_tex();
+        ok = src && shot_take(src) == 0;
+        if (src)
+            ID3D11Texture2D_Release(src);
+    }
+    LeaveCriticalSection(&g_lock);
+    if (!ok) {
+        InterlockedExchange(&g_ovl_open, 0);
+        fprintf(stderr, "[OVL] the settings overlay can't open here\n");
+        ReleaseSRWLockExclusive(&g_pause_lock);
+        return;
+    }
+    if (!have) {
+        twoc_settings_current(&s);
+        have = 1;
+    }
+    fs_seen = g_fs;
+    s.fullscreen = fs_seen;
+    was = s;
+    QueryPerformanceFrequency(&freq);
+    QueryPerformanceCounter(&t0);
+    last = t0;
+    fprintf(stderr, "[OVL] settings open: the game waits in its present %u\n", g_st.presents);
+    twoc_audio_mute(1);                 /* the APU plays looped voices on: silence while held */
+    while (g_ovl_open && g_ready) {
+        ID3D11Texture2D *dst = NULL;
+        ID3D11RenderTargetView *rtv = NULL;
+        ovl_info_t in;
+        int r = 0;
+
+        if (g_latency || g_frame_hz > 0)
+            pace();
+        else
+            Sleep(15);                  /* the executor paces this run, not the host */
+        QueryPerformanceCounter(&now);
+        EnterCriticalSection(&g_lock);
+        flip_fit();
+        if (g_fs != fs_seen) {          /* Alt+Enter while open */
+            fs_seen = g_fs;
+            s.fullscreen = was.fullscreen = fs_seen;
+        }
+        memset(&in, 0, sizeof(in));
+        in.host_w = g_w;
+        in.host_h = g_h;
+        in.guest_w = g_gw;
+        in.guest_h = g_gh;
+        in.display_hz = d3dh_display_hz();
+        in.interval = g_interval;
+        in.frame_hz = g_frame_hz;
+        in.executor_paces = getenv("RECOMP_PB_EXEC") && strcmp(getenv("RECOMP_PB_EXEC"), "0") != 0;
+        in.dpi_aware = g_dpi_aware;
+        in.save_note = dirty ? "Saved to crash_twoc.ini when you resume." : note;
+        if (SUCCEEDED(IDXGISwapChain1_GetBuffer(g_flip, 0, &IID_ID3D11Texture2D, (void **)&dst)) &&
+            blit_draw(dst, g_buf_w, g_buf_h) == 0 &&
+            SUCCEEDED(ID3D11Device_CreateRenderTargetView(d3d8_GetD3D11Device(), (ID3D11Resource *)dst, NULL, &rtv)))
+            r = ovl_frame(rtv, g_buf_w, g_buf_h, overlay_scale(),
+                          (float)((double)(now.QuadPart - last.QuadPart) / (double)freq.QuadPart), &s, &in);
+        if (rtv)
+            ID3D11RenderTargetView_Release(rtv);
+        if (dst)
+            ID3D11Texture2D_Release(dst);
+        IDXGISwapChain1_Present(g_flip, g_interval, 0);
+        LeaveCriticalSection(&g_lock);
+        last = now;
+        frames++;
+        if (r & OVL_CHANGED) {
+            overlay_apply(&was, &s);
+            dirty = 1;
+        }
+        if (r & OVL_CLOSE)
+            InterlockedExchange(&g_ovl_open, 0);
+    }
+    twoc_audio_mute(0);
+    if (dirty)
+        note = twoc_settings_save(&s) == 0 ? "Saved to crash_twoc.ini." : "crash_twoc.ini couldn't be written.";
+    QueryPerformanceCounter(&now);
+    fprintf(stderr, "[OVL] settings closed after %.1f s (%u overlay frames)%s\n",
+            (double)(now.QuadPart - t0.QuadPart) / (double)freq.QuadPart, frames, dirty ? "; settings saved" : "");
+    ReleaseSRWLockExclusive(&g_pause_lock);
+}
+
 void d3dh_present(double t_s, unsigned swap_no)
 {
     ULONGLONG now;
@@ -1808,6 +2278,8 @@ void d3dh_present(double t_s, unsigned swap_no)
 
     if (!g_ready)
         return;
+    if (g_ovl_open)                     /* step 54: Esc; this frame waits under the overlay */
+        overlay_pause();
     pace();
     EnterCriticalSection(&g_lock);
     now = GetTickCount64();
@@ -1827,9 +2299,8 @@ void d3dh_present(double t_s, unsigned swap_no)
     }
     flip_fit();                         /* step 54 */
     {   /* xbox_d3d8's back buffer -> the visible flip-model swap chain */
-        ID3D11Texture2D *src = NULL, *dst = NULL;
-        if (SUCCEEDED(IDXGISwapChain_GetBuffer(d3d8_GetSwapChain(), 0, &IID_ID3D11Texture2D, (void **)&src)) &&
-            SUCCEEDED(IDXGISwapChain1_GetBuffer(g_flip, 0, &IID_ID3D11Texture2D, (void **)&dst))) {
+        ID3D11Texture2D *src = back_tex(), *dst = NULL;
+        if (src && SUCCEEDED(IDXGISwapChain1_GetBuffer(g_flip, 0, &IID_ID3D11Texture2D, (void **)&dst))) {
             if (g_buf_w == g_w && g_buf_h == g_h)
                 ID3D11DeviceContext_CopyResource(d3d8_GetD3D11Context(), (ID3D11Resource *)dst,
                                                  (ID3D11Resource *)src);

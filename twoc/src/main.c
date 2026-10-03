@@ -41,6 +41,8 @@
 /* xboxrecomp runtime headers */
 #include <xbox/xboxrecomp.h>
 
+#include "settings.h"
+
 /*
  * If xboxrecomp.h is not an umbrella header in your setup, include
  * the individual headers directly:
@@ -317,6 +319,15 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance,
     if (wt_out || wt_err)
         fprintf(stderr, "[LOG] the launcher opened%s%s write-through; cleared (notes 18.47)\n",
                 wt_out ? " stdout" : "", wt_err ? (wt_out ? " and stderr" : " stderr") : "");
+
+    /* Player settings (settings.c, notes 18.57): crash_twoc.ini next to the
+     * exe fills in the RECOMP_* switches the launcher left unset, before
+     * anything reads them. No file: nothing set. The game's volume is set
+     * only when one was asked for (Windows remembers it otherwise). */
+    twoc_settings_load();
+    twoc_audio_startup();
+    if (getenv("RECOMP_VOLUME") && *getenv("RECOMP_VOLUME"))
+        twoc_audio_set_volume(atoi(getenv("RECOMP_VOLUME")));
 
     printf("=== Crash Bandicoot: tWoC - Static Recompilation ===\n");
     printf("Loading XBE...\n");

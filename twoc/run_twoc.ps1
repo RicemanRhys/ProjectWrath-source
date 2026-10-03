@@ -35,6 +35,12 @@
 #                over its monitor, the picture letterboxed at its own aspect. Alt+Enter on the window switches
 #                between that and the window at any time
 #
+# Settings (notes 18.57): Esc on the bridge window opens the settings overlay and holds the game until Esc
+# again (fullscreen, widescreen, render size, frame pacing, anisotropic filtering, volume; applied at once).
+# They are saved to twoc\build\Release\crash_twoc.ini, which the next start reads. A switch given here wins
+# over that file for this run: -Widescreen, -Fullscreen, -RenderSize WxH | native | game, and to switch one
+# off -Widescreen:$false or -Fullscreen:$false. Without the file, and with no switch, everything is as before.
+#
 # Usage, from anywhere (script execution is off by default on this machine, so bypass it for this process):
 #   powershell -NoProfile -ExecutionPolicy Bypass -File twoc\run_twoc.ps1
 #   ... -File twoc\run_twoc.ps1 -Seconds 30
@@ -77,9 +83,16 @@ if ($Window) { $env:RECOMP_FB_WINDOW = '1' }
 if ($FastTitle) { $env:RECOMP_DEV_FAST_TITLE = '1' } else { Remove-Item Env:RECOMP_DEV_FAST_TITLE -ErrorAction SilentlyContinue }
 if ($AutoStart) { $env:RECOMP_DEV_AUTOSTART  = '1' } else { Remove-Item Env:RECOMP_DEV_AUTOSTART  -ErrorAction SilentlyContinue }
 if ($Bridge)    { $env:RECOMP_D3D_BRIDGE     = '1' } else { Remove-Item Env:RECOMP_D3D_BRIDGE     -ErrorAction SilentlyContinue }
-if ($Widescreen) { $env:RECOMP_WIDESCREEN    = '1' } else { Remove-Item Env:RECOMP_WIDESCREEN     -ErrorAction SilentlyContinue }
+# A switch given as -Name:$false is passed on as '0', so it wins over crash_twoc.ini; one not given is
+# cleared and leaves the setting to that file (notes 18.57).
+if ($Widescreen) { $env:RECOMP_WIDESCREEN    = '1' }
+elseif ($PSBoundParameters.ContainsKey('Widescreen')) { $env:RECOMP_WIDESCREEN = '0' }
+else { Remove-Item Env:RECOMP_WIDESCREEN     -ErrorAction SilentlyContinue }
+if ($RenderSize -eq 'game') { $RenderSize = '0' }
 if ($RenderSize) { $env:RECOMP_RENDER_SIZE   = $RenderSize } else { Remove-Item Env:RECOMP_RENDER_SIZE -ErrorAction SilentlyContinue }
-if ($Fullscreen) { $env:RECOMP_FULLSCREEN    = '1' } else { Remove-Item Env:RECOMP_FULLSCREEN     -ErrorAction SilentlyContinue }
+if ($Fullscreen) { $env:RECOMP_FULLSCREEN    = '1' }
+elseif ($PSBoundParameters.ContainsKey('Fullscreen')) { $env:RECOMP_FULLSCREEN = '0' }
+else { Remove-Item Env:RECOMP_FULLSCREEN     -ErrorAction SilentlyContinue }
 if ($DumpDir) {
     New-Item -ItemType Directory -Force -Path $DumpDir | Out-Null
     $env:RECOMP_FB_DUMP = Join-Path (Resolve-Path $DumpDir) 'shot'
