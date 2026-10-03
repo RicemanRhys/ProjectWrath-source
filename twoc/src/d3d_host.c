@@ -157,7 +157,8 @@ static int g_cur_target = -1;           /* -1 the back buffer, else a g_rt index
  *
  * The host back buffer can be bigger than the guest's (RECOMP_RENDER_SIZE)
  * and wider (RECOMP_WIDESCREEN). The guest keeps drawing for its own 640x480,
- * and the host maps its pixels: on the back buffer, x and y scale by
+ * and the host maps its pixels: on the back buffer, and on a render target of
+ * the back buffer's size (made at the host's size, rt_find), x and y scale by
  * host / guest, so the viewport, and with it 3D and vertex programs, covers
  * the whole host picture (the game widens its projection to match,
  * d3db_camera_aspect_scale). Pre-transformed 2D that spans the guest's whole
@@ -172,7 +173,7 @@ typedef struct {
 
 static int screen_target(const d3dh_target_t *t)
 {
-    return !t->data;
+    return !t->data || (t->width == g_gw && t->height == g_gh);
 }
 
 static void target_map(const d3dh_target_t *t, int pillar, xmap_t *m)
@@ -487,8 +488,8 @@ static int rt_find(const d3dh_target_t *t, int create)
         rt_release(lru);
         free_i = lru;
     }
-    hw = t->width;
-    hh = t->height;
+    hw = screen_target(t) ? g_w : t->width;     /* 18.56: a screen-sized target at the host's size */
+    hh = screen_target(t) ? g_h : t->height;
     hr = g_dev->lpVtbl->CreateTexture(g_dev, hw, hh, 1, D3DUSAGE_RENDERTARGET, (D3DFORMAT)t->format,
                                       D3DPOOL_DEFAULT, &tex);
     if (SUCCEEDED(hr))
@@ -1096,22 +1097,35 @@ int d3dh_copy_back(const d3dh_target_t *dst, const int32_t *rects, const int32_t
     EnterCriticalSection(&g_lock);
     i = rt_find(&t, 1);
     if (i >= 0 && SUCCEEDED(IDXGISwapChain_GetBuffer(d3d8_GetSwapChain(), 0, &IID_ID3D11Texture2D, (void **)&bb))) {
+        static const d3dh_target_t back = { 0, 0, 0, 0 };
+        xmap_t ms, md;                  /* 18.56: the guest's rects and points in host pixels */
+        target_map(&back, 0, &ms);
+        target_map(&t, 0, &md);
+        if (!map_identity(&ms) && map_identity(&md) && ++g_st.copy_unscaled <= 5)
+            fprintf(stderr, "[D3DB] host CopyRects to Data %08X (%ux%u): the copy isn't scaled to the host's size\n",
+                    t.data, t.width, t.height);
         ctx = d3d8_GetD3D11Context();
         dt = ((D3D8Texture *)g_rt[i].tex)->d3d11_texture;
         for (k = 0; k < (n ? n : 1); k++) {
             int32_t l = n ? rects[4 * k] : 0, top = n ? rects[4 * k + 1] : 0;
-            int32_t r = n ? rects[4 * k + 2] : (int32_t)g_w, b = n ? rects[4 * k + 3] : (int32_t)g_h;
+            int32_t r = n ? rects[4 * k + 2] : (int32_t)g_gw, b = n ? rects[4 * k + 3] : (int32_t)g_gh;
             int32_t x = points ? points[2 * k] : l, y = points ? points[2 * k + 1] : top;
+            if (x < 0 || y < 0 || l < 0 || top < 0)
+                continue;
+            l = map_coord(ms.ox, ms.sx, (uint32_t)l);
+            top = map_coord(ms.oy, ms.sy, (uint32_t)top);
+            r = r > 0 ? map_coord(ms.ox, ms.sx, (uint32_t)r) : r;
+            b = b > 0 ? map_coord(ms.oy, ms.sy, (uint32_t)b) : b;
+            x = map_coord(md.ox, md.sx, (uint32_t)x);
+            y = map_coord(md.oy, md.sy, (uint32_t)y);
             if (r > (int32_t)g_w)
                 r = (int32_t)g_w;
             if (b > (int32_t)g_h)
                 b = (int32_t)g_h;
-            if (x < 0 || y < 0 || l < 0 || top < 0)
-                continue;
-            if (r - l > (int32_t)t.width - x)
-                r = l + (int32_t)t.width - x;
-            if (b - top > (int32_t)t.height - y)
-                b = top + (int32_t)t.height - y;
+            if (r - l > (int32_t)g_rt[i].hw - x)
+                r = l + (int32_t)g_rt[i].hw - x;
+            if (b - top > (int32_t)g_rt[i].hh - y)
+                b = top + (int32_t)g_rt[i].hh - y;
             if (r <= l || b <= top)
                 continue;
             box.left = (UINT)l;

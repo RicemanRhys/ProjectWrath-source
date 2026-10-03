@@ -2296,14 +2296,14 @@ static uint8_t *cpu_lit_copy(const void *verts, uint32_t count, uint32_t stride,
  * 0..479; read as 0..1 and clamped, the screen was one texel's colour. A
  * stage with texture generation, or a set two linear stages read at different
  * sizes, is left as it was and counted. */
-static volatile LONG g_ff_texel_draws, g_ff_texel_gaps, g_ev_ff_texel;
+static volatile LONG g_ff_texel_draws, g_ff_texel_gaps, g_ev_ff_texel, g_wide_crops;
 
 static void ff_texel_scale(d3dh_draw_t *dr, uint32_t fvf, uint8_t **owned)
 {
     static const uint8_t pos[8] = { 0, 12, 16, 16, 20, 24, 28, 32 };
     static const uint8_t tc[4] = { 8, 12, 16, 4 };
-    uint32_t sets = (fvf >> 8) & 15, off, set_off[8], done = 0, s, i;
-    float sw[8], sh[8];
+    uint32_t sets = (fvf >> 8) & 15, off, set_off[8], done = 0, crop = 0, s, i;
+    float sw[8], sh[8], k = d3db_wide > 0 ? (float)((4.0 / 3.0) / d3db_wide) : 1.0f;
     uint8_t *c;
 
     for (s = 0; s < 4; s++) {
@@ -2325,6 +2325,12 @@ static void ff_texel_scale(d3dh_draw_t *dr, uint32_t fvf, uint8_t **owned)
         done |= 1u << set;
         sw[set] = 1.0f / t->width;
         sh[set] = 1.0f / t->height;
+        /* 18.56: a screen-sized texture (the CopyRects copy of a 16:9 frame)
+         * drawn into a smaller target (the pause still) keeps its middle 4:3,
+         * what the game captured at 4:3, instead of the whole width squeezed. */
+        if (d3db_wide > 0 && dr->target.data && t->width == g_guest_w && t->height == g_guest_h &&
+            (dr->target.width != g_guest_w || dr->target.height != g_guest_h))
+            crop |= 1u << set;
         event(&g_ev_ff_texel, 8, "fixed-function draw (FVF %X): linear texture %08X (%ux%u) on stage %u, coordinate"
               " set %u scaled to 0..1", fvf, t->key, t->width, t->height, s, set);
     }
@@ -2351,12 +2357,16 @@ static void ff_texel_scale(d3dh_draw_t *dr, uint32_t fvf, uint8_t **owned)
         for (v = 0; v < dr->vert_count; v++) {
             float *p = (float *)(c + (size_t)v * dr->stride + set_off[i]);
             p[0] *= sw[i];
+            if (crop & (1u << i))
+                p[0] = 0.5f + (p[0] - 0.5f) * k;
             if (two)
                 p[1] *= sh[i];
         }
     }
     dr->verts = c;
     InterlockedIncrement(&g_ff_texel_draws);
+    if (crop)
+        InterlockedIncrement(&g_wide_crops);
 }
 
 static void count_mirrored(const d3dh_draw_t *dr)
@@ -4227,8 +4237,9 @@ static void mirror_swap(void)
             if (d3db_wide > 0 || g_render_w)    /* 18.56 */
                 log_block_printf(&lb, "[D3DB] host widescreen: projections widened %ld, kept %ld; fixed-function"
                                  " draws with a 4:3 projection pillarboxed %ld; pre-transformed draws stretched %u,"
-                                 " pillarboxed %u; copies not scaled %u\n", (long)g_wide_cameras, (long)g_wide_kept,
-                                 (long)g_wide_ff_pillar, st.rhw_full, st.rhw_pillar, st.copy_unscaled);
+                                 " pillarboxed %u; screen copies cropped to 4:3 %ld; copies not scaled %u\n",
+                                 (long)g_wide_cameras, (long)g_wide_kept, (long)g_wide_ff_pillar, st.rhw_full,
+                                 st.rhw_pillar, (long)g_wide_crops, st.copy_unscaled);
             {
                 char buf[512];
                 int i, len = 0;
