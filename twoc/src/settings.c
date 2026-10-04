@@ -19,6 +19,8 @@ static const struct {
     { "pacing", "RECOMP_PACING" },
     { "anisotropy", "RECOMP_ANISOTROPY" },
     { "volume", "RECOMP_VOLUME" },
+    { "music_volume", "RECOMP_MUSIC_VOLUME" },
+    { "effects_volume", "RECOMP_EFFECTS_VOLUME" },
 };
 #define N_KEYS (sizeof(g_keys) / sizeof(g_keys[0]))
 
@@ -126,6 +128,18 @@ static int env_on(const char *name)
     return v && *v && strcmp(v, "0") != 0;
 }
 
+/* A 0-100 level from `name`, -1 when unset. */
+static int env_percent(const char *name)
+{
+    const char *v = getenv(name);
+    int p;
+
+    if (!v || !*v)
+        return -1;
+    p = atoi(v);
+    return p < 0 ? 0 : p > 100 ? 100 : p;
+}
+
 void twoc_settings_current(twoc_settings_t *s)
 {
     const char *v;
@@ -157,6 +171,8 @@ void twoc_settings_current(twoc_settings_t *s)
         s->volume = 100;
     if (v && *v && s->volume < 0)
         s->volume = 0;
+    s->music = env_percent("RECOMP_MUSIC_VOLUME");
+    s->effects = env_percent("RECOMP_EFFECTS_VOLUME");
 }
 
 /* Key i's value in `s` as the file writes it ("" for a volume never set). */
@@ -181,6 +197,10 @@ static void key_text(const twoc_settings_t *s, size_t i, char *buf, size_t cap)
         snprintf(buf, cap, "%d", s->anisotropy);
     else if (strcmp(k, "volume") == 0 && s->volume >= 0)
         snprintf(buf, cap, "%d", s->volume);
+    else if (strcmp(k, "music_volume") == 0 && s->music >= 0)
+        snprintf(buf, cap, "%d", s->music);
+    else if (strcmp(k, "effects_volume") == 0 && s->effects >= 0)
+        snprintf(buf, cap, "%d", s->effects);
 }
 
 int twoc_settings_save(const twoc_settings_t *s)
@@ -188,7 +208,9 @@ int twoc_settings_save(const twoc_settings_t *s)
     static const char *const notes[N_KEYS] = { "", "0, 1 or W:H", "game (480 lines), WxH or native",
                                                "auto, vsync, limiter or limiter+vsync",
                                                "1 (the game's filtering), 2, 4, 8 or 16",
-                                               "0-100, the game's level in Windows' volume mixer" };
+                                               "0-100, the game's level in Windows' volume mixer",
+                                               "0-100: music, ambience and speech (the game's streams)",
+                                               "0-100: the sound effects" };
     FILE *f = fopen(twoc_settings_path(), "w");
     size_t i;
 

@@ -13,6 +13,11 @@
  *   pacing      = auto | vsync | limiter | limiter+vsync    RECOMP_PACING
  *   anisotropy  = 1 | 2 | 4 | 8 | 16          RECOMP_ANISOTROPY (1: the game's own filtering)
  *   volume      = 0-100                       RECOMP_VOLUME (the game's volume in Windows' mixer)
+ *   music_volume   = 0-100                    RECOMP_MUSIC_VOLUME (stream voices: music, ambience, speech)
+ *   effects_volume = 0-100                    RECOMP_EFFECTS_VOLUME (buffer voices: the sound effects)
+ *
+ * The two last are gains inside the emulated APU (xboxrecomp's voice
+ * processor, notes 18.58), under the game's volume; 100 is the game's mix.
  *
  * The settings overlay (overlay.cpp) shows the values in effect and writes
  * the file back when the player changes one.
@@ -34,6 +39,7 @@ typedef struct {
     int pacing;                         /* TWOC_PACING_* */
     int anisotropy;                     /* 1 (off), 2, 4, 8, 16 */
     int volume;                         /* 0-100; -1: never set (Windows' own level) */
+    int music, effects;                 /* 0-100; -1: never set (100, the game's mix) */
 } twoc_settings_t;
 
 /* Read crash_twoc.ini into the RECOMP_* variables the launcher left unset. */
@@ -53,6 +59,9 @@ void twoc_audio_set_volume(int percent);
 void twoc_audio_mute(int on);
 /* At the start: lift a mute the overlay left when the process ended. */
 void twoc_audio_startup(void);
+/* The music (stream != 0) or effects volume, 0-100, in the APU's voice
+ * processor; -1 (never set) is 100. */
+void twoc_audio_set_kind(int stream, int percent);
 
 #ifdef __cplusplus
 }

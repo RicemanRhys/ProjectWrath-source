@@ -328,6 +328,14 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance,
     twoc_audio_startup();
     if (getenv("RECOMP_VOLUME") && *getenv("RECOMP_VOLUME"))
         twoc_audio_set_volume(atoi(getenv("RECOMP_VOLUME")));
+    {   /* music and effects apart (notes 18.58): only when one was set */
+        twoc_settings_t s;
+        twoc_settings_current(&s);
+        if (s.music >= 0)
+            twoc_audio_set_kind(1, s.music);
+        if (s.effects >= 0)
+            twoc_audio_set_kind(0, s.effects);
+    }
 
     printf("=== Crash Bandicoot: tWoC - Static Recompilation ===\n");
     printf("Loading XBE...\n");

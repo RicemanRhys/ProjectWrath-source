@@ -264,10 +264,24 @@ static int build(twoc_settings_t *s, const ovl_info_t *in)
             s->volume = v;
             r |= OVL_CHANGED;
         }
-        more("The game's level in Windows' volume mixer (Windows remembers it). Music and effects can't be set "
-             "apart yet: the emulated APU mixes them into one stream.");
+        more("The game's level in Windows' volume mixer (Windows remembers it). It scales everything below.");
         if (s->volume < 0)
             help("Not set: Windows' own level.");
+    }
+    {
+        int m = s->music < 0 ? 100 : s->music, e = s->effects < 0 ? 100 : s->effects;
+        ImGui::SetNextItemWidth(ImGui::GetFontSize() * 12);
+        if (ImGui::SliderInt("Music", &m, 0, 100, "%d%%")) {
+            s->music = m;
+            r |= OVL_CHANGED;
+        }
+        more("Music, ambience and speech: everything the game streams. 100% is the game's own mix.");
+        ImGui::SetNextItemWidth(ImGui::GetFontSize() * 12);
+        if (ImGui::SliderInt("Effects", &e, 0, 100, "%d%%")) {
+            s->effects = e;
+            r |= OVL_CHANGED;
+        }
+        more("The sound effects: everything the game plays from memory. 100% is the game's own mix.");
     }
 
     ImGui::Spacing();

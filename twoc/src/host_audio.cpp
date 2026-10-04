@@ -3,7 +3,8 @@
  * session, the one Windows' volume mixer shows for the game. XAudio2 (the
  * APU monitor's output, xboxrecomp) plays into that session, so this scales
  * everything the game plays without touching the emulated APU. Music and
- * effects can't be told apart here: the APU mixes them into one stream.
+ * effects can't be told apart here (the APU mixes them into one stream), so
+ * their volumes are gains inside the APU (twoc_audio_set_kind, below).
  *
  * Windows remembers a session's level for the next start, as it does when
  * the player moves the mixer's slider. So the level is set only when the
@@ -143,6 +144,22 @@ extern "C" void twoc_audio_mute(int on)
 {
     InterlockedExchange(&g_want_mute, on ? 1 : 0);
     wake();
+}
+
+/* Music and effects apart (notes 18.58): a gain in the APU's voice
+ * processor (xboxrecomp apu_vp.c) on stream voices (music, ambience, speech)
+ * or buffer voices (effects), linear like the session level above. A plain
+ * store: the APU's frame thread reads it at its next voice. */
+extern "C" void mcpx_apu_set_voice_gain(int stream, float gain);
+
+extern "C" void twoc_audio_set_kind(int stream, int percent)
+{
+    static int told[2];
+    int p = percent < 0 ? 100 : percent > 100 ? 100 : percent;
+
+    mcpx_apu_set_voice_gain(stream, (float)p / 100.0f);
+    if (!told[stream ? 1 : 0]++)        /* the first; not every slider step */
+        fprintf(stderr, "[AUDIO] %s volume %d%%\n", stream ? "music" : "effects", p);
 }
 
 extern "C" void twoc_audio_startup(void)
