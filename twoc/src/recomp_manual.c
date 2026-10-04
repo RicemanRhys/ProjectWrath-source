@@ -1525,6 +1525,57 @@ static void pa_MmGetPhysicalAddress(void)
     coop_leave(self);
 }
 
+/* ── The speaker setting: surround at 5.1 (notes 18.58) ──── */
+
+/*
+ * The game learns its speakers the way every title does: XAPI's
+ * XGetAudioFlags (sub_000EDCA2) reads XC_AUDIO from the EEPROM through
+ * ExQueryNonVolatileSetting, once for DSOUND's settings (sub_00136DBA, kept
+ * at +8: the speaker config its 3D voices are panned for) and once for the
+ * game's sound manager (0x427A58 + 0xC, sub_000B99D0). The runtime answers
+ * 0, stereo, and DSOUND then pans 3D voices over the front pair only.
+ *
+ * When the output opened at 5.1 (RECOMP_SPEAKERS=5.1 and a device with those
+ * speakers, xboxrecomp apu_xaudio2.c), XC_AUDIO answers
+ * XC_AUDIO_FLAGS_SURROUND, the dashboard's "Surround" setting, so the panning
+ * reaches the rear bins the 5.1 output plays. Any other index, or stereo
+ * output: the runtime, as before. The AV pack (HalBootSMCVideoMode, 0 here)
+ * doesn't mask the flags.
+ */
+#define NV_QUERY_THUNK        0x0015AB28u      /* [thunk] = ExQueryNonVolatileSetting (ordinal 24) */
+#define NV_XC_AUDIO           9u
+#define NV_AUDIO_SURROUND     0x00000002u      /* XC_AUDIO_FLAGS_SURROUND */
+extern int mcpx_apu_output_channels(int *device_channels);
+
+/* NTSTATUS ExQueryNonVolatileSetting(ValueIndex, Type*, Value*, ValueLength, ResultLength*); ret 20 */
+static void nv_ExQueryNonVolatileSetting(void)
+{
+    uint32_t index = MEM32(esp + 4), type = MEM32(esp + 8), value = MEM32(esp + 12);
+    uint32_t len = MEM32(esp + 16), result = MEM32(esp + 20);
+    coop_thread_t *self;
+    static volatile LONG told;
+
+    if (index != NV_XC_AUDIO || mcpx_apu_output_channels(NULL) != 6) {
+        t_coop_kernel_va = MEM32(NV_QUERY_THUNK);
+        coop_kernel_call();
+        return;
+    }
+    self = coop_enter();
+    if (value && len >= 4) {               /* as the runtime answers: a dword, success */
+        MEM32(value) = NV_AUDIO_SURROUND;
+        if (type)
+            MEM32(type) = 4;               /* REG_DWORD */
+        if (result)
+            MEM32(result) = 4;
+    }
+    if (InterlockedIncrement(&told) <= 2)
+        fprintf(stderr, "[AUDIO] the game asked for its speakers (caller %08X): surround (5.1 output)\n",
+                MEM32(esp));
+    eax = 0;                               /* STATUS_SUCCESS */
+    esp += 24;                             /* ret 20 */
+    coop_leave(self);
+}
+
 /* ── Kernel pool: an arena of its own (notes 18.42) ──────── */
 
 /*
@@ -1856,6 +1907,7 @@ recomp_func_t recomp_lookup_manual(uint32_t xbox_va)
         if (xbox_va == MEM32(CM_FREE_THUNK))        return cm_MmFreeContiguousMemory;
         if (xbox_va == MEM32(CM_QSIZE_THUNK))       return cm_MmQueryAllocationSize;
         if (xbox_va == MEM32(PA_THUNK))             return pa_MmGetPhysicalAddress;
+        if (xbox_va == MEM32(NV_QUERY_THUNK))       return nv_ExQueryNonVolatileSetting;
         if (xbox_va == MEM32(POOL_ALLOC_THUNK))     return pool_ExAllocatePool;
         if (xbox_va == MEM32(POOL_ALLOC_TAG_THUNK)) return pool_ExAllocatePoolWithTag;
         if (xbox_va == MEM32(POOL_FREE_THUNK))      return pool_ExFreePool;

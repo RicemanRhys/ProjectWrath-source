@@ -21,6 +21,7 @@ static const struct {
     { "volume", "RECOMP_VOLUME" },
     { "music_volume", "RECOMP_MUSIC_VOLUME" },
     { "effects_volume", "RECOMP_EFFECTS_VOLUME" },
+    { "speakers", "RECOMP_SPEAKERS" },
 };
 #define N_KEYS (sizeof(g_keys) / sizeof(g_keys[0]))
 
@@ -173,6 +174,8 @@ void twoc_settings_current(twoc_settings_t *s)
         s->volume = 0;
     s->music = env_percent("RECOMP_MUSIC_VOLUME");
     s->effects = env_percent("RECOMP_EFFECTS_VOLUME");
+    v = getenv("RECOMP_SPEAKERS");
+    s->speakers = v && *v ? strcmp(v, "5.1") == 0 : -1;
 }
 
 /* Key i's value in `s` as the file writes it ("" for a volume never set). */
@@ -201,6 +204,8 @@ static void key_text(const twoc_settings_t *s, size_t i, char *buf, size_t cap)
         snprintf(buf, cap, "%d", s->music);
     else if (strcmp(k, "effects_volume") == 0 && s->effects >= 0)
         snprintf(buf, cap, "%d", s->effects);
+    else if (strcmp(k, "speakers") == 0 && s->speakers >= 0)
+        snprintf(buf, cap, "%s", s->speakers ? "5.1" : "stereo");
 }
 
 int twoc_settings_save(const twoc_settings_t *s)
@@ -210,7 +215,8 @@ int twoc_settings_save(const twoc_settings_t *s)
                                                "1 (the game's filtering), 2, 4, 8 or 16",
                                                "0-100, the game's level in Windows' volume mixer",
                                                "0-100: music, ambience and speech (the game's streams)",
-                                               "0-100: the sound effects" };
+                                               "0-100: the sound effects",
+                                               "stereo or 5.1 (from the next start)" };
     FILE *f = fopen(twoc_settings_path(), "w");
     size_t i;
 

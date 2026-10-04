@@ -11,12 +11,16 @@
 
 #include <windows.h>
 #include <stdio.h>
+#include <stdlib.h>
 #include <string.h>
 
 #include "imgui.h"
 #include "imgui_impl_dx11.h"
 
 #include "overlay.h"
+
+/* xboxrecomp apu.h: the output's channels (2 or 6) and the device's */
+extern "C" int mcpx_apu_output_channels(int *device_channels);
 
 static CRITICAL_SECTION g_cs;
 static volatile LONG g_cs_ready;
@@ -282,6 +286,32 @@ static int build(twoc_settings_t *s, const ovl_info_t *in)
             r |= OVL_CHANGED;
         }
         more("The sound effects: everything the game plays from memory. 100% is the game's own mix.");
+    }
+    {
+        static const char *const spk[] = { "Stereo", "5.1 surround" };
+        int cur = s->speakers > 0, devch = 0, out = mcpx_apu_output_channels(&devch);
+        const char *e = getenv("RECOMP_SPEAKERS");
+        int at_start = e && strcmp(e, "5.1") == 0;
+        ImGui::SetNextItemWidth(ImGui::GetFontSize() * 12);
+        if (ImGui::Combo("Speakers", &cur, spk, 2)) {
+            s->speakers = cur;
+            r |= OVL_CHANGED;
+        }
+        more("5.1 sends the game's six speaker channels (front left/right, center, LFE, rear left/right) to a "
+             "device that has those speakers, and tells the game it has surround speakers, as the Xbox "
+             "dashboard did, so its 3D sounds pan to the rear. A device without them stays in stereo. From the "
+             "next start.");
+        if (out == 6)
+            snprintf(line, sizeof(line), "Now: 5.1 (the device has %d channels).", devch);
+        else if (at_start && devch > 0)
+            snprintf(line, sizeof(line), "Now: stereo: the default device takes %d channel%s.", devch,
+                     devch == 1 ? "" : "s");
+        else
+            snprintf(line, sizeof(line), "Now: stereo.");
+        if (cur != at_start)
+            snprintf(line + strlen(line), sizeof(line) - strlen(line), " %s from the next start.",
+                     cur ? "5.1" : "Stereo");
+        help(line);
     }
 
     ImGui::Spacing();
