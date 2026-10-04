@@ -85,6 +85,21 @@ static bool voice_should_mute(uint16_t v)
     return m || mcpx_apu_debug_is_muted(v);
 }
 
+/* A gain per kind of voice, for a player's music and effects volume. The VP
+ * tells the two kinds apart by the format's data type: a stream voice plays
+ * buffers the title queues as it goes (DirectSound streams: music, ambience,
+ * speech), a buffer voice plays one buffer from memory (the sound effects).
+ * [0] buffer voices, [1] stream voices; 1.0 leaves every sample as it was.
+ * A multipass voice mixes bins other voices already wrote, so it takes none. */
+static volatile float g_voice_gain[2] = { 1.0f, 1.0f };
+
+void mcpx_apu_set_voice_gain(int stream, float gain)
+{
+    if (gain < 0.0f) gain = 0.0f;
+    if (gain > 1.0f) gain = 1.0f;
+    g_voice_gain[stream ? 1 : 0] = gain;
+}
+
 /* ============================================================
  * Utility functions
  * ============================================================ */
@@ -1186,6 +1201,13 @@ static void voice_process(MCPXAPUState *d,
         }
     }
 
+    /* The player's gain for this kind of voice (1.0: the samples unchanged) */
+    float kg = 1.0f;
+    if (!multipass) {
+        kg = g_voice_gain[voice_get_mask(d, v, NV_PAVS_VOICE_CFG_FMT,
+                                         NV_PAVS_VOICE_CFG_FMT_DATA_TYPE) != 0];
+    }
+
     /* Mix into bins */
     for (int b = 0; b < 8; b++) {
         float g = ea_value;
@@ -1196,6 +1218,7 @@ static void voice_process(MCPXAPUState *d,
             hr = (float)(1 << d->vp.submix_headroom[bin[b]]);
         }
         g *= attenuate(vol[b]) / hr;
+        g *= kg;
         for (int i = 0; i < NUM_SAMPLES_PER_FRAME; i++) {
             mixbins[bin[b]][i] += g * samples[i][b % channels];
         }
@@ -1209,7 +1232,7 @@ static void voice_process(MCPXAPUState *d,
             float bg = attenuate(vol[b]) / hr;
             if (bg > g) g = bg;
         }
-        g *= ea_value;
+        g *= ea_value * kg;
         for (int i = 0; i < NUM_SAMPLES_PER_FRAME; i++) {
             sample_buf[i][0] += g * samples[i][0];
             sample_buf[i][1] += g * samples[i][1];

@@ -31,6 +31,13 @@ void mcpx_apu_mmio_write(MCPXAPUState *d, uint64_t addr, uint64_t val, unsigned 
  * Directly programs a voice without going through DirectSound. */
 void mcpx_apu_play_test_tone(MCPXAPUState *d);
 
+/* A gain (0.0-1.0) on every stream voice (stream != 0: music, ambience,
+ * speech) or every buffer voice (stream == 0: sound effects), applied where
+ * the voice processor mixes a voice into its bins. 1.0, the default, leaves
+ * the output unchanged. Any thread, any time. */
+void mcpx_apu_set_voice_gain(int stream, float gain);
+
+
 /* ============================================================
  * Software mixer - DirectSound buffer bridge
  *
