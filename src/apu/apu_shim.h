@@ -378,7 +378,7 @@ static struct {
 } g_config = {
     .audio = {
         .volume_limit = 1.0f,
-        .hrtf = false,
+        .hrtf = true,       /* xemu's default; mcpx_apu_set_hrtf (apu_vp.c) */
         .vp = { .num_workers = 1 },
     },
 };

@@ -37,6 +37,14 @@ void mcpx_apu_play_test_tone(MCPXAPUState *d);
  * the output unchanged. Any thread, any time. */
 void mcpx_apu_set_voice_gain(int stream, float gain);
 
+/* The voice processor's HRTF filter on 3D voices (on by default, as on the
+ * Xbox): it places them left-right, its left output into the left-hand HRTF
+ * submixes and its right output into the right-hand ones. Off, a 3D voice
+ * goes unfiltered into all four, the same on both sides. Any thread, any
+ * time; it takes effect at the next frame. */
+void mcpx_apu_set_hrtf(int on);
+int mcpx_apu_get_hrtf(void);
+
 /* The output's channels: 2 (stereo) or 6 (5.1: RECOMP_SPEAKERS=5.1 and a
  * default device with those speakers; see apu_xaudio2.c), 0 before the
  * output is open. *device_channels (may be NULL) gets the default device's

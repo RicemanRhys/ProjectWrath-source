@@ -100,6 +100,17 @@ void mcpx_apu_set_voice_gain(int stream, float gain)
     g_voice_gain[stream ? 1 : 0] = gain;
 }
 
+/* g_config.audio.hrtf (apu_shim.h) is this file's own copy: the only reader. */
+void mcpx_apu_set_hrtf(int on)
+{
+    g_config.audio.hrtf = on != 0;
+}
+
+int mcpx_apu_get_hrtf(void)
+{
+    return g_config.audio.hrtf;
+}
+
 /* ============================================================
  * Utility functions
  * ============================================================ */
@@ -1192,12 +1203,14 @@ static void voice_process(MCPXAPUState *d,
     }
 
     /* HRTF processing for 3D voices */
+    bool hrtf_done = false;
     if (v < MCPX_HW_MAX_3D_VOICES && g_config.audio.hrtf) {
         uint16_t hrtf_handle =
             (uint16_t)voice_get_mask(d, v, NV_PAVS_VOICE_CFG_HRTF_TARGET,
                                      NV_PAVS_VOICE_CFG_HRTF_TARGET_HANDLE);
         if (hrtf_handle != HRTF_NULL_HANDLE) {
             hrtf_filter_process(&d->vp.filters[v].hrtf, samples, samples);
+            hrtf_done = true;
         }
     }
 
@@ -1219,8 +1232,14 @@ static void voice_process(MCPXAPUState *d,
         }
         g *= attenuate(vol[b]) / hr;
         g *= kg;
+        /* The HRTF's output is a left and a right ear, and the four HRTF
+         * submixes are two left (0, 1: front, back) and two right (2, 3), as
+         * DirectSound sets them (crash_twoc notes 18.58/18.59). xemu takes
+         * channel b % channels here, so a mono 3D voice's left ear goes to
+         * all four and nothing is placed left-right. */
+        int ch = (hrtf_done && b < 4) ? (b >= 2) : (int)(b % channels);
         for (int i = 0; i < NUM_SAMPLES_PER_FRAME; i++) {
-            mixbins[bin[b]][i] += g * samples[i][b % channels];
+            mixbins[bin[b]][i] += g * samples[i][ch];
         }
     }
 
