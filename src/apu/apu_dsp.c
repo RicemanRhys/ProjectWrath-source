@@ -23,6 +23,7 @@
  */
 
 #include "apu_state.h"
+#include "apu.h"
 #include "fpconv.h"
 
 #include <math.h>
@@ -101,7 +102,8 @@ static void dsp_ack_init(void)
  *
  * So by default: front left/right at unity, center and the back pair at
  * -3 dB into both sides, LFE dropped (a stereo fold-down), the HRTF submix
- * bins at -11 dB (RECOMP_APU_XTLK_DB overrides), every other bin dropped.
+ * bins at -11 dB (-2.6 dB with the VP's HRTF on, below; RECOMP_APU_XTLK_DB
+ * overrides both), every other bin dropped.
  * No reverb: that needs the DSP.
  *
  * RECOMP_APU_MIXDOWN=all is the previous mixdown (every bin summed at unit
@@ -124,14 +126,20 @@ static int mcpx_apu_mixdown_mode(void)
     return mode;
 }
 
+/* The -11 dB above was fitted against xemu with its HRTF filter on, while
+ * this APU's was off: it held the filter's loss as well as the GP's gain.
+ * With the filter on here too (mcpx_apu_set_hrtf), the 3D submixes come out
+ * 8.4 dB lower (the attract demo's 3D bins, 55 s; crash_twoc notes 18.59), so
+ * they take -2.6 dB, which keeps the balance the -11 dB gave. */
 static float mcpx_apu_xtlk_gain(void)
 {
-    static float g = -1.0f;
+    static float g = -1.0f, g_hrtf;
     if (g < 0.0f) {
         const char *e = getenv("RECOMP_APU_XTLK_DB");
         g = powf(10.0f, (float)((e && *e) ? atof(e) : -11.0) / 20.0f);
+        g_hrtf = (e && *e) ? g : powf(10.0f, -2.6f / 20.0f);
     }
-    return g;
+    return mcpx_apu_get_hrtf() ? g_hrtf : g;
 }
 
 /* Per-bin gains to the left and right outputs for MIXDOWN_GP. The HRTF
