@@ -227,16 +227,24 @@ hrtf_filter_set_target_params(HrtfFilter *f, float hrir_coeff[2][HRTF_NUM_TAPS],
                               float itd) {
     f->itd_tar = fmaxf(-(float)HRTF_MAX_DELAY_SAMPLES,
                         fminf(itd, (float)HRTF_MAX_DELAY_SAMPLES));
+    /* One scale for both ears: the louder ear's taps sum to 1 in magnitude
+     * (each ear's did, in xemu), and the other keeps its level against it.
+     * The level difference between the ears is half of the placement:
+     * DirectSound's entries for a sound off to one side differ by up to
+     * ~9 dB (crash_twoc notes 18.59). */
+    float s = 0.0f;
     for (int ch = 0; ch < 2; ch++) {
-        float *coeff = f->ch[ch].hrir_coeff_tar;
-        memcpy(coeff, hrir_coeff[ch], sizeof(f->ch[ch].hrir_coeff_tar));
-        float s = 0.0f;
+        float sc = 0.0f;
+        memcpy(f->ch[ch].hrir_coeff_tar, hrir_coeff[ch], sizeof(f->ch[ch].hrir_coeff_tar));
         for (int k = 0; k < HRTF_NUM_TAPS; k++) {
-            s += fabsf(coeff[k]);
+            sc += fabsf(hrir_coeff[ch][k]);
         }
-        if (s == 0.0f || s == 1.0f) break;
+        s = fmaxf(s, sc);
+    }
+    if (s == 0.0f) return;
+    for (int ch = 0; ch < 2; ch++) {
         for (int k = 0; k < HRTF_NUM_TAPS; k++) {
-            coeff[k] /= s;
+            f->ch[ch].hrir_coeff_tar[k] /= s;
         }
     }
 }
