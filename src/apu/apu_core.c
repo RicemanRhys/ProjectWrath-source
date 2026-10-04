@@ -209,9 +209,11 @@ void mcpx_apu_monitor_init(MCPXAPUState *d, Error **errp)
     d->monitor.stream = NULL;
     d->monitor.queued_bytes_low = 1024;
     d->monitor.queued_bytes_high = 3072;
+    d->monitor.channels = 2;
 
     /* Try XAudio2 first (lower latency) */
     if (xa2_init()) {
+        d->monitor.channels = xa2_channels();
         fprintf(stderr, "[APU] Using XAudio2 audio backend\n");
         return;
     }
@@ -292,13 +294,54 @@ static void monitor_stats(MCPXAPUState *d)
     g_mon_stats.t0_ms = now;
 }
 
+/* RECOMP_APU_OUT_WAV=PATH (a check, notes 18.58): every frame the monitor
+ * hands the device, as a 16-bit 48 kHz WAV with the output's channels
+ * (FL FR C LFE BL BR at 5.1). The header's sizes are brought up to date
+ * every second, so a run that is killed leaves a readable file. */
+static void out_wav(const int16_t *samples, int n, int ch)
+{
+    static int state;                   /* 0 not looked, 1 writing, -1 off */
+    static FILE *f;
+    static uint32_t bytes, since;
+    uint32_t hdr[11];
+
+    if (state == 0) {
+        const char *p = getenv("RECOMP_APU_OUT_WAV");
+        state = -1;
+        if (p && *p && (f = fopen(p, "wb")) != NULL) {
+            state = 1;
+            fprintf(stderr, "[APU] output written to %s (%d channels)\n", p, ch);
+        }
+    }
+    if (state < 0)
+        return;
+    if (bytes == 0 || since >= 48000u * 2 * ch) {
+        hdr[0] = 0x46464952; hdr[1] = 36 + bytes; hdr[2] = 0x45564157;     /* RIFF size WAVE */
+        hdr[3] = 0x20746D66; hdr[4] = 16;                                  /* "fmt " 16 */
+        hdr[5] = 1u | ((uint32_t)ch << 16); hdr[6] = 48000;                 /* PCM, channels, rate */
+        hdr[7] = 48000u * 2 * ch; hdr[8] = (uint32_t)(2 * ch) | (16u << 16);
+        hdr[9] = 0x61746164; hdr[10] = bytes;                              /* "data" size */
+        fseek(f, 0, SEEK_SET);
+        fwrite(hdr, sizeof(hdr), 1, f);
+        fseek(f, 0, SEEK_END);
+        fflush(f);
+        since = 0;
+    }
+    fwrite(samples, 2 * ch, n, f);
+    bytes += 2 * ch * n;
+    since += 2 * ch * n;
+}
+
 /* Hands this APU frame's 256 samples to the device. The frame thread holds
  * d->lock; a wait for room in the device's queue lets it go. */
 static void monitor_submit(MCPXAPUState *d)
 {
     int wait_loops = 0;
+    const int16_t *out = d->monitor.channels == 6 ? (const int16_t *)d->monitor.frame_buf6
+                                                  : (const int16_t *)d->monitor.frame_buf;
 
     g_mon_stats.frames++;
+    out_wav(out, MIXER_FRAME_SAMPLES, d->monitor.channels);
 
     if (xa2_is_active()) {
         while (xa2_buffers_queued() >= xa2_max_buffers() && wait_loops++ < 50) {
@@ -308,7 +351,7 @@ static void monitor_submit(MCPXAPUState *d)
         }
         if (xa2_buffers_queued() == 0)
             g_mon_stats.underruns++;
-        if (!xa2_submit_samples((const int16_t *)d->monitor.frame_buf, MIXER_FRAME_SAMPLES))
+        if (!xa2_submit_samples(out, MIXER_FRAME_SAMPLES))
             g_mon_stats.dropped++;
         return;
     }
@@ -378,9 +421,36 @@ void mcpx_apu_monitor_frame(MCPXAPUState *d)
         mixer_render(d->monitor.frame_buf, MIXER_FRAME_SAMPLES);
     }
 
+    /* At 5.1 the pipeline wrote frame_buf6; the tone and the mixer above
+     * (and the VP monitor point) go to its front pair. */
+    if (d->monitor.channels == 6) {
+        if (g_audio_muted) {
+            memset(d->monitor.frame_buf6, 0, sizeof(d->monitor.frame_buf6));
+        } else {
+            for (int i = 0; i < MIXER_FRAME_SAMPLES; i++) {
+                for (int ch = 0; ch < 2; ch++) {
+                    int m = d->monitor.frame_buf6[i][ch] + d->monitor.frame_buf[i][ch];
+                    d->monitor.frame_buf6[i][ch] =
+                        (int16_t)(m > 32767 ? 32767 : m < -32768 ? -32768 : m);
+                }
+            }
+        }
+    }
+
     monitor_submit(d);
     memset(d->monitor.frame_buf, 0, sizeof(d->monitor.frame_buf));
+    if (d->monitor.channels == 6)
+        memset(d->monitor.frame_buf6, 0, sizeof(d->monitor.frame_buf6));
     monitor_stats(d);
+}
+
+int mcpx_apu_output_channels(int *device_channels)
+{
+    if (device_channels)
+        *device_channels = xa2_device_channels();
+    if (xa2_is_active())
+        return xa2_channels();
+    return g_waveout.initialized ? 2 : 0;
 }
 
 /* ============================================================

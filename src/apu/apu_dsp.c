@@ -155,6 +155,43 @@ static void mixdown_weights(MCPXAPUState *d, float wl[NUM_MIXBINS], float wr[NUM
     }
 }
 
+/* 5.1 (notes 18.58): the speaker bins go to their own channels at unity
+ * (bins 0-5 are FL FR C LFE BL BR), and each HRTF submix bin to its
+ * speaker at the same gain as in stereo: the submixes 0 and 2 are the front
+ * pair, 1 and 3 the back (Crash names bins 6, 8, 7, 9: DirectSound's
+ * crosstalk front left, back left, front right, back right). Nothing is
+ * folded down, and the sends stay dropped as in stereo.
+ * RECOMP_APU_MIXDOWN's older mixdowns are stereo only. */
+static void mixdown_51(MCPXAPUState *d, float mixbins[NUM_MIXBINS][NUM_SAMPLES_PER_FRAME], int off)
+{
+    static const int speaker_of_submix[4] = { 0, 4, 1, 5 };
+    float w[6][NUM_MIXBINS];
+    const float gx = mcpx_apu_xtlk_gain();
+
+    memset(w, 0, sizeof(w));
+    for (int c = 0; c < 6; c++)
+        w[c][c] = 1.0f;
+    for (int k = 0; k < 4; k++) {
+        int b = d->vp.hrtf_submix[k], used = 0;
+        if (b < 6 || b >= NUM_MIXBINS)
+            continue;
+        for (int c = 0; c < 6; c++)
+            used |= w[c][b] != 0.0f;
+        if (!used)
+            w[speaker_of_submix[k]][b] = gx;
+    }
+    for (int i = 0; i < NUM_SAMPLES_PER_FRAME; i++) {
+        for (int c = 0; c < 6; c++) {
+            float s = 0.0f;
+            for (int b = 0; b < NUM_MIXBINS; ++b)
+                s += w[c][b] * mixbins[b][i];
+            if (s > 1.0f) s = 1.0f;
+            if (s < -1.0f) s = -1.0f;
+            d->monitor.frame_buf6[off + i][c] = (int16_t)(s * 32767.0f);
+        }
+    }
+}
+
 static void dsp_ack_frame(MCPXAPUState *d)
 {
     int i;
@@ -220,7 +257,9 @@ void mcpx_apu_dsp_frame(MCPXAPUState *d,
 
     dsp_ack_frame(d);
 
-    if (d->monitor.point != MCPX_APU_DEBUG_MON_VP) {
+    if (d->monitor.point != MCPX_APU_DEBUG_MON_VP && d->monitor.channels == 6) {
+        mixdown_51(d, mixbins, off);
+    } else if (d->monitor.point != MCPX_APU_DEBUG_MON_VP) {
         float wl[NUM_MIXBINS], wr[NUM_MIXBINS];
         mixdown_weights(d, wl, wr);
         for (int i = 0; i < NUM_SAMPLES_PER_FRAME; i++) {

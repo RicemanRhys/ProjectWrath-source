@@ -37,6 +37,11 @@ void mcpx_apu_play_test_tone(MCPXAPUState *d);
  * the output unchanged. Any thread, any time. */
 void mcpx_apu_set_voice_gain(int stream, float gain);
 
+/* The output's channels: 2 (stereo) or 6 (5.1: RECOMP_SPEAKERS=5.1 and a
+ * default device with those speakers; see apu_xaudio2.c), 0 before the
+ * output is open. *device_channels (may be NULL) gets the default device's
+ * channel count when 5.1 was asked for, else 0. Set at the APU's start. */
+int mcpx_apu_output_channels(int *device_channels);
 
 /* ============================================================
  * Software mixer - DirectSound buffer bridge

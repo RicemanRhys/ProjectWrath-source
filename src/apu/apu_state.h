@@ -502,6 +502,12 @@ struct MCPXAPUState {
     struct {
         McpxApuDebugMonitorPoint point;
         int16_t frame_buf[256][2];
+        /* 5.1 output (notes 18.58): channels is 6 when the device took
+         * 5.1, and the DSP stage then writes frame_buf6 (FL FR C LFE BL BR);
+         * frame_buf keeps the test tone and the software mixer, which go
+         * to the front pair. */
+        int channels;
+        int16_t frame_buf6[256][6];
         void *stream; /* SDL_AudioStream* - stubbed */
         int queued_bytes_low, queued_bytes_high;
     } monitor;
