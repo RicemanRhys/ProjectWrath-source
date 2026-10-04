@@ -162,6 +162,16 @@ extern "C" void twoc_audio_set_kind(int stream, int percent)
         fprintf(stderr, "[AUDIO] %s volume %d%%\n", stream ? "music" : "effects", p);
 }
 
+/* 3D placement (notes 18.59): the APU's HRTF filter on 3D voices, a plain
+ * store like the gains above. */
+extern "C" void mcpx_apu_set_hrtf(int on);
+
+extern "C" void twoc_audio_set_hrtf(int on)
+{
+    mcpx_apu_set_hrtf(on);
+    fprintf(stderr, "[AUDIO] 3D placement (HRTF) %s\n", on ? "on" : "off");
+}
+
 extern "C" void twoc_audio_startup(void)
 {
     if (GetFileAttributesA(marker_path()) == INVALID_FILE_ATTRIBUTES)

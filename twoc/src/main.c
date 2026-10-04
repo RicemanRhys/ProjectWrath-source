@@ -335,6 +335,8 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance,
             twoc_audio_set_kind(1, s.music);
         if (s.effects >= 0)
             twoc_audio_set_kind(0, s.effects);
+        if (getenv("RECOMP_HRTF") && *getenv("RECOMP_HRTF"))
+            twoc_audio_set_hrtf(s.hrtf);    /* unset: the APU's own, on (notes 18.59) */
     }
 
     printf("=== Crash Bandicoot: tWoC - Static Recompilation ===\n");

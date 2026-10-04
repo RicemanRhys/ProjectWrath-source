@@ -288,6 +288,16 @@ static int build(twoc_settings_t *s, const ovl_info_t *in)
         more("The sound effects: everything the game plays from memory. 100% is the game's own mix.");
     }
     {
+        bool h = s->hrtf != 0;
+        if (ImGui::Checkbox("3D sound placement (HRTF)", &h)) {
+            s->hrtf = h ? 1 : 0;
+            r |= OVL_CHANGED;
+        }
+        more("The Xbox's HRTF filter on the game's 3D sounds: an enemy or a crate on Crash's left is heard on "
+             "the left, as on the console. Off, 3D sounds are centred left-right (front-back still pans in "
+             "5.1). Applies at once.");
+    }
+    {
         static const char *const spk[] = { "Stereo", "5.1 surround" };
         int cur = s->speakers > 0, devch = 0, out = mcpx_apu_output_channels(&devch);
         const char *e = getenv("RECOMP_SPEAKERS");

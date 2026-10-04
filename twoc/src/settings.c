@@ -22,6 +22,7 @@ static const struct {
     { "music_volume", "RECOMP_MUSIC_VOLUME" },
     { "effects_volume", "RECOMP_EFFECTS_VOLUME" },
     { "speakers", "RECOMP_SPEAKERS" },
+    { "hrtf", "RECOMP_HRTF" },
 };
 #define N_KEYS (sizeof(g_keys) / sizeof(g_keys[0]))
 
@@ -176,6 +177,8 @@ void twoc_settings_current(twoc_settings_t *s)
     s->effects = env_percent("RECOMP_EFFECTS_VOLUME");
     v = getenv("RECOMP_SPEAKERS");
     s->speakers = v && *v ? strcmp(v, "5.1") == 0 : -1;
+    v = getenv("RECOMP_HRTF");
+    s->hrtf = !(v && strcmp(v, "0") == 0);
 }
 
 /* Key i's value in `s` as the file writes it ("" for a volume never set). */
@@ -206,6 +209,8 @@ static void key_text(const twoc_settings_t *s, size_t i, char *buf, size_t cap)
         snprintf(buf, cap, "%d", s->effects);
     else if (strcmp(k, "speakers") == 0 && s->speakers >= 0)
         snprintf(buf, cap, "%s", s->speakers ? "5.1" : "stereo");
+    else if (strcmp(k, "hrtf") == 0)
+        snprintf(buf, cap, "%d", s->hrtf ? 1 : 0);
 }
 
 int twoc_settings_save(const twoc_settings_t *s)
@@ -216,7 +221,8 @@ int twoc_settings_save(const twoc_settings_t *s)
                                                "0-100, the game's level in Windows' volume mixer",
                                                "0-100: music, ambience and speech (the game's streams)",
                                                "0-100: the sound effects",
-                                               "stereo or 5.1 (from the next start)" };
+                                               "stereo or 5.1 (from the next start)",
+                                               "1: 3D sounds placed left-right (the Xbox's HRTF), 0: centred" };
     FILE *f = fopen(twoc_settings_path(), "w");
     size_t i;
 

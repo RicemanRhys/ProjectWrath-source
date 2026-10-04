@@ -2169,6 +2169,8 @@ static void overlay_apply(twoc_settings_t *was, const twoc_settings_t *s)
         twoc_audio_set_kind(1, s->music);
     if (s->effects != was->effects)
         twoc_audio_set_kind(0, s->effects);
+    if (s->hrtf != was->hrtf)
+        twoc_audio_set_hrtf(s->hrtf);
     if (g_apply && (s->widescreen != was->widescreen || s->wide_w != was->wide_w || s->wide_h != was->wide_h ||
                     strcmp(s->render_size, was->render_size) != 0 || s->pacing != was->pacing))
         g_apply(s);                     /* d3d_bridge.c: the aspect, the render size, the pacing */
