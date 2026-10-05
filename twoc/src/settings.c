@@ -21,6 +21,7 @@ static const key_t_ g_fixed[] = {
     { "render_size", "RECOMP_RENDER_SIZE", "game (480 lines), WxH or native" },
     { "pacing", "RECOMP_PACING", "auto, vsync, limiter or limiter+vsync" },
     { "anisotropy", "RECOMP_ANISOTROPY", "1 (the game's filtering), 2, 4, 8 or 16" },
+    { "antialiasing", "RECOMP_ANTIALIASING", "off, fxaa, smaa, msaa2x, msaa4x or msaa8x" },
     { "volume", "RECOMP_VOLUME", "0-100, the game's level in Windows' volume mixer" },
     { "music_volume", "RECOMP_MUSIC_VOLUME", "0-100: music, ambience and speech (the game's streams)" },
     { "effects_volume", "RECOMP_EFFECTS_VOLUME", "0-100: the sound effects" },
@@ -96,6 +97,29 @@ int twoc_pacing_parse(const char *v)
         if (_stricmp(v, g_pacing_names[i]) == 0)
             return i;
     return TWOC_PACING_AUTO;
+}
+
+static const char *g_aa_names[TWOC_AA_COUNT] = { "off", "fxaa", "smaa", "msaa2x", "msaa4x", "msaa8x" };
+
+const char *twoc_aa_name(int aa)
+{
+    return aa >= 0 && aa < TWOC_AA_COUNT ? g_aa_names[aa] : "off";
+}
+
+int twoc_aa_parse(const char *v)
+{
+    int i;
+
+    for (i = 0; v && i < TWOC_AA_COUNT; i++)    /* msaa4 reads as msaa4x */
+        if (_stricmp(v, g_aa_names[i]) == 0 ||
+            (i >= TWOC_AA_MSAA2 && _strnicmp(v, g_aa_names[i], 5) == 0 && v[5] == 0))
+            return i;
+    return TWOC_AA_OFF;
+}
+
+unsigned twoc_aa_samples(int aa)
+{
+    return aa == TWOC_AA_MSAA2 ? 2 : aa == TWOC_AA_MSAA4 ? 4 : aa == TWOC_AA_MSAA8 ? 8 : 1;
 }
 
 const char *twoc_settings_path(void)
@@ -221,6 +245,7 @@ void twoc_settings_current(twoc_settings_t *s)
     v = getenv("RECOMP_ANISOTROPY");
     a = v ? atoi(v) : 1;
     s->anisotropy = a >= 16 ? 16 : a >= 8 ? 8 : a >= 4 ? 4 : a >= 2 ? 2 : 1;
+    s->antialiasing = twoc_aa_parse(getenv("RECOMP_ANTIALIASING"));
     v = getenv("RECOMP_VOLUME");
     s->volume = v && *v ? atoi(v) : -1;
     if (s->volume > 100)
@@ -269,6 +294,8 @@ static void key_text(const twoc_settings_t *s, size_t i, char *buf, size_t cap)
         snprintf(buf, cap, "%s", twoc_pacing_name(s->pacing));
     else if (strcmp(k, "anisotropy") == 0)
         snprintf(buf, cap, "%d", s->anisotropy);
+    else if (strcmp(k, "antialiasing") == 0)
+        snprintf(buf, cap, "%s", twoc_aa_name(s->antialiasing));
     else if (strcmp(k, "volume") == 0 && s->volume >= 0)
         snprintf(buf, cap, "%d", s->volume);
     else if (strcmp(k, "music_volume") == 0 && s->music >= 0)

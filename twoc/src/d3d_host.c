@@ -118,6 +118,14 @@
  * game's sound plays on, while the controller gate gives the game an idle
  * pad until the overlay has closed (g_ovl_session). The toggle applies at
  * once, both ways.
+ *
+ * Step 58 (notes 18.61): anti-aliasing, RECOMP_ANTIALIASING, off unless set,
+ * live from the overlay. FXAA and SMAA filter the frame at the present
+ * (frame_tex, aa.c): what is shown and dumped. MSAA 2x/4x/8x draws the back
+ * buffer and the screen-sized render targets into multisampled surfaces
+ * (the stand-in back buffer g_bb is then always used) and resolves each into
+ * its texture before anything reads it: a CopyRects, a draw that samples the
+ * target, a dump, the present. Off, nothing here changes.
  */
 
 #include <stdio.h>
@@ -133,6 +141,7 @@
 
 #include "d3d_host.h"
 #include "overlay.h"
+#include "aa.h"
 
 #define WIN_CLASS          "TwocD3DBridge"
 #define WIN_TITLE           "Crash TWOC - D3D bridge (host)"
@@ -175,11 +184,15 @@ static UINT g_flip_flags;               /* the swap chain's flags, for ResizeBuf
 
 /* Step 54: the settings overlay and live settings (overlay.cpp). */
 static unsigned g_dev_w, g_dev_h;       /* xbox_d3d8's own back buffer: its size is fixed */
-static struct {                         /* stands in for it after a live size change (d3dh_resize) */
-    IDirect3DTexture8 *tex;
-    IDirect3DSurface8 *surf, *depth;
+static struct {                         /* stands in for it after a live size change (d3dh_resize), or with MSAA */
+    IDirect3DTexture8 *tex;             /* what is sampled, copied and shown */
+    IDirect3DSurface8 *surf, *depth;    /* what is drawn into: tex's level 0, or (step 58) multisampled surfaces */
+    unsigned ms;                        /* step 58: surf's samples a pixel, 0 when it is tex's level 0 */
+    int dirty;                          /* step 58: drawn into since its last resolve */
 } g_bb;
 static volatile LONG g_aniso = 1;       /* RECOMP_ANISOTROPY: 1 leaves the game's filtering */
+static int g_aa;                        /* step 58, RECOMP_ANTIALIASING: TWOC_AA_* */
+static unsigned g_msaa = 1;             /* step 58: the samples a pixel MSAA asks for, 1 without */
 static volatile LONG g_ovl_open;        /* Esc: the next present runs the overlay */
 static SRWLOCK g_pause_lock = SRWLOCK_INIT;
 static d3dh_apply_fn g_apply;
@@ -197,6 +210,8 @@ typedef struct {
     IDirect3DTexture8 *tex;
     IDirect3DSurface8 *surf, *depth;
     unsigned last_use;
+    IDirect3DSurface8 *ms, *ms_depth;   /* step 58: a screen-sized target's multisampled surfaces, made when bound */
+    int dirty;                          /* step 58: ms drawn into since its last resolve */
 } host_rt_t;
 static host_rt_t g_rt[RT_SLOTS];
 static unsigned g_rt_clock;
@@ -546,6 +561,8 @@ static DWORD WINAPI win_thread(LPVOID p)
 
 /* ── Device ────────────────────────────────────────────────── */
 
+static void set_antialiasing(int aa);
+
 int d3dh_create(unsigned width, unsigned height, unsigned host_w, unsigned host_h, double wide, int dpi_aware,
                 unsigned interval, double frame_hz, const char *dump_prefix)
 {
@@ -661,6 +678,11 @@ int d3dh_create(unsigned width, unsigned height, unsigned host_w, unsigned host_
         fprintf(stderr, "[D3DB] host: xbox_d3d8 CreateDevice failed 0x%08lX\n", (unsigned long)hr);
         return -1;
     }
+    {   /* step 58 */
+        int aa = twoc_aa_parse(getenv("RECOMP_ANTIALIASING"));
+        if (aa != TWOC_AA_OFF)
+            set_antialiasing(aa);
+    }
     if (g_w != g_gw || g_h != g_gh)     /* 18.56 */
         fprintf(stderr, "[D3DB] host renders %ux%u for the guest's %ux%u: %s; full-width 2D stretched, other 2D"
                 " %s\n", g_w, g_h, g_gw, g_gh, g_wide > 0 ? "widescreen" : "4:3",
@@ -678,6 +700,177 @@ int d3dh_ready(void)
     return g_ready;
 }
 
+/* ── MSAA (step 58, notes 18.61) ───────────────────────────────
+ *
+ * With MSAA the back buffer (g_bb) and every render target of the guest
+ * back buffer's size (H2 Oh No's underwater target, the CopyRects copy) are
+ * drawn into multisampled surfaces, each beside its single-sample texture:
+ * the texture is what is sampled, copied, dumped and shown, and it is
+ * resolved from the surface before any of that whenever the surface was
+ * drawn into since. Smaller targets (the 128x128 passes, the pause still's
+ * 256x256) stay single-sampled. A target's surfaces are made when it is
+ * first bound for a draw and filled from its texture (aa_copy), so what a
+ * CopyRects or an earlier mode left there carries over; a CopyRects into a
+ * target with surfaces refills them the same way.
+ *
+ * xbox_d3d8 makes multisampled textures in CreateRenderTarget and
+ * CreateDepthStencilSurface but views them as TEXTURE2D, which D3D11 refuses
+ * for a multisampled texture, so those surfaces have no view. The surfaces
+ * are made here instead: xbox_d3d8's surface wrapper around the texture
+ * (with no view of its own), given a TEXTURE2DMS view. Nothing in xbox_d3d8
+ * changes. */
+
+/* The most samples up to g_msaa that colour `fmt` and the D24S8 depth both
+ * take, 1 if none. */
+static unsigned ms_samples(D3DFORMAT fmt)
+{
+    ID3D11Device *d = d3d8_GetD3D11Device();
+    unsigned n;
+    UINT q;
+
+    for (n = g_msaa; n > 1; n /= 2)
+        if (SUCCEEDED(ID3D11Device_CheckMultisampleQualityLevels(d, d3d8_to_dxgi_format(fmt), n, &q)) && q &&
+            SUCCEEDED(ID3D11Device_CheckMultisampleQualityLevels(d, DXGI_FORMAT_D24_UNORM_S8_UINT, n, &q)) && q)
+            return n;
+    return 1;
+}
+
+/* A multisampled colour (or D24S8 depth) surface xbox_d3d8 can bind. */
+static IDirect3DSurface8 *ms_surface(unsigned w, unsigned h, D3DFORMAT fmt, unsigned samples)
+{
+    ID3D11Device *d = d3d8_GetD3D11Device();
+    int depth = fmt == D3DFMT_D24S8;
+    D3D11_TEXTURE2D_DESC td;
+    ID3D11Texture2D *tex = NULL;
+    IDirect3DSurface8 *s;
+    D3D8Surface *sf;
+    HRESULT hr = E_OUTOFMEMORY;
+
+    memset(&td, 0, sizeof(td));
+    td.Width = w;
+    td.Height = h;
+    td.MipLevels = 1;
+    td.ArraySize = 1;
+    td.Format = depth ? DXGI_FORMAT_D24_UNORM_S8_UINT : d3d8_to_dxgi_format(fmt);
+    td.SampleDesc.Count = samples;
+    td.Usage = D3D11_USAGE_DEFAULT;
+    td.BindFlags = depth ? D3D11_BIND_DEPTH_STENCIL : D3D11_BIND_RENDER_TARGET;
+    if (FAILED(ID3D11Device_CreateTexture2D(d, &td, NULL, &tex)))
+        return NULL;
+    s = xbox_d3d8_surface_wrap(tex, w, h, depth ? D3DFMT_A8R8G8B8 : fmt);  /* a colour format: no view made */
+    sf = (D3D8Surface *)s;
+    if (sf && depth) {
+        D3D11_DEPTH_STENCIL_VIEW_DESC dv;
+        memset(&dv, 0, sizeof(dv));
+        dv.Format = td.Format;
+        dv.ViewDimension = D3D11_DSV_DIMENSION_TEXTURE2DMS;
+        hr = ID3D11Device_CreateDepthStencilView(d, (ID3D11Resource *)tex, &dv, &sf->dsv);
+        sf->format = D3DFMT_D24S8;
+        sf->usage = D3DUSAGE_DEPTHSTENCIL;
+    } else if (sf) {
+        D3D11_RENDER_TARGET_VIEW_DESC rv;
+        memset(&rv, 0, sizeof(rv));
+        rv.Format = td.Format;
+        rv.ViewDimension = D3D11_RTV_DIMENSION_TEXTURE2DMS;
+        hr = ID3D11Device_CreateRenderTargetView(d, (ID3D11Resource *)tex, &rv, &sf->rtv);
+        sf->usage = D3DUSAGE_RENDERTARGET;
+    }
+    ID3D11Texture2D_Release(tex);
+    if (s && FAILED(hr)) {
+        s->lpVtbl->Release(s);
+        s = NULL;
+    }
+    return s;
+}
+
+/* Resolve multisampled `ms` into `tex`'s level 0. */
+static void ms_resolve(IDirect3DTexture8 *tex, IDirect3DSurface8 *ms)
+{
+    ID3D11Texture2D *dst = ((D3D8Texture *)tex)->d3d11_texture;
+    D3D11_TEXTURE2D_DESC dd;
+
+    ID3D11Texture2D_GetDesc(dst, &dd);
+    ID3D11DeviceContext_ResolveSubresource(d3d8_GetD3D11Context(), (ID3D11Resource *)dst, 0,
+                                           (ID3D11Resource *)((D3D8Surface *)ms)->d3d11_texture, 0, dd.Format);
+    g_st.ms_resolves++;
+}
+
+/* Fill multisampled `ms` from `tex` (every sample of a pixel gets it) and
+ * clear `ms_depth`. Leaves them bound: the caller sets g_cur_target. */
+static void ms_fill(IDirect3DSurface8 *ms, IDirect3DSurface8 *ms_depth, IDirect3DTexture8 *tex, unsigned w,
+                    unsigned h)
+{
+    g_dev->lpVtbl->SetRenderTarget(g_dev, ms, ms_depth);
+    g_dev->lpVtbl->Clear(g_dev, 0, NULL, D3DCLEAR_TARGET | D3DCLEAR_ZBUFFER | D3DCLEAR_STENCIL, 0, 1.0f, 0);
+    if (aa_copy(((D3D8Surface *)ms)->rtv, ((D3D8Texture *)tex)->srv, w, h) == 0)
+        g_st.ms_fills++;
+}
+
+/* Where the last draw or clear went: its surface now holds more than its
+ * texture (MSAA only). Called with g_lock held. */
+static void target_drawn(void)
+{
+    if (g_cur_target == -1 && g_bb.ms)
+        g_bb.dirty = 1;
+    else if (g_cur_target >= 0 && g_rt[g_cur_target].ms)
+        g_rt[g_cur_target].dirty = 1;
+}
+
+/* Render target i's texture brought up to date with its multisampled
+ * surface. Called with g_lock held. */
+static void rt_resolve(int i)
+{
+    if (g_rt[i].ms && g_rt[i].dirty) {
+        ms_resolve(g_rt[i].tex, g_rt[i].ms);
+        g_rt[i].dirty = 0;
+    }
+}
+
+/* Drop render target i's multisampled surfaces, its texture kept up to date. */
+static void rt_ms_release(int i)
+{
+    if (!g_rt[i].ms)
+        return;
+    rt_resolve(i);
+    if (g_cur_target == i) {
+        g_dev->lpVtbl->SetRenderTarget(g_dev, NULL, NULL);
+        g_cur_target = -2;
+    }
+    g_rt[i].ms_depth->lpVtbl->Release(g_rt[i].ms_depth);
+    g_rt[i].ms->lpVtbl->Release(g_rt[i].ms);
+    g_rt[i].ms = g_rt[i].ms_depth = NULL;
+}
+
+/* With MSAA, render target i's multisampled surfaces when it is screen-sized,
+ * made and filled from its texture if it has none. Called with g_lock held. */
+static void rt_ms_make(int i)
+{
+    unsigned n;
+
+    if (g_msaa <= 1 || g_rt[i].ms || g_rt[i].width != g_gw || g_rt[i].height != g_gh)
+        return;
+    n = ms_samples((D3DFORMAT)g_rt[i].format);
+    if (n <= 1)
+        return;
+    g_rt[i].ms = ms_surface(g_rt[i].hw, g_rt[i].hh, (D3DFORMAT)g_rt[i].format, n);
+    g_rt[i].ms_depth = g_rt[i].ms ? ms_surface(g_rt[i].hw, g_rt[i].hh, D3DFMT_D24S8, n) : NULL;
+    if (!g_rt[i].ms_depth) {
+        if (g_rt[i].ms)
+            g_rt[i].ms->lpVtbl->Release(g_rt[i].ms);
+        g_rt[i].ms = NULL;
+        if (++g_st.ms_fails <= 5)
+            fprintf(stderr, "[D3DB] host render target %d (Data %08X): no %ux multisampled surfaces; drawn without\n",
+                    i, g_rt[i].data, n);
+        return;
+    }
+    ms_fill(g_rt[i].ms, g_rt[i].ms_depth, g_rt[i].tex, g_rt[i].hw, g_rt[i].hh);
+    g_cur_target = -2;
+    g_rt[i].dirty = 0;
+    g_st.ms_targets++;
+    fprintf(stderr, "[D3DB] host render target %d for guest Data %08X: %ux%u, %ux MSAA\n", i, g_rt[i].data,
+            g_rt[i].hw, g_rt[i].hh, n);
+}
+
 /* ── Render targets (S4) ───────────────────────────────────── */
 
 /* Release render target i. Called with g_lock held. */
@@ -691,6 +884,10 @@ static void rt_release(int i)
     }
     for (s = 0; s < 4; s++)             /* xbox_d3d8 keeps the bound pointer */
         g_dev->lpVtbl->SetTexture(g_dev, s, NULL);
+    if (g_rt[i].ms) {                   /* step 58 */
+        g_rt[i].ms_depth->lpVtbl->Release(g_rt[i].ms_depth);
+        g_rt[i].ms->lpVtbl->Release(g_rt[i].ms);
+    }
     g_rt[i].depth->lpVtbl->Release(g_rt[i].depth);
     g_rt[i].surf->lpVtbl->Release(g_rt[i].surf);
     g_rt[i].tex->lpVtbl->Release(g_rt[i].tex);
@@ -776,7 +973,7 @@ static int rt_find(const d3dh_target_t *t, int create)
     /* Start from black, as the guest's memory was (never seen otherwise). */
     g_dev->lpVtbl->SetRenderTarget(g_dev, surf, depth);
     g_dev->lpVtbl->Clear(g_dev, 0, NULL, D3DCLEAR_TARGET | D3DCLEAR_ZBUFFER | D3DCLEAR_STENCIL, 0, 1.0f, 0);
-    g_cur_target = free_i;
+    g_cur_target = g_msaa > 1 ? -2 : free_i;   /* step 58: a draw binds the multisampled surfaces */
     return free_i;
 }
 
@@ -800,7 +997,11 @@ static int bind_target(const d3dh_target_t *t)
     if (i < 0)
         return -1;
     if (g_cur_target != i) {
-        g_dev->lpVtbl->SetRenderTarget(g_dev, g_rt[i].surf, g_rt[i].depth);
+        rt_ms_make(i);                  /* step 58 */
+        if (g_rt[i].ms)
+            g_dev->lpVtbl->SetRenderTarget(g_dev, g_rt[i].ms, g_rt[i].ms_depth);
+        else
+            g_dev->lpVtbl->SetRenderTarget(g_dev, g_rt[i].surf, g_rt[i].depth);
         g_cur_target = i;
     }
     return 0;
@@ -852,6 +1053,7 @@ void d3dh_clear(const d3dh_target_t *target, uint32_t xdk_flags, uint32_t color,
         g_st.clears_depth++;
     if (pc) {
         g_dev->lpVtbl->Clear(g_dev, 0, NULL, pc, (D3DCOLOR)color, z, stencil);
+        target_drawn();
         g_frame_work = 1;
     }
     LeaveCriticalSection(&g_lock);
@@ -973,6 +1175,7 @@ static IDirect3DBaseTexture8 *tex_get(const d3dh_tex_t *t)
             g_st.rt_sampled++;
             if (g_cur_target == (int)i)
                 g_st.rt_feedback++;     /* D3D11 unbinds the view: the stage samples black */
+            rt_resolve((int)i);         /* step 58: what the multisampled surface holds (with MSAA, even while bound) */
             return (IDirect3DBaseTexture8 *)g_rt[i].tex;
         }
     g_tex_clock++;
@@ -1335,6 +1538,7 @@ int d3dh_draw_up(const d3dh_draw_t *d)
     } else {
         hr = g_dev->lpVtbl->DrawPrimitiveUP(g_dev, (D3DPRIMITIVETYPE)d->prim, d->prim_count, verts, d->stride);
     }
+    target_drawn();
     g_st.draws++;
     if (d->target.data)
         g_st.rt_draws++;
@@ -1352,12 +1556,17 @@ int d3dh_draw_up(const d3dh_draw_t *d)
 #define XDK_FMT_LIN_A8B8G8R8 0x3F      /* R8G8B8A8 in xbox_d3d8, the back buffer's DXGI format */
 
 /* The host back buffer's texture, referenced: xbox_d3d8's swap-chain buffer,
- * or since a live size change its stand-in (step 54). NULL if unavailable. */
+ * or since a live size change its stand-in (step 54), resolved from its
+ * multisampled surface with MSAA (step 58). NULL if unavailable. */
 static ID3D11Texture2D *back_tex(void)
 {
     ID3D11Texture2D *t = NULL;
 
     if (g_bb.tex) {
+        if (g_bb.ms && g_bb.dirty) {
+            ms_resolve(g_bb.tex, g_bb.surf);
+            g_bb.dirty = 0;
+        }
         t = ((D3D8Texture *)g_bb.tex)->d3d11_texture;
         ID3D11Texture2D_AddRef(t);
         return t;
@@ -1365,6 +1574,24 @@ static ID3D11Texture2D *back_tex(void)
     if (FAILED(IDXGISwapChain_GetBuffer(d3d8_GetSwapChain(), 0, &IID_ID3D11Texture2D, (void **)&t)))
         return NULL;
     return t;
+}
+
+/* Step 58: the frame as shown, referenced: back_tex, through FXAA or SMAA
+ * when one is on (aa.c; the frame as it is if that fails). Called with
+ * g_lock held. */
+static ID3D11Texture2D *frame_tex(void)
+{
+    ID3D11Texture2D *src = back_tex(), *out = NULL;
+
+    if (!src || (g_aa != TWOC_AA_FXAA && g_aa != TWOC_AA_SMAA))
+        return src;
+    if (aa_post(g_aa, src, &out) != 0) {
+        g_st.post_aa_fails++;
+        return src;
+    }
+    g_st.post_aa++;
+    ID3D11Texture2D_Release(src);
+    return out;
 }
 
 int d3dh_copy_back(const d3dh_target_t *dst, const int32_t *rects, const int32_t *points, unsigned n)
@@ -1393,6 +1620,7 @@ int d3dh_copy_back(const d3dh_target_t *dst, const int32_t *rects, const int32_t
                     t.data, t.width, t.height);
         ctx = d3d8_GetD3D11Context();
         dt = ((D3D8Texture *)g_rt[i].tex)->d3d11_texture;
+        rt_resolve(i);                  /* step 58: the rects land on what the target holds */
         for (k = 0; k < (n ? n : 1); k++) {
             int32_t l = n ? rects[4 * k] : 0, top = n ? rects[4 * k + 1] : 0;
             int32_t r = n ? rects[4 * k + 2] : (int32_t)g_gw, b = n ? rects[4 * k + 3] : (int32_t)g_gh;
@@ -1425,6 +1653,10 @@ int d3dh_copy_back(const d3dh_target_t *dst, const int32_t *rects, const int32_t
                                                       (ID3D11Resource *)bb, 0, &box);
         }
         ID3D11Texture2D_Release(bb);
+        if (g_rt[i].ms) {               /* step 58: and its multisampled surface from it */
+            ms_fill(g_rt[i].ms, g_rt[i].ms_depth, g_rt[i].tex, g_rt[i].hw, g_rt[i].hh);
+            g_cur_target = -2;
+        }
         g_st.copies++;
         g_frame_work = 1;
         ok = 0;
@@ -1516,14 +1748,11 @@ static void dump_texture(ID3D11Texture2D *src, ID3D11Texture2D **staging, const 
         ID3D11Texture2D_Release(st);
 }
 
-static void dump_back_buffer(const char *path)
+/* The frame as shown (frame_tex). */
+static void dump_back_buffer(const char *path, ID3D11Texture2D *frame)
 {
-    ID3D11Texture2D *bb = back_tex();
-
-    if (!bb)
-        return;
-    dump_texture(bb, &g_staging, path, 0);
-    ID3D11Texture2D_Release(bb);
+    if (frame)
+        dump_texture(frame, &g_staging, path, 0);
 }
 
 /* S4: every host render target, as <dump path without .bmp>_rt_<Data>.bmp. */
@@ -1535,6 +1764,7 @@ static void dump_targets(const char *path)
 
     for (i = 0; i < RT_SLOTS; i++)
         if (g_rt[i].tex) {
+            rt_resolve(i);              /* step 58 */
             snprintf(p, sizeof(p), "%.*s_rt_%08X.bmp", (int)(n > 4 ? n - 4 : n), path, g_rt[i].data);
             dump_texture(((D3D8Texture *)g_rt[i].tex)->d3d11_texture, NULL, p, 0);
         }
@@ -2133,11 +2363,111 @@ void d3dh_set_pacing(unsigned interval, double frame_hz)
             g_latency ? " (vsync paced)" : "", g_frame_hz > 0 ? "" : "off, ", g_frame_hz);
 }
 
-void d3dh_resize(unsigned host_w, unsigned host_h, double wide)
+/* The back buffer for a w x h host picture (step 54) with g_msaa's samples
+ * (step 58): a render target of its own, or none (g_bb.tex NULL) where
+ * xbox_d3d8's own back buffer serves, at its size without MSAA. Bound and
+ * cleared, and at the picture's current size it keeps the frame it holds
+ * (an MSAA change while the overlay holds the game shows that frame next).
+ * Called with g_lock held. On failure nothing changes. */
+static HRESULT bb_rebuild(unsigned w, unsigned h)
 {
     IDirect3DTexture8 *tex = NULL;
     IDirect3DSurface8 *surf = NULL, *depth = NULL;
+    unsigned n = g_msaa > 1 ? ms_samples((D3DFORMAT)XDK_FMT_LIN_A8B8G8R8) : 1;
+    ID3D11Texture2D *old = NULL, *dst = NULL;
     HRESULT hr = S_OK;
+
+    if (w != g_dev_w || h != g_dev_h || n > 1) {
+        hr = g_dev->lpVtbl->CreateTexture(g_dev, w, h, 1, D3DUSAGE_RENDERTARGET, (D3DFORMAT)XDK_FMT_LIN_A8B8G8R8,
+                                          D3DPOOL_DEFAULT, &tex);
+        if (SUCCEEDED(hr) && n > 1) {
+            surf = ms_surface(w, h, (D3DFORMAT)XDK_FMT_LIN_A8B8G8R8, n);
+            depth = surf ? ms_surface(w, h, D3DFMT_D24S8, n) : NULL;
+            if (!depth)
+                hr = E_FAIL;
+        } else if (SUCCEEDED(hr)) {
+            hr = tex->lpVtbl->GetSurfaceLevel(tex, 0, &surf);
+            if (SUCCEEDED(hr))
+                hr = g_dev->lpVtbl->CreateDepthStencilSurface(g_dev, w, h, D3DFMT_D24S8, D3DMULTISAMPLE_NONE, &depth);
+        }
+        if (FAILED(hr) || !surf || !depth) {
+            if (depth)
+                depth->lpVtbl->Release(depth);
+            if (surf)
+                surf->lpVtbl->Release(surf);
+            if (tex)
+                tex->lpVtbl->Release(tex);
+            return FAILED(hr) ? hr : E_FAIL;
+        }
+    }
+    if (w == g_w && h == g_h)           /* step 58: the frame carries over */
+        old = back_tex();
+    g_dev->lpVtbl->SetRenderTarget(g_dev, NULL, NULL);
+    if (old) {
+        if (tex)
+            dst = ((D3D8Texture *)tex)->d3d11_texture;
+        else if (SUCCEEDED(IDXGISwapChain_GetBuffer(d3d8_GetSwapChain(), 0, &IID_ID3D11Texture2D, (void **)&dst)))
+            ID3D11Texture2D_Release(dst);       /* the swap chain keeps it */
+        if (dst && dst != old)
+            ID3D11DeviceContext_CopyResource(d3d8_GetD3D11Context(), (ID3D11Resource *)dst, (ID3D11Resource *)old);
+        ID3D11Texture2D_Release(old);
+    }
+    if (g_bb.tex) {
+        g_bb.depth->lpVtbl->Release(g_bb.depth);
+        g_bb.surf->lpVtbl->Release(g_bb.surf);
+        g_bb.tex->lpVtbl->Release(g_bb.tex);
+    }
+    g_bb.tex = tex;                     /* NULL at xbox_d3d8's own size: its back buffer again */
+    g_bb.surf = surf;
+    g_bb.depth = depth;
+    g_bb.ms = n > 1 && tex ? n : 0;
+    g_bb.dirty = 0;
+    if (g_bb.ms && old)
+        ms_fill(g_bb.surf, g_bb.depth, g_bb.tex, w, h);
+    else if (g_bb.tex) {
+        g_dev->lpVtbl->SetRenderTarget(g_dev, g_bb.surf, g_bb.depth);
+        g_dev->lpVtbl->Clear(g_dev, 0, NULL, old ? D3DCLEAR_ZBUFFER | D3DCLEAR_STENCIL
+                                                 : D3DCLEAR_TARGET | D3DCLEAR_ZBUFFER | D3DCLEAR_STENCIL, 0, 1.0f, 0);
+    }
+    g_cur_target = -1;
+    return S_OK;
+}
+
+/* Step 58: the anti-aliasing choice, at once. FXAA and SMAA need nothing
+ * here (the next present filters). A change of MSAA's samples makes the
+ * back buffer again and drops the render targets' multisampled surfaces,
+ * resolved first; a target gets new ones at its next draw. */
+static void set_antialiasing(int aa)
+{
+    unsigned was = g_msaa;
+    HRESULT hr = S_OK;
+    int i;
+
+    EnterCriticalSection(&g_lock);
+    g_aa = aa;
+    g_msaa = twoc_aa_samples(aa);
+    if (g_msaa != was) {
+        for (i = 0; i < RT_SLOTS; i++)
+            if (g_rt[i].tex)
+                rt_ms_release(i);
+        hr = bb_rebuild(g_w, g_h);
+        if (FAILED(hr))
+            g_msaa = was;
+    }
+    g_st.aa_mode = (unsigned)g_aa;
+    g_st.ms_samples = g_bb.ms;
+    LeaveCriticalSection(&g_lock);
+    if (FAILED(hr))
+        fprintf(stderr, "[D3DB] host anti-aliasing: %ux MSAA not set up (0x%08lX); as before\n",
+                twoc_aa_samples(aa), (unsigned long)hr);
+    fprintf(stderr, "[D3DB] host anti-aliasing: %s%s\n", twoc_aa_name(g_aa),
+            g_msaa > 1 && g_bb.ms != g_msaa ? (g_bb.ms ? " (fewer samples: the most the device takes)"
+                                                       : " (the device takes no MSAA: off)") : "");
+}
+
+void d3dh_resize(unsigned host_w, unsigned host_h, double wide)
+{
+    HRESULT hr;
     int i;
 
     if (!g_ready || !host_w || !host_h)
@@ -2148,44 +2478,16 @@ void d3dh_resize(unsigned host_w, unsigned host_h, double wide)
         LeaveCriticalSection(&g_lock);
         return;
     }
-    if (host_w != g_dev_w || host_h != g_dev_h) {
-        hr = g_dev->lpVtbl->CreateTexture(g_dev, host_w, host_h, 1, D3DUSAGE_RENDERTARGET,
-                                          (D3DFORMAT)XDK_FMT_LIN_A8B8G8R8, D3DPOOL_DEFAULT, &tex);
-        if (SUCCEEDED(hr))
-            hr = tex->lpVtbl->GetSurfaceLevel(tex, 0, &surf);
-        if (SUCCEEDED(hr))
-            hr = g_dev->lpVtbl->CreateDepthStencilSurface(g_dev, host_w, host_h, D3DFMT_D24S8, D3DMULTISAMPLE_NONE,
-                                                          &depth);
-        if (FAILED(hr) || !surf || !depth) {
-            if (depth)
-                depth->lpVtbl->Release(depth);
-            if (surf)
-                surf->lpVtbl->Release(surf);
-            if (tex)
-                tex->lpVtbl->Release(tex);
-            LeaveCriticalSection(&g_lock);
-            fprintf(stderr, "[D3DB] host picture not resized to %ux%u (0x%08lX): stays %ux%u\n", host_w, host_h,
-                    (unsigned long)hr, g_w, g_h);
-            return;
-        }
+    hr = bb_rebuild(host_w, host_h);
+    if (FAILED(hr)) {
+        LeaveCriticalSection(&g_lock);
+        fprintf(stderr, "[D3DB] host picture not resized to %ux%u (0x%08lX): stays %ux%u\n", host_w, host_h,
+                (unsigned long)hr, g_w, g_h);
+        return;
     }
     for (i = 0; i < RT_SLOTS; i++)      /* screen-sized targets: made again at the new size at their next use */
         if (g_rt[i].tex && g_rt[i].width == g_gw && g_rt[i].height == g_gh)
             rt_release(i);
-    g_dev->lpVtbl->SetRenderTarget(g_dev, NULL, NULL);
-    if (g_bb.tex) {
-        g_bb.depth->lpVtbl->Release(g_bb.depth);
-        g_bb.surf->lpVtbl->Release(g_bb.surf);
-        g_bb.tex->lpVtbl->Release(g_bb.tex);
-    }
-    g_bb.tex = tex;                     /* NULL at xbox_d3d8's own size: its back buffer again */
-    g_bb.surf = surf;
-    g_bb.depth = depth;
-    if (g_bb.tex) {
-        g_dev->lpVtbl->SetRenderTarget(g_dev, g_bb.surf, g_bb.depth);
-        g_dev->lpVtbl->Clear(g_dev, 0, NULL, D3DCLEAR_TARGET | D3DCLEAR_ZBUFFER | D3DCLEAR_STENCIL, 0, 1.0f, 0);
-    }
-    g_cur_target = -1;
     if (g_staging) {                    /* the dumps' copy has the old size */
         ID3D11Texture2D_Release(g_staging);
         g_staging = NULL;
@@ -2229,6 +2531,8 @@ static void overlay_apply(twoc_settings_t *was, const twoc_settings_t *s)
         fprintf(stderr, "[D3DB] host: anisotropic filtering %s%dx\n", s->anisotropy > 1 ? "" : "off, ",
                 s->anisotropy);
     }
+    if (s->antialiasing != was->antialiasing)
+        set_antialiasing(s->antialiasing);      /* step 58 */
     if (s->volume != was->volume)
         twoc_audio_set_volume(s->volume);
     if (s->music != was->music)
@@ -2343,6 +2647,8 @@ static int ovl_draw(ID3D11Texture2D *dst, int running)
     in.executor_paces = getenv("RECOMP_PB_EXEC") && strcmp(getenv("RECOMP_PB_EXEC"), "0") != 0;
     in.dpi_aware = g_dpi_aware;
     in.running = running;
+    in.aa = g_aa;                       /* step 58 */
+    in.ms_samples = g_bb.ms;
     in.save_note = g_ovs.dirty ? "Saved to crash_twoc.ini when you resume." : g_ovs.note;
     if (SUCCEEDED(ID3D11Device_CreateRenderTargetView(d3d8_GetD3D11Device(), (ID3D11Resource *)dst, NULL, &rtv)))
         r = ovl_frame(rtv, g_buf_w, g_buf_h, overlay_scale(),
@@ -2376,7 +2682,7 @@ static void ovl_after(int r)
  * muted meanwhile (host_audio.cpp). */
 static void overlay_pause(void)
 {
-    int ok;
+    int ok, aa_seen;
 
     AcquireSRWLockExclusive(&g_pause_lock);
     if (!g_ovl_open || !g_ready || (!g_ovs.active && ovl_begin() != 0) || !g_ovs.s.pause) {
@@ -2385,7 +2691,7 @@ static void overlay_pause(void)
     }
     EnterCriticalSection(&g_lock);
     {   /* the frame the game just finished, held while paused */
-        ID3D11Texture2D *src = back_tex();
+        ID3D11Texture2D *src = frame_tex();
         ok = src && shot_take(src) == 0;
         if (src)
             ID3D11Texture2D_Release(src);
@@ -2402,6 +2708,7 @@ static void overlay_pause(void)
         fprintf(stderr, "[OVL] the game waits in its present %u\n", g_st.presents);
     twoc_audio_mute(1);                 /* the APU plays looped voices on: silence while held */
     g_ovs.muted = 1;
+    aa_seen = g_aa;
     while (g_ovl_open && g_ready && g_ovs.s.pause) {
         ID3D11Texture2D *dst = NULL;
         int r = 0;
@@ -2411,6 +2718,14 @@ static void overlay_pause(void)
         else
             Sleep(15);                  /* the executor paces this run, not the host */
         EnterCriticalSection(&g_lock);
+        if (g_aa != aa_seen) {          /* step 58: the held frame through the new choice (MSAA shows on resume) */
+            ID3D11Texture2D *src = frame_tex();
+            if (src) {
+                shot_take(src);
+                ID3D11Texture2D_Release(src);
+            }
+            aa_seen = g_aa;
+        }
         flip_fit();
         if (SUCCEEDED(IDXGISwapChain1_GetBuffer(g_flip, 0, &IID_ID3D11Texture2D, (void **)&dst)) &&
             blit_draw(dst, g_buf_w, g_buf_h) == 0)
@@ -2435,6 +2750,7 @@ void d3dh_present(double t_s, unsigned swap_no)
     ULONGLONG now;
     HRESULT hr;
     int ovl_r = 0;
+    ID3D11Texture2D *src;
 
     if (!g_ready)
         return;
@@ -2448,13 +2764,14 @@ void d3dh_present(double t_s, unsigned swap_no)
         overlay_pause();                /* this frame waits under the overlay */
     pace();
     EnterCriticalSection(&g_lock);
+    src = frame_tex();                  /* step 58: resolved, and through FXAA or SMAA if one is on */
     now = GetTickCount64();
     if (g_dump_prefix[0] &&
         ((g_frame_work && g_dump_first < DUMP_FIRST_FRAMES) || now - g_last_dump_ms >= DUMP_PERIOD_MS ||
          (g_dump_every && swap_no % g_dump_every == 0) || (swap_no >= g_dump_from && swap_no <= g_dump_to))) {
         char path[600];
         snprintf(path, sizeof(path), "%s%03u.bmp", g_dump_prefix, g_dump_seq++);
-        dump_back_buffer(path);
+        dump_back_buffer(path, src);
         if (g_dump_rt)
             dump_targets(path);
         if (g_frame_work && g_dump_first < DUMP_FIRST_FRAMES)
@@ -2465,7 +2782,7 @@ void d3dh_present(double t_s, unsigned swap_no)
     }
     flip_fit();                         /* step 54 */
     {   /* xbox_d3d8's back buffer -> the visible flip-model swap chain */
-        ID3D11Texture2D *src = back_tex(), *dst = NULL;
+        ID3D11Texture2D *dst = NULL;
         if (src && SUCCEEDED(IDXGISwapChain1_GetBuffer(g_flip, 0, &IID_ID3D11Texture2D, (void **)&dst))) {
             if (g_buf_w == g_w && g_buf_h == g_h)
                 ID3D11DeviceContext_CopyResource(d3d8_GetD3D11Context(), (ID3D11Resource *)dst,

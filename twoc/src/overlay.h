@@ -30,6 +30,8 @@ typedef struct {
     int dpi_aware;                      /* the window is in real pixels (a render size at the start) */
     const char *save_note;              /* the last save's outcome, or NULL */
     int running;                        /* step 57: the game runs behind the overlay (pause off) */
+    int aa;                             /* step 58: the anti-aliasing in effect (TWOC_AA_*) */
+    unsigned ms_samples;                /* step 58: MSAA's samples on the back buffer, 0 without */
 } ovl_info_t;
 
 enum { OVL_CHANGED = 1, OVL_CLOSE = 2 };

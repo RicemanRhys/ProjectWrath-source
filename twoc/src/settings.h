@@ -12,6 +12,7 @@
  *   render_size = game | WxH | native         RECOMP_RENDER_SIZE (game: the guest's 480 lines)
  *   pacing      = auto | vsync | limiter | limiter+vsync    RECOMP_PACING
  *   anisotropy  = 1 | 2 | 4 | 8 | 16          RECOMP_ANISOTROPY (1: the game's own filtering)
+ *   antialiasing = off | fxaa | smaa | msaa2x | msaa4x | msaa8x    RECOMP_ANTIALIASING (unset: off)
  *   volume      = 0-100                       RECOMP_VOLUME (the game's volume in Windows' mixer)
  *   music_volume   = 0-100                    RECOMP_MUSIC_VOLUME (stream voices: music, ambience, speech)
  *   effects_volume = 0-100                    RECOMP_EFFECTS_VOLUME (buffer voices: the sound effects)
@@ -33,6 +34,11 @@
  * Step 57: pause 0 keeps the game running behind the overlay (it gets an
  * idle pad meanwhile); the controller map and the keyboard are controls.c's.
  *
+ * Step 58: anti-aliasing (notes 18.61). FXAA and SMAA filter the finished
+ * frame at the present (aa.c); MSAA draws the back buffer and the
+ * screen-sized render targets multisampled and resolves them before
+ * anything reads them (d3d_host.c). Applied at once.
+ *
  * The settings overlay (overlay.cpp) shows the values in effect and writes
  * the file back when the player changes one.
  */
@@ -46,6 +52,7 @@ extern "C" {
 #endif
 
 enum { TWOC_PACING_AUTO, TWOC_PACING_VSYNC, TWOC_PACING_LIMITER, TWOC_PACING_LIMITER_VSYNC, TWOC_PACING_COUNT };
+enum { TWOC_AA_OFF, TWOC_AA_FXAA, TWOC_AA_SMAA, TWOC_AA_MSAA2, TWOC_AA_MSAA4, TWOC_AA_MSAA8, TWOC_AA_COUNT };
 
 typedef struct {
     int fullscreen;
@@ -54,6 +61,7 @@ typedef struct {
     char render_size[32];               /* "" (the game's 480 lines), "WxH" or "native" */
     int pacing;                         /* TWOC_PACING_* */
     int anisotropy;                     /* 1 (off), 2, 4, 8, 16 */
+    int antialiasing;                   /* TWOC_AA_* */
     int volume;                         /* 0-100; -1: never set (Windows' own level) */
     int music, effects;                 /* 0-100; -1: never set (100, the game's mix) */
     int speakers;                       /* 0 stereo, 1 5.1; -1: never set (stereo) */
@@ -72,6 +80,9 @@ int twoc_settings_save(const twoc_settings_t *s);
 const char *twoc_settings_path(void);
 const char *twoc_pacing_name(int pacing);
 int twoc_pacing_parse(const char *v);   /* TWOC_PACING_AUTO for anything unknown */
+const char *twoc_aa_name(int aa);       /* the file's word: off, fxaa, smaa, msaa2x, msaa4x, msaa8x */
+int twoc_aa_parse(const char *v);       /* TWOC_AA_OFF for anything unknown */
+unsigned twoc_aa_samples(int aa);       /* MSAA's samples a pixel; 1 for the others */
 
 /* host_audio.cpp: the process's volume in Windows' mixer (its audio session),
  * 0-100, set on a short-lived thread of its own. */

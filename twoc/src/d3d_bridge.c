@@ -4341,6 +4341,11 @@ static void mirror_swap(void)
                                  " pillarboxed %u; screen copies cropped to 4:3 %ld; copies not scaled %u\n",
                                  (long)g_wide_cameras, (long)g_wide_kept, (long)g_wide_ff_pillar, st.rhw_full,
                                  st.rhw_pillar, (long)g_wide_crops, st.copy_unscaled);
+            if (st.aa_mode || st.ms_targets || st.post_aa)      /* step 58 */
+                log_block_printf(&lb, "[D3DB] host anti-aliasing: %s; back buffer samples %u, multisampled targets %u"
+                                 " (fails %u), resolves %u, fills %u; frames through FXAA/SMAA %u (fails %u)\n",
+                                 twoc_aa_name((int)st.aa_mode), st.ms_samples ? st.ms_samples : 1, st.ms_targets,
+                                 st.ms_fails, st.ms_resolves, st.ms_fills, st.post_aa, st.post_aa_fails);
             {
                 char buf[512];
                 int i, len = 0;

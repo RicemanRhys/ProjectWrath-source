@@ -30,6 +30,9 @@ typedef struct {
     unsigned display_unmeasured;    /* frame statistics unavailable, or more than one frame shown between two reads */
     unsigned rhw_full, rhw_pillar;  /* 18.56: pre-transformed draws on a scaled screen, stretched / pillarboxed */
     unsigned copy_unscaled;         /* 18.56: copies into a target the host couldn't scale them to */
+    unsigned aa_mode, ms_samples;   /* step 58: TWOC_AA_*, the back buffer's samples (0: single) */
+    unsigned ms_targets, ms_fails, ms_resolves, ms_fills;   /* step 58: MSAA render targets and their traffic */
+    unsigned post_aa, post_aa_fails;                        /* step 58: frames through FXAA or SMAA */
 } d3dh_stats_t;
 
 /* A state already in xbox_d3d8's (PC D3D8) numbering and values. */

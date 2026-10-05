@@ -426,6 +426,25 @@ static int tab_display(twoc_settings_t *s, const ovl_info_t *in)
             r |= OVL_CHANGED;
         }
     }
+
+    ImGui::SeparatorText("Anti-aliasing");      /* step 58 */
+    {
+        static const char *const aa_names[TWOC_AA_COUNT] = { "Off", "FXAA", "SMAA", "MSAA 2x", "MSAA 4x",
+                                                             "MSAA 8x" };
+        ImGui::SetNextItemWidth(ImGui::GetFontSize() * 12);
+        if (ImGui::Combo("Anti-aliasing", &s->antialiasing, aa_names, TWOC_AA_COUNT))
+            r |= OVL_CHANGED;
+        more("Smooths jagged edges. FXAA and SMAA filter the finished picture: cheap, but the HUD and text are "
+             "softened a little with the rest. MSAA draws the 3D with 2, 4 or 8 samples a pixel: sharper, and "
+             "the HUD stays crisp, but it costs more, most at a large render size. Applied at once.");
+        if (in->aa >= TWOC_AA_MSAA2 && in->ms_samples != twoc_aa_samples(in->aa))
+            snprintf(line, sizeof(line), in->ms_samples ? "Now: MSAA %ux, the most this graphics card takes."
+                                                        : "Now: off; this graphics card takes no MSAA here.",
+                     in->ms_samples);
+        else
+            snprintf(line, sizeof(line), "Now: %s.", aa_names[in->aa >= 0 && in->aa < TWOC_AA_COUNT ? in->aa : 0]);
+        help(line);
+    }
     return r;
 }
 
