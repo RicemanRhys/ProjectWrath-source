@@ -17,6 +17,9 @@
  *   effects_volume = 0-100                    RECOMP_EFFECTS_VOLUME (buffer voices: the sound effects)
  *   speakers       = stereo | 5.1             RECOMP_SPEAKERS (from the next start)
  *   hrtf           = 0 | 1                    RECOMP_HRTF (unset: on)
+ *   pause          = 0 | 1                    RECOMP_OVERLAY_PAUSE (unset: on)
+ *   keyboard       = 0 | 1                    RECOMP_KEYBOARD (unset: on)
+ *   pad_<xbox input>, key_<xbox input>        RECOMP_PAD_*, RECOMP_KEY_* (controls.h)
  *
  * The music and effects volumes are gains inside the emulated APU
  * (xboxrecomp's voice processor, notes 18.58), under the game's volume; 100
@@ -27,11 +30,16 @@
  * places them left-right as the Xbox does; 0 turns it off (the mix before
  * 18.59: 3D voices the same on both sides).
  *
+ * Step 57: pause 0 keeps the game running behind the overlay (it gets an
+ * idle pad meanwhile); the controller map and the keyboard are controls.c's.
+ *
  * The settings overlay (overlay.cpp) shows the values in effect and writes
  * the file back when the player changes one.
  */
 #ifndef TWOC_SETTINGS_H
 #define TWOC_SETTINGS_H
+
+#include "controls.h"
 
 #ifdef __cplusplus
 extern "C" {
@@ -50,6 +58,9 @@ typedef struct {
     int music, effects;                 /* 0-100; -1: never set (100, the game's mix) */
     int speakers;                       /* 0 stereo, 1 5.1; -1: never set (stereo) */
     int hrtf;                           /* 1 on (also when unset), 0 off */
+    int pause;                          /* 1: the overlay holds the game (also when unset), 0: it runs */
+    int keyboard;                       /* 1: the keyboard plays too (also when unset), 0: not */
+    twoc_controls_t controls;           /* the controller map and the key bindings */
 } twoc_settings_t;
 
 /* Read crash_twoc.ini into the RECOMP_* variables the launcher left unset. */

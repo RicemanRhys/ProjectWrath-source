@@ -37,6 +37,7 @@
 /* D3DB_CALL and the entry ids for the D3D mirror bridge wrappers (end of file). */
 #include "d3d_bridge.h"
 #include "log_block.h"
+#include "controls.h"     /* step 57: the controller map and the keyboard */
 
 /* ── ICALL trace ring buffer ───────────────────────────────── */
 
@@ -117,12 +118,20 @@ void twoc_dev_options_init(void)
         fprintf(stderr, "[DEV] input file: port 0 also reads %s\n", g_dev_input_file);
 }
 
-/* A port the game may open: really connected, or port 0 under autostart or
- * the input file. */
+/* Step 57: port 0 is the keyboard's too, in the bridge's window, with no
+ * controller needed. */
+static int kb_port(DWORD port)
+{
+    return port == 0 && d3db_host_on && controls_keyboard_on();
+}
+
+/* A port the game may open: really connected, or port 0 under autostart, the
+ * input file or the keyboard. */
 static int dev_port_connected(DWORD port)
 {
     return xbox_InputIsConnected(port)
-        || ((g_dev_autostart || g_dev_input_file) && port == 0);
+        || ((g_dev_autostart || g_dev_input_file) && port == 0)
+        || kb_port(port);
 }
 
 /* The input file's pad, reread at most every 50 ms. Returns 1 if it changed
@@ -3287,12 +3296,14 @@ void sub_0015429F(void)
  */
 /*
  * Step 54 (notes 18.57): the settings overlay's controller gate. The overlay
- * takes the keyboard and mouse only and holds the game in its present, so
- * the game doesn't poll while it is open; should a poll come anyway, it gets
- * an idle pad (counted). And whatever button or trigger is held at the first
- * poll after the overlay closes stays masked until it is released, so a
- * press made while it was open never reaches the game. The sticks pass. The
- * overlay never opened: nothing here changes the state.
+ * takes the keyboard and mouse only. Held, the game doesn't poll while it is
+ * open; running behind it (step 57, pause off) it does, and every poll from
+ * Esc until the overlay has closed gets an idle pad (counted). And whatever
+ * button or trigger is held at the first poll after the overlay closes stays
+ * masked until it is released, so a press made while it was open never
+ * reaches the game; the keyboard's keys count, as they are part of the pad
+ * by then. The sticks pass. The overlay never opened: nothing here changes
+ * the state.
  */
 extern int d3dh_overlay_input(unsigned *closes);
 
@@ -3346,7 +3357,30 @@ void sub_001542AB(void)
         esp += 12;                                 /* ret 8 */
         return;
     }
-    result = xbox_InputGetState(port, &state);
+    if (kb_port(port)) {
+        /* Step 57: the keyboard's port. A controller that isn't there is asked
+         * for again once a second, not at every poll (XInput is slow to say
+         * so), and the game gets the keyboard's pad meanwhile. */
+        static ULONGLONG retry_ms;
+        ULONGLONG now = GetTickCount64();
+        result = ERROR_DEVICE_NOT_CONNECTED;
+        if (now >= retry_ms) {
+            result = xbox_InputGetState(port, &state);
+            retry_ms = result == ERROR_SUCCESS ? 0 : now + 1000;
+        }
+        if (result != ERROR_SUCCESS) {
+            memset(&state, 0, sizeof(state));
+            result = ERROR_SUCCESS;
+        }
+    } else
+        result = xbox_InputGetState(port, &state);
+    if (result == ERROR_SUCCESS) {
+        static DWORD kb_packets;
+        controls_apply_pad(&state.Gamepad);         /* step 57: the PC controller's map; as is by default */
+        if (kb_port(port) && controls_apply_keys(&state.Gamepad))
+            kb_packets++;                           /* the keyboard's changes count as packets */
+        state.dwPacketNumber += kb_packets;
+    }
     dev_autostart_poll(port, &state, &result);
     if (result == ERROR_SUCCESS)
         overlay_gate(port, &state);     /* step 54 */
@@ -3483,8 +3517,9 @@ void sub_000EB270(void)
         fprintf(stderr, "[XPP] sub_000EB270 primed: xbox_InputIsConnected(0)=%d\n",
                 xbox_InputIsConnected(0));
         if (connected && !xbox_InputIsConnected(0))
-            fprintf(stderr, "[DEV] %s: no pad on port 0, using a virtual one\n",
-                    g_dev_autostart ? "autostart" : "input file");
+            fprintf(stderr, "[%s] %s: no pad on port 0, using a virtual one\n",
+                    g_dev_autostart || g_dev_input_file ? "DEV" : "KEY",
+                    g_dev_autostart ? "autostart" : g_dev_input_file ? "input file" : "keyboard");
         if (connected) {
             PUSH32(esp, 0);            /* port 0, the one stack arg (cdecl) */
             PUSH32(esp, 0x000EB270u);  /* synthetic return address; unread */

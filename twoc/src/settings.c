@@ -7,24 +7,72 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <ctype.h>
 
 #include "settings.h"
 
-static const struct {
-    const char *key, *var;
-} g_keys[] = {
-    { "fullscreen", "RECOMP_FULLSCREEN" },
-    { "widescreen", "RECOMP_WIDESCREEN" },
-    { "render_size", "RECOMP_RENDER_SIZE" },
-    { "pacing", "RECOMP_PACING" },
-    { "anisotropy", "RECOMP_ANISOTROPY" },
-    { "volume", "RECOMP_VOLUME" },
-    { "music_volume", "RECOMP_MUSIC_VOLUME" },
-    { "effects_volume", "RECOMP_EFFECTS_VOLUME" },
-    { "speakers", "RECOMP_SPEAKERS" },
-    { "hrtf", "RECOMP_HRTF" },
+typedef struct {
+    const char *key, *var, *note;
+} key_t_;
+
+static const key_t_ g_fixed[] = {
+    { "fullscreen", "RECOMP_FULLSCREEN", "" },
+    { "widescreen", "RECOMP_WIDESCREEN", "0, 1 or W:H" },
+    { "render_size", "RECOMP_RENDER_SIZE", "game (480 lines), WxH or native" },
+    { "pacing", "RECOMP_PACING", "auto, vsync, limiter or limiter+vsync" },
+    { "anisotropy", "RECOMP_ANISOTROPY", "1 (the game's filtering), 2, 4, 8 or 16" },
+    { "volume", "RECOMP_VOLUME", "0-100, the game's level in Windows' volume mixer" },
+    { "music_volume", "RECOMP_MUSIC_VOLUME", "0-100: music, ambience and speech (the game's streams)" },
+    { "effects_volume", "RECOMP_EFFECTS_VOLUME", "0-100: the sound effects" },
+    { "speakers", "RECOMP_SPEAKERS", "stereo or 5.1 (from the next start)" },
+    { "hrtf", "RECOMP_HRTF", "1: 3D sounds placed left-right (the Xbox's HRTF), 0: centred" },
+    { "pause", "RECOMP_OVERLAY_PAUSE", "1: the game waits while the overlay is open, 0: it runs behind it" },
+    { "keyboard", "RECOMP_KEYBOARD", "1: the keyboard plays too (key_ bindings), 0: the controller only" },
 };
-#define N_KEYS (sizeof(g_keys) / sizeof(g_keys[0]))
+#define N_FIXED (sizeof(g_fixed) / sizeof(g_fixed[0]))
+
+/* Step 57: then one key per binding (controls.h), at its default unwritten:
+ * pad_<xbox input> for the controller map, key_<binding> for the keyboard. */
+#define K_PAD N_FIXED
+#define K_KEY (K_PAD + XIN_COUNT)
+#define N_KEYS (K_KEY + KIN_COUNT)
+static key_t_ g_keys[N_KEYS];
+static char g_key_names[N_KEYS - N_FIXED][2][40];
+
+static void keys_init(void)
+{
+    size_t i, j;
+
+    if (g_keys[0].key)
+        return;
+    for (i = 0; i < N_FIXED; i++)
+        g_keys[i] = g_fixed[i];
+    for (i = N_FIXED; i < N_KEYS; i++) {
+        char *k = g_key_names[i - N_FIXED][0], *v = g_key_names[i - N_FIXED][1];
+        if (i < K_KEY)
+            snprintf(k, 40, "pad_%s", controls_xin_ini((int)(i - K_PAD)));
+        else
+            snprintf(k, 40, "key_%s", controls_kin_ini((int)(i - K_KEY)));
+        snprintf(v, 40, "RECOMP_%s", k);
+        for (j = 0; v[j]; j++)
+            v[j] = (char)toupper((unsigned char)v[j]);
+        g_keys[i].key = k;
+        g_keys[i].var = v;
+        g_keys[i].note = "";
+    }
+}
+
+/* A binding's value, checked: 0 if it reads. */
+static int binding_ok(size_t i, const char *v)
+{
+    twoc_controls_t c;
+
+    if (i < K_PAD)
+        return 0;
+    controls_default_pad(&c);
+    controls_default_keys(&c);
+    return i < K_KEY ? controls_parse_pad(v, (int)(i - K_PAD), &c) : controls_parse_keys(v, (int)(i - K_KEY), &c);
+}
 
 /* Keys the command line overrode: the file's own value, which a save keeps
  * unless the player changed that setting in the overlay. g_start is the
@@ -83,6 +131,7 @@ void twoc_settings_load(void)
     char line[256];
     int lineno = 0;
 
+    keys_init();
     if (!f)
         return;                         /* no file: nothing set, the run as before */
     fprintf(stderr, "[CFG] settings from %s\n", twoc_settings_path());
@@ -105,6 +154,10 @@ void twoc_settings_load(void)
             ;
         if (i == N_KEYS) {
             fprintf(stderr, "[CFG] line %d: unknown key '%s': ignored\n", lineno, k);
+            continue;
+        }
+        if (binding_ok(i, v) != 0) {
+            fprintf(stderr, "[CFG] line %d: %s = %s: not a binding this knows: ignored\n", lineno, k, v);
             continue;
         }
         if (strcmp(g_keys[i].key, "render_size") == 0 && _stricmp(v, "game") == 0)
@@ -146,6 +199,7 @@ void twoc_settings_current(twoc_settings_t *s)
 {
     const char *v;
     int a;
+    size_t i;
 
     memset(s, 0, sizeof(*s));
     s->fullscreen = env_on("RECOMP_FULLSCREEN");
@@ -179,6 +233,20 @@ void twoc_settings_current(twoc_settings_t *s)
     s->speakers = v && *v ? strcmp(v, "5.1") == 0 : -1;
     v = getenv("RECOMP_HRTF");
     s->hrtf = !(v && strcmp(v, "0") == 0);
+    v = getenv("RECOMP_OVERLAY_PAUSE");
+    s->pause = !(v && strcmp(v, "0") == 0);
+    v = getenv("RECOMP_KEYBOARD");
+    s->keyboard = !(v && strcmp(v, "0") == 0);
+    keys_init();
+    controls_default_pad(&s->controls);
+    controls_default_keys(&s->controls);
+    for (i = K_PAD; i < N_KEYS; i++)
+        if ((v = getenv(g_keys[i].var)) != NULL && *v) {
+            if (i < K_KEY)
+                controls_parse_pad(v, (int)(i - K_PAD), &s->controls);
+            else
+                controls_parse_keys(v, (int)(i - K_KEY), &s->controls);
+        }
 }
 
 /* Key i's value in `s` as the file writes it ("" for a volume never set). */
@@ -211,21 +279,34 @@ static void key_text(const twoc_settings_t *s, size_t i, char *buf, size_t cap)
         snprintf(buf, cap, "%s", s->speakers ? "5.1" : "stereo");
     else if (strcmp(k, "hrtf") == 0)
         snprintf(buf, cap, "%d", s->hrtf ? 1 : 0);
+    else if (strcmp(k, "pause") == 0)
+        snprintf(buf, cap, "%d", s->pause ? 1 : 0);
+    else if (strcmp(k, "keyboard") == 0)
+        snprintf(buf, cap, "%d", s->keyboard ? 1 : 0);
+    else if (i >= K_PAD) {              /* a binding: written only when it isn't the default */
+        twoc_controls_t d;
+        char def[64];
+        controls_default_pad(&d);
+        controls_default_keys(&d);
+        if (i < K_KEY) {
+            controls_pad_text(&s->controls, (int)(i - K_PAD), buf, (unsigned)cap);
+            controls_pad_text(&d, (int)(i - K_PAD), def, sizeof(def));
+        } else {
+            controls_keys_text(&s->controls, (int)(i - K_KEY), buf, (unsigned)cap);
+            controls_keys_text(&d, (int)(i - K_KEY), def, sizeof(def));
+        }
+        if (strcmp(buf, def) == 0)
+            buf[0] = 0;
+    }
 }
 
 int twoc_settings_save(const twoc_settings_t *s)
 {
-    static const char *const notes[N_KEYS] = { "", "0, 1 or W:H", "game (480 lines), WxH or native",
-                                               "auto, vsync, limiter or limiter+vsync",
-                                               "1 (the game's filtering), 2, 4, 8 or 16",
-                                               "0-100, the game's level in Windows' volume mixer",
-                                               "0-100: music, ambience and speech (the game's streams)",
-                                               "0-100: the sound effects",
-                                               "stereo or 5.1 (from the next start)",
-                                               "1: 3D sounds placed left-right (the Xbox's HRTF), 0: centred" };
     FILE *f = fopen(twoc_settings_path(), "w");
     size_t i;
+    int bindings = 0;
 
+    keys_init();
     if (!f) {
         fprintf(stderr, "[CFG] %s not written\n", twoc_settings_path());
         return -1;
@@ -241,7 +322,10 @@ int twoc_settings_save(const twoc_settings_t *s)
             v = g_file_val[i];          /* this run's command line, not the player's choice */
         if (!*v)
             continue;
-        fprintf(f, notes[i][0] ? "%s = %s           # %s\n" : "%s = %s\n", g_keys[i].key, v, notes[i]);
+        if (i >= K_PAD && !bindings++)
+            fprintf(f, "# Controls changed from the defaults (Esc, Controls): pad_<Xbox input> = <PC controller input>,\n"
+                       "# key_<Xbox input> = up to two keys, or none.\n");
+        fprintf(f, g_keys[i].note[0] ? "%s = %s           # %s\n" : "%s = %s\n", g_keys[i].key, v, g_keys[i].note);
     }
     fclose(f);
     fprintf(stderr, "[CFG] settings written to %s\n", twoc_settings_path());

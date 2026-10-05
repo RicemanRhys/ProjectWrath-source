@@ -112,6 +112,12 @@
  * stands in for xbox_d3d8's fixed back buffer) and the pacing
  * (d3dh_set_pacing: the swap chain made again when it needs the other kind).
  * Without Esc, and with RECOMP_ANISOTROPY unset, nothing here runs.
+ *
+ * Step 57: with "Pause the game" off (RECOMP_OVERLAY_PAUSE=0) the overlay
+ * doesn't hold the game: each present draws it over the new frame and the
+ * game's sound plays on, while the controller gate gives the game an idle
+ * pad until the overlay has closed (g_ovl_session). The toggle applies at
+ * once, both ways.
  */
 
 #include <stdio.h>
@@ -349,10 +355,60 @@ static int overlay_message(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp)
     return msg != WM_SETFOCUS && msg != WM_KILLFOCUS && msg != WM_SYSKEYUP;
 }
 
+/* Step 57: the keys held on the window, for the keyboard's pad (controls.c),
+ * from its own messages: only while it has the focus, and all let go when
+ * it loses it. Left and right Shift, Ctrl and Alt apart. */
+static volatile unsigned char g_key_held[256];
+
+static void key_track(UINT msg, WPARAM wp, LPARAM lp)
+{
+    int vk = (int)wp, down;
+
+    switch (msg) {
+    case WM_SYSKEYDOWN:
+        if ((lp & (1 << 29)) && wp != VK_MENU)
+            return;                     /* pressed with Alt (Alt+Enter, Alt+Tab): never held for the game */
+        down = 1;
+        break;
+    case WM_KEYDOWN:
+        down = 1;
+        break;
+    case WM_KEYUP: case WM_SYSKEYUP:
+        down = 0;
+        break;
+    case WM_KILLFOCUS:
+        memset((void *)g_key_held, 0, sizeof(g_key_held));
+        return;
+    default:
+        return;
+    }
+    if (vk == VK_SHIFT)
+        vk = (int)MapVirtualKeyA((UINT)(lp >> 16) & 0xFF, MAPVK_VSC_TO_VK_EX);
+    else if (vk == VK_CONTROL)
+        vk = (lp & (1 << 24)) ? VK_RCONTROL : VK_LCONTROL;
+    else if (vk == VK_MENU)
+        vk = (lp & (1 << 24)) ? VK_RMENU : VK_LMENU;
+    if (vk == 0 && wp == VK_SHIFT)
+        vk = VK_LSHIFT;
+    if (vk > 0 && vk < 256)
+        g_key_held[vk] = (unsigned char)down;
+}
+
+int d3dh_key_down(int vk)
+{
+    if (vk == VK_MENU)
+        return g_key_held[VK_LMENU] || g_key_held[VK_RMENU];
+    return vk > 0 && vk < 256 && g_key_held[vk];
+}
+
 static LRESULT CALLBACK wnd_proc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp)
 {
+    if (hwnd == g_hwnd)
+        key_track(msg, wp, lp);
     if (hwnd == g_hwnd && msg == WM_KEYDOWN && wp == VK_ESCAPE) {
         if (!(lp & (1 << 30)) && g_ready) { /* step 54: Esc opens and closes the settings overlay */
+            if (g_ovl_open && ovl_cancel_capture())
+                return 0;               /* step 57: it was waiting for a key or button: that wait ends */
             if (!g_ovl_open)
                 ovl_opened();
             InterlockedExchange(&g_ovl_open, !g_ovl_open);
@@ -389,6 +445,10 @@ static LRESULT CALLBACK wnd_proc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp)
     case WM_TWOC_FIT:
         fit_window(hwnd);
         return 0;
+    case WM_SYSCOMMAND:                 /* step 57: Alt or F10 alone doesn't open the window menu (keys go dead) */
+        if ((wp & 0xFFF0) == SC_KEYMENU && lp == 0)
+            return 0;
+        break;
     case WM_SETCURSOR:                  /* no pointer over the fullscreen picture, unless the overlay is open */
         if (g_fs && !g_ovl_open && LOWORD(lp) == HTCLIENT) {
             SetCursor(NULL);
@@ -1985,11 +2045,17 @@ void d3dh_set_apply(d3dh_apply_fn fn)
 }
 
 static volatile LONG g_ovl_closes;      /* times the overlay has closed (the controller gate) */
+static volatile LONG g_ovl_session;     /* from the overlay's first frame until it has closed */
 
+/* Step 57: idle from Esc until the overlay's session has ended, held or
+ * running; the close count is read after, so a close is never missed. */
 int d3dh_overlay_input(unsigned *closes)
 {
+    int open = g_ovl_open || g_ovl_session;
+
+    MemoryBarrier();
     *closes = (unsigned)g_ovl_closes;
-    return g_ovl_open != 0;
+    return open;
 }
 
 /* The visible swap chain again, with `flags` (the frame-latency object or
@@ -2171,39 +2237,154 @@ static void overlay_apply(twoc_settings_t *was, const twoc_settings_t *s)
         twoc_audio_set_kind(0, s->effects);
     if (s->hrtf != was->hrtf)
         twoc_audio_set_hrtf(s->hrtf);
+    if (s->pause != was->pause)
+        fprintf(stderr, "[OVL] pause the game while open: %s\n", s->pause ? "on" : "off");
+    if (s->keyboard != was->keyboard || memcmp(&s->controls, &was->controls, sizeof(s->controls)) != 0) {
+        controls_set(&s->controls, s->keyboard);    /* step 57: at the game's next poll */
+        fprintf(stderr, "[OVL] controls: keyboard %s, controller map %s\n", s->keyboard ? "on" : "off",
+                controls_pad_is_default(&s->controls) ? "the default" : "changed");
+    }
     if (g_apply && (s->widescreen != was->widescreen || s->wide_w != was->wide_w || s->wide_h != was->wide_h ||
                     strcmp(s->render_size, was->render_size) != 0 || s->pacing != was->pacing))
         g_apply(s);                     /* d3d_bridge.c: the aspect, the render size, the pacing */
     *was = *s;
 }
 
-/* Esc was pressed: hold this thread (the game's, in its Swap) and draw the
- * overlay over the frame it was about to show, until Esc again or Resume.
- * Every other thread that presents meanwhile waits on g_pause_lock, so the
- * game stands still: no update, no draw, no controller read. The emulated
- * APU runs on its own threads and keeps playing looped voices, so the game's
- * audio session is muted meanwhile (host_audio.cpp). */
+/* One opening of the overlay, from the present after Esc to the one after
+ * it closed (step 57: either held, overlay_pause, or with the game running
+ * behind it, d3dh_present). g_ovl_session is the controller gate's: the
+ * game gets an idle pad from Esc until the session has ended and counted
+ * itself in g_ovl_closes. */
+static struct {
+    int ready;                          /* 0 not tried, 1 the overlay works, -1 it doesn't */
+    int have;                           /* s has been read from the switches */
+    twoc_settings_t s, was;             /* what the player edits; what is applied */
+    const char *note;                   /* the last save's outcome */
+    int active, dirty, muted;
+    LONG fs_seen;
+    LARGE_INTEGER freq, t0, last;
+    unsigned frames;
+} g_ovs;
+
+/* The present after Esc: the overlay's first frame. No lock held. */
+static int ovl_begin(void)
+{
+    EnterCriticalSection(&g_lock);
+    if (!g_ovs.ready)
+        g_ovs.ready = ovl_init(d3d8_GetD3D11Device(), d3d8_GetD3D11Context()) == 0 && blit_init() == 0 ? 1 : -1;
+    LeaveCriticalSection(&g_lock);
+    if (g_ovs.ready < 0) {
+        InterlockedExchange(&g_ovl_open, 0);
+        fprintf(stderr, "[OVL] the settings overlay can't open here\n");
+        return -1;
+    }
+    if (!g_ovs.have) {
+        twoc_settings_current(&g_ovs.s);
+        g_ovs.have = 1;
+    }
+    g_ovs.fs_seen = g_fs;
+    g_ovs.s.fullscreen = g_ovs.fs_seen;
+    g_ovs.was = g_ovs.s;
+    g_ovs.dirty = 0;
+    g_ovs.frames = 0;
+    QueryPerformanceFrequency(&g_ovs.freq);
+    QueryPerformanceCounter(&g_ovs.t0);
+    g_ovs.last = g_ovs.t0;
+    g_ovs.active = 1;
+    InterlockedExchange(&g_ovl_session, 1);
+    fprintf(stderr, "[OVL] settings open: %s %u\n",
+            g_ovs.s.pause ? "the game waits in its present" : "the game runs on behind it, idle pad, from present",
+            g_st.presents);
+    return 0;
+}
+
+/* The overlay closed (Esc, Resume) and its last frame is shown. */
+static void ovl_end(void)
+{
+    LARGE_INTEGER now;
+
+    if (g_ovs.muted) {
+        twoc_audio_mute(0);
+        g_ovs.muted = 0;
+    }
+    g_ovs.active = 0;
+    InterlockedIncrement(&g_ovl_closes);        /* before the gate opens: it masks what is held */
+    InterlockedExchange(&g_ovl_session, 0);
+    if (g_ovs.dirty)
+        g_ovs.note = twoc_settings_save(&g_ovs.s) == 0 ? "Saved to crash_twoc.ini." : "crash_twoc.ini couldn't be written.";
+    QueryPerformanceCounter(&now);
+    fprintf(stderr, "[OVL] settings closed after %.1f s (%u overlay frames)%s\n",
+            (double)(now.QuadPart - g_ovs.t0.QuadPart) / (double)g_ovs.freq.QuadPart, g_ovs.frames,
+            g_ovs.dirty ? "; settings saved" : "");
+}
+
+/* One overlay frame over what `dst` (the visible swap chain's buffer) holds.
+ * With g_lock held. Returns ovl_frame's OVL_* bits. */
+static int ovl_draw(ID3D11Texture2D *dst, int running)
+{
+    ID3D11RenderTargetView *rtv = NULL;
+    LARGE_INTEGER now;
+    ovl_info_t in;
+    int r = 0;
+
+    QueryPerformanceCounter(&now);
+    if (g_fs != g_ovs.fs_seen) {        /* Alt+Enter while open */
+        g_ovs.fs_seen = g_fs;
+        g_ovs.s.fullscreen = g_ovs.was.fullscreen = g_ovs.fs_seen;
+    }
+    memset(&in, 0, sizeof(in));
+    in.host_w = g_w;
+    in.host_h = g_h;
+    in.guest_w = g_gw;
+    in.guest_h = g_gh;
+    in.display_hz = d3dh_display_hz();
+    in.interval = g_interval;
+    in.frame_hz = g_frame_hz;
+    in.executor_paces = getenv("RECOMP_PB_EXEC") && strcmp(getenv("RECOMP_PB_EXEC"), "0") != 0;
+    in.dpi_aware = g_dpi_aware;
+    in.running = running;
+    in.save_note = g_ovs.dirty ? "Saved to crash_twoc.ini when you resume." : g_ovs.note;
+    if (SUCCEEDED(ID3D11Device_CreateRenderTargetView(d3d8_GetD3D11Device(), (ID3D11Resource *)dst, NULL, &rtv)))
+        r = ovl_frame(rtv, g_buf_w, g_buf_h, overlay_scale(),
+                      (float)((double)(now.QuadPart - g_ovs.last.QuadPart) / (double)g_ovs.freq.QuadPart),
+                      &g_ovs.s, &in);
+    if (rtv)
+        ID3D11RenderTargetView_Release(rtv);
+    g_ovs.last = now;
+    g_ovs.frames++;
+    return r;
+}
+
+/* What the frame asked for, with no lock held. */
+static void ovl_after(int r)
+{
+    if (r & OVL_CHANGED) {
+        overlay_apply(&g_ovs.was, &g_ovs.s);
+        g_ovs.dirty = 1;
+    }
+    if (r & OVL_CLOSE)
+        InterlockedExchange(&g_ovl_open, 0);
+}
+
+/* The overlay with "Pause the game" on: hold this thread (the game's, in
+ * its Swap) and draw the overlay over the frame it was about to show, until
+ * Esc again, Resume, or the pause is turned off (then d3dh_present carries
+ * on with the overlay over the running game). Every other thread that
+ * presents meanwhile waits on g_pause_lock, so the game stands still: no
+ * update, no draw, no controller read. The emulated APU runs on its own
+ * threads and keeps playing looped voices, so the game's audio session is
+ * muted meanwhile (host_audio.cpp). */
 static void overlay_pause(void)
 {
-    static int ready;                   /* 0 not tried, 1 the overlay works, -1 it doesn't */
-    static twoc_settings_t s, was;
-    static int have;
-    static const char *note;
-    LARGE_INTEGER freq, t0, last, now;
-    LONG fs_seen;
-    unsigned frames = 0;
-    int dirty = 0, ok;
+    int ok;
 
     AcquireSRWLockExclusive(&g_pause_lock);
-    if (!g_ovl_open || !g_ready) {
+    if (!g_ovl_open || !g_ready || (!g_ovs.active && ovl_begin() != 0) || !g_ovs.s.pause) {
         ReleaseSRWLockExclusive(&g_pause_lock);
         return;
     }
     EnterCriticalSection(&g_lock);
-    if (!ready)
-        ready = ovl_init(d3d8_GetD3D11Device(), d3d8_GetD3D11Context()) == 0 && blit_init() == 0 ? 1 : -1;
-    ok = ready > 0;
-    if (ok) {                           /* the frame the game just finished, held while paused */
+    {   /* the frame the game just finished, held while paused */
         ID3D11Texture2D *src = back_tex();
         ok = src && shot_take(src) == 0;
         if (src)
@@ -2212,77 +2393,40 @@ static void overlay_pause(void)
     LeaveCriticalSection(&g_lock);
     if (!ok) {
         InterlockedExchange(&g_ovl_open, 0);
-        fprintf(stderr, "[OVL] the settings overlay can't open here\n");
+        fprintf(stderr, "[OVL] the settings overlay can't hold the game here\n");
+        ovl_end();
         ReleaseSRWLockExclusive(&g_pause_lock);
         return;
     }
-    if (!have) {
-        twoc_settings_current(&s);
-        have = 1;
-    }
-    fs_seen = g_fs;
-    s.fullscreen = fs_seen;
-    was = s;
-    QueryPerformanceFrequency(&freq);
-    QueryPerformanceCounter(&t0);
-    last = t0;
-    fprintf(stderr, "[OVL] settings open: the game waits in its present %u\n", g_st.presents);
+    if (g_ovs.frames)
+        fprintf(stderr, "[OVL] the game waits in its present %u\n", g_st.presents);
     twoc_audio_mute(1);                 /* the APU plays looped voices on: silence while held */
-    while (g_ovl_open && g_ready) {
+    g_ovs.muted = 1;
+    while (g_ovl_open && g_ready && g_ovs.s.pause) {
         ID3D11Texture2D *dst = NULL;
-        ID3D11RenderTargetView *rtv = NULL;
-        ovl_info_t in;
         int r = 0;
 
         if (g_latency || g_frame_hz > 0)
             pace();
         else
             Sleep(15);                  /* the executor paces this run, not the host */
-        QueryPerformanceCounter(&now);
         EnterCriticalSection(&g_lock);
         flip_fit();
-        if (g_fs != fs_seen) {          /* Alt+Enter while open */
-            fs_seen = g_fs;
-            s.fullscreen = was.fullscreen = fs_seen;
-        }
-        memset(&in, 0, sizeof(in));
-        in.host_w = g_w;
-        in.host_h = g_h;
-        in.guest_w = g_gw;
-        in.guest_h = g_gh;
-        in.display_hz = d3dh_display_hz();
-        in.interval = g_interval;
-        in.frame_hz = g_frame_hz;
-        in.executor_paces = getenv("RECOMP_PB_EXEC") && strcmp(getenv("RECOMP_PB_EXEC"), "0") != 0;
-        in.dpi_aware = g_dpi_aware;
-        in.save_note = dirty ? "Saved to crash_twoc.ini when you resume." : note;
         if (SUCCEEDED(IDXGISwapChain1_GetBuffer(g_flip, 0, &IID_ID3D11Texture2D, (void **)&dst)) &&
-            blit_draw(dst, g_buf_w, g_buf_h) == 0 &&
-            SUCCEEDED(ID3D11Device_CreateRenderTargetView(d3d8_GetD3D11Device(), (ID3D11Resource *)dst, NULL, &rtv)))
-            r = ovl_frame(rtv, g_buf_w, g_buf_h, overlay_scale(),
-                          (float)((double)(now.QuadPart - last.QuadPart) / (double)freq.QuadPart), &s, &in);
-        if (rtv)
-            ID3D11RenderTargetView_Release(rtv);
+            blit_draw(dst, g_buf_w, g_buf_h) == 0)
+            r = ovl_draw(dst, 0);
         if (dst)
             ID3D11Texture2D_Release(dst);
         IDXGISwapChain1_Present(g_flip, g_interval, 0);
         LeaveCriticalSection(&g_lock);
-        last = now;
-        frames++;
-        if (r & OVL_CHANGED) {
-            overlay_apply(&was, &s);
-            dirty = 1;
-        }
-        if (r & OVL_CLOSE)
-            InterlockedExchange(&g_ovl_open, 0);
+        ovl_after(r);
     }
     twoc_audio_mute(0);
-    InterlockedIncrement(&g_ovl_closes);
-    if (dirty)
-        note = twoc_settings_save(&s) == 0 ? "Saved to crash_twoc.ini." : "crash_twoc.ini couldn't be written.";
-    QueryPerformanceCounter(&now);
-    fprintf(stderr, "[OVL] settings closed after %.1f s (%u overlay frames)%s\n",
-            (double)(now.QuadPart - t0.QuadPart) / (double)freq.QuadPart, frames, dirty ? "; settings saved" : "");
+    g_ovs.muted = 0;
+    if (!g_ovl_open || !g_ready)
+        ovl_end();
+    else
+        fprintf(stderr, "[OVL] pause off: the game runs on behind the overlay from present %u\n", g_st.presents);
     ReleaseSRWLockExclusive(&g_pause_lock);
 }
 
@@ -2290,11 +2434,18 @@ void d3dh_present(double t_s, unsigned swap_no)
 {
     ULONGLONG now;
     HRESULT hr;
+    int ovl_r = 0;
 
     if (!g_ready)
         return;
-    if (g_ovl_open)                     /* step 54: Esc; this frame waits under the overlay */
-        overlay_pause();
+    if (g_ovl_open && !g_ovs.active) {  /* step 54: Esc */
+        AcquireSRWLockExclusive(&g_pause_lock);
+        if (g_ovl_open && !g_ovs.active)
+            ovl_begin();
+        ReleaseSRWLockExclusive(&g_pause_lock);
+    }
+    if (g_ovl_open && g_ovs.active && g_ovs.s.pause)
+        overlay_pause();                /* this frame waits under the overlay */
     pace();
     EnterCriticalSection(&g_lock);
     now = GetTickCount64();
@@ -2321,6 +2472,8 @@ void d3dh_present(double t_s, unsigned swap_no)
                                                  (ID3D11Resource *)src);
             else if (shot_take(src) != 0 || blit_draw(dst, g_buf_w, g_buf_h) != 0)
                 copy_unscaled(dst, src);
+            if (g_ovl_open && g_ovs.active && !g_ovs.s.pause)
+                ovl_r = ovl_draw(dst, 1);   /* step 57: the overlay over the running game */
         }
         if (src)
             ID3D11Texture2D_Release(src);
@@ -2432,6 +2585,16 @@ void d3dh_present(double t_s, unsigned swap_no)
         fprintf(stderr, "[D3DB] host Present returned status 0x%08lX\n", (unsigned long)hr);
     g_frame_work = 0;
     LeaveCriticalSection(&g_lock);
+    if (g_ovs.active && (ovl_r || !g_ovl_open)) {
+        AcquireSRWLockExclusive(&g_pause_lock);
+        if (g_ovs.active) {
+            if (ovl_r)                  /* step 57: this present's overlay frame (the pause may just have gone on) */
+                ovl_after(ovl_r);
+            if (!g_ovl_open || !g_ready)
+                ovl_end();              /* closed, whichever way it was last held */
+        }
+        ReleaseSRWLockExclusive(&g_pause_lock);
+    }
 }
 
 /* ── Pixel-shader probe (S4) ───────────────────────────────── */

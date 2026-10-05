@@ -1,6 +1,7 @@
 /**
  * The settings overlay (step 54, notes 18.57): Dear ImGui on the bridge's
- * D3D11 device, drawn by d3d_host.c over the paused game's last frame.
+ * D3D11 device, drawn by d3d_host.c over the paused game's last frame, or
+ * (step 57, pause off) over each frame of the running game.
  *
  * Threads: ovl_input runs on the host window's thread (its messages), the
  * rest on the thread that presents. Both take the overlay's own lock and
@@ -28,6 +29,7 @@ typedef struct {
     int executor_paces;                 /* -Bridge with the NV2A executor: the host doesn't pace */
     int dpi_aware;                      /* the window is in real pixels (a render size at the start) */
     const char *save_note;              /* the last save's outcome, or NULL */
+    int running;                        /* step 57: the game runs behind the overlay (pause off) */
 } ovl_info_t;
 
 enum { OVL_CHANGED = 1, OVL_CLOSE = 2 };
@@ -39,6 +41,9 @@ int ovl_init(ID3D11Device *dev, ID3D11DeviceContext *ctx);
 void ovl_input(UINT msg, WPARAM wp, LPARAM lp, float sx, float sy);
 /* The overlay is opening: no keys or buttons held over from before. */
 void ovl_opened(void);
+/* Step 57: Esc while a binding waits for its key or button ends the wait
+ * (returns 1) instead of closing the overlay. Window thread. */
+int ovl_cancel_capture(void);
 /* One frame into `rtv` (w x h pixels, UI scaled by `scale`), editing `s`.
  * Returns OVL_CHANGED when the player changed a setting, OVL_CLOSE when
  * they asked to resume. */

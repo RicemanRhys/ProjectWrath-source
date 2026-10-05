@@ -59,6 +59,7 @@ set(GAME_SOURCES
     src/d3d_host.c
     # Player settings, the settings overlay and the game's volume (notes 18.57)
     src/settings.c
+    src/controls.c
     src/overlay.cpp
     src/host_audio.cpp
     third_party/imgui/imgui.cpp

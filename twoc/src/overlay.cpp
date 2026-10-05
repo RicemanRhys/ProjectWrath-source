@@ -4,9 +4,14 @@
  * Dear ImGui (third_party/imgui, v1.92.9b) with its DX11 renderer on the
  * bridge's device, and no platform backend: the host window's messages are
  * turned into ImGui input events here (ovl_input), on the window thread,
- * under g_cs; ovl_frame builds and draws a frame under the same lock. The
- * keyboard and mouse only ever reach ImGui: the game reads its controller
- * through XInput and no key, and it is paused while the overlay is open.
+ * under g_cs; ovl_frame builds and draws a frame under the same lock. While
+ * the overlay is open the keyboard and mouse only reach ImGui, and the game
+ * is held or (step 57, "Pause the game" off) gets an idle pad.
+ *
+ * Step 57: three tabs (Display, Audio, Controls). Controls lists the Xbox
+ * controller's inputs with the PC controller's input and the keys that press
+ * each (controls.c); clicking one waits for the new button or key, polled
+ * here each frame (controls_capture_*), and ImGui gets no keys meanwhile.
  */
 
 #include <windows.h>
@@ -27,6 +32,17 @@ static volatile LONG g_cs_ready;
 static bool g_ready;
 static float g_scale = 1.0f;
 static ImGuiStyle g_style_base;
+
+/* Step 57: a binding waiting for its button or key (under g_cs). */
+enum { CAP_NONE, CAP_PAD, CAP_KEY };
+static int g_cap, g_cap_idx, g_cap_slot;
+
+static void capture_end(void)
+{
+    g_cap = CAP_NONE;
+    if (g_ready)
+        ImGui::GetIO().ClearInputKeys();    /* the keys held meanwhile never reached ImGui */
+}
 
 static ImGuiKey vk_key(WPARAM vk)
 {
@@ -59,6 +75,14 @@ extern "C" void ovl_input(UINT msg, WPARAM wp, LPARAM lp, float sx, float sy)
     if (g_ready) {
         ImGuiIO &io = ImGui::GetIO();
         float x = (float)(short)LOWORD(lp) * sx, y = (float)(short)HIWORD(lp) * sy;
+        if (g_cap != CAP_NONE) {        /* waiting for a binding: no keys to ImGui; a click ends the wait */
+            if (msg == WM_KEYDOWN || msg == WM_KEYUP || msg == WM_SYSKEYDOWN || msg == WM_SYSKEYUP) {
+                LeaveCriticalSection(&g_cs);
+                return;
+            }
+            if (msg == WM_LBUTTONDOWN || msg == WM_RBUTTONDOWN)
+                capture_end();
+        }
         switch (msg) {
         case WM_MOUSEMOVE:
             io.AddMousePosEvent(x, y);
@@ -103,11 +127,26 @@ extern "C" void ovl_opened(void)
     if (!g_cs_ready)
         return;
     EnterCriticalSection(&g_cs);
+    g_cap = CAP_NONE;
     if (g_ready) {
         ImGui::GetIO().ClearInputKeys();
         ImGui::GetIO().ClearInputMouse();
     }
     LeaveCriticalSection(&g_cs);
+}
+
+extern "C" int ovl_cancel_capture(void)
+{
+    int was;
+
+    if (!g_cs_ready)
+        return 0;
+    EnterCriticalSection(&g_cs);
+    was = g_cap != CAP_NONE;
+    if (was)
+        capture_end();
+    LeaveCriticalSection(&g_cs);
+    return was;
 }
 
 extern "C" int ovl_init(ID3D11Device *dev, ID3D11DeviceContext *ctx)
@@ -182,7 +221,135 @@ static void more(const char *text)
     }
 }
 
-static int build(twoc_settings_t *s, const ovl_info_t *in)
+/* An Xbox input's name, and the game's own use of it dimmed after it. */
+static void input_name(const char *label, const char *hint)
+{
+    ImGui::AlignTextToFramePadding();
+    ImGui::TextUnformatted(label);
+    if (hint && hint[0]) {
+        ImGui::SameLine();
+        ImGui::TextDisabled("%s", hint);
+    }
+}
+
+/* Step 57: the Controls tab. The child scrolls when the lists don't fit
+ * above `room`, the picture's height the window may take. */
+static int tab_controls(twoc_settings_t *s, float room)
+{
+    static const int pad_order[XIN_COUNT] = { XIN_A, XIN_B, XIN_X, XIN_Y, XIN_BLACK, XIN_WHITE, XIN_LT, XIN_RT,
+                                              XIN_START, XIN_BACK, XIN_LSTICK, XIN_RSTICK, XIN_LS, XIN_RS,
+                                              XIN_UP, XIN_DOWN, XIN_LEFT, XIN_RIGHT };
+    static const int key_order[KIN_COUNT] = { KIN_LUP, KIN_LDOWN, KIN_LLEFT, KIN_LRIGHT, XIN_A, XIN_B, XIN_X,
+                                              XIN_Y, XIN_START, XIN_BACK, XIN_BLACK, XIN_WHITE, XIN_LT, XIN_RT,
+                                              XIN_LS, XIN_RS, XIN_UP, XIN_DOWN, XIN_LEFT, XIN_RIGHT,
+                                              KIN_RUP, KIN_RDOWN, KIN_RLEFT, KIN_RRIGHT };
+    const ImGuiStyle &st = ImGui::GetStyle();
+    float fs = ImGui::GetFontSize(), maxh;
+    int r = 0, i, slot, got;
+    char lbl[96];
+
+    if (g_cap == CAP_PAD && (got = controls_capture_pad(g_cap_idx >= XIN_BUTTONS)) >= 0) {
+        controls_assign_pad(&s->controls, g_cap_idx, got);
+        r |= OVL_CHANGED;
+        capture_end();
+    } else if (g_cap == CAP_KEY && (got = controls_capture_key()) > 0) {
+        controls_assign_key(&s->controls, g_cap_idx, g_cap_slot, got);
+        r |= OVL_CHANGED;
+        capture_end();
+    }
+
+    maxh = room - ImGui::GetCursorPosY() - ImGui::GetFrameHeightWithSpacing() - st.WindowPadding.y -
+           st.ItemSpacing.y * 2;
+    if (maxh < ImGui::GetFrameHeightWithSpacing() * 4)
+        maxh = ImGui::GetFrameHeightWithSpacing() * 4;
+    ImGui::SetNextWindowSizeConstraints(ImVec2(0, 0), ImVec2(FLT_MAX, maxh));
+    ImGui::BeginChild("##controls", ImVec2(0, 0), ImGuiChildFlags_AutoResizeY | ImGuiChildFlags_NavFlattened);
+
+    ImGui::SeparatorText("Controller");
+    help("The game reads an Xbox controller. Click one of its inputs, then press the PC controller's button "
+         "(or move a stick) for it; Esc cancels. A button another input had is swapped with it.");
+    if (ImGui::BeginTable("##pad", 2, ImGuiTableFlags_SizingStretchProp | ImGuiTableFlags_RowBg)) {
+        ImGui::TableSetupColumn("Xbox controller", ImGuiTableColumnFlags_WidthStretch);
+        ImGui::TableSetupColumn("PC controller", ImGuiTableColumnFlags_WidthFixed, fs * 10);
+        ImGui::TableHeadersRow();
+        for (i = 0; i < XIN_COUNT; i++) {
+            int x = pad_order[i];
+            ImGui::TableNextRow();
+            ImGui::TableNextColumn();
+            input_name(controls_xin_label(x), controls_xin_hint(x));
+            ImGui::TableNextColumn();
+            snprintf(lbl, sizeof(lbl), "%s##pad%d",
+                     g_cap == CAP_PAD && g_cap_idx == x ? (x >= XIN_BUTTONS ? "Move a stick..." : "Press a button...")
+                                                       : controls_src_label(s->controls.pad[x]), x);
+            if (ImGui::Button(lbl, ImVec2(-FLT_MIN, 0))) {
+                g_cap = CAP_PAD;
+                g_cap_idx = x;
+                controls_capture_begin();
+                ImGui::GetIO().ClearInputKeys();
+            }
+        }
+        ImGui::EndTable();
+    }
+    if (ImGui::Button("Reset controller to defaults")) {
+        controls_default_pad(&s->controls);
+        r |= OVL_CHANGED;
+    }
+    more("The default is the Xbox layout on an Xbox pad: each button as itself, LB as Black, RB as White.");
+
+    ImGui::SeparatorText("Keyboard");
+    {
+        bool k = s->keyboard != 0;
+        if (ImGui::Checkbox("Play with the keyboard too", &k)) {
+            s->keyboard = k;
+            r |= OVL_CHANGED;
+        }
+        more("These keys press the Xbox controller's inputs on top of the PC controller, while this window is in "
+             "front; no controller is needed. Movement keys push the stick all the way. Keys do nothing while Alt "
+             "is held (Alt+Enter, Alt+Tab).");
+    }
+    help("Click a key, then press the new one; Esc cancels. Right-click a key to clear it.");
+    if (ImGui::BeginTable("##keys", 3, ImGuiTableFlags_SizingStretchProp | ImGuiTableFlags_RowBg)) {
+        ImGui::TableSetupColumn("Xbox controller", ImGuiTableColumnFlags_WidthStretch);
+        ImGui::TableSetupColumn("Key", ImGuiTableColumnFlags_WidthFixed, fs * 6.5f);
+        ImGui::TableSetupColumn("Second key", ImGuiTableColumnFlags_WidthFixed, fs * 6.5f);
+        ImGui::TableHeadersRow();
+        for (i = 0; i < KIN_COUNT; i++) {
+            int k = key_order[i];
+            ImGui::TableNextRow();
+            ImGui::TableNextColumn();
+            input_name(controls_kin_label(k), k < XIN_BUTTONS ? controls_xin_hint(k) : k == KIN_LUP ? "Move" : "");
+            for (slot = 0; slot < KIN_SLOTS; slot++) {
+                int vk = s->controls.key[k][slot];
+                ImGui::TableNextColumn();
+                snprintf(lbl, sizeof(lbl), "%s##key%d.%d",
+                         g_cap == CAP_KEY && g_cap_idx == k && g_cap_slot == slot ? "Press a key..."
+                         : vk ? controls_key_label(vk) : "-", k, slot);
+                if (ImGui::Button(lbl, ImVec2(-FLT_MIN, 0))) {
+                    g_cap = CAP_KEY;
+                    g_cap_idx = k;
+                    g_cap_slot = slot;
+                    controls_capture_begin();
+                    ImGui::GetIO().ClearInputKeys();
+                }
+                if (vk && ImGui::IsItemClicked(ImGuiMouseButton_Right)) {
+                    controls_assign_key(&s->controls, k, slot, 0);
+                    r |= OVL_CHANGED;
+                }
+            }
+        }
+        ImGui::EndTable();
+    }
+    if (ImGui::Button("Reset keys to defaults")) {
+        controls_default_keys(&s->controls);
+        r |= OVL_CHANGED;
+    }
+    more("WASD and the arrows move; Space or K jumps, J or E spins, L or Left Shift crouches and slides (and "
+         "body slams in the air), Enter or P pauses.");
+    ImGui::EndChild();
+    return r;
+}
+
+static int tab_display(twoc_settings_t *s, const ovl_info_t *in)
 {
     static const char *const pacing[TWOC_PACING_COUNT] = { "Auto", "Display (vsync)", "Limiter (59.94 Hz)",
                                                             "Limiter + vsync" };
@@ -259,8 +426,15 @@ static int build(twoc_settings_t *s, const ovl_info_t *in)
             r |= OVL_CHANGED;
         }
     }
+    return r;
+}
 
-    ImGui::SeparatorText("Audio");
+static int tab_audio(twoc_settings_t *s)
+{
+    int r = 0;
+    char line[160];
+
+    ImGui::SeparatorText("Volume");
     {
         int v = s->volume < 0 ? 100 : s->volume;
         ImGui::SetNextItemWidth(ImGui::GetFontSize() * 12);
@@ -323,6 +497,38 @@ static int build(twoc_settings_t *s, const ovl_info_t *in)
                      cur ? "5.1" : "Stereo");
         help(line);
     }
+    return r;
+}
+
+static int build(twoc_settings_t *s, const ovl_info_t *in, float room)
+{
+    int r = 0;
+
+    {
+        bool p = s->pause != 0;
+        if (ImGui::Checkbox("Pause the game while this menu is open", &p)) {
+            s->pause = p;
+            r |= OVL_CHANGED;
+        }
+        more("Off: the game keeps running and drawing behind this menu, so a change to the picture shows at "
+             "once, and its sound plays on. It gets no controller or keyboard input until the menu closes, and "
+             "a button still held then counts only once it is let go.");
+    }
+    if (ImGui::BeginTabBar("##tabs")) {
+        if (ImGui::BeginTabItem("Display")) {
+            r |= tab_display(s, in);
+            ImGui::EndTabItem();
+        }
+        if (ImGui::BeginTabItem("Audio")) {
+            r |= tab_audio(s);
+            ImGui::EndTabItem();
+        }
+        if (ImGui::BeginTabItem("Controls")) {
+            r |= tab_controls(s, room);
+            ImGui::EndTabItem();
+        }
+        ImGui::EndTabBar();
+    }
 
     ImGui::Spacing();
     if (ImGui::Button("Resume  (Esc)"))
@@ -345,6 +551,8 @@ extern "C" int ovl_frame(ID3D11RenderTargetView *rtv, unsigned w, unsigned h, fl
     if (!g_ready)
         return 0;
     EnterCriticalSection(&g_cs);
+    if (info->running)                  /* step 57: smaller over the running game, to leave more of it in view */
+        scale *= 0.8f;
     ImGuiIO &io = ImGui::GetIO();
     io.DisplaySize = ImVec2((float)w, (float)h);
     io.DeltaTime = dt > 0.0f ? dt : 1.0f / 60.0f;
@@ -367,14 +575,21 @@ extern "C" int ovl_frame(ID3D11RenderTargetView *rtv, unsigned w, unsigned h, fl
     }
     ImGui_ImplDX11_NewFrame();
     ImGui::NewFrame();
-    ImGui::GetBackgroundDrawList()->AddRectFilled(ImVec2(0, 0), io.DisplaySize, IM_COL32(0, 0, 0, 120));
-    ImGui::SetNextWindowPos(ImVec2(io.DisplaySize.x * 0.5f, io.DisplaySize.y * 0.5f), ImGuiCond_Always,
-                            ImVec2(0.5f, 0.5f));
-    ImGui::SetNextWindowSize(ImVec2(ImGui::GetFontSize() * 30, 0), ImGuiCond_Always);
-    ImGui::Begin("Crash TWOC - settings (paused)", NULL,
+    if (info->running)                  /* step 57: the running game at the left, undimmed, to watch a change */
+        ImGui::SetNextWindowPos(ImVec2(io.DisplaySize.x * 0.02f, io.DisplaySize.y * 0.5f), ImGuiCond_Always,
+                                ImVec2(0.0f, 0.5f));
+    else {
+        ImGui::GetBackgroundDrawList()->AddRectFilled(ImVec2(0, 0), io.DisplaySize, IM_COL32(0, 0, 0, 120));
+        ImGui::SetNextWindowPos(ImVec2(io.DisplaySize.x * 0.5f, io.DisplaySize.y * 0.5f), ImGuiCond_Always,
+                                ImVec2(0.5f, 0.5f));
+    }
+    ImGui::SetNextWindowSize(ImVec2(ImGui::GetFontSize() * 34, 0), ImGuiCond_Always);
+    ImGui::SetNextWindowBgAlpha(info->running ? 0.8f : g_style_base.Colors[ImGuiCol_WindowBg].w);
+    ImGui::Begin(info->running ? "Crash TWOC - settings (the game runs)###settings"
+                               : "Crash TWOC - settings (paused)###settings", NULL,
                  ImGuiWindowFlags_NoResize | ImGuiWindowFlags_NoMove | ImGuiWindowFlags_NoCollapse |
                      ImGuiWindowFlags_NoSavedSettings);
-    r = build(s, info);
+    r = build(s, info, (float)h * 0.96f);
     {
         float wh = ImGui::GetWindowSize().y, room = (float)h * 0.96f;
         if (wh > room && fit > 0.4f)
