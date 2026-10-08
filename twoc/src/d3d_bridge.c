@@ -4335,6 +4335,17 @@ static void mirror_swap(void)
                 for (i = 0; i < 4; i++)
                     last[i] = cur[i];
             }
+            {   /* step 60: the host draw call alone (d3dh_draw_up), a draw and a guest frame */
+                static unsigned last_draws;
+                static double last_draw_ms;
+                unsigned dd = st.draws - last_draws;
+                double dm = st.draw_ms - last_draw_ms;
+                log_block_printf(&lb, "[D3DB] host draw calls this interval: %u, %.1f ms (%.2f us a draw, %.2f ms a"
+                                 " frame)\n", dd, dm, dd ? 1000.0 * dm / dd : 0.0,
+                                 n > last_swaps ? dm / (double)(n - last_swaps) : 0.0);
+                last_draws = st.draws;
+                last_draw_ms = st.draw_ms;
+            }
             if (d3db_wide > 0 || g_render_w)    /* 18.56 */
                 log_block_printf(&lb, "[D3DB] host widescreen: projections widened %ld, kept %ld; fixed-function"
                                  " draws with a 4:3 projection pillarboxed %ld; pre-transformed draws stretched %u,"

@@ -33,6 +33,7 @@ typedef struct {
     unsigned aa_mode, ms_samples;   /* step 58: TWOC_AA_*, the back buffer's samples (0: single) */
     unsigned ms_targets, ms_fails, ms_resolves, ms_fills;   /* step 58: MSAA render targets and their traffic */
     unsigned post_aa, post_aa_fails;                        /* step 58: frames through FXAA or SMAA */
+    double draw_ms;                 /* step 60: time in d3dh_draw_up (its draws: `draws`) */
 } d3dh_stats_t;
 
 /* A state already in xbox_d3d8's (PC D3D8) numbering and values. */
@@ -127,6 +128,11 @@ typedef struct {
 /* S5: the registers a program reads (bit n = vn), 0 if it reads none or
  * can't be parsed. */
 uint16_t d3dh_vs_inputs(const d3dh_vprog_t *p);
+
+/* Step 60: the constant registers the program reads directly (bit n of
+ * mask[n / 32] = cn); returns the lowest base it reads relative to a0.x
+ * (some register from there on), or -1 if none. */
+int d3dh_vs_consts(const d3dh_vprog_t *p, uint32_t mask[6]);
 
 /* S5, RECOMP_D3D_BRIDGE_VSPROBE: draw one vertex (in the program's layout,
  * `stride` bytes) as a point with this program, the draw's viewport and no

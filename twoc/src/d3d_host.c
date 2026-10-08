@@ -170,6 +170,7 @@ static ULONGLONG g_last_dump_ms;
 static int g_frame_work;                /* mirrored work since the last present */
 static int g_dump_rt;                   /* RECOMP_D3D_BRIDGE_DUMP_RT: render targets too (S4) */
 static d3dh_stats_t g_st;
+static LARGE_INTEGER g_qpf;                 /* step 60: QueryPerformanceFrequency */
 
 /* Step 54: borderless fullscreen. g_fs and the client size are the window
  * thread's; g_buf_w x g_buf_h is the visible swap chain's, changed only by a
@@ -576,6 +577,7 @@ int d3dh_create(unsigned width, unsigned height, unsigned host_w, unsigned host_
     if (InterlockedExchange(&once, 1))
         return g_ready ? 0 : -1;        /* the game creates its device once */
     InitializeCriticalSection(&g_lock);
+    QueryPerformanceFrequency(&g_qpf);
     g_gw = width ? width : 640;
     g_gh = height ? height : 480;
     g_w = host_w ? host_w : g_gw;
@@ -1365,10 +1367,50 @@ static struct {
     uint32_t key;
     DWORD handle;                       /* 0: couldn't be created */
     uint16_t inputs;
+    uint32_t cmask[6];                  /* step 60: constant registers read directly, bit n = cn */
+    int rel_base;                       /* lowest base read relative to a0.x, -1 none */
 } g_vs[VS_SLOTS];
 static unsigned g_vs_n;
 static float g_vs_consts[192 * 4];
 static int g_vs_consts_valid;
+
+/* Step 60: the constant registers a parsed program reads: each source
+ * operand an instruction's units use (MOV and ARL read A; ADD A and C; MAD
+ * A, B and C; the other MAC ops A and B; the ILU C) that selects a constant
+ * reads the instruction's constant index, or, with a0.x relative, some
+ * register from that index on (its base kept in `rel_base`, the lowest). */
+static void vs_const_reads(const NV2AVshProgram *pg, uint32_t mask[6], int *rel_base)
+{
+    int i, s;
+
+    memset(mask, 0, 6 * sizeof(uint32_t));
+    *rel_base = -1;
+    for (i = 0; i < pg->length; i++) {
+        const NV2AVshInstruction *in = &pg->insns[i];
+        unsigned used;
+        switch (in->mac_op) {
+        case NV2A_VSH_MAC_NOP: used = 0; break;
+        case NV2A_VSH_MAC_MOV: case NV2A_VSH_MAC_ARL: used = 1; break;
+        case NV2A_VSH_MAC_ADD: used = 5; break;
+        case NV2A_VSH_MAC_MAD: used = 7; break;
+        default: used = 3; break;
+        }
+        if (in->ilu_op != NV2A_VSH_ILU_NOP)
+            used |= 4;
+        for (s = 0; s < 3; s++) {
+            const NV2AVshSrcOperand *src = &in->mac_src[s];
+            if (!(used & (1u << s)) || src->reg_type != NV2A_VSH_REG_CONST || src->reg_index < 0 ||
+                src->reg_index >= 192)
+                continue;
+            if (src->rel_addr) {
+                if (*rel_base < 0 || src->reg_index < *rel_base)
+                    *rel_base = src->reg_index;
+            } else {
+                mask[src->reg_index >> 5] |= 1u << (src->reg_index & 31);
+            }
+        }
+    }
+}
 
 /* Called with g_lock held. */
 static int vs_slot(const d3dh_vprog_t *p)
@@ -1384,6 +1426,21 @@ static int vs_slot(const d3dh_vprog_t *p)
     g_vs[i].key = p->key;
     d3d8_vsh_parse((const DWORD *)p->code, (int)p->n_insns, &parsed);
     g_vs[i].inputs = parsed.inputs_read;
+    vs_const_reads(&parsed, g_vs[i].cmask, &g_vs[i].rel_base);
+    {
+        int k, n = 0, lo = -1, hi = -1;
+        for (k = 0; k < 192; k++)
+            if (g_vs[i].cmask[k >> 5] >> (k & 31) & 1) {
+                n++;
+                hi = k;
+                if (lo < 0)
+                    lo = k;
+            }
+        fprintf(stderr, "[D3DB] host program %08X (%u instructions): reads %d constant registers (c%d-c%d)%s",
+                p->key, p->n_insns, n, lo, hi, g_vs[i].rel_base >= 0 ? ", and relative to a0.x from c" : "\n");
+        if (g_vs[i].rel_base >= 0)
+            fprintf(stderr, "%d\n", g_vs[i].rel_base);
+    }
     if (FAILED(d3d8_vsh_create_shader((const DWORD *)p->code, (int)p->n_insns, &g_vs[i].handle))) {
         g_vs[i].handle = 0;
         g_st.vs_fails++;
@@ -1404,6 +1461,23 @@ uint16_t d3dh_vs_inputs(const d3dh_vprog_t *p)
     EnterCriticalSection(&g_lock);
     i = vs_slot(p);
     r = i < 0 ? 0 : g_vs[i].inputs;
+    LeaveCriticalSection(&g_lock);
+    return r;
+}
+
+int d3dh_vs_consts(const d3dh_vprog_t *p, uint32_t mask[6])
+{
+    int i, r = -1;
+
+    memset(mask, 0, 6 * sizeof(uint32_t));
+    if (!g_ready)
+        return -1;
+    EnterCriticalSection(&g_lock);
+    i = vs_slot(p);
+    if (i >= 0) {
+        memcpy(mask, g_vs[i].cmask, 6 * sizeof(uint32_t));
+        r = g_vs[i].rel_base;
+    }
     LeaveCriticalSection(&g_lock);
     return r;
 }
@@ -1440,9 +1514,11 @@ int d3dh_draw_up(const d3dh_draw_t *d)
     unsigned i, s;
     const void *verts;
     int lit = 0;
+    LARGE_INTEGER t0, t1;
 
     if (!g_ready)
         return -1;
+    QueryPerformanceCounter(&t0);       /* step 60: the host draw's time, waiting for the lock included */
     EnterCriticalSection(&g_lock);
     if (bind_target(&d->target) != 0) {
         LeaveCriticalSection(&g_lock);
@@ -1547,6 +1623,8 @@ int d3dh_draw_up(const d3dh_draw_t *d)
                 d->indices ? "Indexed" : "", (unsigned long)hr, d->prim, d->prim_count, d->stride, d->fvf,
                 d->vert_count);
     g_frame_work = 1;
+    QueryPerformanceCounter(&t1);
+    g_st.draw_ms += (double)(t1.QuadPart - t0.QuadPart) * 1000.0 / (double)g_qpf.QuadPart;
     LeaveCriticalSection(&g_lock);
     return FAILED(hr) ? -1 : 0;
 }
