@@ -764,10 +764,16 @@ static void *convert_fan_or_quad(D3DPRIMITIVETYPE pt, const void *src,
  * DrawPrimitiveUP call, use a persistent ring buffer.
  * ================================================================ */
 
-#define UP_RING_BUFFER_SIZE (4 * 1024 * 1024)  /* 4MB ring buffer */
+#define UP_RING_BUFFER_SIZE (16 * 1024 * 1024)  /* 16MB ring buffer (4MB before indexed draws used it too, twoc notes 18.63) */
 
 static ID3D11Buffer *g_up_ring_buffer = NULL;
 static UINT          g_up_ring_offset = 0;
+
+/* DrawIndexedPrimitiveUP's indices go through a ring of their own (local
+ * perf change, twoc notes 18.63). */
+#define IB_RING_BUFFER_SIZE (2 * 1024 * 1024)
+static ID3D11Buffer *g_ib_ring_buffer = NULL;
+static UINT          g_ib_ring_offset = 0;
 
 static HRESULT up_ring_init(void)
 {
@@ -787,6 +793,11 @@ static void up_ring_shutdown(void)
         g_up_ring_buffer = NULL;
     }
     g_up_ring_offset = 0;
+    if (g_ib_ring_buffer) {
+        ID3D11Buffer_Release(g_ib_ring_buffer);
+        g_ib_ring_buffer = NULL;
+    }
+    g_ib_ring_offset = 0;
 }
 
 /* Upload vertex data to ring buffer, returns offset. Returns (UINT)-1 on failure. */
@@ -822,6 +833,40 @@ static UINT up_ring_upload(const void *data, UINT size)
         (ID3D11Resource *)g_up_ring_buffer, 0);
 
     g_up_ring_offset = (offset + size + 15) & ~15;  /* 16-byte align */
+    return offset;
+}
+
+/* The index ring of DrawIndexedPrimitiveUP, the same way. */
+static UINT ib_ring_upload(const void *data, UINT size)
+{
+    D3D11_MAPPED_SUBRESOURCE mapped;
+    D3D11_MAP map_type;
+    UINT offset;
+
+    if (!g_ib_ring_buffer) {
+        D3D11_BUFFER_DESC bd;
+        memset(&bd, 0, sizeof(bd));
+        bd.ByteWidth = IB_RING_BUFFER_SIZE;
+        bd.Usage = D3D11_USAGE_DYNAMIC;
+        bd.BindFlags = D3D11_BIND_INDEX_BUFFER;
+        bd.CPUAccessFlags = D3D11_CPU_ACCESS_WRITE;
+        if (FAILED(ID3D11Device_CreateBuffer(g_device_state.d3d11_device, &bd, NULL, &g_ib_ring_buffer)))
+            return (UINT)-1;
+    }
+    if (size > IB_RING_BUFFER_SIZE) return (UINT)-1;
+    if (g_ib_ring_offset + size > IB_RING_BUFFER_SIZE) {
+        g_ib_ring_offset = 0;
+        map_type = D3D11_MAP_WRITE_DISCARD;
+    } else {
+        map_type = D3D11_MAP_WRITE_NO_OVERWRITE;
+    }
+    if (FAILED(ID3D11DeviceContext_Map(g_device_state.d3d11_context,
+            (ID3D11Resource *)g_ib_ring_buffer, 0, map_type, 0, &mapped)))
+        return (UINT)-1;
+    offset = g_ib_ring_offset;
+    memcpy((BYTE *)mapped.pData + offset, data, size);
+    ID3D11DeviceContext_Unmap(g_device_state.d3d11_context, (ID3D11Resource *)g_ib_ring_buffer, 0);
+    g_ib_ring_offset = (offset + size + 15) & ~15;
     return offset;
 }
 
@@ -922,13 +967,9 @@ static HRESULT __stdcall dev_DrawIndexedPrimitiveUP(IDirect3DDevice8 *self, D3DP
     (void)self; (void)MinVertexIndex;
     g_d3d_draw_count++;
     D3D11_PRIMITIVE_TOPOLOGY topology;
-    D3D11_BUFFER_DESC bd;
-    D3D11_SUBRESOURCE_DATA sd;
-    ID3D11Buffer *tmp_vb = NULL, *tmp_ib = NULL;
-    UINT index_count, vb_size, ib_size, offset = 0;
+    UINT index_count, vb_size, ib_size, offset = 0, vb_offset, ib_offset;
     UINT idx_bytes;
     DXGI_FORMAT ib_fmt;
-    HRESULT hr;
 
     if (!pVertexData || !pIndexData || !VertexStreamZeroStride) return E_INVALIDARG;
 
@@ -940,28 +981,19 @@ static HRESULT __stdcall dev_DrawIndexedPrimitiveUP(IDirect3DDevice8 *self, D3DP
     vb_size = NumVertices * VertexStreamZeroStride;
     ib_size = index_count * idx_bytes;
 
-    /* Create temp vertex buffer */
-    memset(&bd, 0, sizeof(bd));
-    bd.ByteWidth = vb_size;
-    bd.Usage = D3D11_USAGE_IMMUTABLE;
-    bd.BindFlags = D3D11_BIND_VERTEX_BUFFER;
-    memset(&sd, 0, sizeof(sd));
-    sd.pSysMem = pVertexData;
-    hr = ID3D11Device_CreateBuffer(g_device_state.d3d11_device, &bd, &sd, &tmp_vb);
-    if (FAILED(hr)) return hr;
-
-    /* Create temp index buffer */
-    bd.ByteWidth = ib_size;
-    bd.BindFlags = D3D11_BIND_INDEX_BUFFER;
-    sd.pSysMem = pIndexData;
-    hr = ID3D11Device_CreateBuffer(g_device_state.d3d11_device, &bd, &sd, &tmp_ib);
-    if (FAILED(hr)) { ID3D11Buffer_Release(tmp_vb); return hr; }
+    /* Vertices and indices through the ring buffers (local perf change, twoc
+     * notes 18.63: two immutable buffers were created and released for every
+     * draw, ~4.4 us of its ~7). */
+    vb_offset = up_ring_upload(pVertexData, vb_size);
+    if (vb_offset == (UINT)-1) return E_OUTOFMEMORY;
+    ib_offset = ib_ring_upload(pIndexData, ib_size);
+    if (ib_offset == (UINT)-1) return E_OUTOFMEMORY;
 
     /* Bind, prepare, draw */
     ID3D11DeviceContext_IASetVertexBuffers(g_device_state.d3d11_context,
-        0, 1, &tmp_vb, &VertexStreamZeroStride, &offset);
+        0, 1, &g_up_ring_buffer, &VertexStreamZeroStride, &vb_offset);
     ID3D11DeviceContext_IASetIndexBuffer(g_device_state.d3d11_context,
-        tmp_ib, ib_fmt, 0);
+        g_ib_ring_buffer, ib_fmt, ib_offset);
 
     /* Vertex shader: try programmable VS first, fall back to FVF fixed-function */
     d3d8_shaders_prepare_draw(g_device_state.vertex_shader);
@@ -970,10 +1002,6 @@ static HRESULT __stdcall dev_DrawIndexedPrimitiveUP(IDirect3DDevice8 *self, D3DP
 
     ID3D11DeviceContext_IASetPrimitiveTopology(g_device_state.d3d11_context, topology);
     ID3D11DeviceContext_DrawIndexed(g_device_state.d3d11_context, index_count, 0, 0);
-
-    /* Cleanup temp buffers */
-    ID3D11Buffer_Release(tmp_ib);
-    ID3D11Buffer_Release(tmp_vb);
 
     /* Restore previous bindings */
     if (g_cur_vb) {

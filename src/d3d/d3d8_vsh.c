@@ -88,6 +88,7 @@
 
 /* Stored shader programs */
 static NV2AVshSlot g_vsh_slots[NV2A_VS_MAX_SLOTS];
+static uint32_t g_vsh_slot_hash[NV2A_VS_MAX_SLOTS];    /* each slot's microcode hash, set with it */
 static int g_vsh_slot_count = 0;
 
 /* Constant registers (192 float4) */
@@ -866,6 +867,7 @@ HRESULT d3d8_vsh_create_shader(const DWORD *microcode, int num_insns,
            (size_t)num_insns * 4 * sizeof(DWORD));
     g_vsh_slots[slot].length = num_insns;
     g_vsh_slots[slot].in_use = 1;
+    g_vsh_slot_hash[slot] = fnv1a_hash(g_vsh_slots[slot].microcode, (size_t)num_insns * 4 * sizeof(DWORD));
     g_vsh_slot_count++;
 
     /* Generate handle: slot index + 0x10000 to distinguish from FVF codes.
@@ -950,8 +952,9 @@ BOOL d3d8_vsh_prepare_draw(DWORD handle)
     if (!vsh->in_use)
         return FALSE;
 
-    /* Hash the microcode to look up in cache */
-    hash = fnv1a_hash(vsh->microcode, (size_t)vsh->length * 4 * sizeof(DWORD));
+    /* The microcode's hash, taken once when the slot was filled (local perf
+     * change, twoc notes 18.63: it was rehashed byte by byte at every draw). */
+    hash = g_vsh_slot_hash[slot];
 
     /* Look up in cache */
     entry = cache_lookup(hash);

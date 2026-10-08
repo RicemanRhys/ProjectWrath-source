@@ -21,7 +21,15 @@
 static ID3D11BlendState        *g_blend_state = NULL;
 static ID3D11DepthStencilState *g_ds_state = NULL;
 static ID3D11RasterizerState   *g_raster_state = NULL;
-static ID3D11SamplerState      *g_sampler_states[4] = { NULL, NULL, NULL, NULL };
+static ID3D11SamplerState      *g_sampler_states[4] = { NULL, NULL, NULL, NULL };   /* bound, from the cache */
+
+/* Sampler objects by description (local perf change, twoc notes 18.63). */
+#define SAMPLER_CACHE_MAX 64
+static struct {
+    D3D11_SAMPLER_DESC desc;
+    ID3D11SamplerState *state;
+} g_sampler_cache[SAMPLER_CACHE_MAX];
+static unsigned g_sampler_cache_n;
 
 /* Last known render state identity for dirty detection */
 static DWORD g_last_blend_hash = 0;
@@ -277,12 +285,6 @@ void d3d8_states_apply_sampler(DWORD stage)
     tss = d3d8_GetTSS(stage);
     if (!tss) return;
 
-    /* Release old sampler */
-    if (g_sampler_states[stage]) {
-        ID3D11SamplerState_Release(g_sampler_states[stage]);
-        g_sampler_states[stage] = NULL;
-    }
-
     memset(&sd, 0, sizeof(sd));
     sd.Filter = d3d8_to_d3d11_filter(
         tss[D3DTSS_MAGFILTER],
@@ -295,8 +297,32 @@ void d3d8_states_apply_sampler(DWORD stage)
     sd.ComparisonFunc = D3D11_COMPARISON_NEVER;
     sd.MaxLOD = D3D11_FLOAT32_MAX;
 
-    hr = ID3D11Device_CreateSamplerState(d3d8_GetD3D11Device(), &sd, &g_sampler_states[stage]);
-    if (SUCCEEDED(hr)) {
+    /* A sampler object per distinct description, made once and kept (local
+     * perf change, twoc notes 18.63: one was created and released for every
+     * stage of every draw). The same description binds an object with the
+     * same description, as before. */
+    {
+        unsigned i;
+        for (i = 0; i < g_sampler_cache_n; i++)
+            if (memcmp(&g_sampler_cache[i].desc, &sd, sizeof(sd)) == 0)
+                break;
+        if (i == g_sampler_cache_n) {
+            ID3D11SamplerState *st = NULL;
+            hr = ID3D11Device_CreateSamplerState(d3d8_GetD3D11Device(), &sd, &st);
+            if (FAILED(hr))
+                return;
+            if (g_sampler_cache_n == SAMPLER_CACHE_MAX) {   /* full: start again */
+                unsigned k;
+                for (k = 0; k < g_sampler_cache_n; k++)
+                    ID3D11SamplerState_Release(g_sampler_cache[k].state);
+                g_sampler_cache_n = 0;
+                i = 0;
+            }
+            g_sampler_cache[i].desc = sd;
+            g_sampler_cache[i].state = st;
+            g_sampler_cache_n = i + 1;
+        }
+        g_sampler_states[stage] = g_sampler_cache[i].state;
         ID3D11DeviceContext_PSSetSamplers(ctx, stage, 1, &g_sampler_states[stage]);
     }
 }
@@ -317,12 +343,11 @@ void d3d8_states_shutdown(void)
     if (g_blend_state)  { ID3D11BlendState_Release(g_blend_state); g_blend_state = NULL; }
     if (g_ds_state)     { ID3D11DepthStencilState_Release(g_ds_state); g_ds_state = NULL; }
     if (g_raster_state) { ID3D11RasterizerState_Release(g_raster_state); g_raster_state = NULL; }
-    for (i = 0; i < 4; i++) {
-        if (g_sampler_states[i]) {
-            ID3D11SamplerState_Release(g_sampler_states[i]);
-            g_sampler_states[i] = NULL;
-        }
-    }
+    for (i = 0; i < 4; i++)
+        g_sampler_states[i] = NULL;         /* owned by the cache */
+    for (i = 0; i < (int)g_sampler_cache_n; i++)
+        ID3D11SamplerState_Release(g_sampler_cache[i].state);
+    g_sampler_cache_n = 0;
     g_last_blend_hash = 0;
     g_last_raster_hash = 0;
 }
