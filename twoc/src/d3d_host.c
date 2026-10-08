@@ -171,6 +171,8 @@ static int g_frame_work;                /* mirrored work since the last present 
 static int g_dump_rt;                   /* RECOMP_D3D_BRIDGE_DUMP_RT: render targets too (S4) */
 static d3dh_stats_t g_st;
 static LARGE_INTEGER g_qpf;                 /* step 60: QueryPerformanceFrequency */
+static int g_replay;                    /* step 60, RECOMP_D3D_BRIDGE_REPLAY: passes at each present, 0 off */
+static int g_replay_check;              /* RECOMP_D3D_BRIDGE_REPLAY_CHECK: drawn at once too, and compared */
 
 /* Step 54: borderless fullscreen. g_fs and the client size are the window
  * thread's; g_buf_w x g_buf_h is the visible swap chain's, changed only by a
@@ -578,6 +580,22 @@ int d3dh_create(unsigned width, unsigned height, unsigned host_w, unsigned host_
         return g_ready ? 0 : -1;        /* the game creates its device once */
     InitializeCriticalSection(&g_lock);
     QueryPerformanceFrequency(&g_qpf);
+    {   /* step 60 */
+        const char *e = getenv("RECOMP_D3D_BRIDGE_REPLAY");
+        g_replay = e && *e ? atoi(e) : 0;
+        g_replay = g_replay < 0 ? 0 : g_replay > 8 ? 8 : g_replay;
+        e = getenv("RECOMP_D3D_BRIDGE_REPLAY_CHECK");
+        g_replay_check = e && *e && strcmp(e, "0") != 0;
+        if (g_replay_check) {
+            g_replay = 1;
+            fprintf(stderr, "[D3DB] host replay check: each frame drawn at once and again from its recording, the"
+                    " two back buffers compared\n");
+        }
+        if (g_replay)
+            fprintf(stderr, "[D3DB] host record and replay: each frame's host draws recorded and drawn at its present"
+                    "%s (%d pass%s)\n", g_replay > 1 ? ", again and again as a cost check" : "", g_replay,
+                    g_replay > 1 ? "es" : "");
+    }
     g_gw = width ? width : 640;
     g_gh = height ? height : 480;
     g_w = host_w ? host_w : g_gw;
@@ -1009,18 +1027,193 @@ static int bind_target(const d3dh_target_t *t)
     return 0;
 }
 
-void d3dh_memory_freed(uint32_t data, uint32_t bytes)
+/* ── Step 60: record and replay ───────────────────────────────
+ *
+ * RECOMP_D3D_BRIDGE_REPLAY=N (N 1-8; unset or 0: off, every host call runs
+ * at once as before): the host's draws, clears, copies and render-target
+ * releases are recorded as they arrive and run, in their order, at the
+ * guest's present, N times (the last is what's shown; N > 1 only measures
+ * what drawing a frame again costs). A recorded draw owns copies of all it
+ * points to (the vertices, indices, states, matrices, the program and its
+ * constants, the texture descriptions), and its textures are fetched through
+ * the cache when it is recorded and held until the replay, so a texture the
+ * guest rewrites later in the frame draws as it was. A texture whose Data is
+ * a host render target, or may be one by then (a target drawn, cleared or
+ * copied into earlier in the frame), is fetched at the replay instead, where
+ * the target's contents are made. Stage 2 interpolates between two recorded
+ * frames (notes 18.62). */
+enum { RC_DRAW, RC_CLEAR, RC_COPY, RC_FREED };
+typedef struct {
+    int kind;
+    union {
+        struct {
+            d3dh_draw_t d;
+            IDirect3DBaseTexture8 *pin[4];
+            uint8_t pinned[4];
+        } draw;
+        struct {
+            d3dh_target_t t;
+            uint32_t flags, color, stencil;
+            float z;
+        } clear;
+        struct {
+            d3dh_target_t t;
+            int32_t *rects, *points;
+            unsigned n;
+        } copy;
+        struct {
+            uint32_t data, bytes;
+        } freed;
+    } u;
+} rcmd_t;
+
+#define RA_CHUNK (1u << 20)
+typedef struct ra_chunk {
+    struct ra_chunk *next;
+    size_t used, cap;
+    double data[1];                     /* aligned storage, `cap` bytes */
+} ra_chunk_t;
+
+static rcmd_t *g_rc;                    /* this frame's commands */
+static unsigned g_rc_n, g_rc_cap;
+static ra_chunk_t *g_ra_head, *g_ra_cur;
+static size_t g_ra_bytes;               /* allocated this frame */
+static uint32_t g_rc_targets[64];       /* Data of targets drawn, cleared or copied into this frame */
+static unsigned g_rc_targets_n;
+static int g_rc_overflow;               /* more than 64: every texture fetched at the replay */
+
+static void clear_exec(const d3dh_target_t *target, uint32_t xdk_flags, uint32_t color, float z, uint32_t stencil);
+static int copy_exec(const d3dh_target_t *dst, const int32_t *rects, const int32_t *points, unsigned n);
+static void freed_exec(uint32_t data, uint32_t bytes);
+
+/* `n` bytes from this frame's arena (16-aligned; NULL if out of memory). */
+static void *ra_alloc(size_t n)
+{
+    ra_chunk_t *c = g_ra_cur;
+
+    n = (n + 15) & ~(size_t)15;
+    if (c && c->used + n <= c->cap) {
+        void *p = (uint8_t *)c->data + c->used;
+        c->used += n;
+        g_ra_bytes += n;
+        return p;
+    }
+    /* The next kept chunk if it is large enough, else a new one after this. */
+    if (c && c->next && c->next->cap >= n) {
+        c = c->next;
+        c->used = 0;
+    } else if (!c && g_ra_head && g_ra_head->cap >= n) {
+        c = g_ra_head;
+        c->used = 0;
+    } else {
+        size_t cap = n > RA_CHUNK ? n : RA_CHUNK;
+        ra_chunk_t *nc = (ra_chunk_t *)malloc(sizeof(ra_chunk_t) + cap);
+        if (!nc)
+            return NULL;
+        nc->cap = cap;
+        nc->used = 0;
+        if (c) {
+            nc->next = c->next;
+            c->next = nc;
+        } else {
+            nc->next = g_ra_head;
+            g_ra_head = nc;
+        }
+        c = nc;
+    }
+    g_ra_cur = c;
+    c->used = n;
+    g_ra_bytes += n;
+    return c->data;
+}
+
+static void *ra_dup(const void *p, size_t n)
+{
+    void *q;
+
+    if (!p || !n)
+        return NULL;
+    q = ra_alloc(n);
+    if (q)
+        memcpy(q, p, n);
+    return q;
+}
+
+static rcmd_t *rc_push(int kind)
+{
+    if (g_rc_n == g_rc_cap) {
+        unsigned cap = g_rc_cap ? 2 * g_rc_cap : 1024;
+        rcmd_t *n = (rcmd_t *)realloc(g_rc, cap * sizeof(rcmd_t));
+        if (!n)
+            return NULL;
+        g_rc = n;
+        g_rc_cap = cap;
+    }
+    memset(&g_rc[g_rc_n], 0, sizeof(rcmd_t));
+    g_rc[g_rc_n].kind = kind;
+    return &g_rc[g_rc_n++];
+}
+
+static void rc_target(uint32_t data)
+{
+    unsigned i;
+
+    if (!data)
+        return;
+    for (i = 0; i < g_rc_targets_n; i++)
+        if (g_rc_targets[i] == data)
+            return;
+    if (g_rc_targets_n == sizeof(g_rc_targets) / sizeof(g_rc_targets[0]))
+        g_rc_overflow = 1;
+    else
+        g_rc_targets[g_rc_targets_n++] = data;
+}
+
+/* Whether a texture with this Data may sample a host render target at the
+ * replay: one exists now, or the frame draws, clears or copies into one. */
+static int rc_maybe_target(uint32_t data)
+{
+    unsigned i;
+
+    if (g_rc_overflow)
+        return 1;
+    for (i = 0; i < RT_SLOTS; i++)
+        if (g_rt[i].tex && g_rt[i].data == data)
+            return 1;
+    for (i = 0; i < g_rc_targets_n; i++)
+        if (g_rc_targets[i] == data)
+            return 1;
+    return 0;
+}
+
+/* Called with g_lock held. */
+static void freed_exec(uint32_t data, uint32_t bytes)
 {
     int i;
 
-    if (!g_ready)
-        return;
-    EnterCriticalSection(&g_lock);
     for (i = 0; i < RT_SLOTS; i++)
         if (g_rt[i].tex && g_rt[i].data >= data && g_rt[i].data - data < bytes) {
             rt_release(i);
             g_st.rt_released++;
         }
+}
+
+void d3dh_memory_freed(uint32_t data, uint32_t bytes)
+{
+    if (!g_ready)
+        return;
+    EnterCriticalSection(&g_lock);
+    if (g_replay && !g_replay_check) {  /* step 60: in its place among the frame's commands */
+        rcmd_t *c = rc_push(RC_FREED);
+        if (c) {
+            c->u.freed.data = data;
+            c->u.freed.bytes = bytes;
+        } else {
+            freed_exec(data, bytes);
+        }
+    } else {
+        freed_exec(data, bytes);
+    }
     LeaveCriticalSection(&g_lock);
 }
 
@@ -1028,22 +1221,40 @@ void d3dh_memory_freed(uint32_t data, uint32_t bytes)
 
 void d3dh_clear(const d3dh_target_t *target, uint32_t xdk_flags, uint32_t color, float z, uint32_t stencil)
 {
-    DWORD pc = 0;
-
     if (!g_ready)
         return;
+    EnterCriticalSection(&g_lock);
+    if (g_replay) {                     /* step 60 */
+        rcmd_t *c = rc_push(RC_CLEAR);
+        if (g_replay_check)
+            clear_exec(target, xdk_flags, color, z, stencil);
+        if (c) {
+            c->u.clear.t = *target;
+            c->u.clear.flags = xdk_flags;
+            c->u.clear.color = color;
+            c->u.clear.z = z;
+            c->u.clear.stencil = stencil;
+            rc_target(target->data);
+        }
+    } else {
+        clear_exec(target, xdk_flags, color, z, stencil);
+    }
+    LeaveCriticalSection(&g_lock);
+}
+
+/* Called with g_lock held. */
+static void clear_exec(const d3dh_target_t *target, uint32_t xdk_flags, uint32_t color, float z, uint32_t stencil)
+{
+    DWORD pc = 0;
+
     if ((xdk_flags & 0xF0) == 0xF0)
         pc |= D3DCLEAR_TARGET;
     if (xdk_flags & 1)
         pc |= D3DCLEAR_ZBUFFER;
     if (xdk_flags & 2)
         pc |= D3DCLEAR_STENCIL;
-
-    EnterCriticalSection(&g_lock);
-    if (bind_target(target) != 0) {
-        LeaveCriticalSection(&g_lock);
+    if (bind_target(target) != 0)
         return;
-    }
     if (target->data)
         g_st.rt_clears++;
     g_st.clears++;
@@ -1058,7 +1269,6 @@ void d3dh_clear(const d3dh_target_t *target, uint32_t xdk_flags, uint32_t color,
         target_drawn();
         g_frame_work = 1;
     }
-    LeaveCriticalSection(&g_lock);
 }
 
 /* ── Textures (S3) ─────────────────────────────────────────── */
@@ -1506,7 +1716,11 @@ static int vs_bind(const d3dh_vprog_t *p)
     return 0;
 }
 
-int d3dh_draw_up(const d3dh_draw_t *d)
+/* A draw on the host, now: the body of d3dh_draw_up (step 60: also each
+ * recorded draw at its replay). `pinned[s]` set: stage s takes `pin[s]`, the
+ * texture fetched when the draw was recorded, instead of a fetch now.
+ * Called with g_lock held. */
+static int draw_exec(const d3dh_draw_t *d, IDirect3DBaseTexture8 *const *pin, const uint8_t *pinned)
 {
     D3DVIEWPORT8 vp;
     xmap_t map;
@@ -1516,14 +1730,9 @@ int d3dh_draw_up(const d3dh_draw_t *d)
     int lit = 0;
     LARGE_INTEGER t0, t1;
 
-    if (!g_ready)
+    QueryPerformanceCounter(&t0);       /* step 60: the host draw's time */
+    if (bind_target(&d->target) != 0)
         return -1;
-    QueryPerformanceCounter(&t0);       /* step 60: the host draw's time, waiting for the lock included */
-    EnterCriticalSection(&g_lock);
-    if (bind_target(&d->target) != 0) {
-        LeaveCriticalSection(&g_lock);
-        return -1;
-    }
     vp.X = d->vp_x;
     vp.Y = d->vp_y;
     vp.Width = d->vp_w;
@@ -1540,7 +1749,7 @@ int d3dh_draw_up(const d3dh_draw_t *d)
     {
         IDirect3DBaseTexture8 *bound[4];
         for (s = 0; s < 4; s++)
-            bound[s] = d->tex[s] ? tex_get(d->tex[s]) : NULL;
+            bound[s] = !d->tex[s] ? NULL : pinned && pinned[s] ? pin[s] : tex_get(d->tex[s]);
         for (s = 0; s < 4; s++)
             g_dev->lpVtbl->SetTexture(g_dev, s, bound[s]);
     }
@@ -1587,7 +1796,6 @@ int d3dh_draw_up(const d3dh_draw_t *d)
     if (d->vprog) {                     /* S5: the vertices are already in the program's layout */
         if (vs_bind(d->vprog) != 0) {
             g_st.draw_fails++;
-            LeaveCriticalSection(&g_lock);
             return -1;
         }
         verts = d->verts;
@@ -1625,8 +1833,138 @@ int d3dh_draw_up(const d3dh_draw_t *d)
     g_frame_work = 1;
     QueryPerformanceCounter(&t1);
     g_st.draw_ms += (double)(t1.QuadPart - t0.QuadPart) * 1000.0 / (double)g_qpf.QuadPart;
-    LeaveCriticalSection(&g_lock);
     return FAILED(hr) ? -1 : 0;
+}
+
+/* Record a draw. Called with g_lock held. Returns 0, or -1 (out of memory:
+ * the draw is lost, counted as a failure). */
+static int rec_draw(const d3dh_draw_t *d)
+{
+    rcmd_t *c = rc_push(RC_DRAW);
+    d3dh_draw_t *o;
+    unsigned s;
+    int bad = 0;
+
+    if (!c) {
+        g_st.draw_fails++;
+        return -1;
+    }
+    o = &c->u.draw.d;
+    *o = *d;
+    o->verts = ra_dup(d->verts, (size_t)d->vert_count * d->stride);
+    bad |= d->verts && d->vert_count && d->stride && !o->verts;
+    o->indices = (const uint16_t *)ra_dup(d->indices, (size_t)d->index_count * sizeof(uint16_t));
+    bad |= d->indices && d->index_count && !o->indices;
+    o->ff = (const d3dh_ff_t *)ra_dup(d->ff, sizeof(d3dh_ff_t));
+    o->rs = (const d3dh_state_t *)ra_dup(d->rs, d->n_rs * sizeof(d3dh_state_t));
+    for (s = 0; s < 4; s++)
+        o->tss[s] = (const d3dh_state_t *)ra_dup(d->tss[s], d->n_tss[s] * sizeof(d3dh_state_t));
+    o->ps = (const d3dh_ps_t *)ra_dup(d->ps, sizeof(d3dh_ps_t));
+    if (d->vprog) {
+        d3dh_vprog_t *v = (d3dh_vprog_t *)ra_dup(d->vprog, sizeof(d3dh_vprog_t));
+        if (v) {
+            v->code = (const uint32_t *)ra_dup(d->vprog->code, (size_t)d->vprog->n_insns * 16);
+            v->consts = (const float *)ra_dup(d->vprog->consts, 192 * 16);
+        }
+        o->vprog = v;
+        bad |= !v || !v->code || !v->consts;
+    }
+    for (s = 0; s < 4; s++) {
+        if (!d->tex[s])
+            continue;
+        o->tex[s] = (const d3dh_tex_t *)ra_dup(d->tex[s], sizeof(d3dh_tex_t));
+        bad |= !o->tex[s];
+    }
+    bad |= (d->ff && !o->ff) || (d->ps && !o->ps) || (d->n_rs && !o->rs);
+    if (bad) {
+        g_rc_n--;
+        g_st.draw_fails++;
+        return -1;
+    }
+    /* The textures as they are now; those that may be render targets at the
+     * replay are fetched there (fetched here as the old path did, so the
+     * cache sees the same sequence). */
+    for (s = 0; s < 4; s++) {
+        if (!o->tex[s] || rc_maybe_target(o->tex[s]->data))
+            continue;
+        c->u.draw.pin[s] = tex_get(o->tex[s]);
+        c->u.draw.pinned[s] = 1;
+        if (c->u.draw.pin[s]) {
+            c->u.draw.pin[s]->lpVtbl->AddRef(c->u.draw.pin[s]);
+            g_st.replay_pins++;
+        }
+    }
+    rc_target(d->target.data);
+    return 0;
+}
+
+/* Run this frame's commands `g_replay` times, then forget them. Called with
+ * g_lock held, at the present. */
+static void replay_run(void)
+{
+    LARGE_INTEGER t0, t1;
+    unsigned p, i, s;
+
+    if (!g_rc_n && !g_ra_bytes)
+        return;
+    QueryPerformanceCounter(&t0);
+    for (p = 0; p < (unsigned)g_replay; p++)
+        for (i = 0; i < g_rc_n; i++) {
+            const rcmd_t *c = &g_rc[i];
+            switch (c->kind) {
+            case RC_DRAW:
+                draw_exec(&c->u.draw.d, c->u.draw.pin, c->u.draw.pinned);
+                break;
+            case RC_CLEAR:
+                clear_exec(&c->u.clear.t, c->u.clear.flags, c->u.clear.color, c->u.clear.z, c->u.clear.stencil);
+                break;
+            case RC_COPY:
+                copy_exec(&c->u.copy.t, c->u.copy.rects, c->u.copy.points, c->u.copy.n);
+                break;
+            case RC_FREED:
+                freed_exec(c->u.freed.data, c->u.freed.bytes);
+                break;
+            }
+        }
+    for (i = 0; i < g_rc_n; i++)
+        if (g_rc[i].kind == RC_DRAW)
+            for (s = 0; s < 4; s++)
+                if (g_rc[i].u.draw.pin[s])
+                    g_rc[i].u.draw.pin[s]->lpVtbl->Release(g_rc[i].u.draw.pin[s]);
+    QueryPerformanceCounter(&t1);
+    g_st.replay_frames++;
+    g_st.replay_cmds += g_rc_n;
+    g_st.replay_bytes += (double)g_ra_bytes;
+    g_st.replay_ms += (double)(t1.QuadPart - t0.QuadPart) * 1000.0 / (double)g_qpf.QuadPart;
+    g_rc_n = 0;
+    g_ra_cur = NULL;
+    g_ra_bytes = 0;
+    g_rc_targets_n = 0;
+    g_rc_overflow = 0;
+}
+
+int d3dh_draw_up(const d3dh_draw_t *d)
+{
+    int r;
+
+    if (!g_ready)
+        return -1;
+    EnterCriticalSection(&g_lock);
+    if (g_replay_check) {               /* at once, as without replay, and recorded */
+        r = draw_exec(d, NULL, NULL);
+        rec_draw(d);
+    } else if (g_replay) {
+        LARGE_INTEGER t0, t1;
+        QueryPerformanceCounter(&t0);
+        r = rec_draw(d);
+        QueryPerformanceCounter(&t1);
+        g_st.rec_ms += (double)(t1.QuadPart - t0.QuadPart) * 1000.0 / (double)g_qpf.QuadPart;
+        g_st.rec_draws++;
+    } else {
+        r = draw_exec(d, NULL, NULL);
+    }
+    LeaveCriticalSection(&g_lock);
+    return r;
 }
 
 /* ── CopyRects (step 35) ───────────────────────────────────── */
@@ -1674,6 +2012,38 @@ static ID3D11Texture2D *frame_tex(void)
 
 int d3dh_copy_back(const d3dh_target_t *dst, const int32_t *rects, const int32_t *points, unsigned n)
 {
+    int ok = 0;
+
+    if (!g_ready)
+        return -1;
+    EnterCriticalSection(&g_lock);
+    if (g_replay) {                     /* step 60: the rects and points copied */
+        rcmd_t *c = rc_push(RC_COPY);
+        if (g_replay_check)
+            ok = copy_exec(dst, rects, points, n);
+        if (c) {
+            c->u.copy.t = *dst;
+            c->u.copy.n = n;
+            c->u.copy.rects = n ? (int32_t *)ra_dup(rects, (size_t)n * 16) : NULL;
+            c->u.copy.points = n && points ? (int32_t *)ra_dup(points, (size_t)n * 8) : NULL;
+            rc_target(dst->data);
+            if (n && !c->u.copy.rects) {
+                g_rc_n--;
+                ok = -1;
+            }
+        } else {
+            ok = -1;
+        }
+    } else {
+        ok = copy_exec(dst, rects, points, n);
+    }
+    LeaveCriticalSection(&g_lock);
+    return ok;
+}
+
+/* Called with g_lock held. */
+static int copy_exec(const d3dh_target_t *dst, const int32_t *rects, const int32_t *points, unsigned n)
+{
     d3dh_target_t t = *dst;
     ID3D11Texture2D *bb = NULL, *dt;
     ID3D11DeviceContext *ctx;
@@ -1681,12 +2051,9 @@ int d3dh_copy_back(const d3dh_target_t *dst, const int32_t *rects, const int32_t
     unsigned k;
     int i, ok = -1;
 
-    if (!g_ready)
-        return -1;
     /* D3D11 copies only within a format family, and the guest's A8R8G8B8 is
      * B8G8R8A8 there: the copy is kept as R8G8B8A8, which samples the same. */
     t.format = XDK_FMT_LIN_A8B8G8R8;
-    EnterCriticalSection(&g_lock);
     i = rt_find(&t, 1);
     if (i >= 0 && (bb = back_tex()) != NULL) {
         static const d3dh_target_t back = { 0, 0, 0, 0 };
@@ -1741,7 +2108,6 @@ int d3dh_copy_back(const d3dh_target_t *dst, const int32_t *rects, const int32_t
     } else if (++g_st.copy_fails <= 5) {
         fprintf(stderr, "[D3DB] host CopyRects to Data %08X (%ux%u) failed\n", t.data, t.width, t.height);
     }
-    LeaveCriticalSection(&g_lock);
     return ok;
 }
 
@@ -2823,6 +3189,181 @@ static void overlay_pause(void)
     ReleaseSRWLockExclusive(&g_pause_lock);
 }
 
+/* The replay check's snapshot of where a frame starts: the back buffer's and
+ * each render target's colour, taken after a frame (`restore` 0) and put
+ * back before that frame's replay (1), so the replay starts from what the
+ * frame drawn at once started from. A target made during the frame starts
+ * black, as its creation leaves it. Depth and stencil aren't kept (every
+ * frame seen clears them before use), nor multisampled surfaces (check
+ * without MSAA). Called with g_lock held. */
+static void replay_check_snap(int restore, ID3D11Texture2D *bb)
+{
+    static ID3D11Texture2D *snap[RT_SLOTS + 1];
+    static uint32_t snap_data[RT_SLOTS + 1];
+    ID3D11DeviceContext *ctx = d3d8_GetD3D11Context();
+    ID3D11Device *dev = d3d8_GetD3D11Device();
+    D3D11_TEXTURE2D_DESC a, b;
+    int i;
+
+    for (i = 0; i <= RT_SLOTS; i++) {
+        ID3D11Texture2D *t = i == RT_SLOTS ? bb : g_rt[i].tex ? ((D3D8Texture *)g_rt[i].tex)->d3d11_texture : NULL;
+        uint32_t data = i == RT_SLOTS ? 0xFFFFFFFFu : g_rt[i].data;
+        if (!restore) {
+            if (!t) {
+                snap_data[i] = 0;
+                continue;
+            }
+            ID3D11Texture2D_GetDesc(t, &a);
+            if (snap[i]) {
+                ID3D11Texture2D_GetDesc(snap[i], &b);
+                if (b.Width != a.Width || b.Height != a.Height || b.Format != a.Format) {
+                    ID3D11Texture2D_Release(snap[i]);
+                    snap[i] = NULL;
+                }
+            }
+            if (!snap[i]) {
+                b = a;
+                b.MipLevels = 1;
+                b.ArraySize = 1;
+                b.SampleDesc.Count = 1;
+                b.SampleDesc.Quality = 0;
+                b.Usage = D3D11_USAGE_DEFAULT;
+                b.BindFlags = 0;
+                b.CPUAccessFlags = 0;
+                b.MiscFlags = 0;
+                if (FAILED(ID3D11Device_CreateTexture2D(dev, &b, NULL, &snap[i])))
+                    snap[i] = NULL;
+            }
+            snap_data[i] = snap[i] ? data : 0;
+            if (snap[i])
+                ID3D11DeviceContext_CopySubresourceRegion(ctx, (ID3D11Resource *)snap[i], 0, 0, 0, 0,
+                                                          (ID3D11Resource *)t, 0, NULL);
+            continue;
+        }
+        if (!t)
+            continue;
+        if (snap[i] && snap_data[i] == data) {
+            ID3D11Texture2D_GetDesc(t, &a);
+            ID3D11Texture2D_GetDesc(snap[i], &b);
+            if (a.Width == b.Width && a.Height == b.Height && a.Format == b.Format) {
+                ID3D11DeviceContext_CopySubresourceRegion(ctx, (ID3D11Resource *)t, 0, 0, 0, 0,
+                                                          (ID3D11Resource *)snap[i], 0, NULL);
+                continue;
+            }
+        }
+        if (i < RT_SLOTS) {             /* made during the frame: black, as rt_find left it */
+            g_dev->lpVtbl->SetRenderTarget(g_dev, g_rt[i].surf, g_rt[i].depth);
+            g_dev->lpVtbl->Clear(g_dev, 0, NULL, D3DCLEAR_TARGET | D3DCLEAR_ZBUFFER | D3DCLEAR_STENCIL, 0, 1.0f, 0);
+            g_cur_target = -2;
+        }
+    }
+}
+
+/* RECOMP_D3D_BRIDGE_REPLAY_CHECK (step 60): `after` 0 keeps the back buffer
+ * as drawn at once, 1 compares the replayed one with it. Called with g_lock
+ * held. */
+static void replay_check(int after, unsigned swap_no)
+{
+    static ID3D11Texture2D *kept, *stage[2];
+    static D3D11_TEXTURE2D_DESC kd;
+    ID3D11DeviceContext *ctx = d3d8_GetD3D11Context();
+    ID3D11Device *dev = d3d8_GetD3D11Device();
+    ID3D11Texture2D *bb = back_tex();
+    D3D11_TEXTURE2D_DESC d;
+    D3D11_MAPPED_SUBRESOURCE ma, mb;
+    unsigned x, y, k, diff = 0, maxd = 0, x0 = ~0u, y0 = ~0u, x1 = 0, y1 = 0;
+
+    if (!bb)
+        return;
+    ID3D11Texture2D_GetDesc(bb, &d);
+    if (!after) {
+        if (!kept || kd.Width != d.Width || kd.Height != d.Height || kd.Format != d.Format) {
+            for (k = 0; k < 2; k++)
+                if (stage[k]) {
+                    ID3D11Texture2D_Release(stage[k]);
+                    stage[k] = NULL;
+                }
+            if (kept)
+                ID3D11Texture2D_Release(kept);
+            kept = NULL;
+            kd = d;
+            kd.MipLevels = 1;
+            kd.ArraySize = 1;
+            kd.SampleDesc.Count = 1;
+            kd.SampleDesc.Quality = 0;
+            kd.Usage = D3D11_USAGE_DEFAULT;
+            kd.BindFlags = 0;
+            kd.CPUAccessFlags = 0;
+            kd.MiscFlags = 0;
+            if (FAILED(ID3D11Device_CreateTexture2D(dev, &kd, NULL, &kept)))
+                kept = NULL;
+            kd.Usage = D3D11_USAGE_STAGING;
+            kd.CPUAccessFlags = D3D11_CPU_ACCESS_READ;
+            for (k = 0; k < 2; k++)
+                if (FAILED(ID3D11Device_CreateTexture2D(dev, &kd, NULL, &stage[k])))
+                    stage[k] = NULL;
+            kd.Usage = D3D11_USAGE_DEFAULT;
+            kd.CPUAccessFlags = 0;
+        }
+        if (kept)
+            ID3D11DeviceContext_CopyResource(ctx, (ID3D11Resource *)kept, (ID3D11Resource *)bb);
+        replay_check_snap(1, bb);       /* the replay starts where the frame did */
+        ID3D11Texture2D_Release(bb);
+        return;
+    }
+    if (!kept || !stage[0] || !stage[1] || kd.Width != d.Width || kd.Height != d.Height) {
+        ID3D11Texture2D_Release(bb);
+        return;
+    }
+    ID3D11DeviceContext_CopyResource(ctx, (ID3D11Resource *)stage[0], (ID3D11Resource *)kept);
+    ID3D11DeviceContext_CopyResource(ctx, (ID3D11Resource *)stage[1], (ID3D11Resource *)bb);
+    replay_check_snap(0, bb);           /* where the next frame starts */
+    ID3D11Texture2D_Release(bb);
+    if (FAILED(ID3D11DeviceContext_Map(ctx, (ID3D11Resource *)stage[0], 0, D3D11_MAP_READ, 0, &ma)))
+        return;
+    if (FAILED(ID3D11DeviceContext_Map(ctx, (ID3D11Resource *)stage[1], 0, D3D11_MAP_READ, 0, &mb))) {
+        ID3D11DeviceContext_Unmap(ctx, (ID3D11Resource *)stage[0], 0);
+        return;
+    }
+    for (y = 0; y < kd.Height; y++) {
+        const uint8_t *pa = (const uint8_t *)ma.pData + (size_t)y * ma.RowPitch;
+        const uint8_t *pb = (const uint8_t *)mb.pData + (size_t)y * mb.RowPitch;
+        if (memcmp(pa, pb, 4 * (size_t)kd.Width) == 0)
+            continue;
+        for (x = 0; x < kd.Width; x++) {
+            unsigned c, m = 0;
+            for (c = 0; c < 3; c++) {   /* colour; alpha isn't shown */
+                unsigned dd = pa[4 * x + c] > pb[4 * x + c] ? pa[4 * x + c] - pb[4 * x + c] : pb[4 * x + c] - pa[4 * x + c];
+                m = dd > m ? dd : m;
+            }
+            if (m) {
+                diff++;
+                maxd = m > maxd ? m : maxd;
+                x0 = x < x0 ? x : x0;
+                x1 = x > x1 ? x : x1;
+                y0 = y < y0 ? y : y0;
+                y1 = y > y1 ? y : y1;
+            }
+        }
+    }
+    ID3D11DeviceContext_Unmap(ctx, (ID3D11Resource *)stage[1], 0);
+    ID3D11DeviceContext_Unmap(ctx, (ID3D11Resource *)stage[0], 0);
+    g_st.replay_checked++;
+    if (diff) {
+        g_st.replay_check_diff++;
+        if (g_st.replay_check_diff <= 20)
+            fprintf(stderr, "[D3DB] host replay check: guest swap %u differs in %u pixels (largest %u levels),"
+                    " within (%u, %u)-(%u, %u)\n", swap_no, diff, maxd, x0, y0, x1, y1);
+        if (g_dump_prefix[0] && g_st.replay_check_diff <= 4) {     /* both pictures, with -DumpDir */
+            char path[600];
+            snprintf(path, sizeof(path), "%schk%05u_once.bmp", g_dump_prefix, swap_no);
+            dump_texture(kept, NULL, path, 0);
+            snprintf(path, sizeof(path), "%schk%05u_replayed.bmp", g_dump_prefix, swap_no);
+            dump_texture(stage[1], NULL, path, 0);
+        }
+    }
+}
+
 void d3dh_present(double t_s, unsigned swap_no)
 {
     ULONGLONG now;
@@ -2832,6 +3373,15 @@ void d3dh_present(double t_s, unsigned swap_no)
 
     if (!g_ready)
         return;
+    if (g_replay) {                     /* step 60: the frame's recorded commands, drawn now */
+        EnterCriticalSection(&g_lock);
+        if (g_replay_check)
+            replay_check(0, swap_no);
+        replay_run();
+        if (g_replay_check)
+            replay_check(1, swap_no);
+        LeaveCriticalSection(&g_lock);
+    }
     if (g_ovl_open && !g_ovs.active) {  /* step 54: Esc */
         AcquireSRWLockExclusive(&g_pause_lock);
         if (g_ovl_open && !g_ovs.active)

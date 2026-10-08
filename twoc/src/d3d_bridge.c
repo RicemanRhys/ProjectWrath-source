@@ -4346,6 +4346,27 @@ static void mirror_swap(void)
                 last_draws = st.draws;
                 last_draw_ms = st.draw_ms;
             }
+            if (st.replay_frames) {     /* step 60: record and replay */
+                static unsigned lf, lc, lp, lr;
+                static double lms, lrec, lby;
+                unsigned f = st.replay_frames - lf, r = st.rec_draws - lr;
+                log_block_printf(&lb, "[D3DB] host replay: frames %u, commands %.0f a frame, recorded %.0f KB a"
+                                 " frame, %.2f us a draw to record (%.2f ms a frame), replays %.2f ms a frame;"
+                                 " textures held %u\n", f, f ? (double)(st.replay_cmds - lc) / f : 0.0,
+                                 f ? (st.replay_bytes - lby) / 1024.0 / f : 0.0,
+                                 r ? 1000.0 * (st.rec_ms - lrec) / r : 0.0, f ? (st.rec_ms - lrec) / f : 0.0,
+                                 f ? (st.replay_ms - lms) / f : 0.0, st.replay_pins - lp);
+                if (st.replay_checked)
+                    log_block_printf(&lb, "[D3DB] host replay check: %u frames compared, %u differ\n",
+                                     st.replay_checked, st.replay_check_diff);
+                lf = st.replay_frames;
+                lc = st.replay_cmds;
+                lp = st.replay_pins;
+                lr = st.rec_draws;
+                lms = st.replay_ms;
+                lrec = st.rec_ms;
+                lby = st.replay_bytes;
+            }
             if (d3db_wide > 0 || g_render_w)    /* 18.56 */
                 log_block_printf(&lb, "[D3DB] host widescreen: projections widened %ld, kept %ld; fixed-function"
                                  " draws with a 4:3 projection pillarboxed %ld; pre-transformed draws stretched %u,"

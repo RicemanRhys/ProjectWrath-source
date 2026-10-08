@@ -33,7 +33,10 @@ typedef struct {
     unsigned aa_mode, ms_samples;   /* step 58: TWOC_AA_*, the back buffer's samples (0: single) */
     unsigned ms_targets, ms_fails, ms_resolves, ms_fills;   /* step 58: MSAA render targets and their traffic */
     unsigned post_aa, post_aa_fails;                        /* step 58: frames through FXAA or SMAA */
-    double draw_ms;                 /* step 60: time in d3dh_draw_up (its draws: `draws`) */
+    double draw_ms;                 /* step 60: time drawing on the host (its draws: `draws`) */
+    unsigned replay_frames, replay_cmds, replay_pins, rec_draws;    /* step 60: record and replay */
+    double replay_ms, rec_ms, replay_bytes;
+    unsigned replay_checked, replay_check_diff;     /* step 60: RECOMP_D3D_BRIDGE_REPLAY_CHECK */
 } d3dh_stats_t;
 
 /* A state already in xbox_d3d8's (PC D3D8) numbering and values. */
