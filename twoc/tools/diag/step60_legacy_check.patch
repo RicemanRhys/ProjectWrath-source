@@ -1,0 +1,15 @@
+diff --git a/twoc/src/d3d_host.c b/twoc/src/d3d_host.c
+index b887dd4..e29c108 100644
+--- a/twoc/src/d3d_host.c
++++ b/twoc/src/d3d_host.c
+@@ -1951,7 +1951,10 @@ int d3dh_draw_up(const d3dh_draw_t *d)
+         return -1;
+     EnterCriticalSection(&g_lock);
+     if (g_replay_check) {               /* at once, as without replay, and recorded */
++        extern int g_d3d8_tmp_legacy;
++        g_d3d8_tmp_legacy = getenv("RECOMP_TMP_LEGACY") != NULL;
+         r = draw_exec(d, NULL, NULL);
++        g_d3d8_tmp_legacy = 0;
+         rec_draw(d);
+     } else if (g_replay) {
+         LARGE_INTEGER t0, t1;

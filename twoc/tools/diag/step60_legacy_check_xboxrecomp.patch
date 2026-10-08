@@ -1,0 +1,97 @@
+diff --git a/src/d3d/d3d8_device.c b/src/d3d/d3d8_device.c
+index 0161646..76efcb7 100644
+--- a/src/d3d/d3d8_device.c
++++ b/src/d3d/d3d8_device.c
+@@ -766,6 +766,7 @@ static void *convert_fan_or_quad(D3DPRIMITIVETYPE pt, const void *src,
+ 
+ #define UP_RING_BUFFER_SIZE (16 * 1024 * 1024)  /* 16MB ring buffer (4MB before indexed draws used it too, twoc notes 18.63) */
+ 
++int g_d3d8_tmp_legacy;   /* TEMPORARY */
+ static ID3D11Buffer *g_up_ring_buffer = NULL;
+ static UINT          g_up_ring_offset = 0;
+ 
+@@ -984,6 +985,35 @@ static HRESULT __stdcall dev_DrawIndexedPrimitiveUP(IDirect3DDevice8 *self, D3DP
+     /* Vertices and indices through the ring buffers (local perf change, twoc
+      * notes 18.63: two immutable buffers were created and released for every
+      * draw, ~4.4 us of its ~7). */
++    if (g_d3d8_tmp_legacy) {
++        D3D11_BUFFER_DESC bd;
++        D3D11_SUBRESOURCE_DATA sd;
++        ID3D11Buffer *tmp_vb = NULL, *tmp_ib = NULL;
++        HRESULT hr;
++        memset(&bd, 0, sizeof(bd));
++        bd.ByteWidth = vb_size;
++        bd.Usage = D3D11_USAGE_IMMUTABLE;
++        bd.BindFlags = D3D11_BIND_VERTEX_BUFFER;
++        memset(&sd, 0, sizeof(sd));
++        sd.pSysMem = pVertexData;
++        hr = ID3D11Device_CreateBuffer(g_device_state.d3d11_device, &bd, &sd, &tmp_vb);
++        if (FAILED(hr)) return hr;
++        bd.ByteWidth = ib_size;
++        bd.BindFlags = D3D11_BIND_INDEX_BUFFER;
++        sd.pSysMem = pIndexData;
++        hr = ID3D11Device_CreateBuffer(g_device_state.d3d11_device, &bd, &sd, &tmp_ib);
++        if (FAILED(hr)) { ID3D11Buffer_Release(tmp_vb); return hr; }
++        ID3D11DeviceContext_IASetVertexBuffers(g_device_state.d3d11_context, 0, 1, &tmp_vb, &VertexStreamZeroStride, &offset);
++        ID3D11DeviceContext_IASetIndexBuffer(g_device_state.d3d11_context, tmp_ib, ib_fmt, 0);
++        d3d8_shaders_prepare_draw(g_device_state.vertex_shader);
++        d3d8_combiners_prepare_draw();
++        d3d8_states_apply();
++        ID3D11DeviceContext_IASetPrimitiveTopology(g_device_state.d3d11_context, topology);
++        ID3D11DeviceContext_DrawIndexed(g_device_state.d3d11_context, index_count, 0, 0);
++        ID3D11Buffer_Release(tmp_ib);
++        ID3D11Buffer_Release(tmp_vb);
++        goto restore;
++    }
+     vb_offset = up_ring_upload(pVertexData, vb_size);
+     if (vb_offset == (UINT)-1) return E_OUTOFMEMORY;
+     ib_offset = ib_ring_upload(pIndexData, ib_size);
+@@ -1003,6 +1033,7 @@ static HRESULT __stdcall dev_DrawIndexedPrimitiveUP(IDirect3DDevice8 *self, D3DP
+     ID3D11DeviceContext_IASetPrimitiveTopology(g_device_state.d3d11_context, topology);
+     ID3D11DeviceContext_DrawIndexed(g_device_state.d3d11_context, index_count, 0, 0);
+ 
++restore:
+     /* Restore previous bindings */
+     if (g_cur_vb) {
+         D3D8VertexBuffer *vb = (D3D8VertexBuffer *)g_cur_vb;
+diff --git a/src/d3d/d3d8_states.c b/src/d3d/d3d8_states.c
+index 141e3f6..8c34774 100644
+--- a/src/d3d/d3d8_states.c
++++ b/src/d3d/d3d8_states.c
+@@ -297,6 +297,20 @@ void d3d8_states_apply_sampler(DWORD stage)
+     sd.ComparisonFunc = D3D11_COMPARISON_NEVER;
+     sd.MaxLOD = D3D11_FLOAT32_MAX;
+ 
++    {
++        extern int g_d3d8_tmp_legacy;
++        static ID3D11SamplerState *legacy[4];
++        if (g_d3d8_tmp_legacy) {
++            if (legacy[stage]) {
++                ID3D11SamplerState_Release(legacy[stage]);
++                legacy[stage] = NULL;
++            }
++            hr = ID3D11Device_CreateSamplerState(d3d8_GetD3D11Device(), &sd, &legacy[stage]);
++            if (SUCCEEDED(hr))
++                ID3D11DeviceContext_PSSetSamplers(ctx, stage, 1, &legacy[stage]);
++            return;
++        }
++    }
+     /* A sampler object per distinct description, made once and kept (local
+      * perf change, twoc notes 18.63: one was created and released for every
+      * stage of every draw). The same description binds an object with the
+diff --git a/src/d3d/d3d8_vsh.c b/src/d3d/d3d8_vsh.c
+index 065eef3..14214ce 100644
+--- a/src/d3d/d3d8_vsh.c
++++ b/src/d3d/d3d8_vsh.c
+@@ -954,7 +954,10 @@ BOOL d3d8_vsh_prepare_draw(DWORD handle)
+ 
+     /* The microcode's hash, taken once when the slot was filled (local perf
+      * change, twoc notes 18.63: it was rehashed byte by byte at every draw). */
+-    hash = g_vsh_slot_hash[slot];
++    {
++        extern int g_d3d8_tmp_legacy;
++        hash = g_d3d8_tmp_legacy ? fnv1a_hash(vsh->microcode, (size_t)vsh->length * 4 * sizeof(DWORD)) : g_vsh_slot_hash[slot];
++    }
+ 
+     /* Look up in cache */
+     entry = cache_lookup(hash);
