@@ -1,0 +1,28 @@
+diff --git a/twoc/src/d3d_host.c b/twoc/src/d3d_host.c
+index 695559f..aad487d 100644
+--- a/twoc/src/d3d_host.c
++++ b/twoc/src/d3d_host.c
+@@ -3657,6 +3657,7 @@ static void pace(int mid)
+          * rest of the run, and with it frame interpolation, until a
+          * restart). */
+         r = WaitForSingleObjectEx(g_latency, VSYNC_WAIT_MS, TRUE);
++        { static int stalls; if (getenv("TMP_STALL_AT") && g_st.presents >= (unsigned)atoi(getenv("TMP_STALL_AT")) && stalls < 3) { stalls++; r = WAIT_TIMEOUT; } } /* TMPTEST */
+         QueryPerformanceCounter(&now);
+         g_st.paced++;
+         g_st.paced_wait_ms += ((double)now.QuadPart - left) * 1000.0 / (double)freq.QuadPart;
+@@ -3739,6 +3740,7 @@ double d3dh_display_hz(void)
+ {
+     DWM_TIMING_INFO ti;
+ 
++    if (getenv("TMP_DWM_HZ")) return atof(getenv("TMP_DWM_HZ")); /* TMPTEST */
+     memset(&ti, 0, sizeof(ti));
+     ti.cbSize = sizeof(ti);
+     if (FAILED(DwmGetCompositionTimingInfo(NULL, &ti)) || !ti.rateRefresh.uiDenominator)
+@@ -4046,6 +4048,7 @@ double d3dh_monitor_hz(void)
+ 
+     memset(&mi, 0, sizeof(mi));
+     mi.cbSize = sizeof(mi);
++    if (!g_hwnd && getenv("TMP_MON0")) return 0; /* TMPTEST */
+     if (g_hwnd)
+         mon = MonitorFromWindow(g_hwnd, MONITOR_DEFAULTTONEAREST);
+     else {                              /* step 63: before the window (pacing at the start), the primary monitor's */
