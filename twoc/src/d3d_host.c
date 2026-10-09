@@ -141,6 +141,13 @@
  * bones (c124 on) are interpolated, one that stepped over 1.5 units snaps
  * (RECOMP_D3D_BRIDGE_INTERP_OBJECTS: the limit, 0 camera only). See
  * "Step 62: objects".
+ *
+ * Step 63 (notes 18.66): a mirror image (the hub floor's Crash) and a
+ * flattened one (his stencil shadow) are other kinds than the model, and a
+ * skinned mesh's partner is the nearest by all its bones; an object that
+ * took another kind's place (a menu line changing colour) is drawn as it
+ * is, and one whose nearest of its kind was taken snaps if its partner is
+ * over half its size away (ic_replaced, ic_pair).
  */
 
 #include <stdio.h>
@@ -2366,6 +2373,20 @@ static uint32_t ic_key(const d3dh_draw_t *d)
     return fnv(h, d->index_count);
 }
 
+/* Step 63: a 3x3's handedness: 1 right, -1 mirrored, 0 flat (Crash's
+ * stencil shadow flattens his bones onto the ground: a determinant of +0 or
+ * -0 from frame to frame). */
+static int ic_hand(const double *m)
+{
+    double det = m[0] * (m[4] * m[8] - m[5] * m[7]) - m[1] * (m[3] * m[8] - m[5] * m[6]) +
+                 m[2] * (m[3] * m[7] - m[4] * m[6]), l = 1;
+    int i;
+
+    for (i = 0; i < 3; i++)
+        l *= sqrt(m[3 * i] * m[3 * i] + m[3 * i + 1] * m[3 * i + 1] + m[3 * i + 2] * m[3 * i + 2]);
+    return det > 1e-3 * l ? 1 : det < -1e-3 * l ? -1 : 0;
+}
+
 /* Step 62: a draw's object, with its world `w` and its program constants
  * when it has bones (else NULL). */
 static void ic_obj(rcmd_t *c, uint32_t key, const double *w, const float *k4, const uint32_t *cmask)
@@ -2404,13 +2425,17 @@ static void ic_obj(rcmd_t *c, uint32_t key, const double *w, const float *k4, co
      * first bone sits a few hundredths of a unit from the model's: by
      * position alone the model took its reflection's place in the frame
      * before, and the matrices lerped through the mirror plane. */
-    key = fnv(key, w[0] * (w[5] * w[10] - w[6] * w[9]) - w[1] * (w[4] * w[10] - w[6] * w[8]) +
-                   w[2] * (w[4] * w[9] - w[5] * w[8]) < 0);
-    if (k4) {
-        const float *b = k4 + 4 * IC_BONE_BASE;
-        key = fnv(key, (double)b[0] * ((double)b[5] * b[10] - (double)b[6] * b[9]) -
-                       (double)b[1] * ((double)b[4] * b[10] - (double)b[6] * b[8]) +
-                       (double)b[2] * ((double)b[4] * b[9] - (double)b[5] * b[8]) < 0);
+    {
+        double m[9];
+        for (i = 0; i < 3; i++)
+            for (j = 0; j < 3; j++)
+                m[3 * i + j] = w[4 * i + j];
+        key = fnv(key, (uint32_t)(ic_hand(m) + 1));
+        if (k4) {
+            for (i = 0; i < 9; i++)
+                m[i] = k4[4 * (IC_BONE_BASE + i / 3) + i % 3];
+            key = fnv(key, (uint32_t)(ic_hand(m) + 1));
+        }
     }
     o->key = key;
     o->prev = -1;
@@ -2639,6 +2664,98 @@ static double ic_dist(const iobj_t *o, const iobj_t *p)
     return dd;
 }
 
+/* Step 63: the frame before's unskinned objects by W's origin x. */
+static unsigned *g_ixord;
+static unsigned g_ixord_cap;
+
+static int cmp_ixord(const void *a, const void *b)
+{
+    double x = g_iord_of[*(const unsigned *)a].w[12], y = g_iord_of[*(const unsigned *)b].w[12];
+    return x < y ? -1 : x > y;
+}
+
+/* Step 63: whether the frame before had an object of this key (g_iord
+ * sorted by key). */
+static int ic_kind_before(uint32_t key)
+{
+    const iobj_t *po = g_iord_of;
+    unsigned lo = 0, hi = g_iobj_n[!g_icur];
+
+    while (lo < hi) {
+        unsigned mid = (lo + hi) / 2;
+        if (po[g_iord[mid]].key < key)
+            lo = mid + 1;
+        else
+            hi = mid;
+    }
+    return lo < g_iobj_n[!g_icur] && po[g_iord[lo]].key == key;
+}
+
+/* Step 63: an unskinned object where the frame before had one of another
+ * kind (within half its size, W's first axis), with none of its own kind
+ * within twice that, replaced that one in place: a pause-menu line taking or losing
+ * the highlight's colour (another texture: another key), a HUD digit
+ * changing. Paired by kind, each letter took the same glyph in the line
+ * the highlight left and slid a line across; it is drawn as this frame has
+ * it (marked used 2), and the one it replaced is nobody's partner. The one
+ * replaced may already be another's (a letter and its drop shadow sit
+ * almost on one place, and change together). Only when the frame before
+ * had one of its kind somewhere (else it is "none of its kind" anyway, and
+ * meshes built in world space, W = I, all sit at the origin).
+ * Skinned meshes (W = I, the motion in the bones) don't take part. Called
+ * from ic_pair with the frame before's objects unused. */
+static void ic_replaced(void)
+{
+    unsigned cur = (unsigned)g_icur, prv = !cur, n = g_iobj_n[prv], m = 0, i, j;
+    iobj_t *po = g_iobj[prv];
+
+    if (n > g_ixord_cap) {
+        unsigned *o = (unsigned *)realloc(g_ixord, n * sizeof(unsigned));
+        if (!o)
+            return;
+        g_ixord = o;
+        g_ixord_cap = n;
+    }
+    for (i = 0; i < n; i++)
+        if (po[i].bones < 0)
+            g_ixord[m++] = i;
+    if (!m)
+        return;
+    qsort(g_ixord, m, sizeof(unsigned), cmp_ixord);
+    for (i = 0; i < g_iobj_n[cur]; i++) {
+        iobj_t *o = &g_iobj[cur][i];
+        double tol = 0.5 * sqrt(o->w[0] * o->w[0] + o->w[1] * o->w[1] + o->w[2] * o->w[2]);
+        double d_other = tol * tol, d_same = 1e300;
+        unsigned lo = 0, hi = m, other = (unsigned)-1;
+        if (o->bones >= 0 || !(tol > 0))
+            continue;
+        while (lo < hi) {
+            unsigned mid = (lo + hi) / 2;
+            if (po[g_ixord[mid]].w[12] < o->w[12] - tol)
+                lo = mid + 1;
+            else
+                hi = mid;
+        }
+        for (j = lo; j < m && po[g_ixord[j]].w[12] <= o->w[12] + tol; j++) {
+            const iobj_t *p = &po[g_ixord[j]];
+            double dx = o->w[12] - p->w[12], dy = o->w[13] - p->w[13], dz = o->w[14] - p->w[14];
+            double dd = dx * dx + dy * dy + dz * dz;
+            if (p->key == o->key) {
+                if (dd < d_same)
+                    d_same = dd;
+            } else if (dd < d_other) {  /* taken or not: a letter and its drop shadow both replace theirs */
+                d_other = dd;
+                other = g_ixord[j];
+            }
+        }
+        if (other != (unsigned)-1 && 4 * d_other < d_same && d_same > 0.04 * tol * tol && ic_kind_before(o->key)) {
+            o->used = 2;
+            po[other].used = 1;
+            g_st.interp_obj_swap++;
+        }
+    }
+}
+
 /* Step 62: each object of this frame paired with the frame before's
  * nearest unpaired one of its key, in draw order; none within g_isnap: it
  * stays where it is. Called with g_lock held. */
@@ -2662,10 +2779,15 @@ static void ic_pair(void)
     }
     g_iord_of = po;
     qsort(g_iord, n, sizeof(unsigned), cmp_iord);
+    ic_replaced();                      /* step 63 */
     for (i = 0; i < g_iobj_n[cur]; i++) {
         iobj_t *o = &g_iobj[cur][i];
-        unsigned lo = 0, hi = n, best = (unsigned)-1;
-        double bd = 1e300;
+        unsigned lo = 0, hi = n, best = (unsigned)-1, a1i = (unsigned)-1;
+        double bd = 1e300, a1 = 1e300, rel;
+        if (o->used == 2) {             /* step 63: replaced another in place, drawn as it is */
+            g_st.interp_obj++;
+            continue;
+        }
         while (lo < hi) {
             unsigned mid = (lo + hi) / 2;
             if (po[g_iord[mid]].key < o->key)
@@ -2675,10 +2797,13 @@ static void ic_pair(void)
         }
         for (j = lo; j < n && po[g_iord[j]].key == o->key; j++) {
             const iobj_t *p = &po[g_iord[j]];
-            double dd;
+            double dd = ic_dist(o, p);
+            if (dd < a1) {              /* step 63: the nearest, taken or not */
+                a1 = dd;
+                a1i = g_iord[j];
+            }
             if (p->used)
                 continue;
-            dd = ic_dist(o, p);
             if (dd < bd) {
                 bd = dd;
                 best = g_iord[j];
@@ -2690,9 +2815,18 @@ static void ic_pair(void)
             double dx = o->pos[0] - p->pos[0], dy = o->pos[1] - p->pos[1], dz = o->pos[2] - p->pos[2];
             bd = dx * dx + dy * dy + dz * dz;
         }
+        /* Step 63: a partner over half the object's own size (W's first
+         * axis) away, taken because one of its kind under half as far was
+         * already another's, is a guess: the pause menu's highlighted line
+         * pulses and changes colour together, and its letters took the
+         * same glyph two to four letters off. It snaps. Skinned meshes
+         * (W = I) keep the snap alone. */
+        rel = 1e300;
+        if (o->bones < 0 && best != (unsigned)-1 && a1i != best && 4 * a1 < bd)
+            rel = 0.25 * (o->w[0] * o->w[0] + o->w[1] * o->w[1] + o->w[2] * o->w[2]);
         if (best == (unsigned)-1) {
             g_st.interp_obj_new++;
-        } else if (bd > g_isnap * g_isnap) {
+        } else if (bd > g_isnap * g_isnap || bd > rel) {
             g_st.interp_obj_snap++;
         } else {
             o->prev = (int32_t)best;

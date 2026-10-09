@@ -49,6 +49,7 @@ typedef struct {
      * per sub-frame the program and fixed-function draws moved and the
      * skinned ones whose bones moved. */
     unsigned interp_obj, interp_obj_new, interp_obj_snap, interp_obj_vp, interp_obj_ff, interp_bones, interp_bone_snap;
+    unsigned interp_obj_swap;           /* step 63: in the place of another kind of object (kept as drawn) */
     double interp_matched;              /* sum of each interpolated frame's fraction of draws matched */
 } d3dh_stats_t;
 

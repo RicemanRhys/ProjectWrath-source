@@ -4427,15 +4427,17 @@ static void mirror_swap(void)
                 lmt = st.interp_matched;
             }
             if (st.interp_obj) {                        /* step 62: objects */
-                static unsigned lf, ls, lo, ln, lsn, lvp, lff, lbn, lbs;
+                static unsigned lf, ls, lo, ln, lsn, lvp, lff, lbn, lbs, lsw;
                 unsigned f = st.interp_frames - lf, subs = st.interp_subs - ls;
                 log_block_printf(&lb, "[D3DB] host interpolation objects: a frame %.1f, paired %.1f, none of their"
-                                 " kind %.1f, snapped %.2f; a sub-frame moves program draws %.1f (bones %.1f),"
+                                 " kind %.1f, snapped %.2f, replaced in place %.2f; a sub-frame moves program draws %.1f (bones %.1f),"
                                  " fixed-function %.1f; bones snapped %u\n", f ? (double)(st.interp_obj - lo) / f : 0.0,
-                                 f ? (double)(st.interp_obj - lo - (st.interp_obj_new - ln) - (st.interp_obj_snap - lsn)) / f
+                                 f ? (double)(st.interp_obj - lo - (st.interp_obj_new - ln) - (st.interp_obj_snap - lsn) -
+                                              (st.interp_obj_swap - lsw)) / f
                                    : 0.0,
                                  f ? (double)(st.interp_obj_new - ln) / f : 0.0,
                                  f ? (double)(st.interp_obj_snap - lsn) / f : 0.0,
+                                 f ? (double)(st.interp_obj_swap - lsw) / f : 0.0,
                                  subs ? (double)(st.interp_obj_vp - lvp) / subs : 0.0,
                                  subs ? (double)(st.interp_bones - lbn) / subs : 0.0,
                                  subs ? (double)(st.interp_obj_ff - lff) / subs : 0.0,
@@ -4445,6 +4447,7 @@ static void mirror_swap(void)
                 lo = st.interp_obj;
                 ln = st.interp_obj_new;
                 lsn = st.interp_obj_snap;
+                lsw = st.interp_obj_swap;
                 lvp = st.interp_obj_vp;
                 lff = st.interp_obj_ff;
                 lbn = st.interp_bones;
