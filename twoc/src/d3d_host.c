@@ -2399,6 +2399,19 @@ static void ic_obj(rcmd_t *c, uint32_t key, const double *w, const float *k4, co
         for (j = 0; j < sizeof(keep) / sizeof(keep[0]); j++)
             if (d->rs[i].state == keep[j])
                 key = fnv(fnv(key, d->rs[i].state), d->rs[i].value);
+    /* Step 63: the handedness of W and of the first bone. A reflection (the
+     * hub floor's Crash) draws the same mesh with mirrored bones, and its
+     * first bone sits a few hundredths of a unit from the model's: by
+     * position alone the model took its reflection's place in the frame
+     * before, and the matrices lerped through the mirror plane. */
+    key = fnv(key, w[0] * (w[5] * w[10] - w[6] * w[9]) - w[1] * (w[4] * w[10] - w[6] * w[8]) +
+                   w[2] * (w[4] * w[9] - w[5] * w[8]) < 0);
+    if (k4) {
+        const float *b = k4 + 4 * IC_BONE_BASE;
+        key = fnv(key, (double)b[0] * ((double)b[5] * b[10] - (double)b[6] * b[9]) -
+                       (double)b[1] * ((double)b[4] * b[10] - (double)b[6] * b[8]) +
+                       (double)b[2] * ((double)b[4] * b[9] - (double)b[5] * b[8]) < 0);
+    }
     o->key = key;
     o->prev = -1;
     o->used = 0;
@@ -2597,6 +2610,35 @@ static int cmp_iord(const void *a, const void *b)
     return x < y ? -1 : x > y ? 1 : (i > j) - (i < j);
 }
 
+/* Step 63: how far apart two objects of one key are: W's origins, plus
+ * for skinned meshes the mean over the bones both may move (squared). The
+ * first bone alone left identical meshes drawn twice with nearly the same
+ * root (a model and its reflection, fur passes) to a near tie. */
+static double ic_dist(const iobj_t *o, const iobj_t *p)
+{
+    double dd = 0, bs = 0;
+    unsigned b, nb = 0;
+    int i;
+
+    for (i = 0; i < 3; i++)
+        dd += (o->w[12 + i] - p->w[12 + i]) * (o->w[12 + i] - p->w[12 + i]);
+    if (o->bones >= 0 && p->bones >= 0) {
+        const float *x = g_ibone[g_icur] + o->bones, *y = g_ibone[!g_icur] + p->bones;
+        for (b = 0; b < IC_BONE_REGS / 3; b++) {
+            if (!((o->bmask & p->bmask) >> b & 1))
+                continue;
+            for (i = 0; i < 3; i++) {
+                double d = (double)x[12 * b + 4 * i + 3] - y[12 * b + 4 * i + 3];
+                bs += d * d;
+            }
+            nb++;
+        }
+        if (nb)
+            dd += bs / nb;
+    }
+    return dd;
+}
+
 /* Step 62: each object of this frame paired with the frame before's
  * nearest unpaired one of its key, in draw order; none within g_isnap: it
  * stays where it is. Called with g_lock held. */
@@ -2633,14 +2675,21 @@ static void ic_pair(void)
         }
         for (j = lo; j < n && po[g_iord[j]].key == o->key; j++) {
             const iobj_t *p = &po[g_iord[j]];
-            double dx = o->pos[0] - p->pos[0], dy = o->pos[1] - p->pos[1], dz = o->pos[2] - p->pos[2];
-            double dd = dx * dx + dy * dy + dz * dz;
-            if (!p->used && dd < bd) {
+            double dd;
+            if (p->used)
+                continue;
+            dd = ic_dist(o, p);
+            if (dd < bd) {
                 bd = dd;
                 best = g_iord[j];
             }
         }
         g_st.interp_obj++;
+        if (best != (unsigned)-1) {     /* the snap goes by W's origin and the first bone's, as before */
+            const iobj_t *p = &po[best];
+            double dx = o->pos[0] - p->pos[0], dy = o->pos[1] - p->pos[1], dz = o->pos[2] - p->pos[2];
+            bd = dx * dx + dy * dy + dz * dz;
+        }
         if (best == (unsigned)-1) {
             g_st.interp_obj_new++;
         } else if (bd > g_isnap * g_isnap) {
