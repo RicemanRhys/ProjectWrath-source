@@ -134,6 +134,13 @@
  * between the frame before and this one, each presented at interval 1, so
  * the game still leaves its Swap at 59.94 Hz. Only the camera moves between
  * sub-frames; the last is the frame as recorded. See "Frame interpolation".
+ *
+ * Step 62 (notes 18.65): objects too. Draws are matched with the frame
+ * before's by their kind and the guest mesh (d3d_bridge.c host_draw), the
+ * nearest of a kind by position; a matched object's world matrix and its
+ * bones (c124 on) are interpolated, one that stepped over 1.5 units snaps
+ * (RECOMP_D3D_BRIDGE_INTERP_OBJECTS: the limit, 0 camera only). See
+ * "Step 62: objects".
  */
 
 #include <stdio.h>
@@ -189,6 +196,7 @@ static char g_subdump_trigger[MAX_PATH];        /* RECOMP_D3D_BRIDGE_SUBDUMP=@FI
 static int g_subdump_cuts;                      /* RECOMP_D3D_BRIDGE_SUBDUMP=cuts: each held frame and the 2 after */
 #define REC_ON() (g_replay || g_interp) /* step 60/61: host calls recorded, run at the present */
 static double g_icut_step = 2.0, g_icut_turn = 30.0, g_icut_match = 0.5;   /* RECOMP_D3D_BRIDGE_INTERP_CUT */
+static double g_isnap = 1.5;            /* step 62: RECOMP_D3D_BRIDGE_INTERP_OBJECTS, an object stepping further snaps; 0: objects off */
 static int g_interp_t0;                 /* RECOMP_D3D_BRIDGE_INTERP_T0: sub-frames at t = 0 .. (k-1)/k (a check) */
 static int g_iq_on;                     /* step 61: the visible swap chain's queue is the interpolation's */
 static int g_imid;                      /* RECOMP_D3D_BRIDGE_INTERP_MID=1: sub-frames held to mid-refresh too */
@@ -633,6 +641,9 @@ int d3dh_create(unsigned width, unsigned height, unsigned host_w, unsigned host_
         e = getenv("RECOMP_D3D_BRIDGE_INTERP_CUT");      /* "units,degrees,matched fraction" */
         if (e && *e)
             sscanf(e, "%lf,%lf,%lf", &g_icut_step, &g_icut_turn, &g_icut_match);
+        e = getenv("RECOMP_D3D_BRIDGE_INTERP_OBJECTS");  /* step 62: "0" camera only (stage 2), or the snap step */
+        if (e && *e)
+            g_isnap = atof(e);
         e = getenv("RECOMP_D3D_BRIDGE_SUBDUMP");
         if (e && strcmp(e, "cuts") == 0) {
             g_subdump_cuts = 1;
@@ -1102,6 +1113,7 @@ typedef struct {
             uint8_t pinned[4];
             uint8_t cam, cls;           /* step 61: its camera (IC_NO_CAM: none), IC_* */
             uint8_t n_cpos, cpos[4];    /* step 61: program registers holding the camera's position */
+            int32_t obj;                /* step 62: its object (g_iobj), -1 none */
         } draw;
         struct {
             d3dh_target_t t;
@@ -1632,6 +1644,7 @@ static struct {
     uint16_t inputs;
     uint32_t cmask[6];                  /* step 60: constant registers read directly, bit n = cn */
     int rel_base;                       /* lowest base read relative to a0.x, -1 none */
+    int rel_bones;                      /* step 62: reads relative to a0.x from c124 (XDK c28): bones */
 } g_vs[VS_SLOTS];
 static unsigned g_vs_n;
 static float g_vs_consts[192 * 4];
@@ -1641,13 +1654,15 @@ static int g_vs_consts_valid;
  * operand an instruction's units use (MOV and ARL read A; ADD A and C; MAD
  * A, B and C; the other MAC ops A and B; the ILU C) that selects a constant
  * reads the instruction's constant index, or, with a0.x relative, some
- * register from that index on (its base kept in `rel_base`, the lowest). */
-static void vs_const_reads(const NV2AVshProgram *pg, uint32_t mask[6], int *rel_base)
+ * register from that index on (its base kept in `rel_base`, the lowest;
+ * `bones` set when one base is c124, step 62). */
+static void vs_const_reads(const NV2AVshProgram *pg, uint32_t mask[6], int *rel_base, int *bones)
 {
     int i, s;
 
     memset(mask, 0, 6 * sizeof(uint32_t));
     *rel_base = -1;
+    *bones = 0;
     for (i = 0; i < pg->length; i++) {
         const NV2AVshInstruction *in = &pg->insns[i];
         unsigned used;
@@ -1668,6 +1683,8 @@ static void vs_const_reads(const NV2AVshProgram *pg, uint32_t mask[6], int *rel_
             if (src->rel_addr) {
                 if (*rel_base < 0 || src->reg_index < *rel_base)
                     *rel_base = src->reg_index;
+                if (src->reg_index == 124)
+                    *bones = 1;
             } else {
                 mask[src->reg_index >> 5] |= 1u << (src->reg_index & 31);
             }
@@ -1689,7 +1706,7 @@ static int vs_slot(const d3dh_vprog_t *p)
     g_vs[i].key = p->key;
     d3d8_vsh_parse((const DWORD *)p->code, (int)p->n_insns, &parsed);
     g_vs[i].inputs = parsed.inputs_read;
-    vs_const_reads(&parsed, g_vs[i].cmask, &g_vs[i].rel_base);
+    vs_const_reads(&parsed, g_vs[i].cmask, &g_vs[i].rel_base, &g_vs[i].rel_bones);
     {
         int k, n = 0, lo = -1, hi = -1;
         for (k = 0; k < 192; k++)
@@ -1702,7 +1719,7 @@ static int vs_slot(const d3dh_vprog_t *p)
         fprintf(stderr, "[D3DB] host program %08X (%u instructions): reads %d constant registers (c%d-c%d)%s",
                 p->key, p->n_insns, n, lo, hi, g_vs[i].rel_base >= 0 ? ", and relative to a0.x from c" : "\n");
         if (g_vs[i].rel_base >= 0)
-            fprintf(stderr, "%d\n", g_vs[i].rel_base);
+            fprintf(stderr, "%d%s\n", g_vs[i].rel_base, g_vs[i].rel_bones && g_vs[i].rel_base != 124 ? " and c124" : "");
     }
     if (FAILED(d3d8_vsh_create_shader((const DWORD *)p->code, (int)p->n_insns, &g_vs[i].handle))) {
         g_vs[i].handle = 0;
@@ -1949,6 +1966,7 @@ static int rec_draw(const d3dh_draw_t *d)
     }
     rc_target(d->target.data);
     c->u.draw.cam = 0xFF;
+    c->u.draw.obj = -1;
     if (g_interp) {                     /* step 61 */
         o->camera = d->camera ? (const float *)ra_dup(d->camera, 32 * sizeof(float)) : NULL;
         ic_record(c);
@@ -2054,7 +2072,7 @@ static void replay_run(void)
  * (WVP P^-1 Cam Cam(t)^-1 P(t))^T and its camera-position registers Cam(t)'s
  * position; a fixed-function draw's view becomes V Cam Cam(t)^-1 and its
  * projection P(t) where it was P. The last sub-frame (t = 1) is the frame as
- * recorded. Objects keep this frame's place (stage 3 moves them too).
+ * recorded. Objects move between their two places too (step 62, below).
  *
  * The k presents go at DXGI interval 1 from inside the game's Swap, so the
  * game still runs 59.94 updates a second. They go as soon as the queue has
@@ -2072,6 +2090,7 @@ static void replay_run(void)
  * before); RECOMP_D3D_BRIDGE_INTERP_REC=FILE appends N frames' draws as
  * interpolation sees them once FILE.go holding N appears;
  * RECOMP_D3D_BRIDGE_INTERP_CUT=units,degrees,fraction sets the cut rule,
+ * RECOMP_D3D_BRIDGE_INTERP_OBJECTS=units the object snap (0: camera only),
  * RECOMP_D3D_BRIDGE_INTERP_QUEUE=buffers,latency the queue and
  * RECOMP_D3D_BRIDGE_INTERP_MID=1 holds sub-frames to mid-refresh again. */
 enum { IC_NONE, IC_VP, IC_FF, IC_FF_PROJ };
@@ -2094,6 +2113,43 @@ static struct {
     int on;
     float c[16], vfix[16], dp[16], pos[3];
 } g_isub[IC_CAMS];                      /* this sub-frame's corrections, by camera */
+static double g_it;                     /* this sub-frame's t */
+
+/* Step 62: objects. A 3D draw interpolated with its camera (IC_VP, IC_FF*)
+ * whose mesh the bridge knows (d3dh_draw_t.mesh) is an object: its key (its
+ * kind, a few render states and the mesh), its world W (row vectors: a
+ * program draw's factored (WVP) P^-1 Cam, a fixed-function draw's world
+ * matrix) and, for a program that reads relative to a0.x from c124 (XDK
+ * c28, the skinned meshes), the bones there: 3 registers each, the rows of a
+ * 3x4 world-space matrix (a bone with a register the program also reads
+ * directly is not one: left alone). At the present each object is paired with the
+ * frame before's nearest unpaired one of its key (by W's origin plus the
+ * first bone's); one further than g_isnap (1.5 units: a teleport, a respawn)
+ * or with none stays where this frame has it (camera-only, as in stage 2).
+ * A paired object that moved is drawn at W(t) and its bones at B(t), each
+ * interpolated as a rotation (slerp), its axes' lengths and its origin
+ * (lerp), or element by element when it isn't a rotation and scale; a bone
+ * that stepped further than 4 g_isnap is left as it is (a limb swings
+ * further than an object steps; a register the program doesn't read may
+ * hold anything). */
+#define IC_BONE_BASE 124
+#define IC_BONE_REGS 66                 /* 22 bones */
+typedef struct {
+    uint32_t key;
+    int32_t prev;                       /* its partner in the frame before (index there), -1 none */
+    int32_t bones;                      /* its bones' offset in g_ibone[], -1 none */
+    uint32_t used;                      /* (in the frame before) taken by a partner */
+    uint32_t bmask;                     /* the bones that may move (bit b: c124 + 3b) */
+    double pos[3];                      /* W's origin, plus its first bone's */
+    double w[16];
+} iobj_t;
+static iobj_t *g_iobj[2];
+static unsigned g_iobj_n[2], g_iobj_cap[2];
+static float *g_ibone[2];               /* IC_BONE_REGS float4s an object */
+static unsigned g_ibone_n[2], g_ibone_cap[2];
+static unsigned *g_iord;                /* the frame before's objects, by key */
+static unsigned g_iord_cap;
+static const iobj_t *g_iord_of;
 
 static void m4_mul(const double *a, const double *b, double *o)
 {
@@ -2176,6 +2232,84 @@ static void m3_from_q(const double *q, double *m)
     m[6] = 2 * (x * z - y * w);     m[7] = 2 * (y * z + x * w);     m[8] = 1 - 2 * (x * x + y * y);
 }
 
+static void q_slerp(const double *qa0, const double *qb, double t, double *q)
+{
+    double qa[4], dot, th, sa, sb, n;
+    int j;
+
+    memcpy(qa, qa0, sizeof(qa));
+    dot = qa[0] * qb[0] + qa[1] * qb[1] + qa[2] * qb[2] + qa[3] * qb[3];
+    if (dot < 0) {
+        for (j = 0; j < 4; j++)
+            qa[j] = -qa[j];
+        dot = -dot;
+    }
+    if (dot > 0.9995) {
+        sa = 1 - t;
+        sb = t;
+    } else {
+        th = acos(dot);
+        sa = sin((1 - t) * th) / sin(th);
+        sb = sin(t * th) / sin(th);
+    }
+    for (j = 0; j < 4; j++)
+        q[j] = sa * qa[j] + sb * qb[j];
+    n = sqrt(q[0] * q[0] + q[1] * q[1] + q[2] * q[2] + q[3] * q[3]);
+    for (j = 0; j < 4; j++)
+        q[j] /= n;
+}
+
+/* Step 62: an affine transform as its axes (rows of r, with their lengths)
+ * and its origin t. */
+typedef struct {
+    double r[9], t[3];
+} aff_t;
+
+/* Its rotation and axis lengths, when its axes are orthogonal and
+ * right-handed; 0 if not. */
+static int aff_rot(const aff_t *a, double *q, double *len)
+{
+    double r[9], det;
+    int i, j;
+
+    for (i = 0; i < 3; i++) {
+        double l = sqrt(a->r[3 * i] * a->r[3 * i] + a->r[3 * i + 1] * a->r[3 * i + 1] + a->r[3 * i + 2] * a->r[3 * i + 2]);
+        if (l < 1e-6)
+            return 0;
+        len[i] = l;
+        for (j = 0; j < 3; j++)
+            r[3 * i + j] = a->r[3 * i + j] / l;
+    }
+    for (i = 0; i < 3; i++)
+        for (j = i + 1; j < 3; j++)
+            if (fabs(r[3 * i] * r[3 * j] + r[3 * i + 1] * r[3 * j + 1] + r[3 * i + 2] * r[3 * j + 2]) > 1e-2)
+                return 0;
+    det = r[0] * (r[4] * r[8] - r[5] * r[7]) - r[1] * (r[3] * r[8] - r[5] * r[6]) + r[2] * (r[3] * r[7] - r[4] * r[6]);
+    if (det < 0.98)
+        return 0;
+    q_from_m3(r, q);
+    return 1;
+}
+
+static void aff_lerp(const aff_t *a, const aff_t *b, double t, aff_t *o)
+{
+    double qa[4], qb[4], la[3], lb[3], q[4], r[9];
+    int i, j;
+
+    if (aff_rot(a, qa, la) && aff_rot(b, qb, lb)) {
+        q_slerp(qa, qb, t, q);
+        m3_from_q(q, r);
+        for (i = 0; i < 3; i++)
+            for (j = 0; j < 3; j++)
+                o->r[3 * i + j] = r[3 * i + j] * (la[i] + (lb[i] - la[i]) * t);
+    } else {
+        for (i = 0; i < 9; i++)
+            o->r[i] = a->r[i] + (b->r[i] - a->r[i]) * t;
+    }
+    for (i = 0; i < 3; i++)
+        o->t[i] = a->t[i] + (b->t[i] - a->t[i]) * t;
+}
+
 /* A camera's derived values: P^-1, and its rotation and row lengths when
  * its rows are orthogonal and right-handed (else it is lerped whole). */
 static void icam_prep(icam_t *c)
@@ -2232,12 +2366,70 @@ static uint32_t ic_key(const d3dh_draw_t *d)
     return fnv(h, d->index_count);
 }
 
+/* Step 62: a draw's object, with its world `w` and its program constants
+ * when it has bones (else NULL). */
+static void ic_obj(rcmd_t *c, uint32_t key, const double *w, const float *k4, const uint32_t *cmask)
+{
+    static const uint32_t keep[] = { 14, 19, 20, 22, 52, 55, 56, 168 };  /* ZWRITE, blend, CULL, STENCIL*, COLORWRITE */
+    const d3dh_draw_t *d = &c->u.draw.d;
+    unsigned cur = (unsigned)g_icur, i, j;
+    iobj_t *o;
+
+    if (!d->mesh || g_isnap <= 0)
+        return;
+    if (g_iobj_n[cur] == g_iobj_cap[cur]) {
+        unsigned cap = g_iobj_cap[cur] ? 2 * g_iobj_cap[cur] : 1024;
+        iobj_t *n = (iobj_t *)realloc(g_iobj[cur], cap * sizeof(iobj_t));
+        if (!n)
+            return;
+        g_iobj[cur] = n;
+        g_iobj_cap[cur] = cap;
+    }
+    if (k4 && g_ibone_n[cur] + IC_BONE_REGS * 4 > g_ibone_cap[cur]) {
+        unsigned cap = g_ibone_cap[cur] ? 2 * g_ibone_cap[cur] : 64 * IC_BONE_REGS * 4;
+        float *n = (float *)realloc(g_ibone[cur], cap * sizeof(float));
+        if (!n)
+            return;
+        g_ibone[cur] = n;
+        g_ibone_cap[cur] = cap;
+    }
+    o = &g_iobj[cur][g_iobj_n[cur]];
+    key = fnv(key, d->mesh);
+    for (i = 0; i < d->n_rs; i++)       /* a pass that only marks stencil is another object than the model's */
+        for (j = 0; j < sizeof(keep) / sizeof(keep[0]); j++)
+            if (d->rs[i].state == keep[j])
+                key = fnv(fnv(key, d->rs[i].state), d->rs[i].value);
+    o->key = key;
+    o->prev = -1;
+    o->used = 0;
+    o->bones = -1;
+    o->bmask = 0;
+    memcpy(o->w, w, sizeof(o->w));
+    for (i = 0; i < 3; i++)
+        o->pos[i] = w[12 + i];
+    if (k4) {
+        o->bones = (int32_t)g_ibone_n[cur];
+        memcpy(g_ibone[cur] + o->bones, k4 + 4 * IC_BONE_BASE, IC_BONE_REGS * 4 * sizeof(float));
+        g_ibone_n[cur] += IC_BONE_REGS * 4;
+        for (i = 0; i < 3; i++)
+            o->pos[i] += k4[4 * (IC_BONE_BASE + i) + 3];
+        for (i = 0; i < IC_BONE_REGS / 3; i++) {
+            unsigned r = IC_BONE_BASE + 3 * i;
+            if (!((cmask[r >> 5] >> (r & 31) | cmask[(r + 1) >> 5] >> ((r + 1) & 31) |
+                   cmask[(r + 2) >> 5] >> ((r + 2) & 31)) & 1))
+                o->bmask |= 1u << i;
+        }
+    }
+    c->u.draw.obj = (int32_t)g_iobj_n[cur]++;
+}
+
 /* Record time: the draw's camera in this frame's table, its class, and its
  * kind. Called with g_lock held. */
 static void ic_record(rcmd_t *c)
 {
     const d3dh_draw_t *d = &c->u.draw.d;
     unsigned ci, cur = (unsigned)g_icur;
+    uint32_t key = ic_key(d);
     icam_t *cam;
 
     if (g_ikey_n[cur] == g_ikey_cap[cur]) {
@@ -2249,7 +2441,7 @@ static void ic_record(rcmd_t *c)
         }
     }
     if (g_ikey_n[cur] < g_ikey_cap[cur])
-        g_ikey[cur][g_ikey_n[cur]++] = ic_key(d);
+        g_ikey[cur][g_ikey_n[cur]++] = key;
     if (!d->camera)
         return;
     for (ci = g_icam_n[cur]; ci-- > 0;)
@@ -2297,6 +2489,7 @@ static void ic_record(rcmd_t *c)
                 c->u.draw.cpos[c->u.draw.n_cpos++] = (uint8_t)r;
         }
         cam->draws++;
+        ic_obj(c, key, w, g_vs[slot].rel_bones ? k4 : NULL, g_vs[slot].cmask);     /* step 62 */
     } else if (d->ff && (d->fvf & D3DFVF_POSITION_MASK) != D3DFVF_XYZRHW) {
         double v[16], cm[16], vc[16];
         int i, j;
@@ -2312,6 +2505,9 @@ static void ic_record(rcmd_t *c)
             if (fabs((double)d->ff->proj[i] - cam->m[16 + i]) > 1e-4 * (1.0 + fabs(cam->m[16 + i])))
                 c->u.draw.cls = IC_FF;
         cam->draws++;
+        m4_from(d->ff->world, v);       /* step 62: an affine world is an object's */
+        if (v[3] == 0 && v[7] == 0 && v[11] == 0 && v[15] == 1)
+            ic_obj(c, key, v, NULL, NULL);
     }
 }
 
@@ -2379,6 +2575,7 @@ static void ic_rec_dump(unsigned swap_no)
             r[8] = (d->ff != NULL) | (d->vprog != NULL) << 1 | d->pillar << 2 | (d->camera != NULL) << 3;
             r[9] = d->vert_count;
             r[10] = d->prim_count;
+            r[11] = d->mesh;                  /* step 62 */
             fwrite(r, 4, 12, f);
             fwrite(d->camera ? d->camera : zero, 4, 32, f);
             fwrite(d->ff ? d->ff->world : zero, 4, 16, f);
@@ -2391,6 +2588,68 @@ static void ic_rec_dump(unsigned swap_no)
         }
     }
     fclose(f);
+}
+
+static int cmp_iord(const void *a, const void *b)
+{
+    unsigned i = *(const unsigned *)a, j = *(const unsigned *)b;
+    uint32_t x = g_iord_of[i].key, y = g_iord_of[j].key;
+    return x < y ? -1 : x > y ? 1 : (i > j) - (i < j);
+}
+
+/* Step 62: each object of this frame paired with the frame before's
+ * nearest unpaired one of its key, in draw order; none within g_isnap: it
+ * stays where it is. Called with g_lock held. */
+static void ic_pair(void)
+{
+    unsigned cur = (unsigned)g_icur, prv = !cur, n = g_iobj_n[prv], i, j;
+    iobj_t *po = g_iobj[prv];
+
+    if (!g_iobj_n[cur])
+        return;
+    if (n > g_iord_cap) {
+        unsigned *o = (unsigned *)realloc(g_iord, n * sizeof(unsigned));
+        if (!o)
+            return;
+        g_iord = o;
+        g_iord_cap = n;
+    }
+    for (i = 0; i < n; i++) {
+        g_iord[i] = i;
+        po[i].used = 0;
+    }
+    g_iord_of = po;
+    qsort(g_iord, n, sizeof(unsigned), cmp_iord);
+    for (i = 0; i < g_iobj_n[cur]; i++) {
+        iobj_t *o = &g_iobj[cur][i];
+        unsigned lo = 0, hi = n, best = (unsigned)-1;
+        double bd = 1e300;
+        while (lo < hi) {
+            unsigned mid = (lo + hi) / 2;
+            if (po[g_iord[mid]].key < o->key)
+                lo = mid + 1;
+            else
+                hi = mid;
+        }
+        for (j = lo; j < n && po[g_iord[j]].key == o->key; j++) {
+            const iobj_t *p = &po[g_iord[j]];
+            double dx = o->pos[0] - p->pos[0], dy = o->pos[1] - p->pos[1], dz = o->pos[2] - p->pos[2];
+            double dd = dx * dx + dy * dy + dz * dz;
+            if (!p->used && dd < bd) {
+                bd = dd;
+                best = g_iord[j];
+            }
+        }
+        g_st.interp_obj++;
+        if (best == (unsigned)-1) {
+            g_st.interp_obj_new++;
+        } else if (bd > g_isnap * g_isnap) {
+            g_st.interp_obj_snap++;
+        } else {
+            o->prev = (int32_t)best;
+            po[best].used = 1;
+        }
+    }
 }
 
 /* At the present: how many sub-frames this frame gets (1: shown as it is),
@@ -2509,6 +2768,7 @@ static unsigned ic_begin(unsigned swap_no, int ovl)
     }
     g_st.interp_frames++;
     g_st.interp_matched += frac;
+    ic_pair();
     return k;
 }
 
@@ -2517,6 +2777,7 @@ static void ic_sub(double t)
 {
     unsigned cur = (unsigned)g_icur, prv = !cur, i, j;
 
+    g_it = t;
     for (i = 0; i < g_icam_n[cur]; i++) {
         const icam_t *b = &g_icam[cur][i], *a;
         double ci[16], inv_ci[16], cn[16], vfix[16], tmp[16], c[16], pi[16];
@@ -2527,27 +2788,8 @@ static void ic_sub(double t)
         if (memcmp(a->m, b->m, sizeof(a->m)) == 0)
             continue;                   /* it didn't move */
         if (a->rot_ok && b->rot_ok) {
-            double q[4], qa[4], dot, r[9], th, sa, sb;
-            memcpy(qa, a->q, sizeof(qa));
-            dot = qa[0] * b->q[0] + qa[1] * b->q[1] + qa[2] * b->q[2] + qa[3] * b->q[3];
-            if (dot < 0) {
-                for (j = 0; j < 4; j++)
-                    qa[j] = -qa[j];
-                dot = -dot;
-            }
-            if (dot > 0.9995) {
-                sa = 1 - t;
-                sb = t;
-            } else {
-                th = acos(dot);
-                sa = sin((1 - t) * th) / sin(th);
-                sb = sin(t * th) / sin(th);
-            }
-            for (j = 0; j < 4; j++)
-                q[j] = sa * qa[j] + sb * b->q[j];
-            dot = sqrt(q[0] * q[0] + q[1] * q[1] + q[2] * q[2] + q[3] * q[3]);
-            for (j = 0; j < 4; j++)
-                q[j] /= dot;
+            double q[4], r[9];
+            q_slerp(a->q, b->q, t, q);
             m3_from_q(q, r);
             for (j = 0; j < 3; j++) {
                 double l = a->len[j] + (b->len[j] - a->len[j]) * t;
@@ -2590,40 +2832,134 @@ static void ic_draw(const rcmd_t *c)
     static d3dh_ff_t ff;
     static d3dh_vprog_t vp;
     const d3dh_draw_t *d = &c->u.draw.d;
+    const iobj_t *o = NULL, *p = NULL;
+    const float *pb = NULL;
     d3dh_draw_t m;
-    int i, j, n;
+    double wt[16];
+    int i, j, n, cam_on, w_move = 0, b_move = 0;
 
-    if (c->u.draw.cls == IC_NONE || c->u.draw.cam >= IC_CAMS || !g_isub[c->u.draw.cam].on) {
+    cam_on = c->u.draw.cam < IC_CAMS && g_isub[c->u.draw.cam].on;
+    if (c->u.draw.obj >= 0) {           /* step 62: the object, if it moved */
+        o = &g_iobj[g_icur][c->u.draw.obj];
+        if (o->prev >= 0) {
+            p = &g_iobj[!g_icur][o->prev];
+            for (i = 0; i < 16 && !w_move; i++)
+                w_move = fabs(o->w[i] - p->w[i]) > 1e-5 * (1.0 + fabs(o->w[i]));
+            if (o->bones >= 0 && p->bones >= 0) {
+                pb = g_ibone[!g_icur] + p->bones;
+                b_move = memcmp(pb, d->vprog->consts + 4 * IC_BONE_BASE, IC_BONE_REGS * 4 * sizeof(float)) != 0;
+            }
+        }
+    }
+    if (c->u.draw.cls == IC_NONE || (!cam_on && !w_move && !b_move)) {
         g_st.interp_kept++;
         draw_exec(d, c->u.draw.pin, c->u.draw.pinned);
         return;
     }
+    if (w_move) {                       /* W(t), from the frame before's W and this one's */
+        aff_t a, b, r;
+        for (i = 0; i < 3; i++)
+            for (j = 0; j < 3; j++) {
+                a.r[3 * i + j] = p->w[4 * i + j];
+                b.r[3 * i + j] = o->w[4 * i + j];
+            }
+        for (j = 0; j < 3; j++) {
+            a.t[j] = p->w[12 + j];
+            b.t[j] = o->w[12 + j];
+        }
+        aff_lerp(&a, &b, g_it, &r);
+        for (i = 0; i < 3; i++) {
+            for (j = 0; j < 3; j++)
+                wt[4 * i + j] = r.r[3 * i + j];
+            wt[4 * i + 3] = 0;
+            wt[12 + i] = r.t[i];
+        }
+        wt[15] = 1;
+    }
     m = *d;
     if (c->u.draw.cls == IC_VP) {
-        const float *s = d->vprog->consts, *cc = g_isub[c->u.draw.cam].c;
+        const float *s = d->vprog->consts;
+        double wvp[16], t1[16], t2[16];
         memcpy(k4, s, sizeof(k4));
-        for (j = 0; j < 4; j++)         /* c(96+j)' = sum_n C[n][j] c(96+n): (WVP C)^T */
+        for (j = 0; j < 4; j++)         /* c(96+j) is column j of WVP */
             for (i = 0; i < 4; i++)
-                k4[4 * (96 + j) + i] = cc[j] * s[4 * 96 + i] + cc[4 + j] * s[4 * 97 + i] + cc[8 + j] * s[4 * 98 + i] +
-                                       cc[12 + j] * s[4 * 99 + i];
-        for (n = 0; n < c->u.draw.n_cpos; n++)
-            memcpy(&k4[4 * c->u.draw.cpos[n]], g_isub[c->u.draw.cam].pos, 3 * sizeof(float));
-        g_st.interp_cpos += c->u.draw.n_cpos;
+                wvp[4 * i + j] = s[4 * (96 + j) + i];
+        if (w_move) {                   /* W(t) W^-1 WVP */
+            double wi[16], l[16];
+            if (m4_inv(o->w, wi) == 0) {
+                m4_mul(wt, wi, l);
+                m4_mul(l, wvp, t1);
+                memcpy(wvp, t1, sizeof(wvp));
+                g_st.interp_obj_vp++;
+            }
+        }
+        if (cam_on) {                   /* ... C: the camera at t */
+            m4_from(g_isub[c->u.draw.cam].c, t1);
+            m4_mul(wvp, t1, t2);
+            memcpy(wvp, t2, sizeof(wvp));
+            for (n = 0; n < c->u.draw.n_cpos; n++)
+                memcpy(&k4[4 * c->u.draw.cpos[n]], g_isub[c->u.draw.cam].pos, 3 * sizeof(float));
+            g_st.interp_cpos += c->u.draw.n_cpos;
+        }
+        for (j = 0; j < 4; j++)
+            for (i = 0; i < 4; i++)
+                k4[4 * (96 + j) + i] = (float)wvp[4 * i + j];
+        if (b_move) {                   /* the bones at t */
+            int bi, moved = 0;
+            for (bi = 0; bi < IC_BONE_REGS / 3; bi++) {
+                const float *ba = pb + 12 * bi, *bb = s + 4 * (IC_BONE_BASE + 3 * bi);
+                float *bo = k4 + 4 * (IC_BONE_BASE + 3 * bi);
+                aff_t a, b, r;
+                double dx, dy, dz;
+                if (!(o->bmask >> bi & 1) || memcmp(ba, bb, 12 * sizeof(float)) == 0)
+                    continue;
+                for (i = 0; i < 3; i++) {       /* axis j is column j of the 3x4 rows */
+                    for (j = 0; j < 3; j++) {
+                        a.r[3 * j + i] = ba[4 * i + j];
+                        b.r[3 * j + i] = bb[4 * i + j];
+                    }
+                    a.t[i] = ba[4 * i + 3];
+                    b.t[i] = bb[4 * i + 3];
+                }
+                dx = a.t[0] - b.t[0];
+                dy = a.t[1] - b.t[1];
+                dz = a.t[2] - b.t[2];
+                if (!(dx * dx + dy * dy + dz * dz <= 16 * g_isnap * g_isnap)) {
+                    g_st.interp_bone_snap++;
+                    continue;           /* a bone that jumped, or a register not read */
+                }
+                aff_lerp(&a, &b, g_it, &r);
+                for (i = 0; i < 3; i++) {
+                    for (j = 0; j < 3; j++)
+                        bo[4 * i + j] = (float)r.r[3 * j + i];
+                    bo[4 * i + 3] = (float)r.t[i];
+                }
+                moved = 1;
+            }
+            g_st.interp_bones += moved;
+        }
         vp = *d->vprog;
         vp.consts = k4;
         m.vprog = &vp;
         g_st.interp_vp++;
     } else {
-        double v[16], f[16], o[16];
+        double v[16], f[16], x[16];
         ff = *d->ff;
-        m4_from(d->ff->view, v);
-        m4_from(g_isub[c->u.draw.cam].vfix, f);
-        m4_mul(v, f, o);
-        for (i = 0; i < 16; i++)
-            ff.view[i] = (float)o[i];
-        if (c->u.draw.cls == IC_FF_PROJ)
+        if (cam_on) {
+            m4_from(d->ff->view, v);
+            m4_from(g_isub[c->u.draw.cam].vfix, f);
+            m4_mul(v, f, x);
             for (i = 0; i < 16; i++)
-                ff.proj[i] += g_isub[c->u.draw.cam].dp[i];
+                ff.view[i] = (float)x[i];
+            if (c->u.draw.cls == IC_FF_PROJ)
+                for (i = 0; i < 16; i++)
+                    ff.proj[i] += g_isub[c->u.draw.cam].dp[i];
+        }
+        if (w_move) {
+            for (i = 0; i < 16; i++)
+                ff.world[i] = (float)wt[i];
+            g_st.interp_obj_ff++;
+        }
         m.ff = &ff;
         g_st.interp_ff++;
     }
@@ -2636,6 +2972,8 @@ static void ic_end(void)
     g_icur = !g_icur;
     g_icam_n[g_icur] = 0;
     g_ikey_n[g_icur] = 0;
+    g_iobj_n[g_icur] = 0;
+    g_ibone_n[g_icur] = 0;
     g_iprev_ok = 1;
 }
 
@@ -2650,6 +2988,8 @@ static void ic_apply(void)
     g_iprev_ok = 0;
     g_icam_n[g_icur] = 0;
     g_ikey_n[g_icur] = 0;
+    g_iobj_n[g_icur] = 0;
+    g_ibone_n[g_icur] = 0;
     fprintf(stderr, "[D3DB] host frame rate: %s from present %u\n",
             want ? "the display's, interpolated" : "the game's 59.94", g_st.presents);
 }

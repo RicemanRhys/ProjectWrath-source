@@ -3185,7 +3185,19 @@ static float *sprite_vertices(const float *pts, uint32_t n, uint32_t nr, uint32_
  * and counted. */
 /* Step 61 (notes 18.64): every host draw goes with the game's camera as it
  * is now, its world matrix (0x242620) and projection (0x242398): the host
- * redraws a frame under an interpolated camera from these. Read only. */
+ * redraws a frame under an interpolated camera from these. Read only.
+ * Step 62: and with the mesh the draw entry noted (g_mesh, then cleared). */
+static uint32_t g_mesh;
+
+static uint32_t mesh_id(uint32_t kind, uint32_t a, uint32_t b, uint32_t n)
+{
+    uint32_t h = 2166136261u ^ kind;
+    h = (h ^ a) * 16777619u;
+    h = (h ^ b) * 16777619u;
+    h = (h ^ n) * 16777619u;
+    return h ? h : 1;
+}
+
 static int host_draw(d3dh_draw_t *dr)
 {
     float cam[32];
@@ -3193,6 +3205,8 @@ static int host_draw(d3dh_draw_t *dr)
     memcpy(cam, (const void *)XBOX_PTR(0x00242620u), 64);
     memcpy(cam + 16, (const void *)XBOX_PTR(0x00242398u), 64);
     dr->camera = cam;
+    dr->mesh = g_mesh;
+    g_mesh = 0;
     return d3dh_draw_up(dr);
 }
 
@@ -3384,6 +3398,7 @@ static void mirror_draw_up_path(const d3db_args_t *a, const char *path)
     int z_off, cpu;
 
     draw_checks();
+    g_mesh = mesh_id(1, a->arg[2], a->arg[1], 0);       /* step 62 */
     memset(tex, 0, sizeof(tex));
     memset(&dr, 0, sizeof(dr));
     vs = MEM32(d + DEV_VS_HANDLE);
@@ -3546,6 +3561,7 @@ static void mirror_draw_indexed(const d3db_args_t *a)
     if (vs & 1) {                       /* S5: a vertex program */
         uint32_t base[16], stride[16];
         stream_bases(base, stride);
+        g_mesh = mesh_id(2, a->arg[2], base[0], n);     /* step 62 */
         mirror_draw_vp("Indexed", a->arg[0], n, a->arg[2] ? (const uint16_t *)XBOX_PTR(a->arg[2]) : NULL, base,
                        stride);
         return;
@@ -3580,6 +3596,7 @@ static void mirror_draw_indexed(const d3db_args_t *a)
         return;
     }
     va = phys_to_va(MEM32(vb + RES_DATA)) + MEM32(D3D_STREAMS + 4) + (MEM32(d + DEV_BASE_VERTEX) + lo) * stride;
+    g_mesh = mesh_id(2, a->arg[2], va - lo * stride, n);        /* step 62 */
     dr.prim = prim;
     dr.prim_count = count;
     dr.stride = stride;
@@ -3982,6 +3999,7 @@ static void mirror_draw_imm(void)
     int cpu;
 
     draw_checks();
+    g_mesh = 0;                         /* step 62: built here, no guest mesh */
     g_imm.open = 0;
     if (vs & 1) {
         skip(SKIP_VS_PROGRAM, vs);
@@ -4174,6 +4192,7 @@ static void mirror_draw_vertices(const d3db_args_t *a)
     }
     if (vs & 1) {                       /* a vertex program */
         draw_checks();
+        g_mesh = mesh_id(3, base[0], n, 0);             /* step 62 */
         mirror_draw_vp("Vertices", a->arg[0], n, NULL, base, stride);
         return;
     }
@@ -4406,6 +4425,30 @@ static void mirror_swap(void)
                 lk = st.interp_kept;
                 lcp = st.interp_cpos;
                 lmt = st.interp_matched;
+            }
+            if (st.interp_obj) {                        /* step 62: objects */
+                static unsigned lf, ls, lo, ln, lsn, lvp, lff, lbn, lbs;
+                unsigned f = st.interp_frames - lf, subs = st.interp_subs - ls;
+                log_block_printf(&lb, "[D3DB] host interpolation objects: a frame %.1f, paired %.1f, none of their"
+                                 " kind %.1f, snapped %.2f; a sub-frame moves program draws %.1f (bones %.1f),"
+                                 " fixed-function %.1f; bones snapped %u\n", f ? (double)(st.interp_obj - lo) / f : 0.0,
+                                 f ? (double)(st.interp_obj - lo - (st.interp_obj_new - ln) - (st.interp_obj_snap - lsn)) / f
+                                   : 0.0,
+                                 f ? (double)(st.interp_obj_new - ln) / f : 0.0,
+                                 f ? (double)(st.interp_obj_snap - lsn) / f : 0.0,
+                                 subs ? (double)(st.interp_obj_vp - lvp) / subs : 0.0,
+                                 subs ? (double)(st.interp_bones - lbn) / subs : 0.0,
+                                 subs ? (double)(st.interp_obj_ff - lff) / subs : 0.0,
+                                 st.interp_bone_snap - lbs);
+                lf = st.interp_frames;
+                ls = st.interp_subs;
+                lo = st.interp_obj;
+                ln = st.interp_obj_new;
+                lsn = st.interp_obj_snap;
+                lvp = st.interp_obj_vp;
+                lff = st.interp_obj_ff;
+                lbn = st.interp_bones;
+                lbs = st.interp_bone_snap;
             }
             if (d3db_wide > 0 || g_render_w)    /* 18.56 */
                 log_block_printf(&lb, "[D3DB] host widescreen: projections widened %ld, kept %ld; fixed-function"

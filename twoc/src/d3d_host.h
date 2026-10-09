@@ -44,6 +44,11 @@ typedef struct {
     unsigned interp_k, interp_frames, interp_subs;
     unsigned interp_cut_step, interp_cut_turn, interp_cut_match, interp_cut_first, interp_off;
     unsigned interp_vp, interp_ff, interp_kept, interp_cpos;
+    /* Step 62: objects in interpolated frames (paired with the frame
+     * before's, none of their key, or snapped: stepped over the limit), and
+     * per sub-frame the program and fixed-function draws moved and the
+     * skinned ones whose bones moved. */
+    unsigned interp_obj, interp_obj_new, interp_obj_snap, interp_obj_vp, interp_obj_ff, interp_bones, interp_bone_snap;
     double interp_matched;              /* sum of each interpolated frame's fraction of draws matched */
 } d3dh_stats_t;
 
@@ -138,6 +143,10 @@ typedef struct {
      * (0x242620, rows right, up, forward, position) then its projection
      * (0x242398), 32 floats; NULL: unknown (not interpolated). */
     const float *camera;
+    /* Step 62: the guest mesh the draw takes its vertices from (a hash of
+     * its index and vertex addresses and count), 0 unknown: draws of one
+     * object are matched between frames by it. */
+    uint32_t mesh;
 } d3dh_draw_t;
 
 /* S5: the registers a program reads (bit n = vn), 0 if it reads none or
