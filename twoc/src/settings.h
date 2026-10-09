@@ -13,6 +13,7 @@
  *   pacing      = auto | vsync | limiter | limiter+vsync    RECOMP_PACING
  *   anisotropy  = 1 | 2 | 4 | 8 | 16          RECOMP_ANISOTROPY (1: the game's own filtering)
  *   antialiasing = off | fxaa | smaa | msaa2x | msaa4x | msaa8x    RECOMP_ANTIALIASING (unset: off)
+ *   framerate   = 60 | display                RECOMP_FRAMERATE (unset: 60)
  *   volume      = 0-100                       RECOMP_VOLUME (the game's volume in Windows' mixer)
  *   music_volume   = 0-100                    RECOMP_MUSIC_VOLUME (stream voices: music, ambience, speech)
  *   effects_volume = 0-100                    RECOMP_EFFECTS_VOLUME (buffer voices: the sound effects)
@@ -39,6 +40,12 @@
  * screen-sized render targets multisampled and resolves them before
  * anything reads them (d3d_host.c). Applied at once.
  *
+ * Step 61: the frame rate (notes 18.64). 60 shows each game frame for the
+ * display's whole interval, as before; display draws it again at every
+ * refresh in between with the camera interpolated from the frame before
+ * (d3d_host.c), on a display at 2, 3 or 4 x 59.94 Hz paced by its vsync.
+ * The game still runs 59.94 updates a second. From the next frame.
+ *
  * The settings overlay (overlay.cpp) shows the values in effect and writes
  * the file back when the player changes one.
  */
@@ -62,6 +69,7 @@ typedef struct {
     int pacing;                         /* TWOC_PACING_* */
     int anisotropy;                     /* 1 (off), 2, 4, 8, 16 */
     int antialiasing;                   /* TWOC_AA_* */
+    int framerate;                      /* step 61: 0 the game's 60, 1 the display's (interpolated) */
     int volume;                         /* 0-100; -1: never set (Windows' own level) */
     int music, effects;                 /* 0-100; -1: never set (100, the game's mix) */
     int speakers;                       /* 0 stereo, 1 5.1; -1: never set (stereo) */

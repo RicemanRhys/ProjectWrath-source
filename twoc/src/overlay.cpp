@@ -414,6 +414,27 @@ static int tab_display(twoc_settings_t *s, const ovl_info_t *in)
         snprintf(line, sizeof(line), "Now: limiter %.2f fps%s.", in->frame_hz, in->interval ? ", on vsync" : "");
     help(line);
 
+    {   /* step 61 */
+        static const char *const fr_names[2] = { "Game (60)", "Display (interpolated)" };
+        ImGui::SetNextItemWidth(ImGui::GetFontSize() * 12);
+        if (ImGui::Combo("Frame rate", &s->framerate, fr_names, 2))
+            r |= OVL_CHANGED;
+        more("Display: the game still runs 59.94 updates a second, and each of its frames is drawn again at every "
+             "refresh in between with the camera moved partway from the frame before, so turning and following "
+             "Crash look smooth at 120 or 240 Hz. Objects move at the game's rate. A camera cut shows at once. "
+             "Needs vsync pacing (auto or vsync) on a display at 2, 3 or 4 x 59.94 Hz. Applied at once.");
+        if (!s->framerate)
+            snprintf(line, sizeof(line), "Now: the game's 59.94 fps.");
+        else if (in->interp_on)
+            snprintf(line, sizeof(line), "Now: %u frames each game frame, %.2f fps.", in->interp_k,
+                     in->display_hz);
+        else if (in->interp_k)
+            snprintf(line, sizeof(line), "Now: %u frames each game frame from the next frame.", in->interp_k);
+        else
+            snprintf(line, sizeof(line), "Now: 59.94 fps: this pacing shows one frame each game frame.");
+        help(line);
+    }
+
     ImGui::SeparatorText("Textures");
     {
         int cur = 0;

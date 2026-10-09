@@ -126,12 +126,21 @@
  * (the stand-in back buffer g_bb is then always used) and resolves each into
  * its texture before anything reads it: a CopyRects, a draw that samples the
  * target, a dump, the present. Off, nothing here changes.
+ *
+ * Step 61 (notes 18.64): frame interpolation, camera only. With the frame
+ * rate at "display" (RECOMP_FRAMERATE=display, the overlay) each frame is
+ * recorded (step 60) and, at its present, drawn k times, k the DXGI interval
+ * the display paces at (2 at 119.88 Hz, 4 at 239.76 Hz): at t = 1/k .. 1
+ * between the frame before and this one, each presented at interval 1, so
+ * the game still leaves its Swap at 59.94 Hz. Only the camera moves between
+ * sub-frames; the last is the frame as recorded. See "Frame interpolation".
  */
 
 #include <stdio.h>
 #include <stdint.h>
 #include <stdlib.h>
 #include <string.h>
+#include <math.h>
 
 #include "d3d8_internal.h"      /* xbox_d3d8, and its D3D11 accessors */
 #include <dxgi1_3.h>
@@ -173,6 +182,19 @@ static d3dh_stats_t g_st;
 static LARGE_INTEGER g_qpf;                 /* step 60: QueryPerformanceFrequency */
 static int g_replay;                    /* step 60, RECOMP_D3D_BRIDGE_REPLAY: passes at each present, 0 off */
 static int g_replay_check;              /* RECOMP_D3D_BRIDGE_REPLAY_CHECK: drawn at once too, and compared */
+static volatile LONG g_interp_want;     /* step 61: RECOMP_FRAMERATE=display / the overlay, taken at a frame's end */
+static int g_interp;                    /* step 61: frames recorded and drawn as interpolated sub-frames */
+static unsigned g_subdump_from, g_subdump_to;   /* RECOMP_D3D_BRIDGE_SUBDUMP=A-B: each sub-frame of those swaps */
+static char g_subdump_trigger[MAX_PATH];        /* RECOMP_D3D_BRIDGE_SUBDUMP=@FILE: the next N once FILE (N) appears */
+static int g_subdump_cuts;                      /* RECOMP_D3D_BRIDGE_SUBDUMP=cuts: each held frame and the 2 after */
+#define REC_ON() (g_replay || g_interp) /* step 60/61: host calls recorded, run at the present */
+static double g_icut_step = 2.0, g_icut_turn = 30.0, g_icut_match = 0.5;   /* RECOMP_D3D_BRIDGE_INTERP_CUT */
+static int g_interp_t0;                 /* RECOMP_D3D_BRIDGE_INTERP_T0: sub-frames at t = 0 .. (k-1)/k (a check) */
+static int g_iq_on;                     /* step 61: the visible swap chain's queue is the interpolation's */
+static int g_imid;                      /* RECOMP_D3D_BRIDGE_INTERP_MID=1: sub-frames held to mid-refresh too */
+static unsigned g_iq_buffers = 4, g_iq_latency = 4;     /* RECOMP_D3D_BRIDGE_INTERP_QUEUE=buffers,latency */
+static char g_irec_trigger[MAX_PATH];   /* RECOMP_D3D_BRIDGE_INTERP_REC=FILE: once FILE.go appears, N frames' draws */
+static unsigned g_irec_left;
 
 /* Step 54: borderless fullscreen. g_fs and the client size are the window
  * thread's; g_buf_w x g_buf_h is the visible swap chain's, changed only by a
@@ -595,6 +617,34 @@ int d3dh_create(unsigned width, unsigned height, unsigned host_w, unsigned host_
             fprintf(stderr, "[D3DB] host record and replay: each frame's host draws recorded and drawn at its present"
                     "%s (%d pass%s)\n", g_replay > 1 ? ", again and again as a cost check" : "", g_replay,
                     g_replay > 1 ? "es" : "");
+        e = getenv("RECOMP_FRAMERATE");                 /* step 61 */
+        if (e && _stricmp(e, "display") == 0)
+            d3dh_set_framerate(1);
+        e = getenv("RECOMP_D3D_BRIDGE_INTERP_REC");
+        if (e && *e)
+            snprintf(g_irec_trigger, sizeof(g_irec_trigger), "%s", e);
+        e = getenv("RECOMP_D3D_BRIDGE_INTERP_MID");
+        g_imid = e && *e && strcmp(e, "0") != 0;
+        e = getenv("RECOMP_D3D_BRIDGE_INTERP_QUEUE");
+        if (e && *e)
+            sscanf(e, "%u,%u", &g_iq_buffers, &g_iq_latency);
+        e = getenv("RECOMP_D3D_BRIDGE_INTERP_T0");
+        g_interp_t0 = e && *e && strcmp(e, "0") != 0;
+        e = getenv("RECOMP_D3D_BRIDGE_INTERP_CUT");      /* "units,degrees,matched fraction" */
+        if (e && *e)
+            sscanf(e, "%lf,%lf,%lf", &g_icut_step, &g_icut_turn, &g_icut_match);
+        e = getenv("RECOMP_D3D_BRIDGE_SUBDUMP");
+        if (e && strcmp(e, "cuts") == 0) {
+            g_subdump_cuts = 1;
+        } else if (e && *e == '@') {
+            snprintf(g_subdump_trigger, sizeof(g_subdump_trigger), "%s", e + 1);
+            fprintf(stderr, "[D3DB] host sub-frame dumps on demand: the swaps after %s appears (it holds their"
+                    " count)\n", g_subdump_trigger);
+        } else if (e && *e) {
+            char *x;
+            g_subdump_from = (unsigned)strtoul(e, &x, 0);
+            g_subdump_to = *x == '-' ? (unsigned)strtoul(x + 1, NULL, 0) : g_subdump_from;
+        }
     }
     g_gw = width ? width : 640;
     g_gh = height ? height : 480;
@@ -1050,6 +1100,8 @@ typedef struct {
             d3dh_draw_t d;
             IDirect3DBaseTexture8 *pin[4];
             uint8_t pinned[4];
+            uint8_t cam, cls;           /* step 61: its camera (IC_NO_CAM: none), IC_* */
+            uint8_t n_cpos, cpos[4];    /* step 61: program registers holding the camera's position */
         } draw;
         struct {
             d3dh_target_t t;
@@ -1085,6 +1137,7 @@ static int g_rc_overflow;               /* more than 64: every texture fetched a
 static void clear_exec(const d3dh_target_t *target, uint32_t xdk_flags, uint32_t color, float z, uint32_t stencil);
 static int copy_exec(const d3dh_target_t *dst, const int32_t *rects, const int32_t *points, unsigned n);
 static void freed_exec(uint32_t data, uint32_t bytes);
+static void ic_record(rcmd_t *c);       /* step 61 */
 
 /* `n` bytes from this frame's arena (16-aligned; NULL if out of memory). */
 static void *ra_alloc(size_t n)
@@ -1203,7 +1256,7 @@ void d3dh_memory_freed(uint32_t data, uint32_t bytes)
     if (!g_ready)
         return;
     EnterCriticalSection(&g_lock);
-    if (g_replay && !g_replay_check) {  /* step 60: in its place among the frame's commands */
+    if (REC_ON() && !g_replay_check) {  /* step 60: in its place among the frame's commands */
         rcmd_t *c = rc_push(RC_FREED);
         if (c) {
             c->u.freed.data = data;
@@ -1224,7 +1277,7 @@ void d3dh_clear(const d3dh_target_t *target, uint32_t xdk_flags, uint32_t color,
     if (!g_ready)
         return;
     EnterCriticalSection(&g_lock);
-    if (g_replay) {                     /* step 60 */
+    if (REC_ON()) {                     /* step 60 */
         rcmd_t *c = rc_push(RC_CLEAR);
         if (g_replay_check)
             clear_exec(target, xdk_flags, color, z, stencil);
@@ -1895,52 +1948,718 @@ static int rec_draw(const d3dh_draw_t *d)
         }
     }
     rc_target(d->target.data);
+    c->u.draw.cam = 0xFF;
+    if (g_interp) {                     /* step 61 */
+        o->camera = d->camera ? (const float *)ra_dup(d->camera, 32 * sizeof(float)) : NULL;
+        ic_record(c);
+    }
     return 0;
 }
 
-/* Run this frame's commands `g_replay` times, then forget them. Called with
- * g_lock held, at the present. */
-static void replay_run(void)
+static void ic_draw(const rcmd_t *c);   /* step 61 */
+
+/* One pass over this frame's commands: as recorded, or (step 61) with
+ * `interp` set, the draws under this sub-frame's cameras. Called with g_lock
+ * held, at the present. */
+static void replay_pass(int interp)
 {
     LARGE_INTEGER t0, t1;
-    unsigned p, i, s;
+    unsigned i;
 
-    if (!g_rc_n && !g_ra_bytes)
-        return;
     QueryPerformanceCounter(&t0);
-    for (p = 0; p < (unsigned)g_replay; p++)
-        for (i = 0; i < g_rc_n; i++) {
-            const rcmd_t *c = &g_rc[i];
-            switch (c->kind) {
-            case RC_DRAW:
+    for (i = 0; i < g_rc_n; i++) {
+        const rcmd_t *c = &g_rc[i];
+        switch (c->kind) {
+        case RC_DRAW:
+            if (interp)
+                ic_draw(c);
+            else
                 draw_exec(&c->u.draw.d, c->u.draw.pin, c->u.draw.pinned);
-                break;
-            case RC_CLEAR:
-                clear_exec(&c->u.clear.t, c->u.clear.flags, c->u.clear.color, c->u.clear.z, c->u.clear.stencil);
-                break;
-            case RC_COPY:
-                copy_exec(&c->u.copy.t, c->u.copy.rects, c->u.copy.points, c->u.copy.n);
-                break;
-            case RC_FREED:
-                freed_exec(c->u.freed.data, c->u.freed.bytes);
-                break;
-            }
+            break;
+        case RC_CLEAR:
+            clear_exec(&c->u.clear.t, c->u.clear.flags, c->u.clear.color, c->u.clear.z, c->u.clear.stencil);
+            break;
+        case RC_COPY:
+            copy_exec(&c->u.copy.t, c->u.copy.rects, c->u.copy.points, c->u.copy.n);
+            break;
+        case RC_FREED:
+            freed_exec(c->u.freed.data, c->u.freed.bytes);
+            break;
         }
+    }
+    QueryPerformanceCounter(&t1);
+    g_st.replay_ms += (double)(t1.QuadPart - t0.QuadPart) * 1000.0 / (double)g_qpf.QuadPart;
+}
+
+/* The frame's commands are done with: release what they held, forget them. */
+static void replay_done(void)
+{
+    unsigned i, s;
+
     for (i = 0; i < g_rc_n; i++)
         if (g_rc[i].kind == RC_DRAW)
             for (s = 0; s < 4; s++)
                 if (g_rc[i].u.draw.pin[s])
                     g_rc[i].u.draw.pin[s]->lpVtbl->Release(g_rc[i].u.draw.pin[s]);
-    QueryPerformanceCounter(&t1);
     g_st.replay_frames++;
     g_st.replay_cmds += g_rc_n;
     g_st.replay_bytes += (double)g_ra_bytes;
-    g_st.replay_ms += (double)(t1.QuadPart - t0.QuadPart) * 1000.0 / (double)g_qpf.QuadPart;
     g_rc_n = 0;
     g_ra_cur = NULL;
     g_ra_bytes = 0;
     g_rc_targets_n = 0;
     g_rc_overflow = 0;
+}
+
+/* Run this frame's commands `g_replay` times (once when only interpolation
+ * records), then forget them. Called with g_lock held, at the present. */
+static void replay_run(void)
+{
+    int p;
+
+    if (!g_rc_n && !g_ra_bytes)
+        return;
+    for (p = 0; p < (g_replay > 1 ? g_replay : 1); p++)
+        replay_pass(0);
+    replay_done();
+}
+
+/* ── Step 61: frame interpolation, camera only (notes 18.64) ─────
+ *
+ * Every draw carries the game's camera as it was made (d3d_bridge.c
+ * host_draw): its world matrix Cam (rows right, up, forward, position;
+ * 0x242620) and its projection P (0x242398). A frame's distinct cameras go in
+ * a table, and each draw is classed when it is recorded:
+ *   - IC_FF: a fixed-function 3D draw into the screen whose view is the
+ *     camera's inverse (V Cam = I); IC_FF_PROJ when its projection is P too.
+ *   - IC_VP: a program draw into the screen that reads c96-c99, which hold
+ *     (W V P) transposed (XDK c0-c3), whose world W = (WVP) P^-1 Cam is affine:
+ *     it was made with this camera. The registers it reads that hold the
+ *     camera's position are noted: among those it reads directly, or from
+ *     its a0.x-relative base on (Drain Damage's Wa-Wa programs, c103).
+ *     Only one equal to the camera's position (x, y, z) counts, so a
+ *     table entry doesn't match by chance.
+ *   - IC_NONE: the rest (pre-transformed 2D, render-target passes with their
+ *     own camera, copies and clears are replayed as recorded).
+ * At the present each camera of the frame that 3D draws used is paired with
+ * one of the frame before's: an identical one (it didn't move: nothing to
+ * do), else, most used first, the nearest one left. The frame's main camera
+ * (the one most draws used)
+ * decides whether to interpolate: a step over 2 units or a turn over 30
+ * degrees, or under half the frame's draws matched by kind in the frame
+ * before (program or FVF, pixel shader, textures, target, sizes), is a cut,
+ * and the frame is shown k times as it is. Otherwise sub-frame s of k draws
+ * at t = s/k with Cam(t) (position lerped, rotation slerped, row lengths
+ * lerped) and P(t) (lerped): a program draw's c96-c99 become
+ * (WVP P^-1 Cam Cam(t)^-1 P(t))^T and its camera-position registers Cam(t)'s
+ * position; a fixed-function draw's view becomes V Cam Cam(t)^-1 and its
+ * projection P(t) where it was P. The last sub-frame (t = 1) is the frame as
+ * recorded. Objects keep this frame's place (stage 3 moves them too).
+ *
+ * The k presents go at DXGI interval 1 from inside the game's Swap, so the
+ * game still runs 59.94 updates a second. They go as soon as the queue has
+ * room, not each held to its own mid-refresh (pace), and the queue is 4
+ * buffers and 4 frames deep meanwhile (ic_queue): the game's own work for
+ * its next frame then overlaps the sub-frames already queued (16.7 ms at
+ * most, where the game's interval-4 frames queued up to 33 ms).
+ *
+ * Checks (none needed to play): RECOMP_D3D_BRIDGE_SUBDUMP=A-B, =@FILE (the
+ * next N swaps once FILE holding N appears; "framerate 0|1" in it switches
+ * the setting as the overlay does) or =cuts (each held frame and the 2
+ * after) writes every sub-frame as <dump>subSSSSS_sofk.bmp;
+ * RECOMP_D3D_BRIDGE_INTERP_T0=1 draws sub-frame 1 at t = 0 (this frame's
+ * draws under the frame before's camera: still scenery must match the frame
+ * before); RECOMP_D3D_BRIDGE_INTERP_REC=FILE appends N frames' draws as
+ * interpolation sees them once FILE.go holding N appears;
+ * RECOMP_D3D_BRIDGE_INTERP_CUT=units,degrees,fraction sets the cut rule,
+ * RECOMP_D3D_BRIDGE_INTERP_QUEUE=buffers,latency the queue and
+ * RECOMP_D3D_BRIDGE_INTERP_MID=1 holds sub-frames to mid-refresh again. */
+enum { IC_NONE, IC_VP, IC_FF, IC_FF_PROJ };
+#define IC_CAMS 16
+#define IC_NO_CAM 0xFF
+typedef struct {
+    float m[32];                        /* Cam, then P, as the guest had them */
+    double inv_p[16];
+    double q[4], len[3];                /* Cam's rotation and row lengths, when rot_ok */
+    int p_ok, rot_ok;
+    unsigned draws;                     /* draws classed with it */
+} icam_t;
+static icam_t g_icam[2][IC_CAMS];       /* [g_icur] this frame's, [!g_icur] the frame before's */
+static unsigned g_icam_n[2];
+static int g_icur, g_iprev_ok;          /* g_iprev_ok: the frame before was recorded for this */
+static uint32_t *g_ikey[2];             /* each draw's kind, for matching (the frame before's sorted) */
+static unsigned g_ikey_n[2], g_ikey_cap[2];
+static int g_ipair[IC_CAMS];            /* this frame's camera -> the frame before's, -1 none */
+static struct {
+    int on;
+    float c[16], vfix[16], dp[16], pos[3];
+} g_isub[IC_CAMS];                      /* this sub-frame's corrections, by camera */
+
+static void m4_mul(const double *a, const double *b, double *o)
+{
+    int i, j;
+    for (i = 0; i < 4; i++)
+        for (j = 0; j < 4; j++)
+            o[4 * i + j] = a[4 * i] * b[j] + a[4 * i + 1] * b[4 + j] + a[4 * i + 2] * b[8 + j] + a[4 * i + 3] * b[12 + j];
+}
+
+static int m4_inv(const double *m, double *o)
+{
+    double a[4][8];
+    int i, j, k, p;
+
+    for (i = 0; i < 4; i++)
+        for (j = 0; j < 4; j++) {
+            a[i][j] = m[4 * i + j];
+            a[i][4 + j] = i == j;
+        }
+    for (k = 0; k < 4; k++) {
+        p = k;
+        for (i = k + 1; i < 4; i++)
+            if (fabs(a[i][k]) > fabs(a[p][k]))
+                p = i;
+        if (fabs(a[p][k]) < 1e-12)
+            return -1;
+        if (p != k)
+            for (j = 0; j < 8; j++) {
+                double t = a[k][j];
+                a[k][j] = a[p][j];
+                a[p][j] = t;
+            }
+        for (j = 7; j >= k; j--)
+            a[k][j] /= a[k][k];
+        for (i = 0; i < 4; i++)
+            if (i != k && a[i][k] != 0.0) {
+                double f = a[i][k];
+                for (j = k; j < 8; j++)
+                    a[i][j] -= f * a[k][j];
+            }
+    }
+    for (i = 0; i < 4; i++)
+        for (j = 0; j < 4; j++)
+            o[4 * i + j] = a[i][4 + j];
+    return 0;
+}
+
+static void m4_from(const float *f, double *d)
+{
+    int i;
+    for (i = 0; i < 16; i++)
+        d[i] = f[i];
+}
+
+/* A 3x3 rotation (rows) as a quaternion (x, y, z, w), and back. */
+static void q_from_m3(const double *m, double *q)
+{
+    double tr = m[0] + m[4] + m[8], s;
+
+    if (tr > 0) {
+        s = sqrt(tr + 1.0) * 2;
+        q[3] = 0.25 * s; q[0] = (m[7] - m[5]) / s; q[1] = (m[2] - m[6]) / s; q[2] = (m[3] - m[1]) / s;
+    } else if (m[0] > m[4] && m[0] > m[8]) {
+        s = sqrt(1.0 + m[0] - m[4] - m[8]) * 2;
+        q[3] = (m[7] - m[5]) / s; q[0] = 0.25 * s; q[1] = (m[1] + m[3]) / s; q[2] = (m[2] + m[6]) / s;
+    } else if (m[4] > m[8]) {
+        s = sqrt(1.0 + m[4] - m[0] - m[8]) * 2;
+        q[3] = (m[2] - m[6]) / s; q[0] = (m[1] + m[3]) / s; q[1] = 0.25 * s; q[2] = (m[5] + m[7]) / s;
+    } else {
+        s = sqrt(1.0 + m[8] - m[0] - m[4]) * 2;
+        q[3] = (m[3] - m[1]) / s; q[0] = (m[2] + m[6]) / s; q[1] = (m[5] + m[7]) / s; q[2] = 0.25 * s;
+    }
+}
+
+static void m3_from_q(const double *q, double *m)
+{
+    double x = q[0], y = q[1], z = q[2], w = q[3];
+    m[0] = 1 - 2 * (y * y + z * z); m[1] = 2 * (x * y - z * w);     m[2] = 2 * (x * z + y * w);
+    m[3] = 2 * (x * y + z * w);     m[4] = 1 - 2 * (x * x + z * z); m[5] = 2 * (y * z - x * w);
+    m[6] = 2 * (x * z - y * w);     m[7] = 2 * (y * z + x * w);     m[8] = 1 - 2 * (x * x + y * y);
+}
+
+/* A camera's derived values: P^-1, and its rotation and row lengths when
+ * its rows are orthogonal and right-handed (else it is lerped whole). */
+static void icam_prep(icam_t *c)
+{
+    double p[16], r[9], det;
+    int i, j;
+
+    m4_from(c->m + 16, p);
+    c->p_ok = m4_inv(p, c->inv_p) == 0;
+    c->rot_ok = 0;
+    for (i = 0; i < 3; i++) {
+        double l = sqrt((double)c->m[4 * i] * c->m[4 * i] + (double)c->m[4 * i + 1] * c->m[4 * i + 1] +
+                        (double)c->m[4 * i + 2] * c->m[4 * i + 2]);
+        if (l < 1e-6)
+            return;
+        c->len[i] = l;
+        for (j = 0; j < 3; j++)
+            r[3 * i + j] = c->m[4 * i + j] / l;
+    }
+    for (i = 0; i < 3; i++)
+        for (j = i + 1; j < 3; j++)
+            if (fabs(r[3 * i] * r[3 * j] + r[3 * i + 1] * r[3 * j + 1] + r[3 * i + 2] * r[3 * j + 2]) > 1e-2)
+                return;
+    det = r[0] * (r[4] * r[8] - r[5] * r[7]) - r[1] * (r[3] * r[8] - r[5] * r[6]) + r[2] * (r[3] * r[7] - r[4] * r[6]);
+    if (det < 0.98)
+        return;
+    q_from_m3(r, c->q);
+    c->rot_ok = 1;
+}
+
+static uint32_t fnv(uint32_t h, uint32_t v)
+{
+    int i;
+    for (i = 0; i < 4; i++, v >>= 8)
+        h = (h ^ (v & 0xFF)) * 16777619u;
+    return h;
+}
+
+/* A draw's kind, for matching it with the frame before's. */
+static uint32_t ic_key(const d3dh_draw_t *d)
+{
+    uint32_t h = 2166136261u;
+    unsigned s, i;
+
+    h = fnv(h, d->vprog ? d->vprog->key : d->fvf | 0x80000000u);
+    if (d->ps && d->ps->token)
+        for (i = 0; i < d->ps->n_rs; i++)
+            h = fnv(fnv(h, d->ps->rs[i].state), d->ps->rs[i].value);
+    for (s = 0; s < 4; s++)
+        h = fnv(h, d->tex[s] ? d->tex[s]->key : 0);
+    h = fnv(h, d->target.data);
+    h = fnv(h, d->prim);
+    h = fnv(h, d->vert_count);
+    return fnv(h, d->index_count);
+}
+
+/* Record time: the draw's camera in this frame's table, its class, and its
+ * kind. Called with g_lock held. */
+static void ic_record(rcmd_t *c)
+{
+    const d3dh_draw_t *d = &c->u.draw.d;
+    unsigned ci, cur = (unsigned)g_icur;
+    icam_t *cam;
+
+    if (g_ikey_n[cur] == g_ikey_cap[cur]) {
+        unsigned cap = g_ikey_cap[cur] ? 2 * g_ikey_cap[cur] : 2048;
+        uint32_t *n = (uint32_t *)realloc(g_ikey[cur], cap * sizeof(uint32_t));
+        if (n) {
+            g_ikey[cur] = n;
+            g_ikey_cap[cur] = cap;
+        }
+    }
+    if (g_ikey_n[cur] < g_ikey_cap[cur])
+        g_ikey[cur][g_ikey_n[cur]++] = ic_key(d);
+    if (!d->camera)
+        return;
+    for (ci = g_icam_n[cur]; ci-- > 0;)
+        if (memcmp(g_icam[cur][ci].m, d->camera, sizeof(g_icam[cur][ci].m)) == 0)
+            break;
+    if (ci == (unsigned)-1) {
+        if (g_icam_n[cur] == IC_CAMS)
+            return;
+        ci = g_icam_n[cur]++;
+        memcpy(g_icam[cur][ci].m, d->camera, sizeof(g_icam[cur][ci].m));
+        g_icam[cur][ci].draws = 0;
+        icam_prep(&g_icam[cur][ci]);
+    }
+    c->u.draw.cam = (uint8_t)ci;
+    cam = &g_icam[cur][ci];
+    if (!cam->p_ok || !screen_target(&d->target))
+        return;
+    if (d->vprog) {
+        int slot = vs_slot(d->vprog), r, k;
+        const float *k4 = d->vprog->consts;
+        double wvp[16], cm[16], t[16], w[16];
+        if (slot < 0 || (g_vs[slot].cmask[3] & 0xF) != 0xF)
+            return;
+        for (r = 0; r < 4; r++)
+            for (k = 0; k < 4; k++)
+                wvp[4 * k + r] = k4[4 * (96 + r) + k];          /* c(96+r) is column r of WVP */
+        m4_from(cam->m, cm);
+        m4_mul(wvp, cam->inv_p, t);
+        m4_mul(t, cm, w);
+        for (r = 0; r < 4; r++) {
+            double big = fabs(w[4 * r]) > fabs(w[4 * r + 1]) ? fabs(w[4 * r]) : fabs(w[4 * r + 1]);
+            big = fabs(w[4 * r + 2]) > big ? fabs(w[4 * r + 2]) : big;
+            if (fabs(w[4 * r + 3] - (r == 3)) > 2e-3 * (1.0 + big))
+                return;                 /* not made with this camera */
+        }
+        c->u.draw.cls = IC_VP;
+        for (r = 0; r < 192 && c->u.draw.n_cpos < 4; r++) {
+            if ((!(g_vs[slot].cmask[r >> 5] >> (r & 31) & 1) && (g_vs[slot].rel_base < 0 || r < g_vs[slot].rel_base)) ||
+                (r >= 96 && r < 100))
+                continue;
+            for (k = 0; k < 3; k++)
+                if (fabs((double)k4[4 * r + k] - cam->m[12 + k]) > 1e-3 * (1.0 + fabs(cam->m[12 + k])))
+                    break;
+            if (k == 3)
+                c->u.draw.cpos[c->u.draw.n_cpos++] = (uint8_t)r;
+        }
+        cam->draws++;
+    } else if (d->ff && (d->fvf & D3DFVF_POSITION_MASK) != D3DFVF_XYZRHW) {
+        double v[16], cm[16], vc[16];
+        int i, j;
+        m4_from(d->ff->view, v);
+        m4_from(cam->m, cm);
+        m4_mul(v, cm, vc);
+        for (i = 0; i < 4; i++)
+            for (j = 0; j < 4; j++)
+                if (fabs(vc[4 * i + j] - (i == j)) > 2e-3 * (i == 3 ? 1.0 + fabs(cam->m[12 + (j < 3 ? j : 0)]) : 1.0))
+                    return;
+        c->u.draw.cls = IC_FF_PROJ;
+        for (i = 0; i < 16; i++)
+            if (fabs((double)d->ff->proj[i] - cam->m[16 + i]) > 1e-4 * (1.0 + fabs(cam->m[16 + i])))
+                c->u.draw.cls = IC_FF;
+        cam->draws++;
+    }
+}
+
+static int cmp_u32(const void *a, const void *b)
+{
+    uint32_t x = *(const uint32_t *)a, y = *(const uint32_t *)b;
+    return x < y ? -1 : x > y;
+}
+
+/* The DXGI interval the display paces at, when it is a sub-frame count. */
+static unsigned ic_k_possible(void)
+{
+    return g_latency && g_frame_hz <= 0 && g_interval >= 2 && g_interval <= 4 ? g_interval : 0;
+}
+
+/* RECOMP_D3D_BRIDGE_INTERP_REC (a check): each recorded draw of this frame,
+ * as interpolation sees it, appended to the file. */
+static void ic_rec_dump(unsigned swap_no)
+{
+    char go[MAX_PATH + 8];
+    FILE *f;
+    unsigned i, cur = (unsigned)g_icur;
+
+    snprintf(go, sizeof(go), "%s.go", g_irec_trigger);
+    if (!g_irec_left && GetFileAttributesA(go) != INVALID_FILE_ATTRIBUTES) {
+        FILE *g = fopen(go, "r");
+        if (g) {
+            if (fscanf(g, "%u", &g_irec_left) != 1)
+                g_irec_left = 2;
+            fclose(g);
+        }
+        DeleteFileA(go);
+    }
+    if (!g_irec_left)
+        return;
+    g_irec_left--;
+    f = fopen(g_irec_trigger, "ab");
+    if (!f)
+        return;
+    {
+        uint32_t h[4] = { 0x46524543u, swap_no, g_rc_n, g_icam_n[cur] };
+        fwrite(h, 4, 4, f);
+        for (i = 0; i < g_icam_n[cur]; i++) {
+            uint32_t ci[2] = { g_icam[cur][i].draws, (uint32_t)g_icam[cur][i].p_ok | (uint32_t)g_icam[cur][i].rot_ok << 1 };
+            fwrite(g_icam[cur][i].m, 4, 32, f);
+            fwrite(ci, 4, 2, f);
+        }
+    }
+    for (i = 0; i < g_rc_n; i++) {
+        const rcmd_t *c = &g_rc[i];
+        uint32_t r[12];
+        static const float zero[768];
+        const d3dh_draw_t *d = &c->u.draw.d;
+        memset(r, 0, sizeof(r));
+        r[0] = (uint32_t)c->kind;
+        if (c->kind == RC_DRAW) {
+            int slot = d->vprog ? vs_slot(d->vprog) : -1;
+            r[1] = c->u.draw.cls;
+            r[2] = c->u.draw.cam;
+            r[3] = c->u.draw.n_cpos;
+            r[4] = d->target.data;
+            r[5] = d->target.width | d->target.height << 16;
+            r[6] = d->fvf;
+            r[7] = d->vprog ? d->vprog->key : 0;
+            r[8] = (d->ff != NULL) | (d->vprog != NULL) << 1 | d->pillar << 2 | (d->camera != NULL) << 3;
+            r[9] = d->vert_count;
+            r[10] = d->prim_count;
+            fwrite(r, 4, 12, f);
+            fwrite(d->camera ? d->camera : zero, 4, 32, f);
+            fwrite(d->ff ? d->ff->world : zero, 4, 16, f);
+            fwrite(d->ff ? d->ff->view : zero, 4, 16, f);
+            fwrite(d->ff ? d->ff->proj : zero, 4, 16, f);
+            fwrite(d->vprog ? d->vprog->consts : zero, 4, 768, f);
+            fwrite(slot >= 0 ? g_vs[slot].cmask : (const uint32_t *)zero, 4, 6, f);
+        } else {
+            fwrite(r, 4, 12, f);
+        }
+    }
+    fclose(f);
+}
+
+/* At the present: how many sub-frames this frame gets (1: shown as it is),
+ * the cameras paired. `ovl`: the overlay opens or holds the game this
+ * present (one frame). Called with g_lock held. */
+static unsigned ic_begin(unsigned swap_no, int ovl)
+{
+    static unsigned logged;
+    unsigned cur = (unsigned)g_icur, prv = !cur, i, j, k = ic_k_possible(), mc = IC_NO_CAM, matched = 0;
+    int used[IC_CAMS];
+    double frac = 1.0, step = 0.0, turn = 0.0;
+    const char *why = NULL;
+
+    if (g_irec_trigger[0])
+        ic_rec_dump(swap_no);
+    qsort(g_ikey[cur], g_ikey_n[cur], sizeof(uint32_t), cmp_u32);    /* the frame before's next */
+    g_st.interp_k = k ? k : 1;
+    if (!k || ovl) {
+        g_st.interp_off++;              /* this pacing, or the overlay opening or holding the game */
+        return 1;
+    }
+    if (!g_iprev_ok) {
+        g_st.interp_cut_first++;
+        return 1;
+    }
+    for (i = j = 0; i < g_ikey_n[cur] && j < g_ikey_n[prv];) {
+        if (g_ikey[cur][i] == g_ikey[prv][j]) {
+            matched++;
+            i++;
+            j++;
+        } else if (g_ikey[cur][i] < g_ikey[prv][j]) {
+            i++;
+        } else {
+            j++;
+        }
+    }
+    if (g_ikey_n[cur])
+        frac = (double)matched / g_ikey_n[cur];
+    /* Only cameras 3D draws used take part: each frame starts with the
+     * frame before's camera still in place (the render-target passes and 2D
+     * draw under it), and paired by value it took the main camera's pair. */
+    for (j = 0; j < g_icam_n[prv]; j++)
+        used[j] = !g_icam[prv][j].draws;
+    for (i = 0; i < g_icam_n[cur]; i++) {
+        g_ipair[i] = g_icam[cur][i].draws ? -1 : -2;
+        for (j = 0; j < g_icam_n[prv] && g_ipair[i] == -1; j++)
+            if (!used[j] && memcmp(g_icam[cur][i].m, g_icam[prv][j].m, sizeof(g_icam[cur][i].m)) == 0) {
+                g_ipair[i] = (int)j;
+                used[j] = 1;
+                break;
+            }
+        if (mc == IC_NO_CAM || g_icam[cur][i].draws > g_icam[cur][mc].draws)
+            mc = i;
+    }
+    for (;;) {                          /* the rest: most used first, each to the nearest one left */
+        unsigned bi = IC_NO_CAM, bj = IC_NO_CAM;
+        double best = 1e30;
+        for (i = 0; i < g_icam_n[cur]; i++)
+            if (g_ipair[i] == -1 && (bi == IC_NO_CAM || g_icam[cur][i].draws > g_icam[cur][bi].draws))
+                bi = i;
+        if (bi == IC_NO_CAM)
+            break;
+        for (j = 0; j < g_icam_n[prv]; j++) {
+            const float *x = g_icam[cur][bi].m + 12, *y = g_icam[prv][j].m + 12;
+            double d = ((double)x[0] - y[0]) * ((double)x[0] - y[0]) + ((double)x[1] - y[1]) * ((double)x[1] - y[1]) +
+                       ((double)x[2] - y[2]) * ((double)x[2] - y[2]);
+            if (!used[j] && d < best) {
+                best = d;
+                bj = j;
+            }
+        }
+        if (bj == IC_NO_CAM) {
+            for (i = 0; i < g_icam_n[cur]; i++)
+                if (g_ipair[i] == -1)
+                    g_ipair[i] = -2;    /* none left */
+            break;
+        }
+        g_ipair[bi] = (int)bj;
+        used[bj] = 1;
+    }
+    if (mc != IC_NO_CAM && g_icam[cur][mc].draws) {
+        const icam_t *a = g_ipair[mc] >= 0 ? &g_icam[prv][g_ipair[mc]] : NULL;
+        const icam_t *b = &g_icam[cur][mc];
+        if (!a) {
+            why = "its camera is new";
+            step = 1e9;
+        } else {
+            double dx = (double)b->m[12] - a->m[12], dy = (double)b->m[13] - a->m[13], dz = (double)b->m[14] - a->m[14];
+            step = sqrt(dx * dx + dy * dy + dz * dz);
+            if (a->rot_ok && b->rot_ok) {
+                double dot = fabs(a->q[0] * b->q[0] + a->q[1] * b->q[1] + a->q[2] * b->q[2] + a->q[3] * b->q[3]);
+                turn = 2.0 * acos(dot > 1.0 ? 1.0 : dot) * 57.29577951308232;
+            }
+        }
+    }
+    if (step > g_icut_step) {
+        g_st.interp_cut_step++;
+        why = why ? why : "the camera stepped";
+    } else if (turn > g_icut_turn) {
+        g_st.interp_cut_turn++;
+        why = "the camera turned";
+    } else if (frac < g_icut_match) {
+        g_st.interp_cut_match++;
+        why = "too few draws matched";
+    }
+    if (why) {
+        if (g_subdump_cuts && logged < 40) {
+            g_subdump_from = swap_no;
+            g_subdump_to = swap_no + 2;
+        }
+        if (++logged <= 40)
+            fprintf(stderr, "[D3DB] host interpolation: guest swap %u shown as it is (%s: %.2f units, %.1f deg, %.0f%%"
+                    " of %u draws matched)\n", swap_no, why, step > 1e8 ? 0.0 : step, turn, 100.0 * frac,
+                    g_ikey_n[cur]);
+        return 1;
+    }
+    g_st.interp_frames++;
+    g_st.interp_matched += frac;
+    return k;
+}
+
+/* This sub-frame's corrections, camera by camera, at t (0 < t < 1). */
+static void ic_sub(double t)
+{
+    unsigned cur = (unsigned)g_icur, prv = !cur, i, j;
+
+    for (i = 0; i < g_icam_n[cur]; i++) {
+        const icam_t *b = &g_icam[cur][i], *a;
+        double ci[16], inv_ci[16], cn[16], vfix[16], tmp[16], c[16], pi[16];
+        g_isub[i].on = 0;
+        if (g_ipair[i] < 0 || !b->draws || !b->p_ok)
+            continue;
+        a = &g_icam[prv][g_ipair[i]];
+        if (memcmp(a->m, b->m, sizeof(a->m)) == 0)
+            continue;                   /* it didn't move */
+        if (a->rot_ok && b->rot_ok) {
+            double q[4], qa[4], dot, r[9], th, sa, sb;
+            memcpy(qa, a->q, sizeof(qa));
+            dot = qa[0] * b->q[0] + qa[1] * b->q[1] + qa[2] * b->q[2] + qa[3] * b->q[3];
+            if (dot < 0) {
+                for (j = 0; j < 4; j++)
+                    qa[j] = -qa[j];
+                dot = -dot;
+            }
+            if (dot > 0.9995) {
+                sa = 1 - t;
+                sb = t;
+            } else {
+                th = acos(dot);
+                sa = sin((1 - t) * th) / sin(th);
+                sb = sin(t * th) / sin(th);
+            }
+            for (j = 0; j < 4; j++)
+                q[j] = sa * qa[j] + sb * b->q[j];
+            dot = sqrt(q[0] * q[0] + q[1] * q[1] + q[2] * q[2] + q[3] * q[3]);
+            for (j = 0; j < 4; j++)
+                q[j] /= dot;
+            m3_from_q(q, r);
+            for (j = 0; j < 3; j++) {
+                double l = a->len[j] + (b->len[j] - a->len[j]) * t;
+                ci[4 * j] = r[3 * j] * l;
+                ci[4 * j + 1] = r[3 * j + 1] * l;
+                ci[4 * j + 2] = r[3 * j + 2] * l;
+                ci[4 * j + 3] = b->m[4 * j + 3];
+            }
+            for (j = 12; j < 15; j++)
+                ci[j] = a->m[j] + ((double)b->m[j] - a->m[j]) * t;
+            ci[15] = b->m[15];
+        } else {
+            for (j = 0; j < 16; j++)
+                ci[j] = a->m[j] + ((double)b->m[j] - a->m[j]) * t;
+        }
+        if (m4_inv(ci, inv_ci) != 0)
+            continue;
+        for (j = 0; j < 16; j++)
+            pi[j] = a->m[16 + j] + ((double)b->m[16 + j] - a->m[16 + j]) * t;
+        m4_from(b->m, cn);
+        m4_mul(cn, inv_ci, vfix);
+        m4_mul(b->inv_p, vfix, tmp);
+        m4_mul(tmp, pi, c);
+        for (j = 0; j < 16; j++) {
+            g_isub[i].c[j] = (float)c[j];
+            g_isub[i].vfix[j] = (float)vfix[j];
+            g_isub[i].dp[j] = (float)(pi[j] - b->m[16 + j]);
+        }
+        for (j = 0; j < 3; j++)
+            g_isub[i].pos[j] = (float)ci[12 + j];
+        g_isub[i].on = 1;
+    }
+}
+
+/* A recorded draw in a sub-frame: under its camera's correction, or as it
+ * was. Called with g_lock held. */
+static void ic_draw(const rcmd_t *c)
+{
+    static float k4[192 * 4];
+    static d3dh_ff_t ff;
+    static d3dh_vprog_t vp;
+    const d3dh_draw_t *d = &c->u.draw.d;
+    d3dh_draw_t m;
+    int i, j, n;
+
+    if (c->u.draw.cls == IC_NONE || c->u.draw.cam >= IC_CAMS || !g_isub[c->u.draw.cam].on) {
+        g_st.interp_kept++;
+        draw_exec(d, c->u.draw.pin, c->u.draw.pinned);
+        return;
+    }
+    m = *d;
+    if (c->u.draw.cls == IC_VP) {
+        const float *s = d->vprog->consts, *cc = g_isub[c->u.draw.cam].c;
+        memcpy(k4, s, sizeof(k4));
+        for (j = 0; j < 4; j++)         /* c(96+j)' = sum_n C[n][j] c(96+n): (WVP C)^T */
+            for (i = 0; i < 4; i++)
+                k4[4 * (96 + j) + i] = cc[j] * s[4 * 96 + i] + cc[4 + j] * s[4 * 97 + i] + cc[8 + j] * s[4 * 98 + i] +
+                                       cc[12 + j] * s[4 * 99 + i];
+        for (n = 0; n < c->u.draw.n_cpos; n++)
+            memcpy(&k4[4 * c->u.draw.cpos[n]], g_isub[c->u.draw.cam].pos, 3 * sizeof(float));
+        g_st.interp_cpos += c->u.draw.n_cpos;
+        vp = *d->vprog;
+        vp.consts = k4;
+        m.vprog = &vp;
+        g_st.interp_vp++;
+    } else {
+        double v[16], f[16], o[16];
+        ff = *d->ff;
+        m4_from(d->ff->view, v);
+        m4_from(g_isub[c->u.draw.cam].vfix, f);
+        m4_mul(v, f, o);
+        for (i = 0; i < 16; i++)
+            ff.view[i] = (float)o[i];
+        if (c->u.draw.cls == IC_FF_PROJ)
+            for (i = 0; i < 16; i++)
+                ff.proj[i] += g_isub[c->u.draw.cam].dp[i];
+        m.ff = &ff;
+        g_st.interp_ff++;
+    }
+    draw_exec(&m, c->u.draw.pin, c->u.draw.pinned);
+}
+
+/* After the frame's last sub-frame: this frame becomes the frame before. */
+static void ic_end(void)
+{
+    g_icur = !g_icur;
+    g_icam_n[g_icur] = 0;
+    g_ikey_n[g_icur] = 0;
+    g_iprev_ok = 1;
+}
+
+/* At a frame's end, with nothing recorded: the setting, taken. */
+static void ic_apply(void)
+{
+    int want = g_interp_want && !g_replay_check && g_replay <= 1;
+
+    if (want == g_interp)
+        return;
+    g_interp = want;
+    g_iprev_ok = 0;
+    g_icam_n[g_icur] = 0;
+    g_ikey_n[g_icur] = 0;
+    fprintf(stderr, "[D3DB] host frame rate: %s from present %u\n",
+            want ? "the display's, interpolated" : "the game's 59.94", g_st.presents);
+}
+
+void d3dh_set_framerate(int display)
+{
+    InterlockedExchange(&g_interp_want, display ? 1 : 0);
+    if (display && (g_replay_check || g_replay > 1))
+        fprintf(stderr, "[D3DB] host frame rate: interpolation is off while RECOMP_D3D_BRIDGE_REPLAY%s is set\n",
+                g_replay_check ? "_CHECK" : "=N");
 }
 
 int d3dh_draw_up(const d3dh_draw_t *d)
@@ -1953,7 +2672,7 @@ int d3dh_draw_up(const d3dh_draw_t *d)
     if (g_replay_check) {               /* at once, as without replay, and recorded */
         r = draw_exec(d, NULL, NULL);
         rec_draw(d);
-    } else if (g_replay) {
+    } else if (REC_ON()) {
         LARGE_INTEGER t0, t1;
         QueryPerformanceCounter(&t0);
         r = rec_draw(d);
@@ -2017,7 +2736,7 @@ int d3dh_copy_back(const d3dh_target_t *dst, const int32_t *rects, const int32_t
     if (!g_ready)
         return -1;
     EnterCriticalSection(&g_lock);
-    if (g_replay) {                     /* step 60: the rects and points copied */
+    if (REC_ON()) {                     /* step 60: the rects and points copied */
         rcmd_t *c = rc_push(RC_COPY);
         if (g_replay_check)
             ok = copy_exec(dst, rects, points, n);
@@ -2305,10 +3024,13 @@ static void present_mid_refresh(void)
 }
 
 /* S7: wait for this present's slot on the g_frame_hz clock. Outside g_lock,
+ * (Step 61: `mid` 0, an interpolated sub-frame's present goes as soon as the
+ * queue has room, without the mid-refresh hold: the queue paces them, and
+ * holding each for its own refresh kept the game in its Swap 3+ refreshes.)
  * so a loading thread's host calls never queue behind the wait; the game
  * serialises its swaps anyway, and pace_lock keeps the clock consistent if
  * two threads ever swapped at once. */
-static void pace(void)
+static void pace(int mid)
 {
     static SRWLOCK pace_lock = SRWLOCK_INIT;
     static LARGE_INTEGER freq;
@@ -2347,7 +3069,8 @@ static void pace(void)
             }
         } else {
             misses = 0;
-            present_mid_refresh();
+            if (mid)
+                present_mid_refresh();
         }
         ReleaseSRWLockExclusive(&pace_lock);
         return;
@@ -2651,6 +3374,31 @@ static void copy_unscaled(ID3D11Texture2D *dst, ID3D11Texture2D *src)
 /* The visible swap chain's size: the client's in borderless fullscreen, the
  * host back buffer's in a window. Called with g_lock held, before the frame
  * is copied in (no buffer of it is held). */
+/* Step 61: while frames are interpolated the visible swap chain queues
+ * more: the game works on its next frame (~8 ms upstairs) while the queue
+ * shows the sub-frames already presented, and with the usual 2 buffers and
+ * 2 frames of latency at interval 1 that covered only ~8 ms (56 fps there).
+ * Back to 2 and 2 when it stops. Called with g_lock held, holding no buffer. */
+static void ic_queue(int on)
+{
+    IDXGISwapChain2 *sc2 = NULL;
+    unsigned nb = on ? g_iq_buffers : 2, lat = on ? g_iq_latency : 2;
+    HRESULT hr;
+
+    if (!g_flip || !g_latency || on == g_iq_on)
+        return;
+    nb = nb < 2 ? 2 : nb > 8 ? 8 : nb;
+    lat = lat < 1 ? 1 : lat > 8 ? 8 : lat;
+    hr = IDXGISwapChain1_ResizeBuffers(g_flip, nb, g_buf_w, g_buf_h, DXGI_FORMAT_UNKNOWN, g_flip_flags);
+    if (SUCCEEDED(hr) && SUCCEEDED(IDXGISwapChain1_QueryInterface(g_flip, &IID_IDXGISwapChain2, (void **)&sc2))) {
+        hr = IDXGISwapChain2_SetMaximumFrameLatency(sc2, lat);
+        IDXGISwapChain2_Release(sc2);
+    }
+    g_iq_on = on;
+    fprintf(stderr, "[D3DB] host swap chain: %u buffers, %u frames of latency%s\n", nb, lat,
+            FAILED(hr) ? " (not set: as it was)" : "");
+}
+
 static void flip_fit(void)
 {
     unsigned w = g_fs ? (unsigned)g_client_w : g_w, h = g_fs ? (unsigned)g_client_h : g_h;
@@ -2778,6 +3526,7 @@ static int recreate_flip(UINT flags)
                 IDXGISwapChain2_Release(sc2);
             }
         }
+        g_iq_on = 0;                    /* step 61: made with the usual queue */
         IDXGIFactory2_MakeWindowAssociation(f, g_hwnd, DXGI_MWA_NO_ALT_ENTER | DXGI_MWA_NO_WINDOW_CHANGES);
     } else {
         fprintf(stderr, "[D3DB] host swap chain not made again (0x%08lX): the host stops presenting\n",
@@ -2977,6 +3726,8 @@ static void overlay_apply(twoc_settings_t *was, const twoc_settings_t *s)
     }
     if (s->antialiasing != was->antialiasing)
         set_antialiasing(s->antialiasing);      /* step 58 */
+    if (s->framerate != was->framerate)
+        d3dh_set_framerate(s->framerate);       /* step 61: from the frame after this one */
     if (s->volume != was->volume)
         twoc_audio_set_volume(s->volume);
     if (s->music != was->music)
@@ -3093,6 +3844,8 @@ static int ovl_draw(ID3D11Texture2D *dst, int running)
     in.running = running;
     in.aa = g_aa;                       /* step 58 */
     in.ms_samples = g_bb.ms;
+    in.interp_k = ic_k_possible();      /* step 61 */
+    in.interp_on = g_interp && in.interp_k;
     in.save_note = g_ovs.dirty ? "Saved to crash_twoc.ini when you resume." : g_ovs.note;
     if (SUCCEEDED(ID3D11Device_CreateRenderTargetView(d3d8_GetD3D11Device(), (ID3D11Resource *)dst, NULL, &rtv)))
         r = ovl_frame(rtv, g_buf_w, g_buf_h, overlay_scale(),
@@ -3158,7 +3911,7 @@ static void overlay_pause(void)
         int r = 0;
 
         if (g_latency || g_frame_hz > 0)
-            pace();
+            pace(1);
         else
             Sleep(15);                  /* the executor paces this run, not the host */
         EnterCriticalSection(&g_lock);
@@ -3364,37 +4117,27 @@ static void replay_check(int after, unsigned swap_no)
     }
 }
 
-void d3dh_present(double t_s, unsigned swap_no)
+/* One present: the back buffer (as drawn now) dumped when due and shown at
+ * DXGI `interval`, after its wait. Step 61: sub-frame `sub` of `k` (k 1: the
+ * frame itself; only the last of a frame is a frame's dump). Returns the
+ * running overlay's OVL_* bits. */
+static int present_one(double t_s, unsigned swap_no, unsigned interval, unsigned sub, unsigned k)
 {
     ULONGLONG now;
     HRESULT hr;
     int ovl_r = 0;
     ID3D11Texture2D *src;
 
-    if (!g_ready)
-        return;
-    if (g_replay) {                     /* step 60: the frame's recorded commands, drawn now */
-        EnterCriticalSection(&g_lock);
-        if (g_replay_check)
-            replay_check(0, swap_no);
-        replay_run();
-        if (g_replay_check)
-            replay_check(1, swap_no);
-        LeaveCriticalSection(&g_lock);
-    }
-    if (g_ovl_open && !g_ovs.active) {  /* step 54: Esc */
-        AcquireSRWLockExclusive(&g_pause_lock);
-        if (g_ovl_open && !g_ovs.active)
-            ovl_begin();
-        ReleaseSRWLockExclusive(&g_pause_lock);
-    }
-    if (g_ovl_open && g_ovs.active && g_ovs.s.pause)
-        overlay_pause();                /* this frame waits under the overlay */
-    pace();
+    pace(!k || k == 1 || g_imid);
     EnterCriticalSection(&g_lock);
     src = frame_tex();                  /* step 58: resolved, and through FXAA or SMAA if one is on */
     now = GetTickCount64();
-    if (g_dump_prefix[0] &&
+    if (g_dump_prefix[0] && sub && swap_no >= g_subdump_from && swap_no <= g_subdump_to) {
+        char path[600];                 /* step 61: RECOMP_D3D_BRIDGE_SUBDUMP, every sub-frame */
+        snprintf(path, sizeof(path), "%ssub%05u_%uof%u.bmp", g_dump_prefix, swap_no, sub, k);
+        dump_back_buffer(path, src);
+    }
+    if (g_dump_prefix[0] && sub == k &&
         ((g_frame_work && g_dump_first < DUMP_FIRST_FRAMES) || now - g_last_dump_ms >= DUMP_PERIOD_MS ||
          (g_dump_every && swap_no % g_dump_every == 0) || (swap_no >= g_dump_from && swap_no <= g_dump_to))) {
         char path[600];
@@ -3425,7 +4168,7 @@ void d3dh_present(double t_s, unsigned swap_no)
         if (dst)
             ID3D11Texture2D_Release(dst);
     }
-    hr = IDXGISwapChain1_Present(g_flip, g_interval, 0);
+    hr = IDXGISwapChain1_Present(g_flip, interval, 0);
     g_st.presents++;
     {   /* How many DWM compositions apart consecutive presents land: the
          * index of the first one after each present, from DWM's timing (its
@@ -3506,7 +4249,7 @@ void d3dh_present(double t_s, unsigned swap_no)
                 if (last_pc && fs.PresentCount == last_pc + 1) {
                     UINT d = fs.PresentRefreshCount - last_prc;
                     g_st.displayed[d > 8 ? 8 : d]++;
-                    if (log_on && d != g_interval) {
+                    if (log_on && d != interval) {
                         unsigned *a = work[(fs.PresentCount - 1) & 63], *b = work[fs.PresentCount & 63];
                         fprintf(stderr, "[D3DB] host display: present %u shown %u refreshes after the one before"
                                 " (presents at +%.2f, +%.2f ms after a vblank; %u presents made; work before/this:"
@@ -3528,8 +4271,94 @@ void d3dh_present(double t_s, unsigned swap_no)
         fprintf(stderr, "[D3DB] host Present failed 0x%08lX\n", (unsigned long)hr);
     else if (hr != S_OK && ++g_st.present_status <= 5)   /* e.g. DXGI_STATUS_OCCLUDED: not shown */
         fprintf(stderr, "[D3DB] host Present returned status 0x%08lX\n", (unsigned long)hr);
-    g_frame_work = 0;
+    if (sub == k)
+        g_frame_work = 0;
     LeaveCriticalSection(&g_lock);
+    return ovl_r;
+}
+
+void d3dh_present(double t_s, unsigned swap_no)
+{
+    int ovl_r = 0;
+    unsigned k = 1, sub;
+
+    if (!g_ready)
+        return;
+    if (g_subdump_trigger[0] && GetFileAttributesA(g_subdump_trigger) != INVALID_FILE_ATTRIBUTES) {
+        FILE *f = fopen(g_subdump_trigger, "r");
+        unsigned n = 0;
+        int fr = -1;
+        if (f) {
+            char line[64] = "";
+            if (fgets(line, sizeof(line), f) && sscanf(line, "framerate %d", &fr) != 1 && sscanf(line, "%u", &n) != 1)
+                n = 0;                  /* "framerate 0|1": a test aid, the setting as the overlay changes it */
+            fclose(f);
+        }
+        DeleteFileA(g_subdump_trigger);
+        if (fr >= 0)
+            d3dh_set_framerate(fr);
+        n = fr >= 0 ? 0 : n ? n : 8;
+        if (n) {
+            g_subdump_from = swap_no;
+            g_subdump_to = swap_no + n - 1;
+            fprintf(stderr, "[D3DB] host sub-frame dumps: guest swaps %u-%u\n", g_subdump_from, g_subdump_to);
+        }
+    }
+    if (REC_ON()) {                     /* step 60: the frame's recorded commands, drawn now */
+        EnterCriticalSection(&g_lock);
+        ic_queue(g_interp && ic_k_possible());      /* step 61 */
+        if (g_interp)
+            k = ic_begin(swap_no, g_ovl_open && (!g_ovs.active || g_ovs.s.pause));   /* step 61 */
+        if (k > 1) {
+            ic_sub(g_interp_t0 ? 0.0 : 1.0 / k);
+            replay_pass(1);             /* the first sub-frame */
+        } else {
+            if (g_replay_check)
+                replay_check(0, swap_no);
+            replay_run();
+            if (g_replay_check)
+                replay_check(1, swap_no);
+            if (g_interp)
+                ic_end();
+        }
+        LeaveCriticalSection(&g_lock);
+    }
+    if (k > 1) {                        /* step 61: k presents at interval 1, the game held in its Swap */
+        for (sub = 1; sub <= k; sub++) {
+            if (sub > 1) {
+                EnterCriticalSection(&g_lock);
+                if (sub < k) {
+                    ic_sub((double)(sub - g_interp_t0) / k);
+                    replay_pass(1);
+                } else {
+                    replay_pass(0);     /* t = 1: the frame as recorded */
+                    replay_done();
+                    ic_end();
+                }
+                LeaveCriticalSection(&g_lock);
+            }
+            ovl_r |= present_one(t_s, swap_no, 1, sub, k);
+            g_st.interp_subs++;
+        }
+    } else {
+        if (g_ovl_open && !g_ovs.active) {  /* step 54: Esc */
+            AcquireSRWLockExclusive(&g_pause_lock);
+            if (g_ovl_open && !g_ovs.active)
+                ovl_begin();
+            ReleaseSRWLockExclusive(&g_pause_lock);
+        }
+        if (g_ovl_open && g_ovs.active && g_ovs.s.pause)
+            overlay_pause();            /* this frame waits under the overlay */
+        ovl_r = present_one(t_s, swap_no, g_interval, g_interp ? 1 : 0, g_interp ? 1 : 0);
+    }
+    if (g_interp_want != g_interp || (g_iq_on && !g_interp)) {     /* step 61: between frames, nothing recorded */
+        EnterCriticalSection(&g_lock);
+        if (!g_rc_n)
+            ic_apply();
+        if (!g_interp)
+            ic_queue(0);
+        LeaveCriticalSection(&g_lock);
+    }
     if (g_ovs.active && (ovl_r || !g_ovl_open)) {
         AcquireSRWLockExclusive(&g_pause_lock);
         if (g_ovs.active) {

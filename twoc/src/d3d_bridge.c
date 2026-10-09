@@ -3183,6 +3183,19 @@ static float *sprite_vertices(const float *pts, uint32_t n, uint32_t nr, uint32_
  * texels, so the program is patched to scale those coordinates (S5 part 2,
  * texel_patch); a draw that samples a copy and can't be patched is skipped
  * and counted. */
+/* Step 61 (notes 18.64): every host draw goes with the game's camera as it
+ * is now, its world matrix (0x242620) and projection (0x242398): the host
+ * redraws a frame under an interpolated camera from these. Read only. */
+static int host_draw(d3dh_draw_t *dr)
+{
+    float cam[32];
+
+    memcpy(cam, (const void *)XBOX_PTR(0x00242620u), 64);
+    memcpy(cam + 16, (const void *)XBOX_PTR(0x00242398u), 64);
+    dr->camera = cam;
+    return d3dh_draw_up(dr);
+}
+
 static void mirror_draw_vp(const char *path, uint32_t xdk_prim, uint32_t n, const uint16_t *idx,
                            const uint32_t base[16], const uint32_t stride[16])
 {
@@ -3346,7 +3359,7 @@ static void mirror_draw_vp(const char *path, uint32_t xdk_prim, uint32_t n, cons
                 g_motion_vsc_ret[1], g_motion_vsc_ret[2], g_motion_vsc_ret[3]);  /* drawn by, c0 set by */
         fputc('\n', g_motion);
     }
-    if (d3dh_draw_up(&dr) == 0) {
+    if (host_draw(&dr) == 0) {
         count_mirrored(&dr);
         InterlockedIncrement(&g_mirrored_vp);
     }
@@ -3437,7 +3450,7 @@ static void mirror_draw_up_path(const d3db_args_t *a, const char *path)
     if (drawlog_on() || (g_draw_samples_copy && InterlockedIncrement(&g_ev_copy_draw) <= 10))
         drawlog(path, a->arg[0], a->arg[1], vs, dr.verts, dr.vert_count, dr.stride,
                 g_draw_samples_copy ? "mirrored, samples a CopyRects copy" : "mirrored");
-    if (d3dh_draw_up(&dr) == 0)
+    if (host_draw(&dr) == 0)
         count_mirrored(&dr);
     free(lit);
 }
@@ -3628,7 +3641,7 @@ static void mirror_draw_indexed(const d3db_args_t *a)
                 fnv32(p0, (size_t)dr.vert_count * stride, 2166136261u), (double)p0[0], (double)p0[1],
                 (double)p0[2]);
     }
-    if (d3dh_draw_up(&dr) == 0)
+    if (host_draw(&dr) == 0)
         count_mirrored(&dr);
     free(lit);
     free(list);
@@ -4074,7 +4087,7 @@ static void mirror_draw_imm(void)
               (vs & FVF_POSITION_MASK) == FVF_XYZRHW ? "pre-transformed" : "untransformed", g_imm.prim, g_imm.n,
               tex[0].key);
     }
-    if (d3dh_draw_up(&dr) == 0) {
+    if (host_draw(&dr) == 0) {
         count_mirrored(&dr);
         InterlockedIncrement(&g_mirrored_imm);
         if ((vs & FVF_POSITION_MASK) == FVF_XYZRHW)
@@ -4366,6 +4379,33 @@ static void mirror_swap(void)
                 lms = st.replay_ms;
                 lrec = st.rec_ms;
                 lby = st.replay_bytes;
+            }
+            if (st.interp_frames || st.interp_off) {    /* step 61: frame interpolation */
+                static unsigned lf, ls, lst, ltu, lm, lfi, lo, lvp, lff, lk, lcp;
+                static double lmt;
+                unsigned f = st.interp_frames - lf, subs = st.interp_subs - ls;
+                log_block_printf(&lb, "[D3DB] host interpolation: %u frames each game frame; frames interpolated %u"
+                                 " (draws matched %.1f%%), held: camera step %u, turn %u, matches %u, first %u,"
+                                 " other %u; a sub-frame redraws program draws %.0f, fixed-function %.0f, others"
+                                 " as they were %.0f, camera-position registers %.0f\n", st.interp_k, f,
+                                 f ? 100.0 * (st.interp_matched - lmt) / f : 0.0, st.interp_cut_step - lst,
+                                 st.interp_cut_turn - ltu, st.interp_cut_match - lm, st.interp_cut_first - lfi,
+                                 st.interp_off - lo, subs ? (double)(st.interp_vp - lvp) / subs : 0.0,
+                                 subs ? (double)(st.interp_ff - lff) / subs : 0.0,
+                                 subs ? (double)(st.interp_kept - lk) / subs : 0.0,
+                                 subs ? (double)(st.interp_cpos - lcp) / subs : 0.0);
+                lf = st.interp_frames;
+                ls = st.interp_subs;
+                lst = st.interp_cut_step;
+                ltu = st.interp_cut_turn;
+                lm = st.interp_cut_match;
+                lfi = st.interp_cut_first;
+                lo = st.interp_off;
+                lvp = st.interp_vp;
+                lff = st.interp_ff;
+                lk = st.interp_kept;
+                lcp = st.interp_cpos;
+                lmt = st.interp_matched;
             }
             if (d3db_wide > 0 || g_render_w)    /* 18.56 */
                 log_block_printf(&lb, "[D3DB] host widescreen: projections widened %ld, kept %ld; fixed-function"

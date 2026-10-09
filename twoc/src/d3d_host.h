@@ -37,6 +37,14 @@ typedef struct {
     unsigned replay_frames, replay_cmds, replay_pins, rec_draws;    /* step 60: record and replay */
     double replay_ms, rec_ms, replay_bytes;
     unsigned replay_checked, replay_check_diff;     /* step 60: RECOMP_D3D_BRIDGE_REPLAY_CHECK */
+    /* Step 61: frame interpolation. Frames drawn as sub-frames (`interp_k`
+     * each, the last), and those held instead: a camera step or turn over the
+     * limit, too few draws matched, no frame before, or another reason (the
+     * overlay, a cost check). Draws redrawn per sub-frame by kind. */
+    unsigned interp_k, interp_frames, interp_subs;
+    unsigned interp_cut_step, interp_cut_turn, interp_cut_match, interp_cut_first, interp_off;
+    unsigned interp_vp, interp_ff, interp_kept, interp_cpos;
+    double interp_matched;              /* sum of each interpolated frame's fraction of draws matched */
 } d3dh_stats_t;
 
 /* A state already in xbox_d3d8's (PC D3D8) numbering and values. */
@@ -126,6 +134,10 @@ typedef struct {
     const d3dh_ps_t *ps;                /* NULL: fixed function */
     const d3dh_vprog_t *vprog;          /* S5, NULL: the FVF `fvf` */
     int pillar;                         /* 18.56: a 3D draw with a 4:3 projection: its viewport pillarboxed */
+    /* Step 61: the game's camera as the draw was made: its world matrix
+     * (0x242620, rows right, up, forward, position) then its projection
+     * (0x242398), 32 floats; NULL: unknown (not interpolated). */
+    const float *camera;
 } d3dh_draw_t;
 
 /* S5: the registers a program reads (bit n = vn), 0 if it reads none or
@@ -226,6 +238,9 @@ void d3dh_resize(unsigned host_w, unsigned host_h, double wide);
 void d3dh_set_pacing(unsigned interval, double frame_hz);
 /* The window's monitor's nominal refresh rate (its mode), 0 if unknown. */
 double d3dh_monitor_hz(void);
+/* Step 61: "Frame rate: display": interpolated sub-frames at each present
+ * (on 1, off 0), from the next frame. */
+void d3dh_set_framerate(int display);
 /* For the controller poll (recomp_manual.c): 1 while the overlay is open;
  * *closes counts the times it has closed. Callable with the bridge off. */
 int d3dh_overlay_input(unsigned *closes);
