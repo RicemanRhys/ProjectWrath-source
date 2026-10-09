@@ -246,6 +246,10 @@ void d3dh_set_apply(d3dh_apply_fn fn);
 void d3dh_resize(unsigned host_w, unsigned host_h, double wide);
 /* New pacing, as d3dh_create's `interval` and `frame_hz`. */
 void d3dh_set_pacing(unsigned interval, double frame_hz);
+/* Step 63: why the pacing about to be set (d3dh_create, d3dh_set_pacing)
+ * isn't the display's vsync, for the log and the overlay when frame
+ * interpolation can't run; "" or NULL when it is. */
+void d3dh_pacing_note(const char *why);
 /* The window's monitor's nominal refresh rate (its mode), 0 if unknown. */
 double d3dh_monitor_hz(void);
 /* Step 61: "Frame rate: display": interpolated sub-frames at each present

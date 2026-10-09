@@ -431,7 +431,8 @@ static int tab_display(twoc_settings_t *s, const ovl_info_t *in)
         else if (in->interp_k)
             snprintf(line, sizeof(line), "Now: %u frames each game frame from the next frame.", in->interp_k);
         else
-            snprintf(line, sizeof(line), "Now: 59.94 fps: this pacing shows one frame each game frame.");
+            snprintf(line, sizeof(line), "Now: 59.94 fps, one frame each game frame: %s.",
+                     in->interp_why ? in->interp_why : "this pacing");
         help(line);
     }
 

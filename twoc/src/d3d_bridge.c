@@ -825,23 +825,44 @@ static double present_hz(uint32_t xdk)
  * limiter's clock isn't locked to the display, so its frames landed 3, 4 or 5
  * refreshes apart: step 41's micro-stutter, with the game's own frames steady.
  * Only within 0.5% of the rate, for N up to 4 (DXGI's most), and not when
- * RECOMP_D3D_BRIDGE_INTERVAL or _HZ is set. */
+ * RECOMP_D3D_BRIDGE_INTERVAL or _HZ is set.
+ *
+ * Step 63: the rate is the monitor's mode (d3dh_monitor_hz), as for a pacing
+ * chosen during the run, and DWM's (d3dh_display_hz) only when that isn't
+ * known. On a variable-refresh display DWM's rate follows whatever presents
+ * (277.97 Hz once, 18.57); read at the start it could put the limiter on for
+ * the run, and frame interpolation off with it. */
 static void vsync_pacing(unsigned *interval, double *hz)
 {
     const char *vi = getenv("RECOMP_D3D_BRIDGE_INTERVAL"), *vh = getenv("RECOMP_D3D_BRIDGE_HZ");
-    double r;
+    double r, m, d;
     unsigned n;
+    char why[192];
 
-    if (*hz <= 0 || *interval || (vi && *vi) || (vh && *vh))
+    if (*hz <= 0) {
+        d3dh_pacing_note("the game's presents aren't paced by the host (the executor, or an immediate interval)");
         return;
-    r = d3dh_display_hz();
+    }
+    if (*interval || (vi && *vi) || (vh && *vh)) {
+        d3dh_pacing_note("RECOMP_D3D_BRIDGE_INTERVAL or RECOMP_D3D_BRIDGE_HZ is set");
+        return;
+    }
+    m = d3dh_monitor_hz();
+    d = d3dh_display_hz();
+    r = m > 0 ? m : d;
+    if (m > 0 && d > 0 && fabs(m - d) > 0.005 * m)
+        fprintf(stderr, "[D3DB] display: the monitor's mode is %.3f Hz, DWM's rate now %.3f Hz (on a variable-refresh"
+                " display it follows what presents): the mode's rate decides\n", m, d);
     n = r > 0 ? (unsigned)(r / *hz + 0.5) : 0;
     if (n < 1 || n > 4 || fabs(r / n - *hz) > 0.005 * *hz) {
         fprintf(stderr, "[D3DB] display %.3f Hz isn't a multiple of %.3f Hz: the frame limiter paces\n", r, *hz);
+        snprintf(why, sizeof(why), "the display's %.3f Hz isn't 1, 2, 3 or 4 x %.3f Hz", r, *hz);
+        d3dh_pacing_note(why);
         return;
     }
     fprintf(stderr, "[D3DB] display %.3f Hz = %u x %.3f Hz: presents at interval %u, paced by the display\n",
             r, n, r / n, n);
+    d3dh_pacing_note("");
     *interval = n;
     *hz = 0;
 }
@@ -854,6 +875,7 @@ static void vsync_pacing(unsigned *interval, double *hz)
  * executor pacing (no limiter rate) nothing changes. */
 static uint32_t g_pp_interval;          /* the game's XDK presentation interval (CreateDevice) */
 static int g_pacing_mode;               /* the TWOC_PACING_* in effect */
+static int g_framerate_on;              /* step 63: the frame-rate setting as settings_apply last saw it */
 
 static void pacing_for(int mode, int live, unsigned *interval, double *hz)
 {
@@ -877,16 +899,25 @@ static void pacing_for(int mode, int live, unsigned *interval, double *hz)
         const char *vi = getenv("RECOMP_D3D_BRIDGE_INTERVAL"), *vh = getenv("RECOMP_D3D_BRIDGE_HZ");
         n = r > 0 ? (unsigned)(r / *hz + 0.5) : 0;
         if ((vi && *vi) || (vh && *vh) || *interval || n < 1 || n > 4 || fabs(r / n - *hz) > 0.005 * *hz) {
+            char why[192];
             fprintf(stderr, "[D3DB] pacing auto: monitor %.3f Hz isn't a multiple of %.3f Hz: the frame limiter"
                     " paces\n", r, *hz);
+            if ((vi && *vi) || (vh && *vh) || *interval)
+                snprintf(why, sizeof(why), "RECOMP_D3D_BRIDGE_INTERVAL or RECOMP_D3D_BRIDGE_HZ is set");
+            else
+                snprintf(why, sizeof(why), "the display's %.3f Hz isn't 1, 2, 3 or 4 x %.3f Hz", r, *hz);
+            d3dh_pacing_note(why);
             return;
         }
         fprintf(stderr, "[D3DB] pacing auto: monitor %.3f Hz = %u x %.3f Hz: presents at interval %u, paced by"
                 " the display\n", r, n, r / n, n);
+        d3dh_pacing_note("");
         *interval = n;
         *hz = 0;
         return;
     }
+    d3dh_pacing_note(mode == TWOC_PACING_LIMITER ? "the pacing setting is Limiter" :
+                     mode == TWOC_PACING_LIMITER_VSYNC ? "the pacing setting is Limiter + vsync" : "");
     switch (mode) {
     case TWOC_PACING_VSYNC:
         n = r > 0 ? (unsigned)(r / *hz + 0.5) : 1;
@@ -925,11 +956,15 @@ static void settings_apply(const twoc_settings_t *s)
     }
     host_size(g_guest_w ? g_guest_w : 640, g_guest_h ? g_guest_h : 480, &w, &h);
     d3dh_resize(w, h, d3db_wide);
-    if (s->pacing != g_pacing_mode) {   /* only when the pacing itself changed */
+    /* Only when the pacing itself changed, or (step 63) frame interpolation
+     * was turned on under auto pacing: the rate is read again, so a limiter
+     * chosen on a misread rate gives way. */
+    if (s->pacing != g_pacing_mode || (s->framerate && !g_framerate_on && s->pacing == TWOC_PACING_AUTO)) {
         g_pacing_mode = s->pacing;
         pacing_for(s->pacing, 1, &interval, &hz);
         d3dh_set_pacing(interval, hz);
     }
+    g_framerate_on = s->framerate;
 }
 
 /* -DumpDir sets RECOMP_FB_DUMP to "<dir>\shot" for the executor's dumps; the
@@ -965,6 +1000,7 @@ static void mirror_create_device(const d3db_args_t *a)
     g_guest_h = MEM32(pp + 4 * PP_HEIGHT);
     g_pp_interval = MEM32(pp + 4 * PP_INTERVAL);
     g_pacing_mode = twoc_pacing_parse(getenv("RECOMP_PACING"));
+    g_framerate_on = getenv("RECOMP_FRAMERATE") && _stricmp(getenv("RECOMP_FRAMERATE"), "display") == 0;
     pacing_for(g_pacing_mode, 0, &interval, &hz);      /* auto: as before */
     host_size(g_guest_w ? g_guest_w : 640, g_guest_h ? g_guest_h : 480, &host_w, &host_h);
     d3dh_create(g_guest_w, g_guest_h, host_w, host_h, d3db_wide, g_render_w != 0, interval, hz,

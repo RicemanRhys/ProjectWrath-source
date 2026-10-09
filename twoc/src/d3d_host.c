@@ -183,6 +183,12 @@ static int g_dpi_aware;                 /* 18.56: the window in real pixels (a r
 static double g_frame_hz;               /* S7: the frame limiter's rate, 0 = off */
 static HANDLE g_latency;                /* vsync pacing (18.45): the frame-latency waitable object */
 #define VSYNC_WAIT_MS 50                /* the longest a present waits for it (18.46) */
+#define VSYNC_RETRY_S 10                /* step 63: after 3 waits missed, the limiter for this long */
+static HANDLE g_vs_held;                /* step 63: g_latency while the limiter stands in, else NULL */
+static unsigned g_vs_held_interval;
+static LONGLONG g_vs_retry;             /* the QPC tick to try vsync pacing again */
+static SRWLOCK g_why_lock = SRWLOCK_INIT;
+static char g_pace_why[192];            /* step 63: why the pacing is what it is ("" vsync as it should be) */
 static IDirect3DDevice8 *g_dev;
 static ID3D11Texture2D *g_staging;
 static char g_dump_prefix[512];
@@ -2561,6 +2567,46 @@ static unsigned ic_k_possible(void)
     return g_latency && g_frame_hz <= 0 && g_interval >= 2 && g_interval <= 4 ? g_interval : 0;
 }
 
+/* Step 63: why ic_k_possible() is 0, into `buf`. */
+static void ic_why(char *buf, size_t cap)
+{
+    char note[sizeof(g_pace_why)];
+
+    AcquireSRWLockShared(&g_why_lock);
+    memcpy(note, g_pace_why, sizeof(note));
+    ReleaseSRWLockShared(&g_why_lock);
+    if (g_frame_hz > 0)
+        snprintf(buf, cap, "the frame limiter paces (%.2f fps)%s%s", g_frame_hz, note[0] ? ": " : "", note);
+    else if (g_latency && g_interval < 2)
+        snprintf(buf, cap, "the display paces one refresh a frame: needs 2, 3 or 4 x 59.94 Hz%s%s",
+                 note[0] ? "; " : "", note);
+    else if (g_latency)
+        snprintf(buf, cap, "the display paces at interval %u: needs 2, 3 or 4", g_interval);
+    else
+        snprintf(buf, cap, "no vsync pacing (DXGI interval %u, no limiter)%s%s", g_interval, note[0] ? ": " : "",
+                 note);
+}
+
+/* Step 63: a log line each time interpolation stops or starts being
+ * possible while the setting is on. */
+static void ic_log_possible(unsigned k)
+{
+    static char last[256] = "?";
+    char now[256];
+
+    if (k)
+        snprintf(now, sizeof(now), "on: %u frames each game frame", k);
+    else
+        ic_why(now, sizeof(now));
+    if (strcmp(now, last) != 0) {
+        memcpy(last, now, sizeof(last));
+        if (k)
+            fprintf(stderr, "[D3DB] host interpolation %s (display %.3f Hz)\n", now, d3dh_monitor_hz());
+        else
+            fprintf(stderr, "[D3DB] host interpolation off, one frame each game frame: %s\n", now);
+    }
+}
+
 /* RECOMP_D3D_BRIDGE_INTERP_REC (a check): each recorded draw of this frame,
  * as interpolation sees it, appended to the file. */
 static void ic_rec_dump(unsigned swap_no)
@@ -2850,6 +2896,7 @@ static unsigned ic_begin(unsigned swap_no, int ovl)
         ic_rec_dump(swap_no);
     qsort(g_ikey[cur], g_ikey_n[cur], sizeof(uint32_t), cmp_u32);    /* the frame before's next */
     g_st.interp_k = k ? k : 1;
+    ic_log_possible(k);                 /* step 63 */
     if (!k || ovl) {
         g_st.interp_off++;              /* this pacing, or the overlay opening or holding the game */
         return 1;
@@ -3546,6 +3593,20 @@ static void present_mid_refresh(void)
     }
 }
 
+/* Step 63: why the pacing is what it is, for the log and the overlay when
+ * interpolation can't run ("" when the display's vsync paces). */
+static void pace_note(const char *why)
+{
+    AcquireSRWLockExclusive(&g_why_lock);
+    snprintf(g_pace_why, sizeof(g_pace_why), "%s", why ? why : "");
+    ReleaseSRWLockExclusive(&g_why_lock);
+}
+
+void d3dh_pacing_note(const char *why)
+{
+    pace_note(why);
+}
+
 /* S7: wait for this present's slot on the g_frame_hz clock. Outside g_lock,
  * (Step 61: `mid` 0, an interpolated sub-frame's present goes as soon as the
  * queue has room, without the mid-refresh hold: the queue paces them, and
@@ -3563,6 +3624,23 @@ static void pace(int mid)
     LARGE_INTEGER now;
     double period, left;
 
+    if (!g_latency && g_vs_held) {      /* step 63: vsync pacing again after a stall */
+        AcquireSRWLockExclusive(&pace_lock);
+        if (!freq.QuadPart)
+            QueryPerformanceFrequency(&freq);
+        QueryPerformanceCounter(&now);
+        if (!g_latency && g_vs_held && now.QuadPart >= g_vs_retry) {
+            g_latency = g_vs_held;
+            g_interval = g_vs_held_interval;
+            g_frame_hz = 0;
+            g_vs_held = NULL;
+            next = 0;
+            pace_note("");
+            fprintf(stderr, "[D3DB] host: vsync pacing again, interval %u, %d s after the display's stall\n",
+                    g_interval, VSYNC_RETRY_S);
+        }
+        ReleaseSRWLockExclusive(&pace_lock);
+    }
     if (g_latency) {                    /* vsync pacing: wait for room in the queue */
         static int misses;
         DWORD r;
@@ -3575,7 +3653,9 @@ static void pace(int mid)
         /* A few frames at most. It waited up to a second, and the one time
          * the display didn't release a frame in time (a load, 1 run in 6)
          * the game stood still for 1-2 s. Three misses in a row and the
-         * limiter paces for the rest of the run. */
+         * limiter paces, for VSYNC_RETRY_S seconds (step 63: it was the
+         * rest of the run, and with it frame interpolation, until a
+         * restart). */
         r = WaitForSingleObjectEx(g_latency, VSYNC_WAIT_MS, TRUE);
         QueryPerformanceCounter(&now);
         g_st.paced++;
@@ -3583,12 +3663,19 @@ static void pace(int mid)
         if (r == WAIT_TIMEOUT) {
             g_st.paced_late++;
             if (++misses >= 3) {
-                double hz = d3dh_display_hz();
-                g_frame_hz = hz > 0 && g_interval ? hz / g_interval : 60000.0 / 1001.0;
+                char why[160];
+                g_vs_held = g_latency;
+                g_vs_held_interval = g_interval;
+                g_vs_retry = now.QuadPart + (LONGLONG)VSYNC_RETRY_S * freq.QuadPart;
+                g_frame_hz = 60000.0 / 1001.0;  /* the game's rate (DWM's rate over the interval could be off) */
                 g_interval = 0;
                 g_latency = NULL;
-                fprintf(stderr, "[D3DB] host: the display released no frame in %d ms, %d times running;"
-                        " the frame limiter paces from here, %.3f Hz\n", VSYNC_WAIT_MS, misses, g_frame_hz);
+                misses = 0;
+                snprintf(why, sizeof(why), "the display released no frame in %d ms 3 times running (vsync again in"
+                         " %d s)", VSYNC_WAIT_MS, VSYNC_RETRY_S);
+                pace_note(why);
+                fprintf(stderr, "[D3DB] host: the display released no frame in %d ms, 3 times running;"
+                        " the frame limiter paces for %d s, %.3f Hz\n", VSYNC_WAIT_MS, VSYNC_RETRY_S, g_frame_hz);
             }
         } else {
             misses = 0;
@@ -3951,6 +4038,7 @@ static void flip_fit(void)
 double d3dh_monitor_hz(void)
 {
     MONITORINFOEXA mi;
+    HMONITOR mon;
     UINT32 np = 0, nm = 0, i;
     DISPLAYCONFIG_PATH_INFO *paths;
     DISPLAYCONFIG_MODE_INFO *modes;
@@ -3958,7 +4046,13 @@ double d3dh_monitor_hz(void)
 
     memset(&mi, 0, sizeof(mi));
     mi.cbSize = sizeof(mi);
-    if (!g_hwnd || !GetMonitorInfoA(MonitorFromWindow(g_hwnd, MONITOR_DEFAULTTONEAREST), (MONITORINFO *)&mi) ||
+    if (g_hwnd)
+        mon = MonitorFromWindow(g_hwnd, MONITOR_DEFAULTTONEAREST);
+    else {                              /* step 63: before the window (pacing at the start), the primary monitor's */
+        POINT o = { 0, 0 };
+        mon = MonitorFromPoint(o, MONITOR_DEFAULTTOPRIMARY);
+    }
+    if (!GetMonitorInfoA(mon, (MONITORINFO *)&mi) ||
         GetDisplayConfigBufferSizes(QDC_ONLY_ACTIVE_PATHS, &np, &nm) != ERROR_SUCCESS)
         return 0;
     paths = (DISPLAYCONFIG_PATH_INFO *)calloc(np, sizeof(*paths));
@@ -4021,6 +4115,10 @@ static int recreate_flip(UINT flags)
         CloseHandle(g_latency);
         g_latency = NULL;
     }
+    if (g_vs_held) {                    /* step 63 */
+        CloseHandle(g_vs_held);
+        g_vs_held = NULL;
+    }
     ID3D11DeviceContext_Flush(d3d8_GetD3D11Context());
     memset(&sd, 0, sizeof(sd));
     sd.Width = g_buf_w;
@@ -4071,6 +4169,10 @@ void d3dh_set_pacing(unsigned interval, double frame_hz)
         LeaveCriticalSection(&g_lock);
         fprintf(stderr, "[D3DB] host pacing unchanged: the swap chain couldn't be made for it\n");
         return;
+    }
+    if (want && !g_latency && g_vs_held) {      /* step 63: the limiter stood in after a stall: vsync again */
+        g_latency = g_vs_held;
+        g_vs_held = NULL;
     }
     g_interval = interval;
     g_frame_hz = frame_hz > 0 ? frame_hz : 0;
@@ -4267,7 +4369,8 @@ static void overlay_apply(twoc_settings_t *was, const twoc_settings_t *s)
                 controls_pad_is_default(&s->controls) ? "the default" : "changed");
     }
     if (g_apply && (s->widescreen != was->widescreen || s->wide_w != was->wide_w || s->wide_h != was->wide_h ||
-                    strcmp(s->render_size, was->render_size) != 0 || s->pacing != was->pacing))
+                    strcmp(s->render_size, was->render_size) != 0 || s->pacing != was->pacing ||
+                    s->framerate != was->framerate))
         g_apply(s);                     /* d3d_bridge.c: the aspect, the render size, the pacing */
     *was = *s;
 }
@@ -4369,6 +4472,11 @@ static int ovl_draw(ID3D11Texture2D *dst, int running)
     in.ms_samples = g_bb.ms;
     in.interp_k = ic_k_possible();      /* step 61 */
     in.interp_on = g_interp && in.interp_k;
+    if (!in.interp_k) {                 /* step 63 */
+        static char why[256];
+        ic_why(why, sizeof(why));
+        in.interp_why = why;
+    }
     in.save_note = g_ovs.dirty ? "Saved to crash_twoc.ini when you resume." : g_ovs.note;
     if (SUCCEEDED(ID3D11Device_CreateRenderTargetView(d3d8_GetD3D11Device(), (ID3D11Resource *)dst, NULL, &rtv)))
         r = ovl_frame(rtv, g_buf_w, g_buf_h, overlay_scale(),
@@ -4818,8 +4926,16 @@ void d3dh_present(double t_s, unsigned swap_no)
             fclose(f);
         }
         DeleteFileA(g_subdump_trigger);
-        if (fr >= 0)
-            d3dh_set_framerate(fr);
+        if (fr >= 0) {                  /* step 63: through overlay_apply, as the overlay does */
+            if (!g_ovs.have) {
+                twoc_settings_current(&g_ovs.s);
+                g_ovs.s.fullscreen = g_fs;
+                g_ovs.was = g_ovs.s;
+                g_ovs.have = 1;
+            }
+            g_ovs.s.framerate = fr;
+            overlay_apply(&g_ovs.was, &g_ovs.s);
+        }
         n = fr >= 0 ? 0 : n ? n : 8;
         if (n) {
             g_subdump_from = swap_no;

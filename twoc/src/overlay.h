@@ -34,6 +34,7 @@ typedef struct {
     unsigned ms_samples;                /* step 58: MSAA's samples on the back buffer, 0 without */
     unsigned interp_k;                  /* step 61: frames shown a game frame when interpolating (0: can't here) */
     int interp_on;                      /* step 61: interpolating now */
+    const char *interp_why;             /* step 63: why interp_k is 0 */
 } ovl_info_t;
 
 enum { OVL_CHANGED = 1, OVL_CLOSE = 2 };
