@@ -23,6 +23,8 @@ static const key_t_ g_fixed[] = {
     { "anisotropy", "RECOMP_ANISOTROPY", "1 (the game's filtering), 2, 4, 8 or 16" },
     { "antialiasing", "RECOMP_ANTIALIASING", "off, fxaa, smaa, msaa2x, msaa4x or msaa8x" },
     { "framerate", "RECOMP_FRAMERATE", "60, or display: interpolated frames at a 120 or 240 Hz display's rate" },
+    { "hud", "RECOMP_HUD", "centre (the game's 4:3 places) or edges: the HUD counters at the screen's edges, wider than 4:3" },
+    { "hud_margin", "RECOMP_HUD_MARGIN", "0-10: percent of the screen's width the HUD at the edges keeps in from them" },
     { "volume", "RECOMP_VOLUME", "0-100, the game's level in Windows' volume mixer" },
     { "music_volume", "RECOMP_MUSIC_VOLUME", "0-100: music, ambience and speech (the game's streams)" },
     { "effects_volume", "RECOMP_EFFECTS_VOLUME", "0-100: the sound effects" },
@@ -249,6 +251,11 @@ void twoc_settings_current(twoc_settings_t *s)
     s->antialiasing = twoc_aa_parse(getenv("RECOMP_ANTIALIASING"));
     v = getenv("RECOMP_FRAMERATE");
     s->framerate = v && _stricmp(v, "display") == 0;
+    v = getenv("RECOMP_HUD");
+    s->hud = v && _stricmp(v, "edges") == 0;
+    v = getenv("RECOMP_HUD_MARGIN");
+    s->hud_margin = v ? atoi(v) : 0;
+    s->hud_margin = s->hud_margin < 0 ? 0 : s->hud_margin > 10 ? 10 : s->hud_margin;
     v = getenv("RECOMP_VOLUME");
     s->volume = v && *v ? atoi(v) : -1;
     if (s->volume > 100)
@@ -301,6 +308,10 @@ static void key_text(const twoc_settings_t *s, size_t i, char *buf, size_t cap)
         snprintf(buf, cap, "%s", twoc_aa_name(s->antialiasing));
     else if (strcmp(k, "framerate") == 0)
         snprintf(buf, cap, "%s", s->framerate ? "display" : "60");
+    else if (strcmp(k, "hud") == 0)
+        snprintf(buf, cap, "%s", s->hud ? "edges" : "centre");
+    else if (strcmp(k, "hud_margin") == 0)
+        snprintf(buf, cap, "%d", s->hud_margin);
     else if (strcmp(k, "volume") == 0 && s->volume >= 0)
         snprintf(buf, cap, "%d", s->volume);
     else if (strcmp(k, "music_volume") == 0 && s->music >= 0)

@@ -15,6 +15,8 @@
  *   anisotropy  = 1 | 2 | 4 | 8 | 16          RECOMP_ANISOTROPY (1: the game's own filtering)
  *   antialiasing = off | fxaa | smaa | msaa2x | msaa4x | msaa8x    RECOMP_ANTIALIASING (unset: off)
  *   framerate   = 60 | display                RECOMP_FRAMERATE (unset: 60)
+ *   hud         = centre | edges              RECOMP_HUD (unset: centre)
+ *   hud_margin  = 0-10                        RECOMP_HUD_MARGIN (percent of the width; unset: 0)
  *   volume      = 0-100                       RECOMP_VOLUME (the game's volume in Windows' mixer)
  *   music_volume   = 0-100                    RECOMP_MUSIC_VOLUME (stream voices: music, ambience, speech)
  *   effects_volume = 0-100                    RECOMP_EFFECTS_VOLUME (buffer voices: the sound effects)
@@ -47,6 +49,12 @@
  * (d3d_host.c), on a display at 2, 3 or 4 x 59.94 Hz paced by its vsync.
  * The game still runs 59.94 updates a second. From the next frame.
  *
+ * Step 65: the HUD position (notes 18.68). In a picture wider than 4:3 the
+ * game's HUD counters sit in the middle 4:3; edges moves those on the left
+ * to the left edge and those on the right to the right edge (title cards,
+ * the pause menu and anything centred stay), hud_margin percent of the
+ * width in from it. Applied at once.
+ *
  * The settings overlay (overlay.cpp) shows the values in effect and writes
  * the file back when the player changes one.
  */
@@ -71,6 +79,7 @@ typedef struct {
     int anisotropy;                     /* 1 (off), 2, 4, 8, 16 */
     int antialiasing;                   /* TWOC_AA_* */
     int framerate;                      /* step 61: 0 the game's 60, 1 the display's (interpolated) */
+    int hud, hud_margin;                /* step 65: 0 the HUD in the middle 4:3, 1 at the edges; 0-10 percent in */
     int volume;                         /* 0-100; -1: never set (Windows' own level) */
     int music, effects;                 /* 0-100; -1: never set (100, the game's mix) */
     int speakers;                       /* 0 stereo, 1 5.1; -1: never set (stereo) */

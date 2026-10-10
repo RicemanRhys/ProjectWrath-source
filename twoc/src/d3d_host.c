@@ -4616,6 +4616,11 @@ static void overlay_apply(twoc_settings_t *was, const twoc_settings_t *s)
         set_antialiasing(s->antialiasing);      /* step 58 */
     if (s->framerate != was->framerate)
         d3dh_set_framerate(s->framerate);       /* step 61: from the frame after this one */
+    if (s->hud != was->hud || s->hud_margin != was->hud_margin) {   /* step 65: from the next overlay pass */
+        d3dh_set_hud(s->hud, s->hud_margin);
+        fprintf(stderr, "[OVL] HUD position: %s, margin %d%%\n", s->hud ? "screen edges" : "centre (4:3)",
+                s->hud_margin);
+    }
     if (s->volume != was->volume)
         twoc_audio_set_volume(s->volume);
     if (s->music != was->music)

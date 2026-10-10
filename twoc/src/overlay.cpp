@@ -392,6 +392,25 @@ static int tab_display(twoc_settings_t *s, const ovl_info_t *in)
              "while the HUD, menus and text keep their 4:3 shape in the middle. A picture of another shape than "
              "the monitor gets black bars. Applied at once.");
     }
+    {   /* step 65: the HUD at the screen edges */
+        static const char *const hud_names[2] = { "Centre (4:3)", "Screen edges" };
+        int wide = s->widescreen && s->wide_h > 0 && s->wide_w / s->wide_h > 4.0 / 3.0 + 1e-6;
+        ImGui::SetNextItemWidth(ImGui::GetFontSize() * 12);
+        if (ImGui::Combo("HUD position", &s->hud, hud_names, 2))
+            r |= OVL_CHANGED;
+        more("Screen edges: in a picture wider than 4:3, the counters on the left (wumpa fruit, health) move to "
+             "the left edge and those on the right (lives, the time trial clock) to the right edge, each keeping "
+             "its shape and its distance from the edge. Title cards, the pause menu and anything centred stay "
+             "where they are. Applied at once.");
+        if (s->hud) {
+            ImGui::SetNextItemWidth(ImGui::GetFontSize() * 12);
+            if (ImGui::SliderInt("HUD margin", &s->hud_margin, 0, 10, "%d%%"))
+                r |= OVL_CHANGED;
+            more("Pulls the HUD at the edges in from them by this share of the picture's width.");
+        }
+        if (s->hud && !wide)
+            help("Now: as the game draws it (the picture is 4:3).");
+    }
     {
         int cur = -1;
         char lbl[64];
