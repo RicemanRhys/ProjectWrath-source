@@ -2158,6 +2158,7 @@ static struct {
     float c[16], vfix[16], dp[16], pos[3];
 } g_isub[IC_CAMS];                      /* this sub-frame's corrections, by camera */
 static double g_it;                     /* this sub-frame's t */
+static unsigned g_imc = IC_NO_CAM;      /* step 65: the frame's main camera (most 3D draws); only its draws move */
 
 /* Step 62: objects. A 3D draw interpolated with its camera (IC_VP, IC_FF*)
  * whose mesh the bridge knows (d3dh_draw_t.mesh) is an object: its key (its
@@ -2517,7 +2518,7 @@ static void ic_record(rcmd_t *c)
     }
     if (g_ikey_n[cur] < g_ikey_cap[cur])
         g_ikey[cur][g_ikey_n[cur]++] = key;
-    if (!d->camera)
+    if (!d->camera || d->overlay)       /* step 65: the HUD, title cards and pause menu: as recorded */
         return;
     for (ci = g_icam_n[cur]; ci-- > 0;)
         if (memcmp(g_icam[cur][ci].m, d->camera, sizeof(g_icam[cur][ci].m)) == 0)
@@ -3028,6 +3029,7 @@ static unsigned ic_begin(unsigned swap_no, int ovl)
         return 1;
     }
     g_st.interp_frames++;
+    g_imc = mc;
     g_st.interp_matched += frac;
     ic_pair();
     return k;
@@ -3099,6 +3101,12 @@ static void ic_draw(const rcmd_t *c)
     double wt[16];
     int i, j, n, cam_on, w_move = 0, b_move = 0;
 
+    if (c->u.draw.cls != IC_NONE && c->u.draw.cam != g_imc) {
+        g_st.interp_kept++;             /* step 65: under another camera than the world's: as recorded */
+        g_st.interp_other_cam++;
+        draw_exec(d, c->u.draw.pin, c->u.draw.pinned);
+        return;
+    }
     cam_on = c->u.draw.cam < IC_CAMS && g_isub[c->u.draw.cam].on;
     if (c->u.draw.obj >= 0) {           /* step 62: the object, if it moved */
         o = &g_iobj[g_icur][c->u.draw.obj];

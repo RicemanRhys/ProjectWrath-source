@@ -4551,18 +4551,19 @@ static void mirror_swap(void)
                 lby = st.replay_bytes;
             }
             if (st.interp_frames || st.interp_off) {    /* step 61: frame interpolation */
-                static unsigned lf, ls, lst, ltu, lm, lfi, lo, lvp, lff, lk, lcp;
+                static unsigned lf, ls, lst, ltu, lm, lfi, lo, lvp, lff, lk, lcp, loc;
                 static double lmt;
                 unsigned f = st.interp_frames - lf, subs = st.interp_subs - ls;
                 log_block_printf(&lb, "[D3DB] host interpolation: %u frames each game frame; frames interpolated %u"
                                  " (draws matched %.1f%%), held: camera step %u, turn %u, matches %u, first %u,"
                                  " other %u; a sub-frame redraws program draws %.0f, fixed-function %.0f, others"
-                                 " as they were %.0f, camera-position registers %.0f\n", st.interp_k, f,
+                                 " as they were %.0f (another camera's %.0f), camera-position registers %.0f\n", st.interp_k, f,
                                  f ? 100.0 * (st.interp_matched - lmt) / f : 0.0, st.interp_cut_step - lst,
                                  st.interp_cut_turn - ltu, st.interp_cut_match - lm, st.interp_cut_first - lfi,
                                  st.interp_off - lo, subs ? (double)(st.interp_vp - lvp) / subs : 0.0,
                                  subs ? (double)(st.interp_ff - lff) / subs : 0.0,
                                  subs ? (double)(st.interp_kept - lk) / subs : 0.0,
+                                 subs ? (double)(st.interp_other_cam - loc) / subs : 0.0,
                                  subs ? (double)(st.interp_cpos - lcp) / subs : 0.0);
                 lf = st.interp_frames;
                 ls = st.interp_subs;
@@ -4574,6 +4575,7 @@ static void mirror_swap(void)
                 lvp = st.interp_vp;
                 lff = st.interp_ff;
                 lk = st.interp_kept;
+                loc = st.interp_other_cam;
                 lcp = st.interp_cpos;
                 lmt = st.interp_matched;
             }

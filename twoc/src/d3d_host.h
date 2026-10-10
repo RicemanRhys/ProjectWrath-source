@@ -44,6 +44,7 @@ typedef struct {
     unsigned interp_k, interp_frames, interp_subs;
     unsigned interp_cut_step, interp_cut_turn, interp_cut_match, interp_cut_first, interp_off;
     unsigned interp_vp, interp_ff, interp_kept, interp_cpos;
+    unsigned interp_other_cam;          /* step 65: 3D draws kept as recorded: another camera than the world's */
     /* Step 62: objects in interpolated frames (paired with the frame
      * before's, none of their key, or snapped: stepped over the limit), and
      * per sub-frame the program and fixed-function draws moved and the
