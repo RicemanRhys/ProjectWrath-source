@@ -3282,7 +3282,7 @@ static struct {
     uint32_t item, swap, hud, chain[8];
 } g_items[ITEM_SLOTS];
 static uint32_t g_item;                 /* the item being drawn (sub_000A8240), 0 none */
-static int g_item_hud;                  /* ... and whether it is the HUD's */
+static uint32_t g_item_hud;             /* ... and the panel's call site that queued it if it is the HUD's, else 0 */
 static uint32_t g_panel_esp;            /* sub_000B0EF0's stack at its entry while it runs, else 0 */
 
 void d3db_panel(uint32_t entry_esp)
@@ -3310,7 +3310,7 @@ void d3db_item_queued(uint32_t item)
         for (off = 4; esp + off < g_panel_esp && off < 0x2000; off += 4) {
             v = MEM32(esp + off);
             if (v >= PANEL_HUD_FROM && v < PANEL_HUD_TO && is_call_return(v)) {
-                g_items[s].hud = 1;
+                g_items[s].hud = v;
                 break;
             }
             if (v > 0x000B0EF0u && v < PANEL_HUD_FROM && is_call_return(v))
@@ -3331,7 +3331,7 @@ void d3db_item_drawn(uint32_t item)
     uint32_t s = (item >> 4) % ITEM_SLOTS;
 
     g_item = item;
-    g_item_hud = item && g_items[s].item == item && g_items[s].swap == (uint32_t)g_swaps && g_items[s].hud;
+    g_item_hud = item && g_items[s].item == item && g_items[s].swap == (uint32_t)g_swaps ? g_items[s].hud : 0;
 }
 
 static int host_draw(d3dh_draw_t *dr)
@@ -3345,7 +3345,7 @@ static int host_draw(d3dh_draw_t *dr)
     g_mesh = 0;
     dr->overlay = g_pass == PASS_OVERLAY;
     dr->world_cam = dr->overlay && g_world_cam_ok && memcmp(cam, g_world_cam, sizeof(cam)) == 0;
-    dr->hud = dr->overlay && g_item_hud;
+    dr->hud = dr->overlay ? g_item_hud : 0;
     return d3dh_draw_up(dr);
 }
 

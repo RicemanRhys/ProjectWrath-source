@@ -158,10 +158,12 @@ typedef struct {
     /* Step 65: drawn in the game's overlay pass (the HUD counters, title
      * cards, the pause menu: d3d_bridge.c d3db_list_flush), and whether
      * under the camera the world pass had this frame (the HUD counters and
-     * title cards; the pause menu has a camera of its own). `hud`: queued
-     * by the panel's in-game part (the HUD counters and title cards, never
-     * the pause menu or a hub pad's panel). */
-    uint8_t overlay, world_cam, hud;
+     * title cards; the pause menu has a camera of its own). */
+    uint8_t overlay, world_cam;
+    /* Queued by the panel's in-game part (the HUD counters and title cards,
+     * never the pause menu or a hub pad's panel): the panel's call site that
+     * queued it (one per counter's icon, its digits, a card's line), else 0. */
+    uint32_t hud;
     /* Set by the host (step 65, HUD at the screen edges): the clip-space x
      * offset, in units of w, that moves the draw's element to its edge. */
     float hud_dx;

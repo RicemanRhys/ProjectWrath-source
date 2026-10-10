@@ -3309,11 +3309,14 @@ int d3dh_draw_up(const d3dh_draw_t *d)
  * queued as `hud`). Under the widened projection (18.56) they keep their 4:3
  * places in the middle. With the HUD at the edges, the overlay pass's host
  * calls are held to its end (recorded as for a replay, unless the frame is
- * recorded anyway), and there the HUD's draws are grouped into elements: a
- * draw's screen box (its vertices, or for a skinned mesh its first bone)
- * joins another's when they overlap vertically and lie less than the
- * taller one's height apart side by side (a counter's icon and digits, the
- * letters and words of a line). An element whose middle is in the left
+ * recorded anyway), and there the HUD's draws are grouped into elements:
+ * the draws one call site of the panel queued (a counter's digits, its icon,
+ * a card's line) are one, and two join when their screen boxes (the
+ * vertices, or for a skinned mesh its first bone) overlap vertically and lie
+ * less than 0.4 of the taller one's height apart side by side (a
+ * counter's icon and its digits). Counters sit a height or more apart, but
+ * while the HUD slides in at a level's start it is drawn larger, so
+ * nearness alone joined the wumpa counter to the crate counter. An element whose middle is in the left
  * part of the 4:3 picture (under -0.45 of its half width) moves left by the
  * picture's extra width on that side, one in the right part right; one in
  * the middle (within 0.2: title cards, the top-centre crate counter) stays,
@@ -3434,7 +3437,8 @@ static void hud_anchor(unsigned first)
             double hi = box[i][3] - box[i][1], hj = box[j][3] - box[j][1], h = hi > hj ? hi : hj;
             double gap = (box[i][0] > box[j][0] ? box[i][0] - box[j][2] : box[j][0] - box[i][2]) * 320.0,
                    vov = (box[i][3] < box[j][3] ? box[i][3] : box[j][3]) - (box[i][1] > box[j][1] ? box[i][1] : box[j][1]);
-            if (vov >= 0 && gap < h * 240.0 + 2.0)   /* in 4:3 pixels: x 320 and y 240 a half */
+            if (g_rc[cmd[i]].u.draw.d.hud == g_rc[cmd[j]].u.draw.d.hud ||
+                (vov >= 0 && gap < 0.4 * h * 240.0 + 2.0))      /* in 4:3 pixels: x 320 and y 240 a half */
                 par[hud_root(par, (int)i)] = hud_root(par, (int)j);
         }
     for (i = 0; i < n; i++) {
@@ -3445,6 +3449,25 @@ static void hud_anchor(unsigned first)
         int r = hud_root(par, (int)i);
         for (j = 0; j < 4; j++)
             el[r][j] = j < 2 ? (box[i][j] < el[r][j] ? box[i][j] : el[r][j]) : (box[i][j] > el[r][j] ? box[i][j] : el[r][j]);
+    }
+    {
+        static int logn = -1;
+        if (logn < 0) {
+            const char *e = getenv("RECOMP_D3D_BRIDGE_HUDLOG");
+            logn = e ? atoi(e) : 0;
+        }
+        unsigned roots = 0;
+        for (i = 0; i < n; i++)
+            roots += hud_root(par, (int)i) == (int)i;
+        if (logn > 0 && roots >= 3 && g_st.hud_passes % 10 == 0) {    /* RECOMP_D3D_BRIDGE_HUDLOG=N: N passes' boxes */
+            logn--;
+            for (i = 0; i < n; i++) {
+                const d3dh_draw_t *d = &g_rc[cmd[i]].u.draw.d;
+                fprintf(stderr, "[D3DB] hudlog pass %u draw %u %s %08X site %05X box %.3f %.3f %.3f %.3f element %d\n",
+                        g_st.hud_passes, cmd[i] - first, d->vprog ? "vp" : "ff", d->vprog ? d->vprog->key : d->fvf, d->hud,
+                        box[i][0], box[i][1], box[i][2], box[i][3], hud_root(par, (int)i));
+            }
+        }
     }
     dl = s - 1.0 + mg;                  /* to the left edge (NDC), pulled in by the margin */
     dl = dl > 0 ? 0 : dl;
