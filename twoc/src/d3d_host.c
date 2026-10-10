@@ -207,7 +207,10 @@ static int g_interp;                    /* step 61: frames recorded and drawn as
 static unsigned g_subdump_from, g_subdump_to;   /* RECOMP_D3D_BRIDGE_SUBDUMP=A-B: each sub-frame of those swaps */
 static char g_subdump_trigger[MAX_PATH];        /* RECOMP_D3D_BRIDGE_SUBDUMP=@FILE: the next N once FILE (N) appears */
 static int g_subdump_cuts;                      /* RECOMP_D3D_BRIDGE_SUBDUMP=cuts: each held frame and the 2 after */
-#define REC_ON() (g_replay || g_interp) /* step 60/61: host calls recorded, run at the present */
+static int g_ovl_defer;                 /* step 65: the overlay pass's calls held to its end (the HUD at the edges) */
+/* Step 60/61: host calls recorded, run at the present (step 65: or at the
+ * overlay pass's end). */
+#define REC_ON() (g_replay || g_interp || g_ovl_defer)
 static double g_icut_step = 2.0, g_icut_turn = 30.0, g_icut_match = 0.5;   /* RECOMP_D3D_BRIDGE_INTERP_CUT */
 static double g_isnap = 1.5;            /* step 62: RECOMP_D3D_BRIDGE_INTERP_OBJECTS, an object stepping further snaps; 0: objects off */
 static int g_interp_t0;                 /* RECOMP_D3D_BRIDGE_INTERP_T0: sub-frames at t = 0 .. (k-1)/k (a check) */
@@ -641,6 +644,11 @@ int d3dh_create(unsigned width, unsigned height, unsigned host_w, unsigned host_
         e = getenv("RECOMP_FRAMERATE");                 /* step 61 */
         if (e && _stricmp(e, "display") == 0)
             d3dh_set_framerate(1);
+        e = getenv("RECOMP_HUD");                       /* step 65: centre (unset) or edges */
+        if (e && _stricmp(e, "edges") == 0) {
+            const char *mg = getenv("RECOMP_HUD_MARGIN");
+            d3dh_set_hud(1, mg ? atoi(mg) : 0);
+        }
         e = getenv("RECOMP_D3D_BRIDGE_INTERP_REC");
         if (e && *e)
             snprintf(g_irec_trigger, sizeof(g_irec_trigger), "%s", e);
@@ -1813,6 +1821,29 @@ static int draw_exec(const d3dh_draw_t *d, IDirect3DBaseTexture8 *const *pin, co
     int lit = 0;
     LARGE_INTEGER t0, t1;
 
+    if (d->hud_dx != 0.0f) {            /* step 65: a HUD element at its screen edge: x_clip += dx w */
+        static float k4[192 * 4];
+        d3dh_draw_t m = *d;
+        d3dh_ff_t ff;
+        d3dh_vprog_t vp;
+        int r;
+        if (d->ff) {
+            ff = *d->ff;
+            for (r = 0; r < 4; r++)
+                ff.proj[4 * r] += d->hud_dx * ff.proj[4 * r + 3];
+            m.ff = &ff;
+        }
+        if (d->vprog) {                 /* c96 is x_clip's row of (W V P) transposed, c99 w's */
+            vp = *d->vprog;
+            memcpy(k4, d->vprog->consts, sizeof(k4));
+            for (r = 0; r < 4; r++)
+                k4[4 * 96 + r] += d->hud_dx * k4[4 * 99 + r];
+            vp.consts = k4;
+            m.vprog = &vp;
+        }
+        m.hud_dx = 0.0f;
+        return draw_exec(&m, pin, pinned);
+    }
     QueryPerformanceCounter(&t0);       /* step 60: the host draw's time */
     if (bind_target(&d->target) != 0)
         return -1;
@@ -3252,8 +3283,232 @@ int d3dh_draw_up(const d3dh_draw_t *d)
     } else {
         r = draw_exec(d, NULL, NULL);
     }
+    if (d->overlay)                     /* step 65 */
+        g_st.overlay_draws++;
+    if (d->world_cam)
+        g_st.overlay_world_cam++;
+    if (d->hud)
+        g_st.hud_draws++;
     LeaveCriticalSection(&g_lock);
     return r;
+}
+
+/* ── Step 65: the HUD at the screen edges (notes 18.68) ─────────
+ *
+ * The game draws its HUD counters as 3D models and text just in front of
+ * the world's camera, in its overlay pass (the display list flushed at
+ * 0x89679; d3d_bridge.c tags those draws, and those the panel's in-game part
+ * queued as `hud`). Under the widened projection (18.56) they keep their 4:3
+ * places in the middle. With the HUD at the edges, the overlay pass's host
+ * calls are held to its end (recorded as for a replay, unless the frame is
+ * recorded anyway), and there the HUD's draws are grouped into elements: a
+ * draw's screen box (its vertices, or for a skinned mesh its first bone)
+ * joins another's when they overlap vertically and lie less than the
+ * taller one's height apart side by side (a counter's icon and digits, the
+ * letters and words of a line). An element whose middle is in the left
+ * part of the 4:3 picture (under -0.45 of its half width) moves left by the
+ * picture's extra width on that side, one in the right part right; one in
+ * the middle (within 0.2: title cards, the top-centre crate counter) stays,
+ * and in between it moves part of the way, so an element flying across
+ * (the clock just picked up) never jumps. Wumpa, lives and the clock sit
+ * past 0.6. Each draw of a moved element gets x_clip += dx w (draw_exec), so
+ * its shape and its distance from its 4:3 edge are kept; `margin` pulls it
+ * in by that share of the picture's width, never past its 4:3 place. Not
+ * interpolated (d3dh_draw_t.overlay; step 65 item 3). */
+static volatile LONG g_hud_edges, g_hud_margin;    /* RECOMP_HUD=edges, RECOMP_HUD_MARGIN (percent) */
+static int g_ovl_in, g_ovl_anchor;      /* inside the overlay pass; its HUD is to be anchored */
+static unsigned g_ovl_first;            /* its first command in g_rc */
+
+void d3dh_set_hud(int edges, int margin)
+{
+    InterlockedExchange(&g_hud_edges, edges ? 1 : 0);
+    InterlockedExchange(&g_hud_margin, margin < 0 ? 0 : margin > 10 ? 10 : margin);
+}
+
+/* A recorded draw's screen box in clip-space NDC (x0, y0, x1, y1). Returns
+ * 0 if it has none (nothing in front of the eye, or no position known). */
+static int hud_box(const d3dh_draw_t *d, double *b)
+{
+    double m[16], t[16], w[16], v[16], p[16];
+    const uint8_t *vb = (const uint8_t *)d->verts;
+    unsigned i, n = 0;
+
+    b[0] = b[1] = 1e30;
+    b[2] = b[3] = -1e30;
+    if (d->vprog) {
+        int slot = vs_slot(d->vprog), r, k;
+        const float *k4 = d->vprog->consts;
+        if (slot < 0)
+            return 0;
+        for (r = 0; r < 4; r++)         /* m: rows c96-c99 (x, y, z, w of clip space) */
+            for (k = 0; k < 4; k++)
+                m[4 * r + k] = k4[4 * (96 + r) + k];
+        if (g_vs[slot].rel_bones) {     /* skinned: where its first bone puts it */
+            double q[4] = { k4[4 * 124 + 3], k4[4 * 125 + 3], k4[4 * 126 + 3], 1.0 };
+            double cx = m[0] * q[0] + m[1] * q[1] + m[2] * q[2] + m[3] * q[3];
+            double cy = m[4] * q[0] + m[5] * q[1] + m[6] * q[2] + m[7] * q[3];
+            double cw = m[12] * q[0] + m[13] * q[1] + m[14] * q[2] + m[15] * q[3];
+            if (cw <= 1e-6)
+                return 0;
+            b[0] = b[2] = cx / cw;
+            b[1] = b[3] = cy / cw;
+            return 1;
+        }
+        if (!(g_vs[slot].inputs & 1) || !vb || d->stride < 16)
+            return 0;                   /* v0, a float4 first in the host's layout, is the position */
+        for (i = 0; i < d->vert_count; i++) {
+            const float *q = (const float *)(vb + (size_t)i * d->stride);
+            double cx = m[0] * q[0] + m[1] * q[1] + m[2] * q[2] + m[3] * q[3];
+            double cy = m[4] * q[0] + m[5] * q[1] + m[6] * q[2] + m[7] * q[3];
+            double cw = m[12] * q[0] + m[13] * q[1] + m[14] * q[2] + m[15] * q[3];
+            if (cw <= 1e-6)
+                continue;
+            b[0] = cx / cw < b[0] ? cx / cw : b[0];
+            b[2] = cx / cw > b[2] ? cx / cw : b[2];
+            b[1] = cy / cw < b[1] ? cy / cw : b[1];
+            b[3] = cy / cw > b[3] ? cy / cw : b[3];
+            n++;
+        }
+        return n != 0;
+    }
+    if (!d->ff || (d->fvf & D3DFVF_POSITION_MASK) != D3DFVF_XYZ || !vb)
+        return 0;
+    m4_from(d->ff->world, w);
+    m4_from(d->ff->view, v);
+    m4_from(d->ff->proj, p);
+    m4_mul(w, v, t);
+    m4_mul(t, p, m);                    /* row vectors: clip = (x y z 1) W V P */
+    for (i = 0; i < d->vert_count; i++) {
+        const float *q = (const float *)(vb + (size_t)i * d->stride);
+        double cx = q[0] * m[0] + q[1] * m[4] + q[2] * m[8] + m[12];
+        double cy = q[0] * m[1] + q[1] * m[5] + q[2] * m[9] + m[13];
+        double cw = q[0] * m[3] + q[1] * m[7] + q[2] * m[11] + m[15];
+        if (cw <= 1e-6)
+            continue;
+        b[0] = cx / cw < b[0] ? cx / cw : b[0];
+        b[2] = cx / cw > b[2] ? cx / cw : b[2];
+        b[1] = cy / cw < b[1] ? cy / cw : b[1];
+        b[3] = cy / cw > b[3] ? cy / cw : b[3];
+        n++;
+    }
+    return n != 0;
+}
+
+#define HUD_MAX 512
+static int hud_root(int *par, int i)
+{
+    while (par[i] != i)
+        i = par[i] = par[par[i]];
+    return i;
+}
+
+/* The overlay pass's commands [first, g_rc_n): each HUD draw's hud_dx. */
+static void hud_anchor(unsigned first)
+{
+    static double box[HUD_MAX][4], el[HUD_MAX][4];
+    static unsigned cmd[HUD_MAX];
+    static int par[HUD_MAX];
+    double s = (4.0 / 3.0) / g_wide, mg = 0.02 * (double)g_hud_margin, dl, dr;
+    unsigned i, j, n = 0;
+
+    for (i = first; i < g_rc_n && n < HUD_MAX; i++)
+        if (g_rc[i].kind == RC_DRAW && g_rc[i].u.draw.d.hud && hud_box(&g_rc[i].u.draw.d, box[n])) {
+            box[n][0] /= s;             /* x in halves of the 4:3 picture's width, y in halves of its height */
+            box[n][2] /= s;
+            cmd[n] = i;
+            par[n] = (int)n;
+            n++;
+        }
+    if (!n)
+        return;
+    for (i = 0; i < n; i++)
+        for (j = i + 1; j < n; j++) {
+            double hi = box[i][3] - box[i][1], hj = box[j][3] - box[j][1], h = hi > hj ? hi : hj;
+            double gap = (box[i][0] > box[j][0] ? box[i][0] - box[j][2] : box[j][0] - box[i][2]) * 320.0,
+                   vov = (box[i][3] < box[j][3] ? box[i][3] : box[j][3]) - (box[i][1] > box[j][1] ? box[i][1] : box[j][1]);
+            if (vov >= 0 && gap < h * 240.0 + 2.0)   /* in 4:3 pixels: x 320 and y 240 a half */
+                par[hud_root(par, (int)i)] = hud_root(par, (int)j);
+        }
+    for (i = 0; i < n; i++) {
+        el[i][0] = el[i][1] = 1e30;
+        el[i][2] = el[i][3] = -1e30;
+    }
+    for (i = 0; i < n; i++) {
+        int r = hud_root(par, (int)i);
+        for (j = 0; j < 4; j++)
+            el[r][j] = j < 2 ? (box[i][j] < el[r][j] ? box[i][j] : el[r][j]) : (box[i][j] > el[r][j] ? box[i][j] : el[r][j]);
+    }
+    dl = s - 1.0 + mg;                  /* to the left edge (NDC), pulled in by the margin */
+    dl = dl > 0 ? 0 : dl;
+    dr = -dl;
+    for (i = 0; i < n; i++) {
+        int r = hud_root(par, (int)i);
+        double c = 0.5 * (el[r][0] + el[r][2]), a = (fabs(c) - 0.2) / 0.25;
+        float dx;
+        a = a < 0 ? 0 : a > 1 ? 1 : a;  /* a ramp, so one flying in (the clock picked up) never jumps */
+        dx = (float)(a * (c < 0 ? dl : dr));
+        g_rc[cmd[i]].u.draw.d.hud_dx = dx;
+        if (r == (int)i)
+            ++*(dx < 0 ? &g_st.hud_left : dx > 0 ? &g_st.hud_right : &g_st.hud_mid);
+    }
+    g_st.hud_passes++;
+}
+
+/* Forget recorded commands from `first` on (the overlay pass's, run). */
+static void rc_forget(unsigned first)
+{
+    unsigned i, s;
+
+    for (i = first; i < g_rc_n; i++)
+        if (g_rc[i].kind == RC_DRAW)
+            for (s = 0; s < 4; s++)
+                if (g_rc[i].u.draw.pin[s])
+                    g_rc[i].u.draw.pin[s]->lpVtbl->Release(g_rc[i].u.draw.pin[s]);
+    g_rc_n = first;
+    if (!first) {
+        g_ra_cur = NULL;
+        g_ra_bytes = 0;
+        g_rc_targets_n = 0;
+        g_rc_overflow = 0;
+    }
+}
+
+/* Step 65 (notes 18.68): the game's overlay pass, d3d_bridge.c's
+ * d3db_list_flush around it. */
+void d3dh_overlay_pass(int begin)
+{
+    unsigned i;
+
+    if (!g_ready)
+        return;
+    EnterCriticalSection(&g_lock);
+    if (begin) {
+        g_st.overlay_passes++;
+        g_ovl_in = 1;
+        g_ovl_anchor = g_hud_edges && g_wide > 0 && !g_replay_check;
+        g_ovl_first = g_rc_n;
+        g_ovl_defer = g_ovl_anchor && !g_replay && !g_interp;
+    } else if (g_ovl_in) {
+        if (g_ovl_anchor)
+            hud_anchor(g_ovl_first);
+        if (g_ovl_defer) {              /* drawn now, as recorded, and forgotten */
+            g_ovl_defer = 0;
+            for (i = g_ovl_first; i < g_rc_n; i++) {
+                const rcmd_t *c = &g_rc[i];
+                if (c->kind == RC_DRAW)
+                    draw_exec(&c->u.draw.d, c->u.draw.pin, c->u.draw.pinned);
+                else if (c->kind == RC_CLEAR)
+                    clear_exec(&c->u.clear.t, c->u.clear.flags, c->u.clear.color, c->u.clear.z, c->u.clear.stencil);
+                else if (c->kind == RC_COPY)
+                    copy_exec(&c->u.copy.t, c->u.copy.rects, c->u.copy.points, c->u.copy.n);
+                else
+                    freed_exec(c->u.freed.data, c->u.freed.bytes);
+            }
+            rc_forget(g_ovl_first);
+        }
+        g_ovl_in = g_ovl_anchor = 0;
+    }
+    LeaveCriticalSection(&g_lock);
 }
 
 /* ── CopyRects (step 35) ───────────────────────────────────── */

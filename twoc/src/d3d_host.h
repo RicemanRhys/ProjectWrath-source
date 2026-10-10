@@ -51,6 +51,12 @@ typedef struct {
     unsigned interp_obj, interp_obj_new, interp_obj_snap, interp_obj_vp, interp_obj_ff, interp_bones, interp_bone_snap;
     unsigned interp_obj_swap;           /* step 63: in the place of another kind of object (kept as drawn) */
     double interp_matched;              /* sum of each interpolated frame's fraction of draws matched */
+    /* Step 65: the game's overlay pass: passes, its draws, those under the
+     * world's camera (the HUD counters and title cards). */
+    unsigned overlay_passes, overlay_draws, overlay_world_cam;
+    /* ... the HUD's draws and, with the HUD at the edges, its elements
+     * moved left, moved right and left in the middle. */
+    unsigned hud_draws, hud_left, hud_right, hud_mid, hud_passes;
 } d3dh_stats_t;
 
 /* A state already in xbox_d3d8's (PC D3D8) numbering and values. */
@@ -148,6 +154,16 @@ typedef struct {
      * its index and vertex addresses and count), 0 unknown: draws of one
      * object are matched between frames by it. */
     uint32_t mesh;
+    /* Step 65: drawn in the game's overlay pass (the HUD counters, title
+     * cards, the pause menu: d3d_bridge.c d3db_list_flush), and whether
+     * under the camera the world pass had this frame (the HUD counters and
+     * title cards; the pause menu has a camera of its own). `hud`: queued
+     * by the panel's in-game part (the HUD counters and title cards, never
+     * the pause menu or a hub pad's panel). */
+    uint8_t overlay, world_cam, hud;
+    /* Set by the host (step 65, HUD at the screen edges): the clip-space x
+     * offset, in units of w, that moves the draw's element to its edge. */
+    float hud_dx;
 } d3dh_draw_t;
 
 /* S5: the registers a program reads (bit n = vn), 0 if it reads none or
@@ -178,6 +194,14 @@ int d3dh_format_supported(uint32_t format);
 /* Draw: DrawPrimitiveUP, or DrawIndexedPrimitiveUP with 16-bit indices when
  * `indices` is set. Returns 0 on success. */
 int d3dh_draw_up(const d3dh_draw_t *d);
+
+/* Step 65: the game's overlay pass begins (1) or ends (0); its draws come
+ * in between, with `overlay` set. */
+void d3dh_overlay_pass(int begin);
+/* Step 65: the HUD at the screen edges (1) or in the middle 4:3 (0, as the
+ * game draws it) in a picture wider than 4:3, `margin` percent of the
+ * picture's width in from the edge (0-10). From the next overlay pass. */
+void d3dh_set_hud(int edges, int margin);
 
 /* S4, RECOMP_D3D_BRIDGE_PSPROBE: draw one pixel with this pixel shader and
  * fixed inputs (the vertex colours and one 1x1 texture per stage given

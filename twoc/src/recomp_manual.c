@@ -326,6 +326,67 @@ void sub_000956B0(void)
     MEM32(cam + 0x44) = saved;
 }
 
+/* ── Step 65: the game's render passes (notes 18.68) ───────────
+ *
+ * sub_000A8140 draws the display list the game has queued so far (models,
+ * text, HUD items through sub_000A0990). The main loop flushes it several
+ * times a frame: at 0x8929A for the world, at 0x89679 for the overlay (the
+ * HUD counters, title cards, the pause menu and its pages). Drawn under the
+ * world's camera, the overlay can't be told from the world by its draws, so
+ * the bridge is told which flush is running. Bridge off: the lifted body
+ * alone. */
+extern void sub_000A8140_gen(void);
+void sub_000A8140(void)
+{
+    uint32_t ret = MEM32(esp);
+
+    if (!d3db_host_on) {
+        sub_000A8140_gen();
+        return;
+    }
+    d3db_list_flush(ret, 0);
+    sub_000A8140_gen();
+    d3db_list_flush(ret, 1);
+}
+
+/* sub_000B0EF0 is the game's whole panel: the pause menu and its pages and
+ * the hub pads' panels first, then (from 0xB2568) the HUD counters and the
+ * title cards of a level being played. The bridge notes its stack frame, so
+ * an item it queues can be told by the call site (d3db_item_queued). */
+extern void sub_000B0EF0_gen(void);
+void sub_000B0EF0(void)
+{
+    if (!d3db_host_on) {
+        sub_000B0EF0_gen();
+        return;
+    }
+    d3db_panel(esp);
+    sub_000B0EF0_gen();
+    d3db_panel(0);
+}
+
+/* sub_0009EF10(material, item) links a queued item into the display list;
+ * sub_000A8240(item) draws one when the list is flushed. */
+extern void sub_0009EF10_gen(void);
+void sub_0009EF10(void)
+{
+    if (d3db_host_on)
+        d3db_item_queued(MEM32(esp + 8));
+    sub_0009EF10_gen();
+}
+
+extern void sub_000A8240_gen(void);
+void sub_000A8240(void)
+{
+    if (!d3db_host_on) {
+        sub_000A8240_gen();
+        return;
+    }
+    d3db_item_drawn(MEM32(esp + 4));
+    sub_000A8240_gen();
+    d3db_item_drawn(0);
+}
+
 /* ── Cooperative NtSuspendThread / NtResumeThread ──────────── */
 
 /*

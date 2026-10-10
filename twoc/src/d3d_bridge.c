@@ -172,6 +172,7 @@ static int g_motion_live;
 static unsigned g_motion_n;
 static uint32_t g_motion_vsc_ret[4], g_motion_draw_ret;  /* who last wrote c0 (a call chain), who drew */
 static uint32_t g_draw_ret;         /* the draw call's guest return address, for the draw log (18.56) */
+static uint32_t g_draw_chain[6];    /* step 65: and the callers above it (the motion log's walk), while logging */
 static char g_check_prefix[512];    /* where the checks write: "<dump dir>\host", as the host dumps */
 
 static const char *const d3db_name[D3DB_COUNT] = {
@@ -3239,6 +3240,100 @@ static uint32_t mesh_id(uint32_t kind, uint32_t a, uint32_t b, uint32_t n)
     return h ? h : 1;
 }
 
+/* Step 65 (notes 18.68): the display-list flush running now (sub_000A8140's
+ * return address, 0 outside one), and the world's camera as the world pass
+ * had it this frame. The overlay pass draws the HUD counters and title cards
+ * under the world's own camera (placed just in front of it) and the pause
+ * menu under a camera of its own. */
+#define PASS_WORLD   0x0008929Fu        /* the main loop's world flush (0x8929A) */
+#define PASS_OVERLAY 0x0008967Eu        /* its overlay flush (0x89679) */
+static uint32_t g_pass;
+static float g_world_cam[32];
+static int g_world_cam_ok;
+
+void d3db_list_flush(uint32_t ret, int end)
+{
+    if (!end) {
+        g_pass = ret;
+        if (ret == PASS_WORLD) {
+            memcpy(g_world_cam, (const void *)XBOX_PTR(0x00242620u), 64);
+            memcpy(g_world_cam + 16, (const void *)XBOX_PTR(0x00242398u), 64);
+            g_world_cam_ok = 1;
+        } else if (ret == PASS_OVERLAY) {
+            d3dh_overlay_pass(1);
+        }
+        return;
+    }
+    if (ret == PASS_OVERLAY) {
+        d3dh_overlay_pass(0);
+        g_world_cam_ok = 0;             /* a frame without a world pass (the pause) has no world camera */
+    }
+    g_pass = 0;
+}
+
+/* Each display-list item the game queues (sub_0009EF10), by its address:
+ * whether the panel's in-game part queued it (a HUD counter or a title
+ * card), and for the draw log the code that queued it (a call chain, the
+ * motion log's walk). Items are queued again every frame. */
+#define PANEL_HUD_FROM 0x000B2568u      /* sub_000B0EF0 past its pause and hub-pad parts */
+#define PANEL_HUD_TO   0x000B462Du      /* its common end (the panel camera) */
+#define ITEM_SLOTS 4096
+static struct {
+    uint32_t item, swap, hud, chain[8];
+} g_items[ITEM_SLOTS];
+static uint32_t g_item;                 /* the item being drawn (sub_000A8240), 0 none */
+static int g_item_hud;                  /* ... and whether it is the HUD's */
+static uint32_t g_panel_esp;            /* sub_000B0EF0's stack at its entry while it runs, else 0 */
+
+void d3db_panel(uint32_t entry_esp)
+{
+    g_panel_esp = entry_esp;
+}
+
+static int is_call_return(uint32_t v)
+{
+    return v > 0x11005u && v < 0x135AA0u &&
+           (MEM8(v - 5) == 0xE8 || MEM8(v - 6) == 0xFF || MEM8(v - 2) == 0xFF || MEM8(v - 3) == 0xFF);
+}
+
+void d3db_item_queued(uint32_t item)
+{
+    uint32_t off, n = 0, v, s = (item >> 4) % ITEM_SLOTS;
+    int log = drawlog_on();
+
+    if (!g_panel_esp && !log)
+        return;
+    g_items[s].item = item;
+    g_items[s].swap = (uint32_t)g_swaps;
+    g_items[s].hud = 0;
+    if (g_panel_esp)                    /* the panel's own call into the model or text helpers, below its frame */
+        for (off = 4; esp + off < g_panel_esp && off < 0x2000; off += 4) {
+            v = MEM32(esp + off);
+            if (v >= PANEL_HUD_FROM && v < PANEL_HUD_TO && is_call_return(v)) {
+                g_items[s].hud = 1;
+                break;
+            }
+            if (v > 0x000B0EF0u && v < PANEL_HUD_FROM && is_call_return(v))
+                break;                  /* the pause or a hub pad's panel */
+        }
+    if (log) {
+        memset(g_items[s].chain, 0, sizeof(g_items[s].chain));
+        for (off = 4; off < 0x1000 && n < 8; off += 4) {
+            v = MEM32(esp + off);
+            if (is_call_return(v))
+                g_items[s].chain[n++] = v;
+        }
+    }
+}
+
+void d3db_item_drawn(uint32_t item)
+{
+    uint32_t s = (item >> 4) % ITEM_SLOTS;
+
+    g_item = item;
+    g_item_hud = item && g_items[s].item == item && g_items[s].swap == (uint32_t)g_swaps && g_items[s].hud;
+}
+
 static int host_draw(d3dh_draw_t *dr)
 {
     float cam[32];
@@ -3248,6 +3343,9 @@ static int host_draw(d3dh_draw_t *dr)
     dr->camera = cam;
     dr->mesh = g_mesh;
     g_mesh = 0;
+    dr->overlay = g_pass == PASS_OVERLAY;
+    dr->world_cam = dr->overlay && g_world_cam_ok && memcmp(cam, g_world_cam, sizeof(cam)) == 0;
+    dr->hud = dr->overlay && g_item_hud;
     return d3dh_draw_up(dr);
 }
 
@@ -3936,12 +4034,24 @@ static void drawlog(const char *path, uint32_t xdk_prim, uint32_t n, uint32_t fv
         }
     }
     fprintf(stderr, "[D3DB] drawlog swap %ld #%u %s prim %u n %u fvf %X %s; tex0 %08X (fmt %02X, %ux%u, data %08X)"
-            " tex1 %08X; target %s; from %08X; box (%.1f, %.1f)-(%.1f, %.1f)%s uv (%.4g, %.4g)-(%.4g, %.4g)%s\n",
+            " tex1 %08X; target %s; from %08X < %X < %X < %X < %X < %X < %X; pass %X; box (%.1f, %.1f)-(%.1f, %.1f)%s"
+            " uv (%.4g,"
+            " %.4g)-(%.4g, %.4g)%s\n",
             (long)g_swaps + 1, g_drawlog_n++, path, xdk_prim, n, fvf, outcome, t0, (f0 >> 8) & 0xFF,
             t0 ? 1u << ((f0 >> 20) & 15) : 0, t0 ? 1u << ((f0 >> 24) & 15) : 0, res_data(t0), t1,
-            surface_kind(MEM32(d + DEV_RENDER_TARGET)), g_draw_ret, (double)box[0], (double)box[1], (double)box[2],
+            surface_kind(MEM32(d + DEV_RENDER_TARGET)), g_draw_ret, g_draw_chain[0], g_draw_chain[1], g_draw_chain[2],
+            g_draw_chain[3], g_draw_chain[4], g_draw_chain[5], g_pass, (double)box[0], (double)box[1], (double)box[2],
             (double)box[3], behind ? " (some behind the eye)" : "", (double)uv[0], (double)uv[1], (double)uv[2],
             (double)uv[3], w);
+    if (g_item) {                       /* step 65: the display-list item, and who queued it */
+        const uint32_t *ch = g_items[(g_item >> 4) % ITEM_SLOTS].chain;
+        if (g_items[(g_item >> 4) % ITEM_SLOTS].item == g_item)
+            fprintf(stderr, "[D3DB] drawlog   item %08X type %u%s queued from %X < %X < %X < %X < %X < %X < %X < %X\n",
+                    g_item, MEM32(g_item + 4), g_item_hud ? " (HUD)" : "", ch[0], ch[1], ch[2], ch[3], ch[4], ch[5],
+                    ch[6], ch[7]);
+        else
+            fprintf(stderr, "[D3DB] drawlog   item %08X type %u\n", g_item, MEM32(g_item + 4));
+    }
     /* S5: the blending and stage-0/1 ops too (XDK values), and the pixel shader. */
     fprintf(stderr, "[D3DB] drawlog   blend %u %X %X op %X atest %u %X ref %X z %u/%u; stage 0 colour %u %X %X alpha"
             " %u %X %X address %u %u; stage 1 colour %u alpha %u; pixel shader %s (texture modes %08X, dot mapping %X, input texture %X; stages %08X"
@@ -4494,6 +4604,28 @@ static void mirror_swap(void)
                 lbn = st.interp_bones;
                 lbs = st.interp_bone_snap;
             }
+            if (st.overlay_passes && (d3db_wide > 0 || st.interp_frames || st.interp_off)) {    /* step 65 */
+                static unsigned lp, ld, lw;
+                unsigned p = st.overlay_passes - lp;
+                static unsigned lh, ll, lr, lm, lhp;
+                unsigned hp = st.hud_passes - lhp;
+                log_block_printf(&lb, "[D3DB] host overlay pass: %u passes, %.1f draws a pass (under the world's camera"
+                                 " %.1f, the HUD's %.1f); HUD at the edges in %u: elements a pass moved left %.2f,"
+                                 " right %.2f, kept in the middle %.2f\n", p,
+                                 p ? (double)(st.overlay_draws - ld) / p : 0.0,
+                                 p ? (double)(st.overlay_world_cam - lw) / p : 0.0,
+                                 p ? (double)(st.hud_draws - lh) / p : 0.0, hp,
+                                 hp ? (double)(st.hud_left - ll) / hp : 0.0, hp ? (double)(st.hud_right - lr) / hp : 0.0,
+                                 hp ? (double)(st.hud_mid - lm) / hp : 0.0);
+                lp = st.overlay_passes;
+                ld = st.overlay_draws;
+                lw = st.overlay_world_cam;
+                lh = st.hud_draws;
+                ll = st.hud_left;
+                lr = st.hud_right;
+                lm = st.hud_mid;
+                lhp = st.hud_passes;
+            }
             if (d3db_wide > 0 || g_render_w)    /* 18.56 */
                 log_block_printf(&lb, "[D3DB] host widescreen: projections widened %ld, kept %ld; fixed-function"
                                  " draws with a 4:3 projection pillarboxed %ld; pre-transformed draws stretched %u,"
@@ -4574,6 +4706,17 @@ void d3db_enter(int id, d3db_args_t *a)
             if (v > 0x11005u && v < 0x135AA0u &&
                 (MEM8(v - 5) == 0xE8 || MEM8(v - 6) == 0xFF || MEM8(v - 2) == 0xFF || MEM8(v - 3) == 0xFF))
                 g_motion_vsc_ret[n++] = v;
+        }
+    }
+    /* Step 65: the draw log's call chain, the same walk six deep. */
+    if ((id == D3DB_DRAW_UP || id == D3DB_DRAW_INDEXED || id == D3DB_END || id == D3DB_DRAW) && drawlog_on()) {
+        uint32_t off, n = 0, v;
+        memset(g_draw_chain, 0, sizeof(g_draw_chain));
+        for (off = 4; off < 0x800 && n < 6; off += 4) {
+            v = MEM32(esp + off);
+            if (v > 0x11005u && v < 0x135AA0u &&
+                (MEM8(v - 5) == 0xE8 || MEM8(v - 6) == 0xFF || MEM8(v - 2) == 0xFF || MEM8(v - 3) == 0xFF))
+                g_draw_chain[n++] = v;
         }
     }
 

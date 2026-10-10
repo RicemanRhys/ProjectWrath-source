@@ -71,6 +71,20 @@ extern double d3db_wide;
  * size. */
 float d3db_camera_aspect_scale(uint32_t camera, float aspect);
 
+/* Step 65 (notes 18.68): sub_000A8140's wrapper (recomp_manual.c), around
+ * each call that draws the game's queued display list: `ret` is the call's
+ * return address, which names the pass (the world, the overlay: HUD
+ * counters, title cards, the pause menu), `end` 0 before the list is drawn
+ * and 1 after. Bridge on only. */
+void d3db_list_flush(uint32_t ret, int end);
+/* The wrappers of sub_0009EF10 (an item queued into the display list) and
+ * sub_000A8240 (an item drawn; 0 once it is). */
+void d3db_item_queued(uint32_t item);
+void d3db_item_drawn(uint32_t item);
+/* sub_000B0EF0's wrapper (the game's panel: pause menu, HUD): the guest
+ * stack pointer at its entry, 0 once it returns. */
+void d3db_panel(uint32_t entry_esp);
+
 /* A wrapper body: the lifted function first, then (bridge on) the mirror. */
 #define D3DB_CALL(id, gen) do {                 \
         d3db_args_t a_;                         \
