@@ -1922,7 +1922,11 @@ static int draw_exec(const d3dh_draw_t *d, IDirect3DBaseTexture8 *const *pin, co
         verts = d->verts;
         if ((d->fvf & D3DFVF_POSITION_MASK) == D3DFVF_XYZRHW) {
             if (g_wide > 0 && screen_target(&d->target)) {      /* 18.56: full width stretches, the rest 4:3 */
-                int full = rhw_full_width(d->verts, d->vert_count, d->stride);
+                /* Step 66: and so does the game's own projection of 3D (a
+                 * display-list flush's, not the overlay's): the warp portal's
+                 * lightning, pillarboxed, sat a quarter of its distance from
+                 * the middle off its emitters. */
+                int full = d->world_list || rhw_full_width(d->verts, d->vert_count, d->stride);
                 if (full)
                     g_st.rhw_full++;
                 else

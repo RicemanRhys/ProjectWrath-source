@@ -3344,6 +3344,7 @@ static int host_draw(d3dh_draw_t *dr)
     dr->mesh = g_mesh;
     g_mesh = 0;
     dr->overlay = g_pass == PASS_OVERLAY;
+    dr->world_list = g_pass && g_pass != PASS_OVERLAY;     /* step 66 */
     dr->world_cam = dr->overlay && g_world_cam_ok && memcmp(cam, g_world_cam, sizeof(cam)) == 0;
     dr->hud = dr->overlay ? g_item_hud : 0;
     return d3dh_draw_up(dr);

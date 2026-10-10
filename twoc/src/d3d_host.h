@@ -161,6 +161,11 @@ typedef struct {
      * under the camera the world pass had this frame (the HUD counters and
      * title cards; the pause menu has a camera of its own). */
     uint8_t overlay, world_cam;
+    /* Step 66: drawn in one of the game's display-list flushes other than
+     * the overlay pass (the world's, its effects'): a pre-transformed draw
+     * there is 3D the game projected itself (the warp portal's lightning),
+     * with the widened projection: stretched with the 3D, not pillarboxed. */
+    uint8_t world_list;
     /* Queued by the panel's in-game part (the HUD counters and title cards,
      * never the pause menu or a hub pad's panel): the panel's call site that
      * queued it (one per counter's icon, its digits, a card's line), else 0. */
