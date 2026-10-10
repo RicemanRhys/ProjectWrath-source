@@ -27,6 +27,8 @@
 #   -Widescreen  RECOMP_WIDESCREEN=1 (needs -Bridge or -HostOnly; notes 18.56): 16:9. The game widens every
 #                projection that renders to the screen (the camera aspect, sub_000956B0) and the host renders
 #                a 16:9 picture (full-width 2D stretched, the HUD and menus pillarboxed). Off, nothing changes
+#                Other ratios (notes 18.67): the overlay's Aspect ratio (16:10, 21:9), or by hand
+#                $env:RECOMP_WIDESCREEN = '16:10' (any W:H wider than 4:3); -Widescreen always means 16:9
 #   -RenderSize WxH | native   RECOMP_RENDER_SIZE (needs -Bridge or -HostOnly; notes 18.56): the host renders at
 #                that size (the largest of the picture's aspect that fits: 1920x1080 is 1440x1080 at 4:3, all of it
 #                at 16:9), in a window sized in real pixels; "native" is the monitor's mode. Without it the host
@@ -36,7 +38,7 @@
 #                between that and the window at any time
 #
 # Settings (notes 18.57): Esc on the bridge window opens the settings overlay and holds the game until Esc
-# again (fullscreen, widescreen, render size, frame pacing, anisotropic filtering, volume; applied at once).
+# again (fullscreen, aspect ratio, render size, frame pacing, anisotropic filtering, volume; applied at once).
 # They are saved to twoc\build\Release\crash_twoc.ini, which the next start reads. A switch given here wins
 # over that file for this run: -Widescreen, -Fullscreen, -RenderSize WxH | native | game, and to switch one
 # off -Widescreen:$false or -Fullscreen:$false. Without the file, and with no switch, everything is as before.

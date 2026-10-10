@@ -575,7 +575,10 @@ static int env_on(const char *name)
  * together (18.54); its wrapper in recomp_manual.c scales that aspect by
  * d3db_camera_aspect_scale for the call. The host then renders a wider back
  * buffer (d3d_host.c). Off, or with the bridge off, d3db_wide is 0 and
- * nothing here runs. */
+ * nothing here runs.
+ *
+ * Step 64 (notes 18.67): nothing here is 16:9 itself; the overlay's Aspect
+ * ratio offers 16:10 and 21:9 as RECOMP_WIDESCREEN=W:H the same way. */
 double d3db_wide;
 static uint32_t g_guest_w, g_guest_h;      /* the guest back buffer (CreateDevice) */
 static unsigned g_render_w, g_render_h;     /* RECOMP_RENDER_SIZE; 0 if not asked for */
@@ -947,8 +950,10 @@ static void settings_apply(const twoc_settings_t *s)
 
     if (s->widescreen && s->wide_h > 0 && s->wide_w / s->wide_h > 4.0 / 3.0 + 1e-6)
         wide = s->wide_w / s->wide_h;
-    if (wide != d3db_wide)
-        fprintf(stderr, "[WIDE] widescreen %s (live)\n", wide > 0 ? "on" : "off");
+    if (wide != d3db_wide && wide > 0)  /* step 64: which ratio */
+        fprintf(stderr, "[WIDE] widescreen on, %g:%g (live)\n", s->wide_w, s->wide_h);
+    else if (wide != d3db_wide)
+        fprintf(stderr, "[WIDE] widescreen off, 4:3 (live)\n");
     d3db_wide = wide;
     if (render_size_parse(s->render_size, &rw, &rh) == 0) {
         g_render_w = rw;

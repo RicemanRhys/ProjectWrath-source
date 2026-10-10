@@ -17,7 +17,7 @@ typedef struct {
 
 static const key_t_ g_fixed[] = {
     { "fullscreen", "RECOMP_FULLSCREEN", "" },
-    { "widescreen", "RECOMP_WIDESCREEN", "0, 1 or W:H" },
+    { "widescreen", "RECOMP_WIDESCREEN", "the aspect ratio: 0 (4:3), 1 (16:9) or W:H (16:10, 21:9)" },
     { "render_size", "RECOMP_RENDER_SIZE", "game (480 lines), WxH or native" },
     { "pacing", "RECOMP_PACING", "auto, vsync, limiter or limiter+vsync" },
     { "anisotropy", "RECOMP_ANISOTROPY", "1 (the game's filtering), 2, 4, 8 or 16" },

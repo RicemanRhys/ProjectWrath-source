@@ -8,7 +8,8 @@
  * the file, and without the file nothing is set: the run is as before.
  *
  *   fullscreen  = 0 | 1                       RECOMP_FULLSCREEN
- *   widescreen  = 0 | 1 | W:H                 RECOMP_WIDESCREEN
+ *   widescreen  = 0 | 1 | W:H                 RECOMP_WIDESCREEN (0: 4:3, 1: 16:9; step 64: the
+ *                                             overlay's Aspect ratio writes 16:10 and 21:9 as W:H)
  *   render_size = game | WxH | native         RECOMP_RENDER_SIZE (game: the guest's 480 lines)
  *   pacing      = auto | vsync | limiter | limiter+vsync    RECOMP_PACING
  *   anisotropy  = 1 | 2 | 4 | 8 | 16          RECOMP_ANISOTROPY (1: the game's own filtering)

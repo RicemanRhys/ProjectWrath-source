@@ -366,13 +366,31 @@ static int tab_display(twoc_settings_t *s, const ovl_info_t *in)
             r |= OVL_CHANGED;
         }
     }
-    {
-        bool w = s->widescreen != 0;
-        snprintf(line, sizeof(line), "Widescreen (%g:%g)", s->wide_w, s->wide_h);
-        if (ImGui::Checkbox(line, &w)) {
-            s->widescreen = w;
-            r |= OVL_CHANGED;
+    {   /* step 64: the aspect ratio; 4:3 is widescreen off, any other is widescreen = W:H */
+        static const double ratios[][2] = { { 4, 3 }, { 16, 10 }, { 16, 9 }, { 21, 9 } };
+        static const char *const ratio_names[] = { "4:3 (the game's own)", "16:10", "16:9", "21:9" };
+        int cur = -1, n = (int)(sizeof(ratios) / sizeof(ratios[0]));
+        int wide = s->widescreen && s->wide_h > 0 && s->wide_w / s->wide_h > 4.0 / 3.0 + 1e-6;
+        for (i = 0; i < n; i++)
+            if (!wide ? i == 0 : s->wide_w * ratios[i][1] == s->wide_h * ratios[i][0])
+                cur = i;
+        snprintf(buf, sizeof(buf), "%g:%g", s->wide_w, s->wide_h);
+        ImGui::SetNextItemWidth(ImGui::GetFontSize() * 12);
+        if (ImGui::BeginCombo("Aspect ratio", cur >= 0 ? ratio_names[cur] : buf)) {
+            if (cur < 0)                /* another ratio, from the command line or the file */
+                ImGui::Selectable(buf, true);
+            for (i = 0; i < n; i++)
+                if (ImGui::Selectable(ratio_names[i], i == cur) && i != cur) {
+                    s->widescreen = i != 0;
+                    s->wide_w = i ? ratios[i][0] : 16.0;
+                    s->wide_h = i ? ratios[i][1] : 9.0;
+                    r |= OVL_CHANGED;
+                }
+            ImGui::EndCombo();
         }
+        more("The picture's shape. 4:3 is the game's own; the wider ones show more of the world at the sides, "
+             "while the HUD, menus and text keep their 4:3 shape in the middle. A picture of another shape than "
+             "the monitor gets black bars. Applied at once.");
     }
     {
         int cur = -1;
@@ -391,8 +409,8 @@ static int tab_display(twoc_settings_t *s, const ovl_info_t *in)
                 }
             ImGui::EndCombo();
         }
-        more("The size the host draws the game at; the game itself draws 640x480. With widescreen the picture "
-             "is the widest of that aspect that fits, without it 4:3. A window opened without a render size is "
+        more("The size the host draws the game at; the game itself draws 640x480. The picture is the largest "
+             "of its aspect ratio that fits. A window opened without a render size is "
              "scaled by Windows until the next start; fullscreen is unaffected.");
         snprintf(line, sizeof(line), "Now %ux%u.", in->host_w, in->host_h);
         help(line);
