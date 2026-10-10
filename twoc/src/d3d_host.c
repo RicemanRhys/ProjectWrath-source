@@ -213,6 +213,7 @@ static int g_ovl_defer;                 /* step 65: the overlay pass's calls hel
 #define REC_ON() (g_replay || g_interp || g_ovl_defer)
 static double g_icut_step = 2.0, g_icut_turn = 30.0, g_icut_match = 0.5;   /* RECOMP_D3D_BRIDGE_INTERP_CUT */
 static double g_isnap = 1.5;            /* step 62: RECOMP_D3D_BRIDGE_INTERP_OBJECTS, an object stepping further snaps; 0: objects off */
+static int g_iskel = 1;                 /* step 66: RECOMP_D3D_BRIDGE_INTERP_SKELETONS=0, bones one by one as before */
 static int g_interp_t0;                 /* RECOMP_D3D_BRIDGE_INTERP_T0: sub-frames at t = 0 .. (k-1)/k (a check) */
 static int g_iq_on;                     /* step 61: the visible swap chain's queue is the interpolation's */
 static int g_imid;                      /* RECOMP_D3D_BRIDGE_INTERP_MID=1: sub-frames held to mid-refresh too */
@@ -665,6 +666,8 @@ int d3dh_create(unsigned width, unsigned height, unsigned host_w, unsigned host_
         e = getenv("RECOMP_D3D_BRIDGE_INTERP_OBJECTS");  /* step 62: "0" camera only (stage 2), or the snap step */
         if (e && *e)
             g_isnap = atof(e);
+        e = getenv("RECOMP_D3D_BRIDGE_INTERP_SKELETONS");    /* step 66: "0" bones one by one (a check) */
+        g_iskel = !(e && strcmp(e, "0") == 0);
         e = getenv("RECOMP_D3D_BRIDGE_SUBDUMP");
         if (e && strcmp(e, "cuts") == 0) {
             g_subdump_cuts = 1;
@@ -2183,6 +2186,7 @@ typedef struct {
     uint32_t key;
     int32_t prev;                       /* its partner in the frame before (index there), -1 none */
     int32_t bones;                      /* its bones' offset in g_ibone[], -1 none */
+    int32_t grp;                        /* step 66: its skeleton (g_igrp), -1 none: bones one by one */
     uint32_t used;                      /* (in the frame before) taken by a partner */
     uint32_t bmask;                     /* the bones that may move (bit b: c124 + 3b) */
     double pos[3];                      /* W's origin, plus its first bone's */
@@ -2479,6 +2483,7 @@ static void ic_obj(rcmd_t *c, uint32_t key, const double *w, const float *k4, co
     o->prev = -1;
     o->used = 0;
     o->bones = -1;
+    o->grp = -1;
     o->bmask = 0;
     memcpy(o->w, w, sizeof(o->w));
     for (i = 0; i < 3; i++)
@@ -2834,6 +2839,233 @@ static void ic_replaced(void)
     }
 }
 
+/* Step 66 (notes 18.69): skeletons. Bones slerped one by one, each about
+ * its own origin (where it takes the model's origin), stop agreeing where
+ * two of them meet once they turn far in one tick: Coco's arms at the
+ * start of a jump (the jump animation takes over, bones turn up to 98
+ * degrees), her limbs in a spin (up to 179 degrees: each bone took its own
+ * way round). Measured on recorded frames, the joints two bones share came
+ * up to 0.2 units apart at the jump and 6 in a spin (0.002-0.03 otherwise).
+ * Now a skinned object's bones are blended linearly in a frame G that moves
+ * with its skeleton: B(t) = G(t) ((1 - t) Ga^-1 Ba + t Gb^-1 Bb), G(t)
+ * slerped and lerped as a bone was. Linear in the bones, every point any
+ * two bones share stays shared (a joint can't open, whatever G is); G takes
+ * the body's turn, so only a limb's swing relative to it is blended
+ * straight (a little shorter halfway through a big swing).
+ * A skeleton: the skinned objects that hold one identical bone (a moving,
+ * non-flat one: a value both frames have and that changed); G: the bone
+ * most of them hold. A skeleton's draws hold its bones in different
+ * registers, and unread registers hold earlier draws' leftovers, so a
+ * group may take in another character: still consistent, as G is shared.
+ * Flat bones (the stencil shadow's) take no part: one by one as before. */
+typedef struct {
+    double ga[16], gb[16], iga[16], igb[16], gt[16];
+    unsigned stamp;                     /* the sub-frame gt is for */
+} igrp_t;
+static igrp_t *g_igrp;
+static unsigned g_igrp_n, g_igrp_cap, g_isub_stamp;
+typedef struct {
+    uint32_t h;                         /* 0: empty */
+    uint32_t obj, bone, count;          /* the first object holding it, its bone; how many hold it */
+} igval_t;
+static igval_t *g_igval;
+static unsigned g_igval_cap;
+static unsigned *g_iuf;                 /* union-find over this frame's objects */
+static unsigned g_iuf_cap;
+
+static unsigned uf_find(unsigned x)
+{
+    while (g_iuf[x] != x) {
+        g_iuf[x] = g_iuf[g_iuf[x]];
+        x = g_iuf[x];
+    }
+    return x;
+}
+
+/* A bone (3 registers, rows of a 3x4) as a 4x4, row-major. */
+static void bone_m4(const float *b, double *m)
+{
+    int i;
+    for (i = 0; i < 12; i++)
+        m[i] = b[i];
+    m[12] = m[13] = m[14] = 0;
+    m[15] = 1;
+}
+
+static double bone_det(const float *b)
+{
+    return (double)b[0] * ((double)b[5] * b[10] - (double)b[6] * b[9]) -
+           (double)b[1] * ((double)b[4] * b[10] - (double)b[6] * b[8]) +
+           (double)b[2] * ((double)b[4] * b[9] - (double)b[5] * b[8]);
+}
+
+/* A bone that may tie a skeleton together: moved, and neither frame's flat. */
+static int ig_usable(const float *a, const float *b)
+{
+    double da = bone_det(a), db = bone_det(b);
+    return memcmp(a, b, 12 * sizeof(float)) != 0 && fabs(da) > 1e-3 && fabs(db) > 1e-3;
+}
+
+static uint32_t ig_hash(const float *b)
+{
+    uint32_t h = 2166136261u, v;
+    int i;
+    for (i = 0; i < 12; i++) {
+        memcpy(&v, &b[i], 4);
+        h = fnv(h, v);
+    }
+    return h ? h : 1;
+}
+
+/* After pairing: this frame's paired skinned objects in skeletons, each with
+ * its G. Called with g_lock held. */
+static void ic_groups(void)
+{
+    unsigned cur = (unsigned)g_icur, prv = !cur, n = g_iobj_n[cur], nv = 0, cap, i, b, s;
+    iobj_t *ob = g_iobj[cur];
+
+    g_igrp_n = 0;
+    if (!g_iskel)
+        return;
+    for (i = 0; i < n; i++)
+        if (ob[i].bones >= 0 && ob[i].prev >= 0 && g_iobj[prv][ob[i].prev].bones >= 0)
+            nv += IC_BONE_REGS / 3;
+    if (!nv)
+        return;
+    for (cap = 64; cap < 2 * nv; cap *= 2)
+        ;
+    if (cap > g_igval_cap) {
+        igval_t *v = (igval_t *)realloc(g_igval, cap * sizeof(igval_t));
+        if (!v)
+            return;
+        g_igval = v;
+        g_igval_cap = cap;
+    }
+    if (n > g_iuf_cap) {
+        unsigned *u = (unsigned *)realloc(g_iuf, n * sizeof(unsigned));
+        if (!u)
+            return;
+        g_iuf = u;
+        g_iuf_cap = n;
+    }
+    memset(g_igval, 0, cap * sizeof(igval_t));
+    for (i = 0; i < n; i++)
+        g_iuf[i] = i;
+    for (i = 0; i < n; i++) {           /* each usable bone value: held before? then the same skeleton */
+        const iobj_t *o = &ob[i], *p;
+        if (o->bones < 0 || o->prev < 0)
+            continue;
+        p = &g_iobj[prv][o->prev];
+        if (p->bones < 0)
+            continue;
+        for (b = 0; b < IC_BONE_REGS / 3; b++) {
+            const float *vb = g_ibone[cur] + o->bones + 12 * b, *va = g_ibone[prv] + p->bones + 12 * b;
+            uint32_t h;
+            if (!((o->bmask & p->bmask) >> b & 1) || !ig_usable(va, vb))
+                continue;
+            h = ig_hash(vb);
+            for (s = h & (cap - 1);; s = (s + 1) & (cap - 1)) {
+                igval_t *e = &g_igval[s];
+                if (!e->h) {
+                    e->h = h;
+                    e->obj = i;
+                    e->bone = b;
+                    e->count = 1;
+                    break;
+                }
+                if (e->h == h && memcmp(g_ibone[cur] + ob[e->obj].bones + 12 * e->bone, vb, 12 * sizeof(float)) == 0) {
+                    unsigned x = uf_find(i), y = uf_find(e->obj);
+                    if (x != y)
+                        g_iuf[x] = y;
+                    if (e->obj != i)
+                        e->count++;
+                    break;
+                }
+            }
+        }
+    }
+    for (i = 0; i < n; i++)             /* the skeletons, by their root object */
+        ob[i].grp = -1;
+    for (s = 0; s < cap; s++) {         /* each skeleton's G: the bone most of its objects hold */
+        igval_t *e = &g_igval[s];
+        unsigned r;
+        if (!e->h)
+            continue;
+        r = uf_find(e->obj);
+        if (ob[r].grp < 0 || e->count > g_igval[ob[r].grp].count)
+            ob[r].grp = (int32_t)s;     /* for now: the slot of its G */
+    }
+    for (i = 0; i < n; i++) {
+        unsigned r = uf_find(i);
+        if (r == i && ob[i].grp >= 0) {
+            const igval_t *e = &g_igval[ob[i].grp];
+            const iobj_t *o = &ob[e->obj], *p = &g_iobj[prv][o->prev];
+            igrp_t *gr;
+            if (g_igrp_n == g_igrp_cap) {
+                unsigned c2 = g_igrp_cap ? 2 * g_igrp_cap : 16;
+                igrp_t *x = (igrp_t *)realloc(g_igrp, c2 * sizeof(igrp_t));
+                if (!x) {
+                    ob[i].grp = -1;
+                    continue;
+                }
+                g_igrp = x;
+                g_igrp_cap = c2;
+            }
+            gr = &g_igrp[g_igrp_n];
+            bone_m4(g_ibone[prv] + p->bones + 12 * e->bone, gr->ga);
+            bone_m4(g_ibone[cur] + o->bones + 12 * e->bone, gr->gb);
+            gr->stamp = 0;
+            if (m4_inv(gr->ga, gr->iga) != 0 || m4_inv(gr->gb, gr->igb) != 0) {
+                ob[i].grp = -1;
+                continue;
+            }
+            ob[i].grp = (int32_t)(g_igrp_n++ | 0x40000000);   /* marked: a skeleton's index */
+        }
+    }
+    for (i = 0; i < n; i++) {           /* every object its root's skeleton */
+        unsigned r = uf_find(i);
+        int32_t g = ob[r].grp;
+        if (r != i)
+            ob[i].grp = g >= 0 && (g & 0x40000000) ? g : -1;
+    }
+    for (i = 0; i < n; i++) {
+        if (ob[i].grp >= 0 && (ob[i].grp & 0x40000000))
+            ob[i].grp &= ~0x40000000;
+        else
+            ob[i].grp = -1;
+    }
+    g_st.interp_skel += g_igrp_n;
+}
+
+/* Step 66: a skeleton's G at this sub-frame's t, made once a sub-frame. */
+static const double *ic_group_g(unsigned gi)
+{
+    igrp_t *gr = &g_igrp[gi];
+
+    if (gr->stamp != g_isub_stamp) {
+        aff_t a, b, r;
+        int i, j;
+        for (i = 0; i < 3; i++) {       /* axis j is column j */
+            for (j = 0; j < 3; j++) {
+                a.r[3 * j + i] = gr->ga[4 * i + j];
+                b.r[3 * j + i] = gr->gb[4 * i + j];
+            }
+            a.t[i] = gr->ga[4 * i + 3];
+            b.t[i] = gr->gb[4 * i + 3];
+        }
+        aff_lerp(&a, &b, g_it, &r);
+        for (i = 0; i < 3; i++) {
+            for (j = 0; j < 3; j++)
+                gr->gt[4 * i + j] = r.r[3 * j + i];
+            gr->gt[4 * i + 3] = r.t[i];
+        }
+        gr->gt[12] = gr->gt[13] = gr->gt[14] = 0;
+        gr->gt[15] = 1;
+        gr->stamp = g_isub_stamp;
+    }
+    return gr->gt;
+}
+
 /* Step 62: each object of this frame paired with the frame before's
  * nearest unpaired one of its key, in draw order; none within g_isnap: it
  * stays where it is. Called with g_lock held. */
@@ -2911,6 +3143,7 @@ static void ic_pair(void)
             po[best].used = 1;
         }
     }
+    ic_groups();                        /* step 66 */
 }
 
 /* At the present: how many sub-frames this frame gets (1: shown as it is),
@@ -3041,6 +3274,7 @@ static void ic_sub(double t)
     unsigned cur = (unsigned)g_icur, prv = !cur, i, j;
 
     g_it = t;
+    g_isub_stamp++;                     /* step 66: the skeletons' G at this t, made again */
     for (i = 0; i < g_icam_n[cur]; i++) {
         const icam_t *b = &g_icam[cur][i], *a;
         double ci[16], inv_ci[16], cn[16], vfix[16], tmp[16], c[16], pi[16];
@@ -3175,6 +3409,7 @@ static void ic_draw(const rcmd_t *c)
                 k4[4 * (96 + j) + i] = (float)wvp[4 * i + j];
         if (b_move) {                   /* the bones at t */
             int bi, moved = 0;
+            const double *gt = o->grp >= 0 ? ic_group_g((unsigned)o->grp) : NULL;
             for (bi = 0; bi < IC_BONE_REGS / 3; bi++) {
                 const float *ba = pb + 12 * bi, *bb = s + 4 * (IC_BONE_BASE + 3 * bi);
                 float *bo = k4 + 4 * (IC_BONE_BASE + 3 * bi);
@@ -3182,6 +3417,31 @@ static void ic_draw(const rcmd_t *c)
                 double dx, dy, dz;
                 if (!(o->bmask >> bi & 1) || memcmp(ba, bb, 12 * sizeof(float)) == 0)
                     continue;
+                if (gt) {                       /* step 66: blended in its skeleton's frame */
+                    const igrp_t *gr = &g_igrp[o->grp];
+                    double ma[16], mb[16], ra[16], rb[16], rl[16], mt[16];
+                    dx = (double)ba[3] - bb[3];
+                    dy = (double)ba[7] - bb[7];
+                    dz = (double)ba[11] - bb[11];
+                    if (!(dx * dx + dy * dy + dz * dz <= 16 * g_isnap * g_isnap)) {
+                        g_st.interp_bone_snap++;
+                        continue;
+                    }
+                    bone_m4(ba, ma);
+                    bone_m4(bb, mb);
+                    m4_mul(gr->iga, ma, ra);
+                    m4_mul(gr->igb, mb, rb);
+                    for (i = 0; i < 12; i++)
+                        rl[i] = ra[i] + (rb[i] - ra[i]) * g_it;
+                    rl[12] = rl[13] = rl[14] = 0;
+                    rl[15] = 1;
+                    m4_mul(gt, rl, mt);
+                    for (i = 0; i < 12; i++)
+                        bo[i] = (float)mt[i];
+                    moved = 1;
+                    g_st.interp_skel_bones++;
+                    continue;
+                }
                 for (i = 0; i < 3; i++) {       /* axis j is column j of the 3x4 rows */
                     for (j = 0; j < 3; j++) {
                         a.r[3 * j + i] = ba[4 * i + j];

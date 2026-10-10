@@ -4580,11 +4580,12 @@ static void mirror_swap(void)
                 lmt = st.interp_matched;
             }
             if (st.interp_obj) {                        /* step 62: objects */
-                static unsigned lf, ls, lo, ln, lsn, lvp, lff, lbn, lbs, lsw;
+                static unsigned lf, ls, lo, ln, lsn, lvp, lff, lbn, lbs, lsw, lsk, lskb;
                 unsigned f = st.interp_frames - lf, subs = st.interp_subs - ls;
                 log_block_printf(&lb, "[D3DB] host interpolation objects: a frame %.1f, paired %.1f, none of their"
                                  " kind %.1f, snapped %.2f, replaced in place %.2f; a sub-frame moves program draws %.1f (bones %.1f),"
-                                 " fixed-function %.1f; bones snapped %u\n", f ? (double)(st.interp_obj - lo) / f : 0.0,
+                                 " fixed-function %.1f; bones snapped %u; skeletons %.1f (bones blended in them %.1f a"
+                                 " sub-frame)\n", f ? (double)(st.interp_obj - lo) / f : 0.0,
                                  f ? (double)(st.interp_obj - lo - (st.interp_obj_new - ln) - (st.interp_obj_snap - lsn) -
                                               (st.interp_obj_swap - lsw)) / f
                                    : 0.0,
@@ -4594,7 +4595,8 @@ static void mirror_swap(void)
                                  subs ? (double)(st.interp_obj_vp - lvp) / subs : 0.0,
                                  subs ? (double)(st.interp_bones - lbn) / subs : 0.0,
                                  subs ? (double)(st.interp_obj_ff - lff) / subs : 0.0,
-                                 st.interp_bone_snap - lbs);
+                                 st.interp_bone_snap - lbs, f ? (double)(st.interp_skel - lsk) / f : 0.0,
+                                 subs ? (double)(st.interp_skel_bones - lskb) / subs : 0.0);
                 lf = st.interp_frames;
                 ls = st.interp_subs;
                 lo = st.interp_obj;
@@ -4605,6 +4607,8 @@ static void mirror_swap(void)
                 lff = st.interp_obj_ff;
                 lbn = st.interp_bones;
                 lbs = st.interp_bone_snap;
+                lsk = st.interp_skel;
+                lskb = st.interp_skel_bones;
             }
             if (st.overlay_passes && (d3db_wide > 0 || st.interp_frames || st.interp_off)) {    /* step 65 */
                 static unsigned lp, ld, lw;
