@@ -2563,6 +2563,7 @@ static void count_mirrored(const d3dh_draw_t *dr)
 #define VSO_UPLOAD          0x114u
 #define VS_MAX_INSNS        136
 #define VS_CONSTS           192
+static uint32_t g_vsc_fresh[6];       /* step 67: constant slots written since the last program draw */
 #define VS_FMT_DISABLED     0x02u
 
 typedef struct {
@@ -3364,6 +3365,8 @@ static void mirror_draw_vp(const char *path, uint32_t xdk_prim, uint32_t n, cons
     uint32_t lo = 0, hi = 0, nv, prim = 0, count = 0, k = 0, i, vstride;
     int texel, vc = -1;
 
+    memcpy(hv.fresh, g_vsc_fresh, sizeof(hv.fresh));     /* step 67: this draw's own constants */
+    memset(g_vsc_fresh, 0, sizeof(g_vsc_fresh));
     if (describe_vprog(&p) != 0) {
         skip(SKIP_VS_PROGRAM, MEM32(dev() + DEV_VS_HANDLE));
         return;
@@ -4714,6 +4717,11 @@ void d3db_enter(int id, d3db_args_t *a)
                 (MEM8(v - 5) == 0xE8 || MEM8(v - 6) == 0xFF || MEM8(v - 2) == 0xFF || MEM8(v - 3) == 0xFF))
                 g_motion_vsc_ret[n++] = v;
         }
+    }
+    if (id == D3DB_VS_CONSTANT) {       /* step 67: the slots written before the next program draw */
+        int r = (int)a->arg[0] + 96, e = r + (int)a->arg[2];
+        for (r = r < 0 ? 0 : r; r < e && r < VS_CONSTS; r++)
+            g_vsc_fresh[r >> 5] |= 1u << (r & 31);
     }
     /* Step 65: the draw log's call chain, the same walk six deep. */
     if ((id == D3DB_DRAW_UP || id == D3DB_DRAW_INDEXED || id == D3DB_END || id == D3DB_DRAW) && drawlog_on()) {

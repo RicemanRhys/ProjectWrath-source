@@ -121,11 +121,15 @@ typedef struct {
  * shader. `consts` is the NV2A's constant memory as the draw sees it,
  * float4[192] by the microcode's own indices. A draw with one has its
  * vertices in the host's layout for it: a float4 for each register the
- * program reads, in ascending order (d3dh_vs_inputs). */
+ * program reads, in ascending order (d3dh_vs_inputs). `fresh` (step 67):
+ * the constants SetVertexShaderConstant wrote since the program draw
+ * before, bit n = cn; a skinned draw's own bones (the rest of its palette
+ * holds earlier draws' leftovers). */
 typedef struct {
     uint32_t key, n_insns;
     const uint32_t *code;
     const float *consts;
+    uint32_t fresh[6];
 } d3dh_vprog_t;
 
 /* One draw from client memory, translated by d3d_bridge.c. `prim` is

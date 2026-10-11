@@ -2193,6 +2193,7 @@ typedef struct {
     int32_t grp;                        /* step 66: its skeleton (g_igrp), -1 none: bones one by one */
     uint32_t used;                      /* (in the frame before) taken by a partner */
     uint32_t bmask;                     /* the bones that may move (bit b: c124 + 3b) */
+    uint32_t own;                       /* step 67: bmask holds only the bones uploaded for it */
     double pos[3];                      /* W's origin, plus its first bone's */
     double w[16];
 } iobj_t;
@@ -2435,7 +2436,8 @@ static int ic_hand(const double *m)
 
 /* Step 62: a draw's object, with its world `w` and its program constants
  * when it has bones (else NULL). */
-static void ic_obj(rcmd_t *c, uint32_t key, const double *w, const float *k4, const uint32_t *cmask)
+static void ic_obj(rcmd_t *c, uint32_t key, const double *w, const float *k4, const uint32_t *cmask,
+                   const uint32_t *fresh)
 {
     static const uint32_t keep[] = { 14, 19, 20, 22, 52, 55, 56, 168 };  /* ZWRITE, blend, CULL, STENCIL*, COLORWRITE */
     const d3dh_draw_t *d = &c->u.draw.d;
@@ -2489,6 +2491,7 @@ static void ic_obj(rcmd_t *c, uint32_t key, const double *w, const float *k4, co
     o->bones = -1;
     o->grp = -1;
     o->bmask = 0;
+    o->own = 0;
     memcpy(o->w, w, sizeof(o->w));
     for (i = 0; i < 3; i++)
         o->pos[i] = w[12 + i];
@@ -2503,6 +2506,25 @@ static void ic_obj(rcmd_t *c, uint32_t key, const double *w, const float *k4, co
             if (!((cmask[r >> 5] >> (r & 31) | cmask[(r + 1) >> 5] >> ((r + 1) & 31) |
                    cmask[(r + 2) >> 5] >> ((r + 2) & 31)) & 1))
                 o->bmask |= 1u << i;
+        }
+        /* Step 67: a skinned draw uploads its own bones just before it; its
+         * other bone registers hold earlier draws' (another character's,
+         * often), and two draws holding the same leftover made one
+         * skeleton of every character in a level (Banzai Bonsai: 80
+         * objects), whose frame G was one character's: the rest swung
+         * about it in between. Only its own bones pair and group it. */
+        {
+            uint32_t m = 0;
+            for (i = 0; i < IC_BONE_REGS / 3; i++) {
+                unsigned r = IC_BONE_BASE + 3 * i;
+                if ((fresh[r >> 5] >> (r & 31) | fresh[(r + 1) >> 5] >> ((r + 1) & 31) |
+                     fresh[(r + 2) >> 5] >> ((r + 2) & 31)) & 1)
+                    m |= 1u << i;
+            }
+            if (o->bmask & m) {
+                o->bmask &= m;
+                o->own = 1;
+            }
         }
     }
     c->u.draw.obj = (int32_t)g_iobj_n[cur]++;
@@ -2574,7 +2596,7 @@ static void ic_record(rcmd_t *c)
                 c->u.draw.cpos[c->u.draw.n_cpos++] = (uint8_t)r;
         }
         cam->draws++;
-        ic_obj(c, key, w, g_vs[slot].rel_bones ? k4 : NULL, g_vs[slot].cmask);     /* step 62 */
+        ic_obj(c, key, w, g_vs[slot].rel_bones ? k4 : NULL, g_vs[slot].cmask, d->vprog->fresh);  /* step 62 */
     } else if (d->ff && (d->fvf & D3DFVF_POSITION_MASK) != D3DFVF_XYZRHW) {
         double v[16], cm[16], vc[16];
         int i, j;
@@ -2592,7 +2614,7 @@ static void ic_record(rcmd_t *c)
         cam->draws++;
         m4_from(d->ff->world, v);       /* step 62: an affine world is an object's */
         if (v[3] == 0 && v[7] == 0 && v[11] == 0 && v[15] == 1)
-            ic_obj(c, key, v, NULL, NULL);
+            ic_obj(c, key, v, NULL, NULL, NULL);
     }
 }
 
@@ -2701,6 +2723,13 @@ static void ic_rec_dump(unsigned swap_no)
             r[9] = d->vert_count;
             r[10] = d->prim_count;
             r[11] = d->mesh;                  /* step 62 */
+            if (d->vprog) {                   /* step 67: bits 8-29, the bones uploaded for it */
+                unsigned k, q;
+                for (k = 0; k < IC_BONE_REGS / 3; k++)
+                    for (q = IC_BONE_BASE + 3 * k; q < IC_BONE_BASE + 3 * k + 3; q++)
+                        if (d->vprog->fresh[q >> 5] >> (q & 31) & 1)
+                            r[8] |= 1u << (8 + k);
+            }
             fwrite(r, 4, 12, f);
             fwrite(d->camera ? d->camera : zero, 4, 32, f);
             fwrite(d->ff ? d->ff->world : zero, 4, 16, f);
@@ -2960,7 +2989,7 @@ static void ic_groups(void)
         if (o->bones < 0 || o->prev < 0)
             continue;
         p = &g_iobj[prv][o->prev];
-        if (p->bones < 0)
+        if (p->bones < 0 || !o->own || !p->own)     /* step 67: leftovers unknown, no skeleton */
             continue;
         for (b = 0; b < IC_BONE_REGS / 3; b++) {
             const float *vb = g_ibone[cur] + o->bones + 12 * b, *va = g_ibone[prv] + p->bones + 12 * b;
