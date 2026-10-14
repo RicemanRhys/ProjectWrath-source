@@ -214,6 +214,9 @@ static int g_ovl_defer;                 /* step 65: the overlay pass's calls hel
 static double g_icut_step = 2.0, g_icut_turn = 30.0, g_icut_match = 0.5;   /* RECOMP_D3D_BRIDGE_INTERP_CUT */
 static double g_isnap = 1.5;            /* step 62: RECOMP_D3D_BRIDGE_INTERP_OBJECTS, an object stepping further snaps; 0: objects off */
 static int g_iskel = 1;                 /* step 66: RECOMP_D3D_BRIDGE_INTERP_SKELETONS=0, bones one by one as before */
+static int g_imatch = 1;                /* step 68: RECOMP_D3D_BRIDGE_INTERP_MATCH=0, step 62's pairing in draw order */
+static int g_ipairlog, g_irec_this;     /* step 68: RECOMP_D3D_BRIDGE_PAIRLOG=1, each recorded frame's pairs logged */
+static unsigned g_ipair_swap;           /* the swap being paired (the pair log) */
 static int g_interp_t0;                 /* RECOMP_D3D_BRIDGE_INTERP_T0: sub-frames at t = 0 .. (k-1)/k (a check) */
 static int g_iq_on;                     /* step 61: the visible swap chain's queue is the interpolation's */
 static int g_imid;                      /* RECOMP_D3D_BRIDGE_INTERP_MID=1: sub-frames held to mid-refresh too */
@@ -668,6 +671,10 @@ int d3dh_create(unsigned width, unsigned height, unsigned host_w, unsigned host_
             g_isnap = atof(e);
         e = getenv("RECOMP_D3D_BRIDGE_INTERP_SKELETONS");    /* step 66: "0" bones one by one (a check) */
         g_iskel = !(e && strcmp(e, "0") == 0);
+        e = getenv("RECOMP_D3D_BRIDGE_INTERP_MATCH");       /* step 68: "0" pairs in draw order (a check) */
+        g_imatch = !(e && strcmp(e, "0") == 0);
+        e = getenv("RECOMP_D3D_BRIDGE_PAIRLOG");
+        g_ipairlog = e && *e && strcmp(e, "0") != 0;
         e = getenv("RECOMP_D3D_BRIDGE_SUBDUMP");
         if (e && strcmp(e, "cuts") == 0) {
             g_subdump_cuts = 1;
@@ -2688,9 +2695,11 @@ static void ic_rec_dump(unsigned swap_no)
         }
         DeleteFileA(go);
     }
+    g_irec_this = 0;
     if (!g_irec_left)
         return;
     g_irec_left--;
+    g_irec_this = 1;                    /* step 68: the pair log follows the recorded frames */
     f = fopen(g_irec_trigger, "ab");
     if (!f)
         return;
@@ -3099,16 +3108,186 @@ static const double *ic_group_g(unsigned gi)
     return gr->gt;
 }
 
+/* Step 68 (notes 18.71): pairing a key's objects together. Step 62 paired
+ * them one at a time in draw order, each with the nearest unpaired one: a
+ * wumpa fruit just come into view at the screen's edge (culled the frame
+ * before) could be drawn first and take its neighbour's partner, a fruit
+ * spacing away and under the snap, and came out of that fruit and slid into
+ * place (Bamboozled, Medieval Madness); the neighbour, its own taken, snapped
+ * (step 63). Now every candidate pair of a key (each object's IC_CANDS
+ * nearest of the frame before) is taken nearest first, so each keeps its
+ * own and the one that wasn't there before is left with none: new, drawn
+ * where it is. */
+#define IC_CANDS 4
+typedef struct {
+    double dd;
+    unsigned rd;                        /* ties: how far apart their places in the key's draw order are */
+    unsigned c, p;                      /* this frame's object, the frame before's */
+} icand_t;
+static icand_t *g_icand;
+static unsigned g_icand_cap;
+static unsigned *g_icord;               /* this frame's objects by key */
+static unsigned g_icord_cap;
+static int32_t *g_ipick;                /* each of this frame's objects: its partner, -1 none */
+static double *g_ipick_dd, *g_inear;    /* ... its distance (ic_dist), the nearest of its key's, taken or not */
+static int32_t *g_inear_i;
+static unsigned g_ipick_cap;
+static const iobj_t *g_icord_of;
+
+static int cmp_icord(const void *a, const void *b)
+{
+    unsigned i = *(const unsigned *)a, j = *(const unsigned *)b;
+    uint32_t x = g_icord_of[i].key, y = g_icord_of[j].key;
+    return x < y ? -1 : x > y ? 1 : (i > j) - (i < j);
+}
+
+static int cmp_icand(const void *a, const void *b)
+{
+    const icand_t *x = (const icand_t *)a, *y = (const icand_t *)b;
+    if (x->dd != y->dd)
+        return x->dd < y->dd ? -1 : 1;
+    if (x->rd != y->rd)
+        return x->rd < y->rd ? -1 : 1;
+    return x->c != y->c ? (x->c > y->c) - (x->c < y->c) : (x->p > y->p) - (x->p < y->p);
+}
+
+static int ic_grow(void **p, unsigned *cap, unsigned need, size_t sz)
+{
+    void *n;
+    unsigned c = *cap ? *cap : 256;
+
+    if (need <= *cap)
+        return 1;
+    while (c < need)
+        c *= 2;
+    n = realloc(*p, (size_t)c * sz);
+    if (!n)
+        return 0;
+    *p = n;
+    *cap = c;
+    return 1;
+}
+
+/* Each of this frame's objects' partner (g_ipick), its distance and its
+ * nearest of the frame before's (g_inear): a key's candidate pairs nearest
+ * first. 0 if out of memory. */
+static int ic_match(void)
+{
+    unsigned cur = (unsigned)g_icur, prv = !cur, nc = g_iobj_n[cur], np = g_iobj_n[prv], i, a, b, pa;
+    iobj_t *co = g_iobj[cur], *po = g_iobj[prv];
+
+    if (!ic_grow((void **)&g_icord, &g_icord_cap, nc, sizeof(unsigned)))
+        return 0;
+    if (nc > g_ipick_cap) {             /* four arrays of one capacity */
+        unsigned c = g_ipick_cap ? g_ipick_cap : 256;
+        void *x, *y, *w, *z;
+        while (c < nc)
+            c *= 2;
+        if ((x = realloc(g_ipick, c * sizeof(int32_t))) != NULL)
+            g_ipick = (int32_t *)x;
+        if ((y = realloc(g_ipick_dd, c * sizeof(double))) != NULL)
+            g_ipick_dd = (double *)y;
+        if ((w = realloc(g_inear, c * sizeof(double))) != NULL)
+            g_inear = (double *)w;
+        if ((z = realloc(g_inear_i, c * sizeof(int32_t))) != NULL)
+            g_inear_i = (int32_t *)z;
+        if (!x || !y || !w || !z)
+            return 0;
+        g_ipick_cap = c;
+    }
+    for (i = 0; i < nc; i++) {
+        g_icord[i] = i;
+        g_ipick[i] = -1;
+        g_ipick_dd[i] = 1e300;
+        g_inear[i] = 1e300;
+        g_inear_i[i] = -1;
+    }
+    g_icord_of = co;
+    qsort(g_icord, nc, sizeof(unsigned), cmp_icord);
+    for (a = 0, pa = 0; a < nc; a = b) {     /* key by key: [a, b) this frame's, [pa, pb) the frame before's */
+        unsigned pb, round;
+        uint32_t key = co[g_icord[a]].key;
+        for (b = a; b < nc && co[g_icord[b]].key == key; b++)
+            ;
+        while (pa < np && po[g_iord[pa]].key < key)
+            pa++;
+        for (pb = pa; pb < np && po[g_iord[pb]].key == key; pb++)
+            ;
+        if (pb == pa)
+            continue;
+        if (!ic_grow((void **)&g_icand, &g_icand_cap, (b - a) * IC_CANDS, sizeof(icand_t)))
+            return 0;
+        /* Rounds: the objects left without one propose again among those
+         * left (exact ties, e.g. meshes built in world space, all at the
+         * origin, go by their places in the draw order). */
+        for (round = 0; round < 16; round++) {
+            unsigned nn = 0, got = 0, k;
+            for (i = a; i < b; i++) {   /* each object's IC_CANDS nearest unused of the frame before */
+                unsigned c = g_icord[i], j, m = 0;
+                icand_t best[IC_CANDS];
+                if (co[c].used == 2 || g_ipick[c] >= 0)     /* step 63: replaced another in place; or paired */
+                    continue;
+                for (j = pa; j < pb; j++) {
+                    unsigned p = g_iord[j], rd = i - a > j - pa ? (i - a) - (j - pa) : (j - pa) - (i - a);
+                    double dd = ic_dist(&co[c], &po[p]);
+                    if (!round && dd < g_inear[c]) {    /* step 63: the nearest, taken or not */
+                        g_inear[c] = dd;
+                        g_inear_i[c] = (int32_t)p;
+                    }
+                    if (po[p].used)
+                        continue;
+                    if (m < IC_CANDS || dd < best[m - 1].dd || (dd == best[m - 1].dd && rd < best[m - 1].rd)) {
+                        unsigned q = m < IC_CANDS ? m++ : m - 1;
+                        while (q > 0 && (best[q - 1].dd > dd || (best[q - 1].dd == dd && best[q - 1].rd > rd))) {
+                            best[q] = best[q - 1];
+                            q--;
+                        }
+                        best[q].dd = dd;
+                        best[q].rd = rd;
+                        best[q].c = c;
+                        best[q].p = p;
+                    }
+                }
+                for (k = 0; k < m; k++)
+                    g_icand[nn++] = best[k];
+            }
+            if (!nn)
+                break;
+            qsort(g_icand, nn, sizeof(icand_t), cmp_icand);
+            for (k = 0; k < nn; k++) {  /* nearest first */
+                icand_t *x = &g_icand[k];
+                if (g_ipick[x->c] >= 0 || po[x->p].used)
+                    continue;
+                g_ipick[x->c] = (int32_t)x->p;
+                g_ipick_dd[x->c] = x->dd;
+                po[x->p].used = 3;      /* matched; marked 1 once it is the partner */
+                got++;
+            }
+            if (!got)
+                break;
+        }
+        pa = pb;
+    }
+    for (i = 0; i < np; i++)
+        if (po[i].used == 3)
+            po[i].used = 0;
+    return 1;
+}
+
 /* Step 62: each object of this frame paired with the frame before's
- * nearest unpaired one of its key, in draw order; none within g_isnap: it
- * stays where it is. Called with g_lock held. */
+ * nearest unpaired one of its key (step 68: ic_match's, else in draw
+ * order); none within g_isnap: it stays where it is. Called with g_lock
+ * held. */
 static void ic_pair(void)
 {
     unsigned cur = (unsigned)g_icur, prv = !cur, n = g_iobj_n[prv], i, j;
     iobj_t *po = g_iobj[prv];
+    int matched;
+    LARGE_INTEGER t0, t1;
 
     if (!g_iobj_n[cur])
         return;
+    QueryPerformanceCounter(&t0);
     if (n > g_iord_cap) {
         unsigned *o = (unsigned *)realloc(g_iord, n * sizeof(unsigned));
         if (!o)
@@ -3123,33 +3302,45 @@ static void ic_pair(void)
     g_iord_of = po;
     qsort(g_iord, n, sizeof(unsigned), cmp_iord);
     ic_replaced();                      /* step 63 */
+    matched = g_imatch && ic_match();
     for (i = 0; i < g_iobj_n[cur]; i++) {
         iobj_t *o = &g_iobj[cur][i];
         unsigned lo = 0, hi = n, best = (unsigned)-1, a1i = (unsigned)-1;
         double bd = 1e300, a1 = 1e300, rel;
+        const char *what;
         if (o->used == 2) {             /* step 63: replaced another in place, drawn as it is */
             g_st.interp_obj++;
+            if (g_ipairlog && g_irec_this)
+                fprintf(stderr, "[D3DB] pairlog swap %u obj %u key %08X pos %.3f %.3f %.3f replaced\n", g_ipair_swap,
+                        i, o->key, o->pos[0], o->pos[1], o->pos[2]);
             continue;
         }
-        while (lo < hi) {
-            unsigned mid = (lo + hi) / 2;
-            if (po[g_iord[mid]].key < o->key)
-                lo = mid + 1;
-            else
-                hi = mid;
-        }
-        for (j = lo; j < n && po[g_iord[j]].key == o->key; j++) {
-            const iobj_t *p = &po[g_iord[j]];
-            double dd = ic_dist(o, p);
-            if (dd < a1) {              /* step 63: the nearest, taken or not */
-                a1 = dd;
-                a1i = g_iord[j];
+        if (matched) {
+            best = g_ipick[i] >= 0 ? (unsigned)g_ipick[i] : (unsigned)-1;
+            bd = g_ipick_dd[i];
+            a1 = g_inear[i];
+            a1i = g_inear_i[i] >= 0 ? (unsigned)g_inear_i[i] : (unsigned)-1;
+        } else {
+            while (lo < hi) {
+                unsigned mid = (lo + hi) / 2;
+                if (po[g_iord[mid]].key < o->key)
+                    lo = mid + 1;
+                else
+                    hi = mid;
             }
-            if (p->used)
-                continue;
-            if (dd < bd) {
-                bd = dd;
-                best = g_iord[j];
+            for (j = lo; j < n && po[g_iord[j]].key == o->key; j++) {
+                const iobj_t *p = &po[g_iord[j]];
+                double dd = ic_dist(o, p);
+                if (dd < a1) {          /* step 63: the nearest, taken or not */
+                    a1 = dd;
+                    a1i = g_iord[j];
+                }
+                if (p->used)
+                    continue;
+                if (dd < bd) {
+                    bd = dd;
+                    best = g_iord[j];
+                }
             }
         }
         g_st.interp_obj++;
@@ -3169,14 +3360,24 @@ static void ic_pair(void)
             rel = 0.25 * (o->w[0] * o->w[0] + o->w[1] * o->w[1] + o->w[2] * o->w[2]);
         if (best == (unsigned)-1) {
             g_st.interp_obj_new++;
+            what = "new";
         } else if (bd > g_isnap * g_isnap || bd > rel) {
             g_st.interp_obj_snap++;
+            what = bd > rel ? "snap-guess" : "snap";
         } else {
             o->prev = (int32_t)best;
             po[best].used = 1;
+            what = "pair";
         }
+        if (g_ipairlog && g_irec_this)  /* RECOMP_D3D_BRIDGE_PAIRLOG=1: each recorded frame's objects */
+            fprintf(stderr, "[D3DB] pairlog swap %u obj %u key %08X pos %.3f %.3f %.3f prev %d step %.3f near %.3f "
+                    "size %.3f %s\n", g_ipair_swap, i, o->key, o->pos[0], o->pos[1], o->pos[2],
+                    best == (unsigned)-1 ? -1 : (int)best, best == (unsigned)-1 ? -1.0 : sqrt(bd),
+                    a1 < 1e299 ? sqrt(a1) : -1.0, sqrt(o->w[0] * o->w[0] + o->w[1] * o->w[1] + o->w[2] * o->w[2]), what);
     }
     ic_groups();                        /* step 66 */
+    QueryPerformanceCounter(&t1);
+    g_st.pair_ms += (double)(t1.QuadPart - t0.QuadPart) * 1000.0 / (double)g_qpf.QuadPart;
 }
 
 /* At the present: how many sub-frames this frame gets (1: shown as it is),
@@ -3297,6 +3498,7 @@ static unsigned ic_begin(unsigned swap_no, int ovl)
     g_st.interp_frames++;
     g_imc = mc;
     g_st.interp_matched += frac;
+    g_ipair_swap = swap_no;
     ic_pair();
     return k;
 }

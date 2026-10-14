@@ -4585,11 +4585,12 @@ static void mirror_swap(void)
             }
             if (st.interp_obj) {                        /* step 62: objects */
                 static unsigned lf, ls, lo, ln, lsn, lvp, lff, lbn, lbs, lsw, lsk, lskb;
+                static double lpm;
                 unsigned f = st.interp_frames - lf, subs = st.interp_subs - ls;
                 log_block_printf(&lb, "[D3DB] host interpolation objects: a frame %.1f, paired %.1f, none of their"
                                  " kind %.1f, snapped %.2f, replaced in place %.2f; a sub-frame moves program draws %.1f (bones %.1f),"
                                  " fixed-function %.1f; bones snapped %u; skeletons %.1f (bones blended in them %.1f a"
-                                 " sub-frame)\n", f ? (double)(st.interp_obj - lo) / f : 0.0,
+                                 " sub-frame); pairing %.3f ms a frame\n", f ? (double)(st.interp_obj - lo) / f : 0.0,
                                  f ? (double)(st.interp_obj - lo - (st.interp_obj_new - ln) - (st.interp_obj_snap - lsn) -
                                               (st.interp_obj_swap - lsw)) / f
                                    : 0.0,
@@ -4600,7 +4601,9 @@ static void mirror_swap(void)
                                  subs ? (double)(st.interp_bones - lbn) / subs : 0.0,
                                  subs ? (double)(st.interp_obj_ff - lff) / subs : 0.0,
                                  st.interp_bone_snap - lbs, f ? (double)(st.interp_skel - lsk) / f : 0.0,
-                                 subs ? (double)(st.interp_skel_bones - lskb) / subs : 0.0);
+                                 subs ? (double)(st.interp_skel_bones - lskb) / subs : 0.0,
+                                 f ? (st.pair_ms - lpm) / f : 0.0);
+                lpm = st.pair_ms;
                 lf = st.interp_frames;
                 ls = st.interp_subs;
                 lo = st.interp_obj;

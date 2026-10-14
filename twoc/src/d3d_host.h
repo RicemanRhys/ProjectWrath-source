@@ -36,6 +36,7 @@ typedef struct {
     double draw_ms;                 /* step 60: time drawing on the host (its draws: `draws`) */
     unsigned replay_frames, replay_cmds, replay_pins, rec_draws;    /* step 60: record and replay */
     double replay_ms, rec_ms, replay_bytes;
+    double pair_ms;                 /* step 68: time pairing objects (ic_pair) */
     unsigned replay_checked, replay_check_diff;     /* step 60: RECOMP_D3D_BRIDGE_REPLAY_CHECK */
     /* Step 61: frame interpolation. Frames drawn as sub-frames (`interp_k`
      * each, the last), and those held instead: a camera step or turn over the
