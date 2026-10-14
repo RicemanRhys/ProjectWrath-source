@@ -25,7 +25,9 @@
  *   hrtf           = 0 | 1                    RECOMP_HRTF (unset: on)
  *   pause          = 0 | 1                    RECOMP_OVERLAY_PAUSE (unset: on)
  *   keyboard       = 0 | 1                    RECOMP_KEYBOARD (unset: on)
+ *   controller_input = sdl | xinput           RECOMP_CONTROLLER_INPUT (unset: sdl; pads.h)
  *   pad_<xbox input>, key_<xbox input>        RECOMP_PAD_*, RECOMP_KEY_* (controls.h)
+ *   extra_<pc input>                          RECOMP_EXTRA_* (controls.h, step 70)
  *
  * The music and effects volumes are gains inside the emulated APU
  * (xboxrecomp's voice processor, notes 18.58), under the game's volume; 100
@@ -55,6 +57,12 @@
  * to the left edge and those on the right to the right edge (title cards,
  * the pause menu and anything centred stay), hud_margin percent of the
  * width in from it. Applied at once.
+ *
+ * Step 70: controllers (notes 18.73). sdl reads every pad the PC has
+ * through SDL3 (PlayStation, Switch, Steam Controller and Deck, and the
+ * rest) together with the Xbox pads through XInput, as one controller on
+ * the game's port 0, plugged and unplugged while it runs; xinput is
+ * XInput user 0 alone, as before. Applied at once.
  *
  * Step 69: the draw distance (notes 18.72). Each level sets its camera's
  * far plane and its fog; draw_distance multiplies both (and the sky with
@@ -94,6 +102,7 @@ typedef struct {
     int hrtf;                           /* 1 on (also when unset), 0 off */
     int pause;                          /* 1: the overlay holds the game (also when unset), 0: it runs */
     int keyboard;                       /* 1: the keyboard plays too (also when unset), 0: not */
+    int controller_input;               /* step 70: PADS_SDL (also when unset) or PADS_XINPUT_ONLY */
     twoc_controls_t controls;           /* the controller map and the key bindings */
 } twoc_settings_t;
 

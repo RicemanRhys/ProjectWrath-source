@@ -165,6 +165,7 @@
 #include "d3d_host.h"
 #include "overlay.h"
 #include "aa.h"
+#include "pads.h"
 
 #define WIN_CLASS          "TwocD3DBridge"
 #define WIN_TITLE           "Crash TWOC - D3D bridge (host)"
@@ -5344,6 +5345,10 @@ static void overlay_apply(twoc_settings_t *was, const twoc_settings_t *s)
         twoc_audio_set_hrtf(s->hrtf);
     if (s->pause != was->pause)
         fprintf(stderr, "[OVL] pause the game while open: %s\n", s->pause ? "on" : "off");
+    if (s->controller_input != was->controller_input) {
+        pads_set_mode(s->controller_input);     /* step 70: SDL started or stopped */
+        fprintf(stderr, "[OVL] controller input: %s\n", s->controller_input == PADS_SDL ? "SDL (all pads)" : "XInput only");
+    }
     if (s->keyboard != was->keyboard || memcmp(&s->controls, &was->controls, sizeof(s->controls)) != 0) {
         controls_set(&s->controls, s->keyboard);    /* step 57: at the game's next poll */
         fprintf(stderr, "[OVL] controls: keyboard %s, controller map %s\n", s->keyboard ? "on" : "off",

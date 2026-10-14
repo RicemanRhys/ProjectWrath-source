@@ -12,6 +12,13 @@
  * controller's inputs with the PC controller's input and the keys that press
  * each (controls.c); clicking one waits for the new button or key, polled
  * here each frame (controls_capture_*), and ImGui gets no keys meanwhile.
+ *
+ * Step 70: Controls also chooses the controller input (SDL, every pad; or
+ * XInput only), lists the pads there are with a live view of their inputs
+ * (a controller test), names the PC controller's inputs as the pad in use
+ * does (Cross, Circle; B at the bottom of a Switch pad; R4 on a Steam
+ * Controller), and binds the extra buttons (paddles, trackpad clicks) each
+ * to an Xbox button.
  */
 
 #include <windows.h>
@@ -23,6 +30,7 @@
 #include "imgui_impl_dx11.h"
 
 #include "overlay.h"
+#include "pads.h"
 
 /* xboxrecomp apu.h: the output's channels (2 or 6) and the device's */
 extern "C" int mcpx_apu_output_channels(int *device_channels);
@@ -232,6 +240,43 @@ static void input_name(const char *label, const char *hint)
     }
 }
 
+/* Step 70: one pad's inputs now, each name lit while it is pressed, and its
+ * sticks and triggers as numbers: the controller test. */
+static void pad_view(const pads_info_t *p)
+{
+    static const int order[] = { XIN_A, XIN_B, XIN_X, XIN_Y, XIN_BLACK, XIN_WHITE, XIN_START, XIN_BACK, XIN_LS,
+                                 XIN_RS, XIN_UP, XIN_DOWN, XIN_LEFT, XIN_RIGHT, SRC_GUIDE, SRC_PADDLE1, SRC_PADDLE2,
+                                 SRC_PADDLE3, SRC_PADDLE4, SRC_TOUCHPAD, SRC_MISC1, SRC_MISC2, SRC_MISC3, SRC_MISC4,
+                                 SRC_MISC5, SRC_MISC6 };
+    const ImVec4 on = ImVec4(0.45f, 1.0f, 0.45f, 1.0f);
+    float right = ImGui::GetCursorScreenPos().x + ImGui::GetContentRegionAvail().x;
+    bool first = true;
+    int i;
+
+    ImGui::Indent();
+    for (i = 0; i < (int)(sizeof(order) / sizeof(order[0])); i++) {
+        int x = order[i];
+        const char *l = pads_src_label(x, p->style);
+        bool down = p->s.v[x] >= 30;
+        if (!p->has[x])
+            continue;
+        if (!first) {                   /* wrap at the panel's edge */
+            ImGui::SameLine();
+            if (ImGui::GetCursorScreenPos().x + ImGui::CalcTextSize(l).x > right)
+                ImGui::NewLine();
+        }
+        first = false;
+        if (down)
+            ImGui::TextColored(on, "%s", l);
+        else
+            ImGui::TextDisabled("%s", l);
+    }
+    ImGui::Text("%s %3d  %s %3d   L stick %6d %6d   R stick %6d %6d", pads_src_label(XIN_LT, p->style),
+                p->s.v[XIN_LT], pads_src_label(XIN_RT, p->style), p->s.v[XIN_RT], p->s.stick[0][0], p->s.stick[0][1],
+                p->s.stick[1][0], p->s.stick[1][1]);
+    ImGui::Unindent();
+}
+
 /* Step 57: the Controls tab. The child scrolls when the lists don't fit
  * above `room`, the picture's height the window may take. */
 static int tab_controls(twoc_settings_t *s, float room)
@@ -245,11 +290,16 @@ static int tab_controls(twoc_settings_t *s, float room)
                                               KIN_RUP, KIN_RDOWN, KIN_RLEFT, KIN_RRIGHT };
     const ImGuiStyle &st = ImGui::GetStyle();
     float fs = ImGui::GetFontSize(), maxh;
-    int r = 0, i, slot, got;
-    char lbl[96];
+    int r = 0, i, slot, got, style, npads;
+    pads_info_t pads[12];
+    unsigned char has[SRC_COUNT] = { 0 };
+    char lbl[160];
 
     if (g_cap == CAP_PAD && (got = controls_capture_pad(g_cap_idx >= XIN_BUTTONS)) >= 0) {
-        controls_assign_pad(&s->controls, g_cap_idx, got);
+        if (got >= XIN_COUNT)           /* step 70: an extra button presses this Xbox button */
+            controls_assign_extra(&s->controls, got, g_cap_idx);
+        else
+            controls_assign_pad(&s->controls, g_cap_idx, got);
         r |= OVL_CHANGED;
         capture_end();
     } else if (g_cap == CAP_KEY && (got = controls_capture_key()) > 0) {
@@ -257,6 +307,12 @@ static int tab_controls(twoc_settings_t *s, float room)
         r |= OVL_CHANGED;
         capture_end();
     }
+    npads = pads_list(pads, (int)(sizeof(pads) / sizeof(pads[0])));
+    style = pads_style();
+    for (i = 0; i < npads; i++)
+        if (pads[i].read)
+            for (got = 0; got < SRC_COUNT; got++)
+                has[got] |= pads[i].has[got];
 
     maxh = room - ImGui::GetCursorPosY() - ImGui::GetFrameHeightWithSpacing() - st.WindowPadding.y -
            st.ItemSpacing.y * 2;
@@ -265,12 +321,52 @@ static int tab_controls(twoc_settings_t *s, float room)
     ImGui::SetNextWindowSizeConstraints(ImVec2(0, 0), ImVec2(FLT_MAX, maxh));
     ImGui::BeginChild("##controls", ImVec2(0, 0), ImGuiChildFlags_AutoResizeY | ImGuiChildFlags_NavFlattened);
 
+    /* Step 70: which pads, and how they read. */
+    ImGui::SeparatorText("Controllers");
+    {
+        static const char *const modes[2] = { "XInput only", "SDL (all pads)" };
+        int m = s->controller_input == PADS_SDL ? 1 : 0;
+        ImGui::SetNextItemWidth(fs * 10);
+        if (ImGui::Combo("Controller input", &m, modes, 2)) {
+            s->controller_input = m ? PADS_SDL : PADS_XINPUT_ONLY;
+            r |= OVL_CHANGED;
+        }
+        more("SDL (all pads): PlayStation, Switch, Steam Controller, Steam Deck and other pads through SDL "
+             "3, Xbox pads through XInput as before, all of them together as the game's one controller, "
+             "plugged in or out while it runs. XInput only: the first Xbox pad (XInput's user 0), as before.");
+    }
+    if (npads == 0)
+        help(s->controller_input == PADS_SDL && !pads_sdl_version()[0] ? "Starting SDL..."
+                                                                       : "No controller is connected.");
+    for (i = 0; i < npads; i++) {
+        const pads_info_t *p = &pads[i];
+        if (p->vid || p->pid)
+            snprintf(lbl, sizeof(lbl), "%s  (%s, %s, %04X:%04X)", p->name, p->type, p->via, p->vid, p->pid);
+        else
+            snprintf(lbl, sizeof(lbl), "%s  (%s, %s)", p->name, p->type, p->via);
+        if (p->read)
+            ImGui::TextUnformatted(lbl);
+        else {
+            ImGui::TextDisabled("%s", lbl);
+            ImGui::SameLine();
+            ImGui::TextDisabled("- not read: %s", p->why);
+        }
+        if (p->read)
+            pad_view(p);
+    }
+    if (s->controller_input == PADS_SDL && pads_sdl_version()[0]) {
+        snprintf(lbl, sizeof(lbl), "SDL %s", pads_sdl_version());
+        help(lbl);
+    }
+
     ImGui::SeparatorText("Controller");
     help("The game reads an Xbox controller. Click one of its inputs, then press the PC controller's button "
-         "(or move a stick) for it; Esc cancels. A button another input had is swapped with it.");
+         "(or move a stick) for it; Esc cancels. A button another input had is swapped with it; an extra "
+         "button (a paddle, a trackpad click) presses it as well.");
+    snprintf(lbl, sizeof(lbl), "PC controller (%s)", pads_style_name(style));
     if (ImGui::BeginTable("##pad", 2, ImGuiTableFlags_SizingStretchProp | ImGuiTableFlags_RowBg)) {
         ImGui::TableSetupColumn("Xbox controller", ImGuiTableColumnFlags_WidthStretch);
-        ImGui::TableSetupColumn("PC controller", ImGuiTableColumnFlags_WidthFixed, fs * 10);
+        ImGui::TableSetupColumn(lbl, ImGuiTableColumnFlags_WidthFixed, fs * 11);
         ImGui::TableHeadersRow();
         for (i = 0; i < XIN_COUNT; i++) {
             int x = pad_order[i];
@@ -280,7 +376,7 @@ static int tab_controls(twoc_settings_t *s, float room)
             ImGui::TableNextColumn();
             snprintf(lbl, sizeof(lbl), "%s##pad%d",
                      g_cap == CAP_PAD && g_cap_idx == x ? (x >= XIN_BUTTONS ? "Move a stick..." : "Press a button...")
-                                                       : controls_src_label(s->controls.pad[x]), x);
+                                                       : pads_src_label(s->controls.pad[x], style), x);
             if (ImGui::Button(lbl, ImVec2(-FLT_MIN, 0))) {
                 g_cap = CAP_PAD;
                 g_cap_idx = x;
@@ -290,11 +386,42 @@ static int tab_controls(twoc_settings_t *s, float room)
         }
         ImGui::EndTable();
     }
+
+    /* Step 70: the extra buttons the pads there have, and any bound. */
+    {
+        static const char *xb_names[XIN_BUTTONS + 1];
+        int shown = 0, e;
+        if (!xb_names[0]) {
+            xb_names[0] = "Nothing";
+            for (e = 0; e < XIN_BUTTONS; e++)
+                xb_names[e + 1] = controls_xin_label(e);
+        }
+        for (e = XIN_COUNT; e < SRC_COUNT; e++) {
+            int x = s->controls.extra[e - XIN_COUNT], sel = x < XIN_BUTTONS ? x + 1 : 0;
+            if (!has[e])
+                continue;
+            if (!shown++) {
+                ImGui::SeparatorText("Extra buttons");
+                help("A pad's buttons past the Xbox layout, each pressing an Xbox button of its own.");
+            }
+            ImGui::AlignTextToFramePadding();
+            ImGui::TextUnformatted(pads_src_label(e, style));
+            ImGui::SameLine(fs * 13);
+            ImGui::SetNextItemWidth(fs * 11);
+            snprintf(lbl, sizeof(lbl), "##extra%d", e);
+            if (ImGui::Combo(lbl, &sel, xb_names, XIN_BUTTONS + 1)) {
+                controls_assign_extra(&s->controls, e, sel ? sel - 1 : XIN_NONE);
+                r |= OVL_CHANGED;
+            }
+        }
+    }
     if (ImGui::Button("Reset controller to defaults")) {
         controls_default_pad(&s->controls);
         r |= OVL_CHANGED;
     }
-    more("The default is the Xbox layout on an Xbox pad: each button as itself, LB as Black, RB as White.");
+    more("The default is the Xbox layout by position on every pad: each button as itself on an Xbox pad, LB as "
+         "Black, RB as White; Cross as A, Circle as B, Square as X, Triangle as Y on a PlayStation pad; the "
+         "bottom button as A on a Switch pad. A Steam Controller's grips: L4 as B, R4 as X, L5 as Y, R5 as A.");
 
     ImGui::SeparatorText("Keyboard");
     {

@@ -10,6 +10,7 @@
 #include <ctype.h>
 
 #include "settings.h"
+#include "pads.h"
 
 typedef struct {
     const char *key, *var, *note;
@@ -33,14 +34,18 @@ static const key_t_ g_fixed[] = {
     { "hrtf", "RECOMP_HRTF", "1: 3D sounds placed left-right (the Xbox's HRTF), 0: centred" },
     { "pause", "RECOMP_OVERLAY_PAUSE", "1: the game waits while the overlay is open, 0: it runs behind it" },
     { "keyboard", "RECOMP_KEYBOARD", "1: the keyboard plays too (key_ bindings), 0: the controller only" },
+    { "controller_input", "RECOMP_CONTROLLER_INPUT",
+      "sdl: every pad (SDL3; Xbox pads through XInput), or xinput: XInput only, as before" },
 };
 #define N_FIXED (sizeof(g_fixed) / sizeof(g_fixed[0]))
 
 /* Step 57: then one key per binding (controls.h), at its default unwritten:
- * pad_<xbox input> for the controller map, key_<binding> for the keyboard. */
+ * pad_<xbox input> for the controller map, key_<binding> for the keyboard;
+ * step 70: extra_<pc input> for the extra buttons (paddles, touchpad, ...). */
 #define K_PAD N_FIXED
 #define K_KEY (K_PAD + XIN_COUNT)
-#define N_KEYS (K_KEY + KIN_COUNT)
+#define K_EXTRA (K_KEY + KIN_COUNT)
+#define N_KEYS (K_EXTRA + SRC_EXTRAS)
 static key_t_ g_keys[N_KEYS];
 static char g_key_names[N_KEYS - N_FIXED][2][40];
 
@@ -56,8 +61,10 @@ static void keys_init(void)
         char *k = g_key_names[i - N_FIXED][0], *v = g_key_names[i - N_FIXED][1];
         if (i < K_KEY)
             snprintf(k, 40, "pad_%s", controls_xin_ini((int)(i - K_PAD)));
-        else
+        else if (i < K_EXTRA)
             snprintf(k, 40, "key_%s", controls_kin_ini((int)(i - K_KEY)));
+        else
+            snprintf(k, 40, "extra_%s", controls_extra_ini((int)(i - K_EXTRA) + XIN_COUNT));
         snprintf(v, 40, "RECOMP_%s", k);
         for (j = 0; v[j]; j++)
             v[j] = (char)toupper((unsigned char)v[j]);
@@ -76,7 +83,9 @@ static int binding_ok(size_t i, const char *v)
         return 0;
     controls_default_pad(&c);
     controls_default_keys(&c);
-    return i < K_KEY ? controls_parse_pad(v, (int)(i - K_PAD), &c) : controls_parse_keys(v, (int)(i - K_KEY), &c);
+    return i < K_KEY     ? controls_parse_pad(v, (int)(i - K_PAD), &c)
+           : i < K_EXTRA ? controls_parse_keys(v, (int)(i - K_KEY), &c)
+                         : controls_parse_extra(v, (int)(i - K_EXTRA) + XIN_COUNT, &c);
 }
 
 /* Keys the command line overrode: the file's own value, which a save keeps
@@ -276,6 +285,7 @@ void twoc_settings_current(twoc_settings_t *s)
     s->pause = !(v && strcmp(v, "0") == 0);
     v = getenv("RECOMP_KEYBOARD");
     s->keyboard = !(v && strcmp(v, "0") == 0);
+    s->controller_input = pads_mode_parse(getenv("RECOMP_CONTROLLER_INPUT"));
     keys_init();
     controls_default_pad(&s->controls);
     controls_default_keys(&s->controls);
@@ -283,8 +293,10 @@ void twoc_settings_current(twoc_settings_t *s)
         if ((v = getenv(g_keys[i].var)) != NULL && *v) {
             if (i < K_KEY)
                 controls_parse_pad(v, (int)(i - K_PAD), &s->controls);
-            else
+            else if (i < K_EXTRA)
                 controls_parse_keys(v, (int)(i - K_KEY), &s->controls);
+            else
+                controls_parse_extra(v, (int)(i - K_EXTRA) + XIN_COUNT, &s->controls);
         }
 }
 
@@ -332,6 +344,8 @@ static void key_text(const twoc_settings_t *s, size_t i, char *buf, size_t cap)
         snprintf(buf, cap, "%d", s->pause ? 1 : 0);
     else if (strcmp(k, "keyboard") == 0)
         snprintf(buf, cap, "%d", s->keyboard ? 1 : 0);
+    else if (strcmp(k, "controller_input") == 0 && s->controller_input != PADS_SDL)
+        snprintf(buf, cap, "%s", pads_mode_name(s->controller_input));     /* sdl, the default: unwritten */
     else if (i >= K_PAD) {              /* a binding: written only when it isn't the default */
         twoc_controls_t d;
         char def[64];
@@ -340,9 +354,12 @@ static void key_text(const twoc_settings_t *s, size_t i, char *buf, size_t cap)
         if (i < K_KEY) {
             controls_pad_text(&s->controls, (int)(i - K_PAD), buf, (unsigned)cap);
             controls_pad_text(&d, (int)(i - K_PAD), def, sizeof(def));
-        } else {
+        } else if (i < K_EXTRA) {
             controls_keys_text(&s->controls, (int)(i - K_KEY), buf, (unsigned)cap);
             controls_keys_text(&d, (int)(i - K_KEY), def, sizeof(def));
+        } else {
+            controls_extra_text(&s->controls, (int)(i - K_EXTRA) + XIN_COUNT, buf, (unsigned)cap);
+            controls_extra_text(&d, (int)(i - K_EXTRA) + XIN_COUNT, def, sizeof(def));
         }
         if (strcmp(buf, def) == 0)
             buf[0] = 0;
@@ -373,7 +390,7 @@ int twoc_settings_save(const twoc_settings_t *s)
             continue;
         if (i >= K_PAD && !bindings++)
             fprintf(f, "# Controls changed from the defaults (Esc, Controls): pad_<Xbox input> = <PC controller input>,\n"
-                       "# key_<Xbox input> = up to two keys, or none.\n");
+                       "# key_<Xbox input> = up to two keys, or none; extra_<PC controller input> = <Xbox button> or none.\n");
         fprintf(f, g_keys[i].note[0] ? "%s = %s           # %s\n" : "%s = %s\n", g_keys[i].key, v, g_keys[i].note);
     }
     fclose(f);
