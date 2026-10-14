@@ -127,12 +127,14 @@ static int kb_port(DWORD port)
 }
 
 /* A port the game may open: really connected, or port 0 under autostart, the
- * input file or the keyboard. */
+ * input file or the keyboard; step 70: or port 0 with any other pad (pads.h:
+ * SDL's, XInput users 1-3). */
 static int dev_port_connected(DWORD port)
 {
     return xbox_InputIsConnected(port)
         || ((g_dev_autostart || g_dev_input_file) && port == 0)
-        || kb_port(port);
+        || kb_port(port)
+        || (port == 0 && pads_others());
 }
 
 /* The input file's pad, reread at most every 50 ms. Returns 1 if it changed
@@ -3669,6 +3671,10 @@ void sub_0015431A(void)
  */
 extern void sub_000EB5A0(void);
 
+/* Step 70: port 0 as XGetDeviceChanges (sub_00154AAD, below) last told the
+ * game; set by the prime here, so nothing is reported before it ran. */
+static int g_xpp_primed, g_xpp_port0;
+
 void sub_000EB270(void)
 {
     static int primed;
@@ -3676,6 +3682,8 @@ void sub_000EB270(void)
     if (!primed) {
         primed = 1;
         int connected = dev_port_connected(0);
+        g_xpp_primed = 1;
+        g_xpp_port0 = connected;
         fprintf(stderr, "[XPP] sub_000EB270 primed: xbox_InputIsConnected(0)=%d\n",
                 xbox_InputIsConnected(0));
         if (connected && !xbox_InputIsConnected(0))
@@ -3710,6 +3718,81 @@ void sub_000EB270(void)
      * its end still at base + 7 MB, and the level spilled into heap blocks
      * DSOUND then took and zeroed (the first attract demo's crash, 18.40). */
     esp += 4;
+}
+
+/*
+ * Step 70 (notes 18.73): hot-plug. sub_00154AAD (0x154AAD..0x154B18),
+ * XGetDeviceChanges:
+ *
+ *   BOOL GetDeviceChanges(type, DWORD *insertions, DWORD *removals)  ; ret 0xC
+ *
+ * The device type object holds the ports' mask now (+0), a "changed" flag
+ * (+4) and the mask last reported (+8); +4 is set only by the USB
+ * enumeration this recomp never runs (18.16), so the lifted body always says
+ * "nothing changed". The game's pump sub_000EB6C0 asks it every frame for
+ * the gamepad type (0x1534AC) and the memory units (0x153430), closes and
+ * clears a removed port's slot (sub_0015429F, slot +0 = 0) and opens an
+ * inserted one (sub_000EB5A0, the insertion handler the prime calls).
+ *
+ * Replacement: port 0 for the gamepad type, from dev_port_connected (a pad
+ * on XInput user 0 or any other, the keyboard, the dev switches), against
+ * what the game was last told; nothing for every other type and port (the
+ * lifted body's answer). Silent until sub_000EB270's one-shot prime has
+ * armed port 0 or found nothing to arm, so a run starts as before; after
+ * it, a pad plugged in arms the slot and the last one unplugged disarms it
+ * (once it has been gone 1 s).
+ * A port without its pad isn't polled, so XInput user 0 is looked for here:
+ * through the pads thread in SDL mode, else once every 2 s (XInput is slow
+ * to say a user isn't there).
+ */
+void sub_00154AAD(void)
+{
+    uint32_t type = MEM32(esp + 4), pins = MEM32(esp + 8), prem = MEM32(esp + 12);
+    uint32_t ins = 0, rem = 0;
+
+    if (type == XPP_GAMEPAD_TYPE && g_xpp_primed) {
+        int now = dev_port_connected(0);
+        if (!now) {
+            static ULONGLONG probe_ms;
+            ULONGLONG t = GetTickCount64();
+            int p = pads_xinput_present(0);
+            if (p > 0 || (p < 0 && t - probe_ms >= 2000)) {
+                XBOX_INPUT_STATE st;
+                probe_ms = t;
+                xbox_InputGetState(0, &st);     /* updates xbox_InputIsConnected(0) */
+                now = dev_port_connected(0);
+            }
+        }
+        {   /* A port gone is told after 1 s gone, so a pad that drops out for a
+             * moment (a Bluetooth hiccup, SDL restarting when the controller
+             * input setting changes) doesn't take the game's slot with it. */
+            static ULONGLONG gone_ms;
+            ULONGLONG t = GetTickCount64();
+            if (now || !g_xpp_port0)
+                gone_ms = 0;
+            else if (!gone_ms)
+                gone_ms = t;
+            if (!now && g_xpp_port0 && t - gone_ms < 1000)
+                now = 1;
+        }
+        if (now != g_xpp_port0) {
+            g_xpp_port0 = now;
+            if (now)
+                ins = 1;
+            else
+                rem = 1;
+            fprintf(stderr, "[XPP] port 0 %s (XGetDeviceChanges): XInput user 0 %s, other pads %s, keyboard %s\n",
+                    now ? "plugged in: the game arms its slot" : "unplugged: the game closes its slot",
+                    xbox_InputIsConnected(0) ? "there" : "not there", pads_others() ? "there" : "none",
+                    kb_port(0) ? "on" : "off");
+        }
+    }
+    if (pins)
+        MEM32(pins) = ins;
+    if (prem)
+        MEM32(prem) = rem;
+    eax = (ins | rem) != 0;
+    esp += 16;                                     /* ret 0xC */
 }
 
 /* ── D3D mirror bridge wrappers (Option B) ─────────────────── */
