@@ -3604,18 +3604,12 @@ int d3dh_draw_up(const d3dh_draw_t *d)
  * calls are held to its end (recorded as for a replay, unless the frame is
  * recorded anyway), and there the HUD's draws are grouped into elements:
  * the draws one call site of the panel queued (a counter's digits, its icon,
- * a card's line) are one, and two join when their screen boxes (the
- * vertices, or for a skinned mesh its first bone) overlap vertically and lie
- * less than 0.4 of the taller one's height apart side by side (a
- * counter's icon and its digits). Counters sit a height or more apart, but
- * while the HUD slides in at a level's start it is drawn larger, so
- * nearness alone joined the wumpa counter to the crate counter. An element whose middle is in the left
- * part of the 4:3 picture (under -0.45 of its half width) moves left by the
- * picture's extra width on that side, one in the right part right; one in
- * the middle (within 0.2: title cards, the top-centre crate counter) stays,
- * and in between it moves part of the way, so an element flying across
- * (the clock just picked up) never jumps. Wumpa, lives and the clock sit
- * past 0.6. Each draw of a moved element gets x_clip += dx w (draw_exec), so
+ * a card's line) are one. Since step 68 an element's anchor is fixed by its
+ * call site (g_hud_sites): left ones move left by the picture's extra width
+ * on that side, right ones right, the rest stay; only things flying between
+ * the world and the HUD move by where they are (in the middle, within 0.2
+ * of the 4:3 half width, not at all; past 0.45 all the way; part of the way
+ * in between, so the clock just picked up never jumps). Each draw of a moved element gets x_clip += dx w (draw_exec), so
  * its shape and its distance from its 4:3 edge are kept; `margin` pulls it
  * in by that share of the picture's width, never past its 4:3 place. Not
  * interpolated (d3dh_draw_t.overlay; step 65 item 3). */
@@ -3698,6 +3692,57 @@ static int hud_box(const d3dh_draw_t *d, double *b)
     return n != 0;
 }
 
+/* Step 68 (notes 18.71): each HUD element's anchor, fixed by the panel's
+ * call site that queued it (the return address d3d_bridge.c finds), read
+ * from sub_000B0EF0's code: the x it passes is a constant per site (the HUD
+ * slides in and out vertically, and grows after a death; x stays). Step 65
+ * judged each element by where it was, and joined elements lying near each
+ * other: the wumpa counter's "40" came within reach of the spinning crate,
+ * so both moved part of the way, in and out every few frames, and the
+ * BONUS letters joined the counters the same way. Now no element joins
+ * another. Sites not listed stay in the middle (the crate counter, BONUS
+ * and DEMO, ENTERING TIME TRIAL, the countdowns, the collectables' icons at
+ * the bottom centre). HUD_FLY: things that fly between the world and the
+ * HUD (the clock picked up, fruit flying to the counter, the clock to the
+ * middle at a time trial's end) move by where they are, on a ramp, each
+ * piece of one site apart. */
+enum { HUD_MID, HUD_LEFT, HUD_RIGHT, HUD_FLY };
+static const struct {
+    uint32_t site;
+    uint8_t anchor;
+} g_hud_sites[] = {
+    /* modes 2-4 (a bonus round's HUD): wumpa, crates (middle), lives */
+    { 0xB26A4, HUD_LEFT }, { 0xB2751, HUD_LEFT }, { 0xB2768, HUD_LEFT },
+    { 0xB2AA0, HUD_RIGHT }, { 0xB2B00, HUD_RIGHT },
+    /* the level HUD: wumpa (fruit x -0.78, digits -0.68), crates (middle), lives (0.49, 0.61) */
+    { 0xB2C53, HUD_LEFT }, { 0xB2C6A, HUD_LEFT }, { 0xB2CCD, HUD_LEFT },
+    { 0xB2F53, HUD_RIGHT }, { 0xB2FAF, HUD_RIGHT },
+    /* fruit flying to the counter (sub_000B06D0; the 0x562F78 list) */
+    { 0xB3354, HUD_FLY }, { 0xB33B7, HUD_FLY },
+    /* a time trial's end: the clock to the middle, its list */
+    { 0xB3631, HUD_FLY }, { 0xB3692, HUD_FLY }, { 0xB37A3, HUD_FLY },
+    /* the time-trial clock, flying in from its pickup */
+    { 0xB3A37, HUD_FLY },
+    /* the bottom corners: percentage and icon left (-0.8, -0.7), count and bar right (0.65-1) */
+    { 0xB3AC8, HUD_LEFT }, { 0xB3B45, HUD_LEFT }, { 0xB3B84, HUD_RIGHT }, { 0xB3BEF, HUD_RIGHT },
+    { 0xB3C4C, HUD_RIGHT }, { 0xB3C89, HUD_RIGHT }, { 0xB3CDD, HUD_RIGHT },
+    { 0xB3D40, HUD_LEFT }, { 0xB3DBD, HUD_LEFT }, { 0xB3DF8, HUD_RIGHT }, { 0xB3E2B, HUD_RIGHT },
+    { 0xB3E78, HUD_RIGHT }, { 0xB3EAC, HUD_RIGHT }, { 0xB3EFA, HUD_RIGHT }, { 0xB3F2F, HUD_RIGHT },
+    { 0xB405D, HUD_LEFT }, { 0xB40A9, HUD_LEFT }, { 0xB418A, HUD_LEFT }, { 0xB41D8, HUD_LEFT },
+    { 0xB4250, HUD_RIGHT }, { 0xB43A9, HUD_LEFT }, { 0xB4464, HUD_LEFT }, { 0xB44DA, HUD_RIGHT },
+    { 0xB4585, HUD_RIGHT }, { 0xB459C, HUD_RIGHT }, { 0xB462A, HUD_LEFT },
+};
+
+static int hud_site_anchor(uint32_t site)
+{
+    unsigned i;
+
+    for (i = 0; i < sizeof(g_hud_sites) / sizeof(g_hud_sites[0]); i++)
+        if (g_hud_sites[i].site == site)
+            return g_hud_sites[i].anchor;
+    return HUD_MID;
+}
+
 #define HUD_MAX 512
 static int hud_root(int *par, int i)
 {
@@ -3711,12 +3756,22 @@ static void hud_anchor(unsigned first)
 {
     static double box[HUD_MAX][4], el[HUD_MAX][4];
     static unsigned cmd[HUD_MAX];
-    static int par[HUD_MAX];
+    static int par[HUD_MAX], anc[HUD_MAX], logn = -1;
     double s = (4.0 / 3.0) / g_wide, mg = 0.02 * (double)g_hud_margin, dl, dr;
     unsigned i, j, n = 0;
 
+    if (logn < 0) {
+        const char *e = getenv("RECOMP_D3D_BRIDGE_HUDLOG");
+        logn = e ? atoi(e) : 0;
+    }
     for (i = first; i < g_rc_n && n < HUD_MAX; i++)
-        if (g_rc[i].kind == RC_DRAW && g_rc[i].u.draw.d.hud && hud_box(&g_rc[i].u.draw.d, box[n])) {
+        if (g_rc[i].kind == RC_DRAW && g_rc[i].u.draw.d.hud) {
+            anc[n] = hud_site_anchor(g_rc[i].u.draw.d.hud);
+            if (!hud_box(&g_rc[i].u.draw.d, box[n])) {
+                if (anc[n] == HUD_FLY)  /* nowhere to judge it by: as it is */
+                    continue;
+                box[n][0] = box[n][1] = box[n][2] = box[n][3] = 0;
+            }
             box[n][0] /= s;             /* x in halves of the 4:3 picture's width, y in halves of its height */
             box[n][2] /= s;
             cmd[n] = i;
@@ -3725,13 +3780,14 @@ static void hud_anchor(unsigned first)
         }
     if (!n)
         return;
-    for (i = 0; i < n; i++)
+    for (i = 0; i < n; i++)             /* one element a site; a flying site's pieces by nearness */
         for (j = i + 1; j < n; j++) {
             double hi = box[i][3] - box[i][1], hj = box[j][3] - box[j][1], h = hi > hj ? hi : hj;
             double gap = (box[i][0] > box[j][0] ? box[i][0] - box[j][2] : box[j][0] - box[i][2]) * 320.0,
                    vov = (box[i][3] < box[j][3] ? box[i][3] : box[j][3]) - (box[i][1] > box[j][1] ? box[i][1] : box[j][1]);
-            if (g_rc[cmd[i]].u.draw.d.hud == g_rc[cmd[j]].u.draw.d.hud ||
-                (vov >= 0 && gap < 0.4 * h * 240.0 + 2.0))      /* in 4:3 pixels: x 320 and y 240 a half */
+            if (g_rc[cmd[i]].u.draw.d.hud != g_rc[cmd[j]].u.draw.d.hud)
+                continue;
+            if (anc[i] != HUD_FLY || (vov >= 0 && gap < 0.4 * h * 240.0 + 2.0))   /* in 4:3 pixels: x 320 and y 240 a half */
                 par[hud_root(par, (int)i)] = hud_root(par, (int)j);
         }
     for (i = 0; i < n; i++) {
@@ -3743,38 +3799,27 @@ static void hud_anchor(unsigned first)
         for (j = 0; j < 4; j++)
             el[r][j] = j < 2 ? (box[i][j] < el[r][j] ? box[i][j] : el[r][j]) : (box[i][j] > el[r][j] ? box[i][j] : el[r][j]);
     }
-    {
-        static int logn = -1;
-        if (logn < 0) {
-            const char *e = getenv("RECOMP_D3D_BRIDGE_HUDLOG");
-            logn = e ? atoi(e) : 0;
-        }
-        unsigned roots = 0;
-        for (i = 0; i < n; i++)
-            roots += hud_root(par, (int)i) == (int)i;
-        if (logn > 0 && roots >= 3 && g_st.hud_passes % 10 == 0) {    /* RECOMP_D3D_BRIDGE_HUDLOG=N: N passes' boxes */
-            logn--;
-            for (i = 0; i < n; i++) {
-                const d3dh_draw_t *d = &g_rc[cmd[i]].u.draw.d;
-                fprintf(stderr, "[D3DB] hudlog pass %u draw %u %s %08X site %05X box %.3f %.3f %.3f %.3f element %d\n",
-                        g_st.hud_passes, cmd[i] - first, d->vprog ? "vp" : "ff", d->vprog ? d->vprog->key : d->fvf, d->hud,
-                        box[i][0], box[i][1], box[i][2], box[i][3], hud_root(par, (int)i));
-            }
-        }
-    }
     dl = s - 1.0 + mg;                  /* to the left edge (NDC), pulled in by the margin */
     dl = dl > 0 ? 0 : dl;
     dr = -dl;
     for (i = 0; i < n; i++) {
         int r = hud_root(par, (int)i);
-        double c = 0.5 * (el[r][0] + el[r][2]), a = (fabs(c) - 0.2) / 0.25;
-        float dx;
-        a = a < 0 ? 0 : a > 1 ? 1 : a;  /* a ramp, so one flying in (the clock picked up) never jumps */
-        dx = (float)(a * (c < 0 ? dl : dr));
-        g_rc[cmd[i]].u.draw.d.hud_dx = dx;
+        double c = 0.5 * (el[r][0] + el[r][2]), a = (fabs(c) - 0.2) / 0.25, sh;
+        a = a < 0 ? 0 : a > 1 ? 1 : a;  /* a ramp, so one flying in never jumps */
+        sh = anc[i] == HUD_LEFT ? -1.0 : anc[i] == HUD_RIGHT ? 1.0 : anc[i] == HUD_FLY ? (c < 0 ? -a : a) : 0.0;
+        g_rc[cmd[i]].u.draw.d.hud_dx = (float)(sh < 0 ? -sh * dl : sh * dr);
         if (r == (int)i)
-            ++*(dx < 0 ? &g_st.hud_left : dx > 0 ? &g_st.hud_right : &g_st.hud_mid);
+            ++*(sh < 0 ? &g_st.hud_left : sh > 0 ? &g_st.hud_right : &g_st.hud_mid);
+        if (logn > 0) {                 /* RECOMP_D3D_BRIDGE_HUDLOG=N: N passes' boxes, anchors and shares */
+            const d3dh_draw_t *d = &g_rc[cmd[i]].u.draw.d;
+            fprintf(stderr, "[D3DB] hudlog pass %u draw %u %s %08X site %05X box %.3f %.3f %.3f %.3f element %d "
+                    "share %.3f anchor %c\n", g_st.hud_passes, cmd[i] - first, d->vprog ? "vp" : "ff",
+                    d->vprog ? d->vprog->key : d->fvf, d->hud, box[i][0], box[i][1], box[i][2], box[i][3], r, sh,
+                    "MLRF"[anc[i]]);
+        }
     }
+    if (logn > 0)
+        logn--;
     g_st.hud_passes++;
 }
 
