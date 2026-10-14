@@ -4586,12 +4586,13 @@ static void mirror_swap(void)
             if (st.interp_obj) {                        /* step 62: objects */
                 static unsigned lf, ls, lo, ln, lsn, lvp, lff, lbn, lbs, lsw, lsk, lskb;
                 static double lpm;
-                static unsigned llo;
+                static unsigned llo, lmo;
                 unsigned f = st.interp_frames - lf, subs = st.interp_subs - ls;
                 log_block_printf(&lb, "[D3DB] host interpolation objects: a frame %.1f, paired %.1f, none of their"
                                  " kind %.1f, snapped %.2f, replaced in place %.2f; a sub-frame moves program draws %.1f (bones %.1f),"
                                  " fixed-function %.1f; bones snapped %u; skeletons %.1f (bones blended in them %.1f a"
-                                 " sub-frame); pairing %.3f ms a frame; paired across a texture change %.1f\n",
+                                 " sub-frame); pairing %.3f ms a frame; paired across a texture change %.1f,"
+                                 " over the snap on their own motion %.2f\n",
                                  f ? (double)(st.interp_obj - lo) / f : 0.0,
                                  f ? (double)(st.interp_obj - lo - (st.interp_obj_new - ln) - (st.interp_obj_snap - lsn) -
                                               (st.interp_obj_swap - lsw)) / f
@@ -4604,9 +4605,11 @@ static void mirror_swap(void)
                                  subs ? (double)(st.interp_obj_ff - lff) / subs : 0.0,
                                  st.interp_bone_snap - lbs, f ? (double)(st.interp_skel - lsk) / f : 0.0,
                                  subs ? (double)(st.interp_skel_bones - lskb) / subs : 0.0,
-                                 f ? (st.pair_ms - lpm) / f : 0.0, f ? (double)(st.interp_obj_loose - llo) / f : 0.0);
+                                 f ? (st.pair_ms - lpm) / f : 0.0, f ? (double)(st.interp_obj_loose - llo) / f : 0.0,
+                                 f ? (double)(st.interp_obj_motion - lmo) / f : 0.0);
                 lpm = st.pair_ms;
                 llo = st.interp_obj_loose;
+                lmo = st.interp_obj_motion;
                 lf = st.interp_frames;
                 ls = st.interp_subs;
                 lo = st.interp_obj;

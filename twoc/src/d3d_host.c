@@ -2183,7 +2183,8 @@ static unsigned g_imc = IC_NO_CAM;      /* step 65: the frame's main camera (mos
  * 3x4 world-space matrix (a bone with a register the program also reads
  * directly is not one: left alone). At the present each object is paired with the
  * frame before's nearest unpaired one of its key (by W's origin plus the
- * first bone's); one further than g_isnap (1.5 units: a teleport, a respawn)
+ * first bone's); one further than g_isnap (1.5 units: a teleport, a respawn;
+ * step 68: and as far off where its own last step would have taken it)
  * or with none stays where this frame has it (camera-only, as in stage 2).
  * A paired object that moved is drawn at W(t) and its bones at B(t), each
  * interpolated as a rotation (slerp), its axes' lengths and its origin
@@ -2203,6 +2204,11 @@ typedef struct {
     uint32_t own;                       /* step 67: bmask holds only the bones uploaded for it */
     uint32_t kind, mesh;                /* step 68: its key's parts (the pair log) */
     uint32_t lkey;                      /* step 68: its key with its textures by their shape only */
+    int32_t hv;                         /* step 68: vel known (it had a partner) */
+    double vel[3];                      /* step 68: its step from its partner (its skeleton's), the motion to expect next */
+    int32_t lbest;                      /* step 68, the pair log: its partner, the decision, the step, off its motion, */
+    const char *lwhat;                  /* the nearest of its key */
+    float lstep, loff, lnear;
     double pos[3];                      /* W's origin, plus its first bone's */
     double w[16];
 } iobj_t;
@@ -2511,6 +2517,7 @@ static void ic_obj(rcmd_t *c, uint32_t key, const double *w, const float *k4, co
     }
     o->key = key;
     o->lkey = lk;
+    o->hv = 0;
     o->prev = -1;
     o->used = 0;
     o->bones = -1;
@@ -2921,6 +2928,8 @@ static void ic_replaced(void)
 typedef struct {
     double ga[16], gb[16], iga[16], igb[16], gt[16];
     unsigned stamp;                     /* the sub-frame gt is for */
+    unsigned holder;                    /* step 68: the object whose bone G is */
+    double step[3], sd, rd;             /* step 68: G's step, its square, and off the holder partner's step */
 } igrp_t;
 static igrp_t *g_igrp;
 static unsigned g_igrp_n, g_igrp_cap, g_isub_stamp;
@@ -3072,6 +3081,7 @@ static void ic_groups(void)
                 g_igrp_cap = c2;
             }
             gr = &g_igrp[g_igrp_n];
+            gr->holder = e->obj;
             bone_m4(g_ibone[prv] + p->bones + 12 * e->bone, gr->ga);
             bone_m4(g_ibone[cur] + o->bones + 12 * e->bone, gr->gb);
             gr->stamp = 0;
@@ -3349,7 +3359,7 @@ static int ic_match(void)
 static void ic_pair(void)
 {
     unsigned cur = (unsigned)g_icur, prv = !cur, n = g_iobj_n[prv], i, j;
-    iobj_t *po = g_iobj[prv];
+    iobj_t *po = g_iobj[prv], *co = g_iobj[cur];
     int matched;
     LARGE_INTEGER t0, t1;
 
@@ -3372,15 +3382,13 @@ static void ic_pair(void)
     ic_replaced();                      /* step 63 */
     matched = g_imatch && ic_match();
     for (i = 0; i < g_iobj_n[cur]; i++) {
-        iobj_t *o = &g_iobj[cur][i];
+        iobj_t *o = &co[i];
         unsigned lo = 0, hi = n, best = (unsigned)-1, a1i = (unsigned)-1;
         double bd = 1e300, a1 = 1e300, rel;
-        const char *what;
+        o->lbest = -1;
+        o->lwhat = "replaced";
         if (o->used == 2) {             /* step 63: replaced another in place, drawn as it is */
             g_st.interp_obj++;
-            if (g_ipairlog && g_irec_this)
-                fprintf(stderr, "[D3DB] pairlog swap %u obj %u key %08X pos %.3f %.3f %.3f replaced\n", g_ipair_swap,
-                        i, o->key, o->pos[0], o->pos[1], o->pos[2]);
             continue;
         }
         if (matched) {
@@ -3412,11 +3420,16 @@ static void ic_pair(void)
             }
         }
         g_st.interp_obj++;
-        if (best != (unsigned)-1) {     /* the snap goes by W's origin and the first bone's, as before */
-            const iobj_t *p = &po[best];
-            double dx = o->pos[0] - p->pos[0], dy = o->pos[1] - p->pos[1], dz = o->pos[2] - p->pos[2];
-            bd = dx * dx + dy * dy + dz * dz;
+        o->lnear = a1 < 1e299 ? (float)sqrt(a1) : -1.0f;
+        if (best == (unsigned)-1) {
+            g_st.interp_obj_new++;
+            o->lwhat = "new";
+            continue;
         }
+        o->lbest = (int32_t)best;
+        for (j = 0; j < 3; j++)         /* the snap goes by W's origin and the first bone's, as before */
+            o->vel[j] = o->pos[j] - po[best].pos[j];
+        bd = o->vel[0] * o->vel[0] + o->vel[1] * o->vel[1] + o->vel[2] * o->vel[2];
         /* Step 63: a partner over half the object's own size (W's first
          * axis) away, taken because one of its kind under half as far was
          * already another's, is a guess: the pause menu's highlighted line
@@ -3424,32 +3437,94 @@ static void ic_pair(void)
          * same glyph two to four letters off. It snaps. Skinned meshes
          * (W = I) keep the snap alone. */
         rel = 1e300;
-        if (o->bones < 0 && best != (unsigned)-1 && a1i != best && 4 * a1 < bd)
+        if (o->bones < 0 && a1i != best && 4 * a1 < bd)
             rel = 0.25 * (o->w[0] * o->w[0] + o->w[1] * o->w[1] + o->w[2] * o->w[2]);
-        if (best == (unsigned)-1) {
-            g_st.interp_obj_new++;
-            what = "new";
-        } else if (bd > g_isnap * g_isnap || bd > rel) {
+        if (bd > rel) {
             g_st.interp_obj_snap++;
-            what = bd > rel ? "snap-guess" : "snap";
-        } else {
-            o->prev = (int32_t)best;
-            po[best].used = 1;
-            what = "pair";
-            if (matched && g_ipick_loose[i]) {
-                g_st.interp_obj_loose++;
-                what = "pair-texture";
-            }
+            o->lwhat = "snap-guess";
+            o->lstep = o->loff = (float)sqrt(bd);
+            continue;
         }
-        if (g_ipairlog && g_irec_this)  /* RECOMP_D3D_BRIDGE_PAIRLOG=1: each recorded frame's objects */
-            fprintf(stderr, "[D3DB] pairlog swap %u obj %u key %08X (kind %08X mesh %08X) pos %.3f %.3f %.3f prev %d "
-                    "step %.3f near %.3f size %.3f %s\n", g_ipair_swap, i, o->key, o->kind, o->mesh, o->pos[0], o->pos[1], o->pos[2],
-                    best == (unsigned)-1 ? -1 : (int)best, best == (unsigned)-1 ? -1.0 : sqrt(bd),
-                    a1 < 1e299 ? sqrt(a1) : -1.0, sqrt(o->w[0] * o->w[0] + o->w[1] * o->w[1] + o->w[2] * o->w[2]), what);
+        if (!g_imatch && bd > g_isnap * g_isnap) {     /* step 62's snap, as before */
+            g_st.interp_obj_snap++;
+            o->lwhat = "snap";
+            o->lstep = o->loff = (float)sqrt(bd);
+            continue;
+        }
+        o->hv = 1;                      /* step 68: its partner known: its step (vel) is the motion to expect next */
+        o->prev = (int32_t)best;        /* for now; step 68: a skeleton's snap is decided below, whole */
+        po[best].used = 1;
+        o->lwhat = matched && g_ipick_loose[i] ? "pair-texture" : "pair";
     }
     ic_groups();                        /* step 66 */
+    /* Step 68: the snap. A step over g_isnap snaps only if it is a jump from
+     * the object's own motion too: from where it would be had it gone on as
+     * in the frame before (its partner's vel). A projectile flying on, the
+     * ball rolling fast, are interpolated; a teleport or a respawn snaps as
+     * before. A skeleton (step 66) snaps whole, by its frame G's step: by
+     * their first bones (often a limb's), some of Crash's draws took a 1.7-2
+     * unit step every fourth frame rolling fast in Medieval Madness, snapped
+     * while the rest were interpolated, and came apart from the ball for
+     * those sub-frames. */
+    for (i = 0; i < g_igrp_n; i++) {
+        igrp_t *gr = &g_igrp[i];
+        const iobj_t *p = &po[co[gr->holder].prev];
+        double ex, ey, ez;
+        gr->step[0] = gr->gb[3] - gr->ga[3];
+        gr->step[1] = gr->gb[7] - gr->ga[7];
+        gr->step[2] = gr->gb[11] - gr->ga[11];
+        ex = gr->step[0] - (p->hv ? p->vel[0] : 0.0);
+        ey = gr->step[1] - (p->hv ? p->vel[1] : 0.0);
+        ez = gr->step[2] - (p->hv ? p->vel[2] : 0.0);
+        gr->sd = gr->step[0] * gr->step[0] + gr->step[1] * gr->step[1] + gr->step[2] * gr->step[2];
+        gr->rd = p->hv ? ex * ex + ey * ey + ez * ez : gr->sd;
+    }
+    for (i = 0; i < g_iobj_n[cur]; i++) {
+        iobj_t *o = &co[i];
+        const iobj_t *p;
+        double sd, rd, ex, ey, ez;
+        if (o->prev < 0 || !g_imatch)
+            continue;
+        p = &po[o->prev];
+        if (o->grp >= 0) {              /* its skeleton's step */
+            const igrp_t *gr = &g_igrp[o->grp];
+            memcpy(o->vel, gr->step, sizeof(o->vel));
+            sd = gr->sd;
+            rd = gr->rd;
+        } else {
+            ex = o->vel[0] - (p->hv ? p->vel[0] : 0.0);
+            ey = o->vel[1] - (p->hv ? p->vel[1] : 0.0);
+            ez = o->vel[2] - (p->hv ? p->vel[2] : 0.0);
+            sd = o->vel[0] * o->vel[0] + o->vel[1] * o->vel[1] + o->vel[2] * o->vel[2];
+            rd = p->hv ? ex * ex + ey * ey + ez * ez : sd;
+        }
+        o->lstep = (float)sqrt(sd);
+        o->loff = (float)sqrt(rd);
+        if (sd > g_isnap * g_isnap && rd > g_isnap * g_isnap) {
+            g_st.interp_obj_snap++;
+            o->lwhat = "snap";
+            o->prev = -1;
+            o->grp = -1;
+            continue;
+        }
+        if (strcmp(o->lwhat, "pair-texture") == 0)
+            g_st.interp_obj_loose++;
+        if (sd > g_isnap * g_isnap) {
+            g_st.interp_obj_motion++;
+            o->lwhat = "pair-motion";
+        }
+    }
     QueryPerformanceCounter(&t1);
     g_st.pair_ms += (double)(t1.QuadPart - t0.QuadPart) * 1000.0 / (double)g_qpf.QuadPart;
+    if (g_ipairlog && g_irec_this)      /* RECOMP_D3D_BRIDGE_PAIRLOG=1: each recorded frame's objects */
+        for (i = 0; i < g_iobj_n[cur]; i++) {
+            const iobj_t *o = &co[i];
+            fprintf(stderr, "[D3DB] pairlog swap %u obj %u key %08X (kind %08X mesh %08X) pos %.3f %.3f %.3f prev %d "
+                    "step %.3f off its motion %.3f near %.3f size %.3f skeleton %d %s\n", g_ipair_swap, i, o->key,
+                    o->kind, o->mesh, o->pos[0], o->pos[1], o->pos[2], o->lbest, o->lbest < 0 ? -1.0 : o->lstep,
+                    o->lbest < 0 ? -1.0 : o->loff, o->lnear, sqrt(o->w[0] * o->w[0] + o->w[1] * o->w[1] + o->w[2] * o->w[2]),
+                    o->grp, o->lwhat);
+        }
 }
 
 /* At the present: how many sub-frames this frame gets (1: shown as it is),
@@ -3717,6 +3792,9 @@ static void ic_draw(const rcmd_t *c)
         if (b_move) {                   /* the bones at t */
             int bi, moved = 0;
             const double *gt = o->grp >= 0 ? ic_group_g((unsigned)o->grp) : NULL;
+            double os[3];               /* step 68: a bone's step is judged less the object's own */
+            for (i = 0; i < 3; i++)
+                os[i] = g_imatch ? o->pos[i] - p->pos[i] : 0.0;
             for (bi = 0; bi < IC_BONE_REGS / 3; bi++) {
                 const float *ba = pb + 12 * bi, *bb = s + 4 * (IC_BONE_BASE + 3 * bi);
                 float *bo = k4 + 4 * (IC_BONE_BASE + 3 * bi);
@@ -3727,9 +3805,9 @@ static void ic_draw(const rcmd_t *c)
                 if (gt) {                       /* step 66: blended in its skeleton's frame */
                     const igrp_t *gr = &g_igrp[o->grp];
                     double ma[16], mb[16], ra[16], rb[16], rl[16], mt[16];
-                    dx = (double)ba[3] - bb[3];
-                    dy = (double)ba[7] - bb[7];
-                    dz = (double)ba[11] - bb[11];
+                    dx = (double)ba[3] - bb[3] + os[0];
+                    dy = (double)ba[7] - bb[7] + os[1];
+                    dz = (double)ba[11] - bb[11] + os[2];
                     if (!(dx * dx + dy * dy + dz * dz <= 16 * g_isnap * g_isnap)) {
                         g_st.interp_bone_snap++;
                         continue;
@@ -3757,9 +3835,9 @@ static void ic_draw(const rcmd_t *c)
                     a.t[i] = ba[4 * i + 3];
                     b.t[i] = bb[4 * i + 3];
                 }
-                dx = a.t[0] - b.t[0];
-                dy = a.t[1] - b.t[1];
-                dz = a.t[2] - b.t[2];
+                dx = a.t[0] - b.t[0] + os[0];
+                dy = a.t[1] - b.t[1] + os[1];
+                dz = a.t[2] - b.t[2] + os[2];
                 if (!(dx * dx + dy * dy + dz * dz <= 16 * g_isnap * g_isnap)) {
                     g_st.interp_bone_snap++;
                     continue;           /* a bone that jumped, or a register not read */
