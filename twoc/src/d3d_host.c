@@ -2201,6 +2201,8 @@ typedef struct {
     uint32_t used;                      /* (in the frame before) taken by a partner */
     uint32_t bmask;                     /* the bones that may move (bit b: c124 + 3b) */
     uint32_t own;                       /* step 67: bmask holds only the bones uploaded for it */
+    uint32_t kind, mesh;                /* step 68: its key's parts (the pair log) */
+    uint32_t lkey;                      /* step 68: its key with its textures by their shape only */
     double pos[3];                      /* W's origin, plus its first bone's */
     double w[16];
 } iobj_t;
@@ -2409,8 +2411,10 @@ static uint32_t fnv(uint32_t h, uint32_t v)
     return h;
 }
 
-/* A draw's kind, for matching it with the frame before's. */
-static uint32_t ic_key(const d3dh_draw_t *d)
+/* A draw's kind, for matching it with the frame before's. `loose`: its
+ * textures by their shape (format, size, levels) instead of which they are
+ * (step 68: a flipbook's frames are a texture each). */
+static uint32_t ic_key(const d3dh_draw_t *d, int loose)
 {
     uint32_t h = 2166136261u;
     unsigned s, i;
@@ -2420,7 +2424,11 @@ static uint32_t ic_key(const d3dh_draw_t *d)
         for (i = 0; i < d->ps->n_rs; i++)
             h = fnv(fnv(h, d->ps->rs[i].state), d->ps->rs[i].value);
     for (s = 0; s < 4; s++)
-        h = fnv(h, d->tex[s] ? d->tex[s]->key : 0);
+        if (!loose || !d->tex[s])
+            h = fnv(h, d->tex[s] ? d->tex[s]->key : 0);
+        else
+            h = fnv(fnv(fnv(h, d->tex[s]->format | d->tex[s]->levels << 8 | d->tex[s]->cube << 12),
+                        d->tex[s]->width), d->tex[s]->height);
     h = fnv(h, d->target.data);
     h = fnv(h, d->prim);
     h = fnv(h, d->vert_count);
@@ -2449,6 +2457,7 @@ static void ic_obj(rcmd_t *c, uint32_t key, const double *w, const float *k4, co
     static const uint32_t keep[] = { 14, 19, 20, 22, 52, 55, 56, 168 };  /* ZWRITE, blend, CULL, STENCIL*, COLORWRITE */
     const d3dh_draw_t *d = &c->u.draw.d;
     unsigned cur = (unsigned)g_icur, i, j;
+    uint32_t lk;
     iobj_t *o;
 
     if (!d->mesh || g_isnap <= 0)
@@ -2470,11 +2479,17 @@ static void ic_obj(rcmd_t *c, uint32_t key, const double *w, const float *k4, co
         g_ibone_cap[cur] = cap;
     }
     o = &g_iobj[cur][g_iobj_n[cur]];
+    o->kind = key;
+    o->mesh = d->mesh;
+    lk = ic_key(d, 1);                  /* step 68: the loose key, through the same steps */
     key = fnv(key, d->mesh);
+    lk = fnv(lk, d->mesh);
     for (i = 0; i < d->n_rs; i++)       /* a pass that only marks stencil is another object than the model's */
         for (j = 0; j < sizeof(keep) / sizeof(keep[0]); j++)
-            if (d->rs[i].state == keep[j])
+            if (d->rs[i].state == keep[j]) {
                 key = fnv(fnv(key, d->rs[i].state), d->rs[i].value);
+                lk = fnv(fnv(lk, d->rs[i].state), d->rs[i].value);
+            }
     /* Step 63: the handedness of W and of the first bone. A reflection (the
      * hub floor's Crash) draws the same mesh with mirrored bones, and its
      * first bone sits a few hundredths of a unit from the model's: by
@@ -2486,13 +2501,16 @@ static void ic_obj(rcmd_t *c, uint32_t key, const double *w, const float *k4, co
             for (j = 0; j < 3; j++)
                 m[3 * i + j] = w[4 * i + j];
         key = fnv(key, (uint32_t)(ic_hand(m) + 1));
+        lk = fnv(lk, (uint32_t)(ic_hand(m) + 1));
         if (k4) {
             for (i = 0; i < 9; i++)
                 m[i] = k4[4 * (IC_BONE_BASE + i / 3) + i % 3];
             key = fnv(key, (uint32_t)(ic_hand(m) + 1));
+            lk = fnv(lk, (uint32_t)(ic_hand(m) + 1));
         }
     }
     o->key = key;
+    o->lkey = lk;
     o->prev = -1;
     o->used = 0;
     o->bones = -1;
@@ -2543,7 +2561,7 @@ static void ic_record(rcmd_t *c)
 {
     const d3dh_draw_t *d = &c->u.draw.d;
     unsigned ci, cur = (unsigned)g_icur;
-    uint32_t key = ic_key(d);
+    uint32_t key = ic_key(d, 0);
     icam_t *cam;
 
     if (g_ikey_n[cur] == g_ikey_cap[cur]) {
@@ -3128,16 +3146,26 @@ static icand_t *g_icand;
 static unsigned g_icand_cap;
 static unsigned *g_icord;               /* this frame's objects by key */
 static unsigned g_icord_cap;
+static unsigned *g_iord2;               /* the frame before's by loose key */
+static unsigned g_iord2_cap;
+static int g_iloose;                    /* the pass: by key (0) or loose key (1) */
+static uint8_t *g_ipick_loose;          /* each of this frame's objects: paired by its loose key */
+static unsigned g_ipick_loose_cap;
 static int32_t *g_ipick;                /* each of this frame's objects: its partner, -1 none */
 static double *g_ipick_dd, *g_inear;    /* ... its distance (ic_dist), the nearest of its key's, taken or not */
 static int32_t *g_inear_i;
 static unsigned g_ipick_cap;
 static const iobj_t *g_icord_of;
 
+static uint32_t ic_mkey(const iobj_t *o)
+{
+    return g_iloose ? o->lkey : o->key;
+}
+
 static int cmp_icord(const void *a, const void *b)
 {
     unsigned i = *(const unsigned *)a, j = *(const unsigned *)b;
-    uint32_t x = g_icord_of[i].key, y = g_icord_of[j].key;
+    uint32_t x = ic_mkey(&g_icord_of[i]), y = ic_mkey(&g_icord_of[j]);
     return x < y ? -1 : x > y ? 1 : (i > j) - (i < j);
 }
 
@@ -3168,50 +3196,22 @@ static int ic_grow(void **p, unsigned *cap, unsigned need, size_t sz)
     return 1;
 }
 
-/* Each of this frame's objects' partner (g_ipick), its distance and its
- * nearest of the frame before's (g_inear): a key's candidate pairs nearest
- * first. 0 if out of memory. */
-static int ic_match(void)
+/* One pass of ic_match, key by key (ic_mkey): [a, b) this frame's objects
+ * of a key in g_icord (nc of them), [pa, pb) the frame before's in `pord`
+ * (np). 0 if out of memory. */
+static int ic_match_keys(unsigned nc, const unsigned *pord, unsigned np)
 {
-    unsigned cur = (unsigned)g_icur, prv = !cur, nc = g_iobj_n[cur], np = g_iobj_n[prv], i, a, b, pa;
+    unsigned cur = (unsigned)g_icur, prv = !cur, i, a, b, pa;
     iobj_t *co = g_iobj[cur], *po = g_iobj[prv];
 
-    if (!ic_grow((void **)&g_icord, &g_icord_cap, nc, sizeof(unsigned)))
-        return 0;
-    if (nc > g_ipick_cap) {             /* four arrays of one capacity */
-        unsigned c = g_ipick_cap ? g_ipick_cap : 256;
-        void *x, *y, *w, *z;
-        while (c < nc)
-            c *= 2;
-        if ((x = realloc(g_ipick, c * sizeof(int32_t))) != NULL)
-            g_ipick = (int32_t *)x;
-        if ((y = realloc(g_ipick_dd, c * sizeof(double))) != NULL)
-            g_ipick_dd = (double *)y;
-        if ((w = realloc(g_inear, c * sizeof(double))) != NULL)
-            g_inear = (double *)w;
-        if ((z = realloc(g_inear_i, c * sizeof(int32_t))) != NULL)
-            g_inear_i = (int32_t *)z;
-        if (!x || !y || !w || !z)
-            return 0;
-        g_ipick_cap = c;
-    }
-    for (i = 0; i < nc; i++) {
-        g_icord[i] = i;
-        g_ipick[i] = -1;
-        g_ipick_dd[i] = 1e300;
-        g_inear[i] = 1e300;
-        g_inear_i[i] = -1;
-    }
-    g_icord_of = co;
-    qsort(g_icord, nc, sizeof(unsigned), cmp_icord);
-    for (a = 0, pa = 0; a < nc; a = b) {     /* key by key: [a, b) this frame's, [pa, pb) the frame before's */
+    for (a = 0, pa = 0; a < nc; a = b) {
         unsigned pb, round;
-        uint32_t key = co[g_icord[a]].key;
-        for (b = a; b < nc && co[g_icord[b]].key == key; b++)
+        uint32_t key = ic_mkey(&co[g_icord[a]]);
+        for (b = a; b < nc && ic_mkey(&co[g_icord[b]]) == key; b++)
             ;
-        while (pa < np && po[g_iord[pa]].key < key)
+        while (pa < np && ic_mkey(&po[pord[pa]]) < key)
             pa++;
-        for (pb = pa; pb < np && po[g_iord[pb]].key == key; pb++)
+        for (pb = pa; pb < np && ic_mkey(&po[pord[pb]]) == key; pb++)
             ;
         if (pb == pa)
             continue;
@@ -3228,9 +3228,9 @@ static int ic_match(void)
                 if (co[c].used == 2 || g_ipick[c] >= 0)     /* step 63: replaced another in place; or paired */
                     continue;
                 for (j = pa; j < pb; j++) {
-                    unsigned p = g_iord[j], rd = i - a > j - pa ? (i - a) - (j - pa) : (j - pa) - (i - a);
+                    unsigned p = pord[j], rd = i - a > j - pa ? (i - a) - (j - pa) : (j - pa) - (i - a);
                     double dd = ic_dist(&co[c], &po[p]);
-                    if (!round && dd < g_inear[c]) {    /* step 63: the nearest, taken or not */
+                    if (!round && !g_iloose && dd < g_inear[c]) {   /* step 63: the nearest, taken or not */
                         g_inear[c] = dd;
                         g_inear_i[c] = (int32_t)p;
                     }
@@ -3260,6 +3260,7 @@ static int ic_match(void)
                     continue;
                 g_ipick[x->c] = (int32_t)x->p;
                 g_ipick_dd[x->c] = x->dd;
+                g_ipick_loose[x->c] = (uint8_t)g_iloose;
                 po[x->p].used = 3;      /* matched; marked 1 once it is the partner */
                 got++;
             }
@@ -3268,10 +3269,77 @@ static int ic_match(void)
         }
         pa = pb;
     }
+    return 1;
+}
+
+/* Each of this frame's objects' partner (g_ipick), its distance and its
+ * nearest of the frame before's (g_inear): a key's candidate pairs nearest
+ * first. Step 68: then those left by their loose key (lkey: their textures
+ * by shape), so an object whose texture is a flipbook (H2 Oh No's caustics
+ * on the sub's missile, the clock, the fruit: a texture each frame, so a
+ * key each frame, never paired) is paired with its last frame's. 0 if out
+ * of memory. */
+static int ic_match(void)
+{
+    unsigned cur = (unsigned)g_icur, prv = !cur, nc = g_iobj_n[cur], np = g_iobj_n[prv], i;
+    iobj_t *co = g_iobj[cur], *po = g_iobj[prv];
+    int ok = 1;
+
+    if (!ic_grow((void **)&g_icord, &g_icord_cap, nc, sizeof(unsigned)) ||
+        !ic_grow((void **)&g_iord2, &g_iord2_cap, np, sizeof(unsigned)) ||
+        !ic_grow((void **)&g_ipick_loose, &g_ipick_loose_cap, nc, 1))
+        return 0;
+    if (nc > g_ipick_cap) {             /* four arrays of one capacity */
+        unsigned c = g_ipick_cap ? g_ipick_cap : 256;
+        void *x, *y, *w, *z;
+        while (c < nc)
+            c *= 2;
+        if ((x = realloc(g_ipick, c * sizeof(int32_t))) != NULL)
+            g_ipick = (int32_t *)x;
+        if ((y = realloc(g_ipick_dd, c * sizeof(double))) != NULL)
+            g_ipick_dd = (double *)y;
+        if ((w = realloc(g_inear, c * sizeof(double))) != NULL)
+            g_inear = (double *)w;
+        if ((z = realloc(g_inear_i, c * sizeof(int32_t))) != NULL)
+            g_inear_i = (int32_t *)z;
+        if (!x || !y || !w || !z)
+            return 0;
+        g_ipick_cap = c;
+    }
+    for (i = 0; i < nc; i++) {
+        g_icord[i] = i;
+        g_ipick[i] = -1;
+        g_ipick_dd[i] = 1e300;
+        g_inear[i] = 1e300;
+        g_inear_i[i] = -1;
+        g_ipick_loose[i] = 0;
+    }
+    g_iloose = 0;
+    g_icord_of = co;
+    qsort(g_icord, nc, sizeof(unsigned), cmp_icord);
+    ok = ic_match_keys(nc, g_iord, np);
+    if (ok) {                           /* those left on both sides, by loose key */
+        unsigned nc2 = 0, np2 = 0;
+        for (i = 0; i < nc; i++)
+            if (g_ipick[i] < 0 && co[i].used != 2)
+                g_icord[nc2++] = i;
+        for (i = 0; i < np; i++)
+            if (!po[i].used)
+                g_iord2[np2++] = i;
+        if (nc2 && np2) {
+            g_iloose = 1;
+            g_icord_of = po;
+            qsort(g_iord2, np2, sizeof(unsigned), cmp_icord);
+            g_icord_of = co;
+            qsort(g_icord, nc2, sizeof(unsigned), cmp_icord);
+            ok = ic_match_keys(nc2, g_iord2, np2);
+        }
+    }
+    g_iloose = 0;
     for (i = 0; i < np; i++)
         if (po[i].used == 3)
             po[i].used = 0;
-    return 1;
+    return ok;
 }
 
 /* Step 62: each object of this frame paired with the frame before's
@@ -3368,10 +3436,14 @@ static void ic_pair(void)
             o->prev = (int32_t)best;
             po[best].used = 1;
             what = "pair";
+            if (matched && g_ipick_loose[i]) {
+                g_st.interp_obj_loose++;
+                what = "pair-texture";
+            }
         }
         if (g_ipairlog && g_irec_this)  /* RECOMP_D3D_BRIDGE_PAIRLOG=1: each recorded frame's objects */
-            fprintf(stderr, "[D3DB] pairlog swap %u obj %u key %08X pos %.3f %.3f %.3f prev %d step %.3f near %.3f "
-                    "size %.3f %s\n", g_ipair_swap, i, o->key, o->pos[0], o->pos[1], o->pos[2],
+            fprintf(stderr, "[D3DB] pairlog swap %u obj %u key %08X (kind %08X mesh %08X) pos %.3f %.3f %.3f prev %d "
+                    "step %.3f near %.3f size %.3f %s\n", g_ipair_swap, i, o->key, o->kind, o->mesh, o->pos[0], o->pos[1], o->pos[2],
                     best == (unsigned)-1 ? -1 : (int)best, best == (unsigned)-1 ? -1.0 : sqrt(bd),
                     a1 < 1e299 ? sqrt(a1) : -1.0, sqrt(o->w[0] * o->w[0] + o->w[1] * o->w[1] + o->w[2] * o->w[2]), what);
     }
