@@ -1,0 +1,34 @@
+diff --git a/twoc/src/d3d_bridge.c b/twoc/src/d3d_bridge.c
+index d31e2ff..350885f 100644
+--- a/twoc/src/d3d_bridge.c
++++ b/twoc/src/d3d_bridge.c
+@@ -4744,6 +4744,29 @@ void d3db_enter(int id, d3db_args_t *a)
+         }
+     }
+ 
++    { /* TMP step 69: per swap, each display-list item's draw path and distance */
++        static int on = -1; static char buf[65536]; static int len;
++        if (on < 0) on = getenv("RECOMP_TMP_PATHLOG") != NULL;
++        if (on && (id == D3DB_DRAW_UP || id == D3DB_DRAW_INDEXED || id == D3DB_DRAW) && g_item && len < 65000) {
++            uint32_t off, v, p = 0;
++            for (off = 4; off < 0x300 && !p; off += 4) {
++                v = MEM32(esp + off);
++                if (v == 0xA5ED2u || v == 0xA614Fu || v == 0xA8233u || v == 0xA5EF1u || v == 0xA5F0Bu) p = v;
++            }
++            if (p) {
++                uint32_t m = MEM32(g_item + 0x18);
++                float x = *(float *)XBOX_PTR(m + 0x30) - *(float *)XBOX_PTR(0x242650u);
++                float y = *(float *)XBOX_PTR(m + 0x34) - *(float *)XBOX_PTR(0x242654u);
++                float z = *(float *)XBOX_PTR(m + 0x38) - *(float *)XBOX_PTR(0x242658u);
++                len += snprintf(buf + len, sizeof(buf) - len, " %X:%X:%X:%u:%.1f", p, g_item, MEM32(g_item + 0x1c),
++                                MEM32(g_item + 4), sqrtf(x * x + y * y + z * z));
++            }
++        }
++        if (on && id == D3DB_SWAP) {
++            fprintf(stderr, "[TMP] swap %ld%s\n", (long)g_swaps, buf);
++            len = 0; buf[0] = 0;
++        }
++    }
+     switch (id) {
+     case D3DB_CLEAR: case D3DB_SWAP: case D3DB_DRAW_UP: case D3DB_DRAW:
+     case D3DB_DRAW_INDEXED: case D3DB_END: case D3DB_COPYRECTS:
