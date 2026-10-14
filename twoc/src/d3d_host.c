@@ -5351,8 +5351,8 @@ static void overlay_apply(twoc_settings_t *was, const twoc_settings_t *s)
     }
     if (g_apply && (s->widescreen != was->widescreen || s->wide_w != was->wide_w || s->wide_h != was->wide_h ||
                     strcmp(s->render_size, was->render_size) != 0 || s->pacing != was->pacing ||
-                    s->framerate != was->framerate))
-        g_apply(s);                     /* d3d_bridge.c: the aspect, the render size, the pacing */
+                    s->framerate != was->framerate || s->draw_distance != was->draw_distance))
+        g_apply(s);                     /* d3d_bridge.c: the aspect, the render size, the pacing, the draw distance */
     *was = *s;
 }
 

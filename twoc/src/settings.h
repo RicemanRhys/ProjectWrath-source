@@ -17,6 +17,7 @@
  *   framerate   = 60 | display                RECOMP_FRAMERATE (unset: 60)
  *   hud         = centre | edges              RECOMP_HUD (unset: centre)
  *   hud_margin  = 0-10                        RECOMP_HUD_MARGIN (percent of the width; unset: 0)
+ *   draw_distance = 1 | 1.5 | 2 | 3           RECOMP_DRAW_DISTANCE (unset: 1, the game's)
  *   volume      = 0-100                       RECOMP_VOLUME (the game's volume in Windows' mixer)
  *   music_volume   = 0-100                    RECOMP_MUSIC_VOLUME (stream voices: music, ambience, speech)
  *   effects_volume = 0-100                    RECOMP_EFFECTS_VOLUME (buffer voices: the sound effects)
@@ -55,6 +56,12 @@
  * the pause menu and anything centred stay), hud_margin percent of the
  * width in from it. Applied at once.
  *
+ * Step 69: the draw distance (notes 18.72). Each level sets its camera's
+ * far plane and its fog; draw_distance multiplies both (and the sky with
+ * them), so the world is drawn further out under fog that ends further
+ * away. Crates and fruit are still drawn within 45 units and enemies woken
+ * within 25, as the game decides. From the next frame.
+ *
  * The settings overlay (overlay.cpp) shows the values in effect and writes
  * the file back when the player changes one.
  */
@@ -80,6 +87,7 @@ typedef struct {
     int antialiasing;                   /* TWOC_AA_* */
     int framerate;                      /* step 61: 0 the game's 60, 1 the display's (interpolated) */
     int hud, hud_margin;                /* step 65: 0 the HUD in the middle 4:3, 1 at the edges; 0-10 percent in */
+    double draw_distance;               /* step 69: the far plane and fog times this; 1 the game's (also unset) */
     int volume;                         /* 0-100; -1: never set (Windows' own level) */
     int music, effects;                 /* 0-100; -1: never set (100, the game's mix) */
     int speakers;                       /* 0 stereo, 1 5.1; -1: never set (stereo) */

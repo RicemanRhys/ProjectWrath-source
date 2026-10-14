@@ -678,6 +678,39 @@ static void wide_init(void)
             (4.0 / 3.0) / d3db_wide);
 }
 
+/* ── The draw distance (step 69, notes 18.72) ─────────────────────
+ *
+ * RECOMP_DRAW_DISTANCE=K (1-4), with the bridge on: the world camera's far
+ * plane, the level's fog range and its sky times K (recomp_manual.c's
+ * wrappers of sub_000956B0, sub_0009D3F0 and sub_000674E0). The game culls
+ * its world geometry against the far plane, so more of the level is drawn,
+ * under fog that ends K times further away. Crates and wumpa fruit are still
+ * drawn within 45 units of the camera and enemies woken within 25 of Crash,
+ * as the game decides (its logic reads those). */
+double d3db_draw_distance = 1.0;
+
+static double draw_distance_parse(const char *v)
+{
+    double k = v && *v ? atof(v) : 1.0;
+
+    return k < 1.0 ? 1.0 : k > 4.0 ? 4.0 : k;
+}
+
+static void draw_distance_init(void)
+{
+    const char *v = getenv("RECOMP_DRAW_DISTANCE");
+
+    if (!v || !*v || draw_distance_parse(v) == 1.0)
+        return;
+    if (!d3db_host_on) {
+        fprintf(stderr, "[DRAW] RECOMP_DRAW_DISTANCE needs the bridge (RECOMP_D3D_BRIDGE=1): off\n");
+        return;
+    }
+    d3db_draw_distance = draw_distance_parse(v);
+    fprintf(stderr, "[DRAW] draw distance x%g: the world camera's far plane and the level's fog range\n",
+            d3db_draw_distance);
+}
+
 /* Whether the current render target is the back buffer or a target of its
  * size (H2 Oh No's underwater pass renders the level into one). */
 static int screen_target(void)
@@ -750,6 +783,7 @@ void d3db_init(void)
         }
     }
     wide_init();
+    draw_distance_init();
     if (d3db_on)
         coop_watch_cs(GAME_D3D_LOCK);
     g_t0_ms = g_last_dump_ms = GetTickCount64();
@@ -956,6 +990,10 @@ static void settings_apply(const twoc_settings_t *s)
     else if (wide != d3db_wide)
         fprintf(stderr, "[WIDE] widescreen off, 4:3 (live)\n");
     d3db_wide = wide;
+    if (s->draw_distance != d3db_draw_distance) {   /* step 69: at the game's next fog, sky and projection */
+        d3db_draw_distance = s->draw_distance < 1.0 ? 1.0 : s->draw_distance > 4.0 ? 4.0 : s->draw_distance;
+        fprintf(stderr, "[DRAW] draw distance x%g (live)\n", d3db_draw_distance);
+    }
     if (render_size_parse(s->render_size, &rw, &rh) == 0) {
         g_render_w = rw;
         g_render_h = rh;

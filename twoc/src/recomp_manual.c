@@ -307,23 +307,83 @@ static void traced_sub_0002BCC0(void)
  * Nothing else reads the aspect, so with RECOMP_WIDESCREEN (bridge on) the
  * camera's aspect is scaled for the call (0.75 -> 0.5625 at 16:9) and put
  * back after it: the view is wider and so is the culling, for every camera
- * that renders to the screen. Off, the lifted function runs as before. */
+ * that renders to the screen. Off, the lifted function runs as before.
+ *
+ * Step 69 (notes 18.72): the draw distance the same way. The far plane is
+ * the camera's +0x4C, the level's draw distance (the level table's word at
+ * +0x2A, set at the level's start by sub_00087410; 1000 when under 10), and
+ * the culling compares against the copy at 0x24266C. With a draw distance
+ * multiplier (d3db_draw_distance) the world camera's (*0x942080) far plane
+ * is scaled for the call; the fog and the sky with it, below. */
+#define WORLD_CAMERA_PTR 0x00942080u
 extern void sub_000956B0_gen(void);
 void sub_000956B0(void)
 {
-    uint32_t cam = MEM32(esp + 4), saved;
-    float scale;
+    uint32_t cam = MEM32(esp + 4), saved, saved_far;
+    float scale, k = (float)d3db_draw_distance;
+    int far_on = k > 1.0f && cam && cam == MEM32(WORLD_CAMERA_PTR);
 
-    if (d3db_wide <= 0 || !cam) {
+    if ((d3db_wide <= 0 && !far_on) || !cam) {
         sub_000956B0_gen();
         return;
     }
     saved = MEM32(cam + 0x44);
+    saved_far = MEM32(cam + 0x4C);
     scale = d3db_camera_aspect_scale(cam, MEMF(cam + 0x44));
     if (scale != 1.0f)
         MEMF(cam + 0x44) *= scale;
+    if (far_on)
+        MEMF(cam + 0x4C) *= k;
     sub_000956B0_gen();
     MEM32(cam + 0x44) = saved;
+    MEM32(cam + 0x4C) = saved_far;
+}
+
+/* sub_0009D3F0(start, end, colour, ., .) sets the fog: start and end
+ * (D3DRS_FOGSTART/FOGEND, linear table fog) and its colour, or turns it off
+ * when start == end. The world's fog is set once a frame from the level
+ * table (+0x44, +0x48; some levels move them) at 0x88B30, before the world
+ * camera's projection; the reflection passes and the fog reset call it
+ * elsewhere. With a draw distance multiplier that call's start and end are
+ * scaled with the far plane, so the fog keeps its shape over the longer
+ * view. */
+#define FOG_WORLD_RET 0x00088B35u
+extern void sub_0009D3F0_gen(void);
+void sub_0009D3F0(void)
+{
+    uint32_t args = esp + 4, start, end;
+
+    if (d3db_draw_distance <= 1.0 || MEM32(esp) != FOG_WORLD_RET) {
+        sub_0009D3F0_gen();
+        return;
+    }
+    start = MEM32(args);
+    end = MEM32(args + 4);
+    MEMF(args) *= (float)d3db_draw_distance;
+    MEMF(args + 4) *= (float)d3db_draw_distance;
+    sub_0009D3F0_gen();
+    MEM32(args) = start;                /* the caller's pushed copies, as they were */
+    MEM32(args + 4) = end;
+}
+
+/* sub_000674E0 queues the level's sky (the first flush of the frame, at
+ * 0x88BBF): its models scaled by the world camera's far plane x 0.05 and
+ * centred on the eye. Under a scaled fog the sky would come out of it and
+ * hide what lies beyond it, so with the multiplier it is scaled with the far
+ * plane: as far off, and as fogged, as before. */
+extern void sub_000674E0_gen(void);
+void sub_000674E0(void)
+{
+    uint32_t cam = MEM32(WORLD_CAMERA_PTR), saved;
+
+    if (d3db_draw_distance <= 1.0 || !cam) {
+        sub_000674E0_gen();
+        return;
+    }
+    saved = MEM32(cam + 0x4C);
+    MEMF(cam + 0x4C) *= (float)d3db_draw_distance;
+    sub_000674E0_gen();
+    MEM32(cam + 0x4C) = saved;
 }
 
 /* ── Step 65: the game's render passes (notes 18.68) ───────────

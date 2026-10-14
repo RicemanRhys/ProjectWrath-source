@@ -71,6 +71,12 @@ extern double d3db_wide;
  * size. */
 float d3db_camera_aspect_scale(uint32_t camera, float aspect);
 
+/* Step 69 (notes 18.72): the draw distance multiplier, RECOMP_DRAW_DISTANCE
+ * with the bridge on (the overlay's Draw distance): the world camera's far
+ * plane and the level's fog range are scaled by it (sub_000956B0's and
+ * sub_0009D3F0's wrappers). 1 when off, and then nothing changes. */
+extern double d3db_draw_distance;
+
 /* Step 65 (notes 18.68): sub_000A8140's wrapper (recomp_manual.c), around
  * each call that draws the game's queued display list: `ret` is the call's
  * return address, which names the pass (the world, the overlay: HUD
