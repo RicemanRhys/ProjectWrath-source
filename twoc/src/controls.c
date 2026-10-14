@@ -10,8 +10,7 @@
 
 #include "xinput_xbox.h"
 #include "controls.h"
-
-#pragma comment(lib, "xinput.lib")
+#include "pads.h"
 
 #define MAXI(a, b) ((a) > (b) ? (a) : (b))
 #define MINI(a, b) ((a) < (b) ? (a) : (b))
@@ -86,6 +85,17 @@ static const struct {
 };
 #define N_KEYS (int)(sizeof(g_keys) / sizeof(g_keys[0]))
 
+/* Step 70: the extra buttons' words (SRC_GUIDE on) and their defaults: the
+ * paddles (SDL's right 1, left 1, right 2, left 2) as X, B, A, Y. */
+static const char *const g_extra_ini[SRC_EXTRAS] = {
+    "guide", "paddle1", "paddle2", "paddle3", "paddle4",
+    "touchpad", "misc1", "misc2", "misc3", "misc4", "misc5", "misc6",
+};
+static const unsigned char g_extra_defaults[SRC_EXTRAS] = {
+    XIN_NONE, XIN_X, XIN_B, XIN_A, XIN_Y,
+    XIN_NONE, XIN_NONE, XIN_NONE, XIN_NONE, XIN_NONE, XIN_NONE, XIN_NONE,
+};
+
 /* Defaults: movement on WASD and the arrows, the actions under the right
  * hand (J K L I) and again under the left (E, Shift, R, Space). */
 static const unsigned char g_key_defaults[KIN_COUNT][KIN_SLOTS] = {
@@ -110,6 +120,7 @@ const char *controls_xin_label(int xin) { return xin >= 0 && xin < XIN_COUNT ? g
 const char *controls_xin_hint(int xin) { return xin >= 0 && xin < XIN_COUNT ? g_xin[xin].hint : ""; }
 const char *controls_src_ini(int src) { return src >= 0 && src < XIN_COUNT ? g_xin[src].src_ini : ""; }
 const char *controls_src_label(int src) { return src >= 0 && src < XIN_COUNT ? g_xin[src].src_label : "?"; }
+const char *controls_extra_ini(int src) { return src >= XIN_COUNT && src < SRC_COUNT ? g_extra_ini[src - XIN_COUNT] : ""; }
 
 const char *controls_kin_ini(int kin)
 {
@@ -145,6 +156,7 @@ void controls_default_pad(twoc_controls_t *c)
 
     for (i = 0; i < XIN_COUNT; i++)
         c->pad[i] = (unsigned char)i;
+    memcpy(c->extra, g_extra_defaults, sizeof(c->extra));
 }
 
 void controls_default_keys(twoc_controls_t *c)
@@ -197,6 +209,30 @@ int controls_parse_keys(const char *v, int kin, twoc_controls_t *c)
     return 0;
 }
 
+int controls_parse_extra(const char *v, int src, twoc_controls_t *c)
+{
+    int x;
+
+    if (src < XIN_COUNT || src >= SRC_COUNT)
+        return -1;
+    if (_stricmp(v, "none") == 0) {
+        c->extra[src - XIN_COUNT] = XIN_NONE;
+        return 0;
+    }
+    for (x = 0; x < XIN_BUTTONS; x++)
+        if (_stricmp(v, g_xin[x].ini) == 0) {
+            c->extra[src - XIN_COUNT] = (unsigned char)x;
+            return 0;
+        }
+    return -1;
+}
+
+void controls_extra_text(const twoc_controls_t *c, int src, char *buf, unsigned cap)
+{
+    int x = src >= XIN_COUNT && src < SRC_COUNT ? c->extra[src - XIN_COUNT] : XIN_NONE;
+    snprintf(buf, cap, "%s", x < XIN_BUTTONS ? g_xin[x].ini : "none");
+}
+
 void controls_pad_text(const twoc_controls_t *c, int xin, char *buf, unsigned cap)
 {
     snprintf(buf, cap, "%s", controls_src_ini(c->pad[xin]));
@@ -227,6 +263,12 @@ void controls_assign_pad(twoc_controls_t *c, int xin, int src)
         if (other != xin && c->pad[other] == src)
             c->pad[other] = c->pad[xin];
     c->pad[xin] = (unsigned char)src;
+}
+
+void controls_assign_extra(twoc_controls_t *c, int src, int xin)
+{
+    if (src >= XIN_COUNT && src < SRC_COUNT && (xin == XIN_NONE || (xin >= 0 && xin < XIN_BUTTONS)))
+        c->extra[src - XIN_COUNT] = (unsigned char)xin;
 }
 
 void controls_assign_key(twoc_controls_t *c, int kin, int slot, int vk)
@@ -271,23 +313,38 @@ static const WORD g_bits[XIN_BUTTONS] = {
     XBOX_GAMEPAD_DPAD_UP, XBOX_GAMEPAD_DPAD_DOWN, XBOX_GAMEPAD_DPAD_LEFT, XBOX_GAMEPAD_DPAD_RIGHT,
 };
 
-void controls_apply_pad(void *gp)
+/* A stick's push, squared, to pick the pad pushing it furthest. */
+static long long stick_push(SHORT x, SHORT y)
+{
+    return (long long)x * x + (long long)y * y;
+}
+
+void controls_apply_pad(void *gp, const void *morep)
 {
     XBOX_GAMEPAD *g = (XBOX_GAMEPAD *)gp, out;
-    unsigned char map[XIN_COUNT], v[XIN_BUTTONS];
+    const pads_src_t *more = (const pads_src_t *)morep;
+    unsigned char map[XIN_COUNT], extra[SRC_EXTRAS], v[SRC_COUNT];
     SHORT st[2][2];
     int i;
 
     AcquireSRWLockShared(&g_lock);
-    if (!g_have || g_default_pad) {     /* the runtime's own table: the state as it is */
+    if (!more && (!g_have || g_default_pad)) {  /* the runtime's own table: the state as it is */
         ReleaseSRWLockShared(&g_lock);
         return;
     }
-    memcpy(map, g_cur.pad, sizeof(map));
+    if (g_have) {
+        memcpy(map, g_cur.pad, sizeof(map));
+        memcpy(extra, g_cur.extra, sizeof(extra));
+    } else {
+        for (i = 0; i < XIN_COUNT; i++)
+            map[i] = (unsigned char)i;
+        memcpy(extra, g_extra_defaults, sizeof(extra));
+    }
     ReleaseSRWLockShared(&g_lock);
 
     /* The PC controller's inputs, back out of the runtime's table (which
      * loses nothing: A-RB as 0/255, the triggers and sticks as they are). */
+    memset(v, 0, sizeof(v));
     for (i = 0; i < 8; i++)
         v[i] = g->bAnalogButtons[i];
     for (i = 8; i < XIN_BUTTONS; i++)
@@ -296,6 +353,16 @@ void controls_apply_pad(void *gp)
     st[0][1] = g->sThumbLY;
     st[1][0] = g->sThumbRX;
     st[1][1] = g->sThumbRY;
+    if (more) {                         /* step 70: the other pads, joined */
+        for (i = 0; i < SRC_COUNT; i++)
+            if (i != XIN_LSTICK && i != XIN_RSTICK && more->v[i] > v[i])
+                v[i] = more->v[i];
+        for (i = 0; i < 2; i++)
+            if (stick_push(more->stick[i][0], more->stick[i][1]) > stick_push(st[i][0], st[i][1])) {
+                st[i][0] = more->stick[i][0];
+                st[i][1] = more->stick[i][1];
+            }
+    }
 
     memset(&out, 0, sizeof(out));
     for (i = 0; i < XIN_BUTTONS; i++) {
@@ -304,6 +371,15 @@ void controls_apply_pad(void *gp)
             out.bAnalogButtons[i] = x;
         else if (x >= XBOX_ANALOG_BUTTON_THRESHOLD)
             out.wButtons |= g_bits[i];
+    }
+    for (i = 0; i < SRC_EXTRAS; i++) {  /* step 70: an extra button presses its Xbox button too */
+        int x = extra[i];
+        if (x >= XIN_BUTTONS || v[XIN_COUNT + i] < XBOX_ANALOG_BUTTON_THRESHOLD)
+            continue;
+        if (x < 8)
+            out.bAnalogButtons[x] = 255;
+        else
+            out.wButtons |= g_bits[x];
     }
     out.sThumbLX = st[map[XIN_LSTICK] - XIN_BUTTONS][0];
     out.sThumbLY = st[map[XIN_LSTICK] - XIN_BUTTONS][1];
@@ -377,30 +453,20 @@ int controls_apply_keys(void *gp)
 /* ── Waiting for a press (the overlay) ─────────────────────── */
 
 static unsigned char g_cap_keys[256];   /* held when the wait began, until released */
-static WORD g_cap_btn;
-static unsigned char g_cap_trig[2], g_cap_stick[2];
+static unsigned char g_cap_src[SRC_COUNT];      /* step 70: every pad's inputs held then, until released */
+static unsigned char g_cap_stick[2];
 
-/* The PC controllers' state, all ports together. Returns 0 if none is there. */
-static int pads_now(WORD *btn, unsigned char trig[2], unsigned char stick[2])
+/* Every pad's state (pads_capture_state): its buttons and triggers, and each
+ * stick's push 0-127. Returns 0 if no pad is there. */
+static int pads_now(unsigned char v[SRC_COUNT], unsigned char stick[2])
 {
-    DWORD p;
-    int any = 0;
+    pads_src_t s;
+    int i, any = pads_capture_state(&s);
 
-    *btn = 0;
-    trig[0] = trig[1] = stick[0] = stick[1] = 0;
-    for (p = 0; p < XUSER_MAX_COUNT; p++) {
-        XINPUT_STATE s;
-        int m;
-        if (XInputGetState(p, &s) != ERROR_SUCCESS)
-            continue;
-        any = 1;
-        *btn |= s.Gamepad.wButtons;
-        trig[0] = (unsigned char)MAXI(trig[0], s.Gamepad.bLeftTrigger);
-        trig[1] = (unsigned char)MAXI(trig[1], s.Gamepad.bRightTrigger);
-        m = MAXI(abs(s.Gamepad.sThumbLX), abs(s.Gamepad.sThumbLY)) >> 8;
-        stick[0] = (unsigned char)MAXI(stick[0], MINI(m, 127));
-        m = MAXI(abs(s.Gamepad.sThumbRX), abs(s.Gamepad.sThumbRY)) >> 8;
-        stick[1] = (unsigned char)MAXI(stick[1], MINI(m, 127));
+    memcpy(v, s.v, SRC_COUNT);
+    for (i = 0; i < 2; i++) {
+        int m = MAXI(abs(s.stick[i][0]), abs(s.stick[i][1])) >> 8;
+        stick[i] = (unsigned char)MINI(m, 127);
     }
     return any;
 }
@@ -411,7 +477,7 @@ void controls_capture_begin(void)
 
     for (i = 0; i < N_KEYS; i++)
         g_cap_keys[g_keys[i].vk] = (unsigned char)key_down(g_keys[i].vk);
-    pads_now(&g_cap_btn, g_cap_trig, g_cap_stick);
+    pads_now(g_cap_src, g_cap_stick);
 }
 
 int controls_capture_key(void)
@@ -430,42 +496,35 @@ int controls_capture_key(void)
 
 int controls_capture_pad(int stick)
 {
-    static const struct {
-        WORD bit;
-        int xin;
-    } bits[] = {
-        { XINPUT_GAMEPAD_A, XIN_A }, { XINPUT_GAMEPAD_B, XIN_B }, { XINPUT_GAMEPAD_X, XIN_X },
-        { XINPUT_GAMEPAD_Y, XIN_Y }, { XINPUT_GAMEPAD_LEFT_SHOULDER, XIN_BLACK },
-        { XINPUT_GAMEPAD_RIGHT_SHOULDER, XIN_WHITE }, { XINPUT_GAMEPAD_START, XIN_START },
-        { XINPUT_GAMEPAD_BACK, XIN_BACK }, { XINPUT_GAMEPAD_LEFT_THUMB, XIN_LS },
-        { XINPUT_GAMEPAD_RIGHT_THUMB, XIN_RS }, { XINPUT_GAMEPAD_DPAD_UP, XIN_UP },
-        { XINPUT_GAMEPAD_DPAD_DOWN, XIN_DOWN }, { XINPUT_GAMEPAD_DPAD_LEFT, XIN_LEFT },
-        { XINPUT_GAMEPAD_DPAD_RIGHT, XIN_RIGHT },
+    /* The order a press is looked for in: the digital buttons, then the
+     * triggers (pressed past half), then the extra buttons. */
+    static const unsigned char order[] = {
+        XIN_A, XIN_B, XIN_X, XIN_Y, XIN_BLACK, XIN_WHITE, XIN_START, XIN_BACK, XIN_LS, XIN_RS,
+        XIN_UP, XIN_DOWN, XIN_LEFT, XIN_RIGHT, XIN_LT, XIN_RT,
+        SRC_PADDLE1, SRC_PADDLE2, SRC_PADDLE3, SRC_PADDLE4, SRC_TOUCHPAD, SRC_MISC1, SRC_MISC2,
+        SRC_MISC3, SRC_MISC4, SRC_MISC5, SRC_MISC6, SRC_GUIDE,
     };
-    WORD btn;
-    unsigned char trig[2], st[2];
+    unsigned char v[SRC_COUNT], st[2];
     int i, got = -1;
 
-    if (!pads_now(&btn, trig, st))
+    if (!pads_now(v, st))
         return -1;
-    g_cap_btn &= btn;                   /* released: may count again */
-    for (i = 0; i < 2; i++) {
-        if (trig[i] < XINPUT_GAMEPAD_TRIGGER_THRESHOLD)
-            g_cap_trig[i] = 0;
+    for (i = 0; i < SRC_COUNT; i++)     /* released: may count again */
+        if (v[i] < XBOX_ANALOG_BUTTON_THRESHOLD)
+            g_cap_src[i] = 0;
+    for (i = 0; i < 2; i++)
         if (st[i] < 40)                 /* back near the centre (under ~30%) */
             g_cap_stick[i] = 0;
-    }
     if (stick) {
         for (i = 0; i < 2 && got < 0; i++)
             if (st[i] >= 80 && g_cap_stick[i] < 40)     /* pushed past ~60% */
                 got = XIN_LSTICK + i;
         return got;
     }
-    for (i = 0; i < (int)(sizeof(bits) / sizeof(bits[0])) && got < 0; i++)
-        if ((btn & bits[i].bit) && !(g_cap_btn & bits[i].bit))
-            got = bits[i].xin;
-    for (i = 0; i < 2 && got < 0; i++)
-        if (trig[i] >= 128 && g_cap_trig[i] < XINPUT_GAMEPAD_TRIGGER_THRESHOLD)
-            got = XIN_LT + i;
+    for (i = 0; i < (int)sizeof(order) && got < 0; i++) {
+        int x = order[i];
+        if (!g_cap_src[x] && v[x] >= (x == XIN_LT || x == XIN_RT ? 128 : XBOX_ANALOG_BUTTON_THRESHOLD))
+            got = x;
+    }
     return got;
 }

@@ -42,6 +42,7 @@
 #include <xbox/xboxrecomp.h>
 
 #include "settings.h"
+#include "pads.h"
 
 /*
  * If xboxrecomp.h is not an umbrella header in your setup, include
@@ -482,6 +483,9 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance,
      * just brings up the host side (XInput) that the hand-written XPP poll
      * and vibration entry points (twoc/src/recomp_manual.c) forward to. */
     xbox_InputInit();
+    /* Step 70 (notes 18.73): every other pad, through SDL3 on a thread of
+     * its own (pads.c); "controller_input = xinput" leaves SDL unstarted. */
+    pads_init(pads_mode_parse(getenv("RECOMP_CONTROLLER_INPUT")));
 
     /* Test-only options (RECOMP_DEV_FAST_TITLE, RECOMP_DEV_AUTOSTART; see
      * recomp_manual.c). Inert unless one is set. */

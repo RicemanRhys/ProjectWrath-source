@@ -40,6 +40,33 @@ set(XBOXRECOMP_DIR "${CMAKE_CURRENT_SOURCE_DIR}/../xboxrecomp" CACHE PATH
 # and provides the 'xboxrecomp' umbrella target to link against.
 add_subdirectory(${XBOXRECOMP_DIR} ${CMAKE_BINARY_DIR}/xboxrecomp)
 
+# ── SDL3, for every controller the PC has (notes 18.73) ──────────
+#
+# The release tarball, fetched at configure time into the build folder and
+# built static with only what the gamepad API needs. 3.4.18 has the 2026
+# Steam Controller outside Steam (its HIDAPI driver, rumble fixed in 3.4.10,
+# SDL_GAMEPAD_TYPE_STEAM in 3.4.18). Offline: -DFETCHCONTENT_SOURCE_DIR_SDL3=
+# <an unpacked SDL3-3.4.18>.
+include(FetchContent)
+set(SDL_SHARED OFF CACHE BOOL "" FORCE)
+set(SDL_STATIC ON CACHE BOOL "" FORCE)
+set(SDL_TEST_LIBRARY OFF CACHE BOOL "" FORCE)
+set(SDL_TESTS OFF CACHE BOOL "" FORCE)
+set(SDL_EXAMPLES OFF CACHE BOOL "" FORCE)
+set(SDL_INSTALL OFF CACHE BOOL "" FORCE)
+foreach(_sdl_off AUDIO VIDEO GPU RENDER CAMERA POWER DIALOG TRAY)
+    set(SDL_${_sdl_off} OFF CACHE BOOL "" FORCE)
+endforeach()
+foreach(_sdl_on JOYSTICK HAPTIC HIDAPI SENSOR)
+    set(SDL_${_sdl_on} ON CACHE BOOL "" FORCE)
+endforeach()
+FetchContent_Declare(SDL3
+    URL https://github.com/libsdl-org/SDL/releases/download/release-3.4.18/SDL3-3.4.18.tar.gz
+    URL_HASH SHA256=9c75cf16330322c217dedd2e0609f1124f1b54b8633e763467b4684d0f4334a3
+    DOWNLOAD_EXTRACT_TIMESTAMP TRUE
+)
+FetchContent_MakeAvailable(SDL3)
+
 # ── Recompiled game executable ──────────────────────────────────
 
 # Collect generated recompiled code.
@@ -60,6 +87,8 @@ set(GAME_SOURCES
     # Player settings, the settings overlay and the game's volume (notes 18.57)
     src/settings.c
     src/controls.c
+    # Every controller through SDL3 next to XInput (notes 18.73)
+    src/pads.c
     src/overlay.cpp
     src/host_audio.cpp
     # Anti-aliasing: FXAA and SMAA at the present (notes 18.61)
@@ -98,7 +127,7 @@ add_executable(${PROJECT_NAME} WIN32
 )
 
 # Link against the xboxrecomp umbrella target (all 6 runtime libraries)
-target_link_libraries(${PROJECT_NAME} PRIVATE xboxrecomp)
+target_link_libraries(${PROJECT_NAME} PRIVATE xboxrecomp SDL3::SDL3-static)
 
 # Include paths for generated recomp headers
 target_include_directories(${PROJECT_NAME} PRIVATE

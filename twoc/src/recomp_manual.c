@@ -38,6 +38,7 @@
 #include "d3d_bridge.h"
 #include "log_block.h"
 #include "controls.h"     /* step 57: the controller map and the keyboard */
+#include "pads.h"         /* step 70: every other pad, through SDL */
 
 /* ── ICALL trace ring buffer ───────────────────────────────── */
 
@@ -3493,14 +3494,32 @@ void sub_001542AB(void)
             memset(&state, 0, sizeof(state));
             result = ERROR_SUCCESS;
         }
+    } else if (port == 0 && pads_xinput_present(0) == 0) {
+        memset(&state, 0, sizeof(state));   /* step 70: the pads thread saw no XInput user 0: not asked */
+        result = ERROR_DEVICE_NOT_CONNECTED;
     } else
         result = xbox_InputGetState(port, &state);
+    /* Step 70: every other pad joins port 0 (pads.h): SDL's, and XInput users
+     * 1-3, by position, under the same map. Steam Input's virtual pad on user
+     * 0 is left out while the pad behind it is read directly. None: as before. */
+    pads_src_t others;
+    unsigned others_packets = 0;
+    int nothers = 0;
+    if (port == 0 && pads_mode() == PADS_SDL) {
+        nothers = pads_read(&others, &others_packets);
+        if (result == ERROR_SUCCESS && pads_skip_xinput0())
+            memset(&state.Gamepad, 0, sizeof(state.Gamepad));
+        if (result != ERROR_SUCCESS && nothers) {
+            memset(&state, 0, sizeof(state));
+            result = ERROR_SUCCESS;
+        }
+    }
     if (result == ERROR_SUCCESS) {
         static DWORD kb_packets;
-        controls_apply_pad(&state.Gamepad);         /* step 57: the PC controller's map; as is by default */
+        controls_apply_pad(&state.Gamepad, nothers ? &others : NULL);  /* step 57: the PC controller's map; as is by default */
         if (kb_port(port) && controls_apply_keys(&state.Gamepad))
             kb_packets++;                           /* the keyboard's changes count as packets */
-        state.dwPacketNumber += kb_packets;
+        state.dwPacketNumber += kb_packets + others_packets;
     }
     dev_autostart_poll(port, &state, &result);
     if (result == ERROR_SUCCESS)
@@ -3571,7 +3590,29 @@ void sub_0015431A(void)
         XBOX_VIBRATION vib;
         vib.wLeftMotorSpeed  = MEM16(payload + 0x42);
         vib.wRightMotorSpeed = MEM16(payload + 0x44);
-        xbox_InputSetState(port, &vib);
+        if (!(port == 0 && pads_skip_xinput0()))
+            xbox_InputSetState(port, &vib);
+        if (port == 0)
+            pads_rumble(vib.wLeftMotorSpeed, vib.wRightMotorSpeed);    /* step 70: every other pad (SDL's rumble) */
+        {   /* Step 70: each rumble's start and end (the game sets the motors every frame, ramps included) */
+            static int on[XBOX_MAX_CONTROLLERS];
+            static unsigned peak[XBOX_MAX_CONTROLLERS][2];
+            int now_on = vib.wLeftMotorSpeed || vib.wRightMotorSpeed;
+            if (port < XBOX_MAX_CONTROLLERS) {
+                if (now_on && !on[port])
+                    fprintf(stderr, "[XPP] port %u vibration on: left %u right %u\n", (unsigned)port,
+                            vib.wLeftMotorSpeed, vib.wRightMotorSpeed);
+                if (now_on) {
+                    peak[port][0] = vib.wLeftMotorSpeed > peak[port][0] ? vib.wLeftMotorSpeed : peak[port][0];
+                    peak[port][1] = vib.wRightMotorSpeed > peak[port][1] ? vib.wRightMotorSpeed : peak[port][1];
+                } else if (on[port]) {
+                    fprintf(stderr, "[XPP] port %u vibration off (peak left %u right %u)\n", (unsigned)port,
+                            peak[port][0], peak[port][1]);
+                    peak[port][0] = peak[port][1] = 0;
+                }
+                on[port] = now_on;
+            }
+        }
     }
     eax = 0;
     esp += 12;                                     /* ret 8 */
