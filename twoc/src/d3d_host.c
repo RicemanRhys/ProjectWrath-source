@@ -1918,17 +1918,26 @@ static void apply_ff(const d3dh_ff_t *ff, int lit)
  * SetVertexShader. The
  * constants arrive whole with each draw; only the registers that differ
  * from the last upload are passed to SetVertexShaderConstant, which
- * xbox_d3d8 then uploads at its draw. */
+ * xbox_d3d8 then uploads at its draw.
+ *
+ * Step 78 (notes 18.81): the table in two halves, the way a render thread
+ * will need it. The game side parses a program the first time it sees it
+ * (vs_slot: the registers it reads, which the bridge's translation and the
+ * recording need) and never changes an entry after; the replay side creates
+ * its host shader at the program's first draw there (vs_make, g_vsh). */
 #define VS_SLOTS 64
 static struct {
     uint32_t key;
-    DWORD handle;                       /* 0: couldn't be created */
     uint16_t inputs;
     uint32_t cmask[6];                  /* step 60: constant registers read directly, bit n = cn */
     int rel_base;                       /* lowest base read relative to a0.x, -1 none */
     int rel_bones;                      /* step 62: reads relative to a0.x from c124 (XDK c28): bones */
-} g_vs[VS_SLOTS];
-static unsigned g_vs_n;
+} g_vs[VS_SLOTS];                       /* game side; an entry is fixed once counted in g_vs_n */
+static volatile LONG g_vs_n;
+static struct {
+    DWORD handle;                       /* 0: couldn't be created */
+    int made;                           /* created, or tried */
+} g_vsh[VS_SLOTS];                      /* replay side, by g_vs's index */
 static float g_vs_consts[192 * 4];
 static int g_vs_consts_valid;
 
@@ -1974,16 +1983,28 @@ static void vs_const_reads(const NV2AVshProgram *pg, uint32_t mask[6], int *rel_
     }
 }
 
-/* Called with g_lock held. */
+/* A program's entry, -1 if it hasn't been parsed. */
+static int vs_find(uint32_t key)
+{
+    unsigned i, n = (unsigned)g_vs_n;
+
+    for (i = 0; i < n; i++)
+        if (g_vs[i].key == key)
+            return (int)i;
+    return -1;
+}
+
+/* Game side: the program's entry, parsed the first time. Called with
+ * g_lock held. */
 static int vs_slot(const d3dh_vprog_t *p)
 {
     static NV2AVshProgram parsed;       /* ~30 KB: not on the stack */
-    unsigned i;
+    int f = vs_find(p->key);
+    unsigned i = (unsigned)g_vs_n;
 
-    for (i = 0; i < g_vs_n; i++)
-        if (g_vs[i].key == p->key)
-            return (int)i;
-    if (g_vs_n == VS_SLOTS)
+    if (f >= 0)
+        return f;
+    if (i == VS_SLOTS)
         return -1;
     g_vs[i].key = p->key;
     d3d8_vsh_parse((const DWORD *)p->code, (int)p->n_insns, &parsed);
@@ -2003,14 +2024,25 @@ static int vs_slot(const d3dh_vprog_t *p)
         if (g_vs[i].rel_base >= 0)
             fprintf(stderr, "%d%s\n", g_vs[i].rel_base, g_vs[i].rel_bones && g_vs[i].rel_base != 124 ? " and c124" : "");
     }
-    if (FAILED(d3d8_vsh_create_shader((const DWORD *)p->code, (int)p->n_insns, &g_vs[i].handle))) {
-        g_vs[i].handle = 0;
-        g_st.vs_fails++;
-    } else {
-        g_st.vs_created++;
-    }
-    g_vs_n++;
+    MemoryBarrier();                    /* the entry whole before it is counted */
+    InterlockedIncrement(&g_vs_n);
     return (int)i;
+}
+
+/* Replay side: entry i's host shader, created from `p`'s microcode at its
+ * first draw. Returns its handle, 0 if it couldn't be. */
+static DWORD vs_make(int i, const d3dh_vprog_t *p)
+{
+    if (!g_vsh[i].made) {
+        g_vsh[i].made = 1;
+        if (FAILED(d3d8_vsh_create_shader((const DWORD *)p->code, (int)p->n_insns, &g_vsh[i].handle))) {
+            g_vsh[i].handle = 0;
+            g_st.vs_fails++;
+        } else {
+            g_st.vs_created++;
+        }
+    }
+    return g_vsh[i].handle;
 }
 
 uint16_t d3dh_vs_inputs(const d3dh_vprog_t *p)
@@ -2062,9 +2094,12 @@ static int vs_const_differs(const float *consts, int k)
  * g_lock held. */
 static int vs_bind(const d3dh_vprog_t *p)
 {
-    int i = vs_slot(p), lo = -1, hi = -1, k, w;
+    int i = vs_find(p->key), lo = -1, hi = -1, k, w;
+    DWORD h;
 
-    if (i < 0 || !g_vs[i].handle)
+    if (i < 0)                          /* step 78: one the game side never parsed (a probe's): at once */
+        i = vs_slot(p);
+    if (i < 0 || !(h = vs_make(i, p)))
         return -1;
     if (!g_vs_consts_valid) {
         lo = 0;
@@ -2094,7 +2129,7 @@ static int vs_bind(const d3dh_vprog_t *p)
         g_vs_consts_valid = 1;
         g_st.vs_const_uploads++;
     }
-    g_dev->lpVtbl->SetVertexShader(g_dev, g_vs[i].handle);
+    g_dev->lpVtbl->SetVertexShader(g_dev, h);
     return 0;
 }
 
@@ -3839,7 +3874,7 @@ static void ic_rec_dump(unsigned swap_no)
         memset(r, 0, sizeof(r));
         r[0] = (uint32_t)c->kind;
         if (c->kind == RC_DRAW) {
-            int slot = d->vprog ? vs_slot(d->vprog) : -1;
+            int slot = d->vprog ? vs_find(d->vprog->key) : -1;
             r[1] = c->u.draw.cls;
             r[2] = c->u.draw.cam;
             r[3] = c->u.draw.n_cpos;
