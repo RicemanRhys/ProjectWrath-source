@@ -14,7 +14,7 @@
  *   pacing      = auto | vsync | limiter | limiter+vsync    RECOMP_PACING
  *   anisotropy  = 1 | 2 | 4 | 8 | 16          RECOMP_ANISOTROPY (1: the game's own filtering)
  *   antialiasing = off | fxaa | smaa | msaa2x | msaa4x | msaa8x    RECOMP_ANTIALIASING (unset: off)
- *   framerate   = 60 | display                RECOMP_FRAMERATE (unset: 60)
+ *   framerate   = 60 | display | N            RECOMP_FRAMERATE (unset: 60; step 77: N a rate in Hz)
  *   adaptive_framerate = 0 | 1                RECOMP_FRAMERATE_ADAPTIVE (unset: on; step 75. The old
  *                                             name RECOMP_D3D_BRIDGE_INTERP_ADAPT still reads)
  *   hud         = centre | edges              RECOMP_HUD (unset: centre)
@@ -101,7 +101,7 @@ typedef struct {
     int pacing;                         /* TWOC_PACING_* */
     int anisotropy;                     /* 1 (off), 2, 4, 8, 16 */
     int antialiasing;                   /* TWOC_AA_* */
-    int framerate;                      /* step 61: 0 the game's 60, 1 the display's (interpolated) */
+    int framerate;                      /* step 61: 0 the game's 60, 1 the display's (interpolated); step 77: N Hz */
     int adaptive;                       /* step 75: 1 fewer sub-frames while late (also when unset), 0 always all */
     int hud, hud_margin;                /* step 65: 0 the HUD in the middle 4:3, 1 at the edges; 0-10 percent in */
     double draw_distance;               /* step 69: the far plane and fog times this; 1 the game's (also unset) */
@@ -124,6 +124,8 @@ int twoc_settings_save(const twoc_settings_t *s);
 const char *twoc_settings_path(void);
 const char *twoc_pacing_name(int pacing);
 int twoc_pacing_parse(const char *v);   /* TWOC_PACING_AUTO for anything unknown */
+int twoc_framerate_parse(const char *v);    /* step 77: 0 (60, unset, unknown), 1 (display), N Hz */
+void twoc_framerate_text(int fr, char *buf, size_t cap);    /* the file's word: 60, display or N */
 const char *twoc_aa_name(int aa);       /* the file's word: off, fxaa, smaa, msaa2x, msaa4x, msaa8x */
 int twoc_aa_parse(const char *v);       /* TWOC_AA_OFF for anything unknown */
 unsigned twoc_aa_samples(int aa);       /* MSAA's samples a pixel; 1 for the others */

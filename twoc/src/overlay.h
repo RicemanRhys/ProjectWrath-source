@@ -37,6 +37,7 @@ typedef struct {
     int interp_on;                      /* step 61: interpolating now */
     const char *interp_why;             /* step 63: why interp_fps is 0 */
     double interp_now;                  /* step 74/77: frames a second now (fewer than interp_fps while late) */
+    const char *interp_note;            /* step 77: the plan: the rate it shows and whether evenly, and why */
 } ovl_info_t;
 
 enum { OVL_CHANGED = 1, OVL_CLOSE = 2 };

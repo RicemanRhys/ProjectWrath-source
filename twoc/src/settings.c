@@ -23,7 +23,9 @@ static const key_t_ g_fixed[] = {
     { "pacing", "RECOMP_PACING", "auto, vsync, limiter or limiter+vsync" },
     { "anisotropy", "RECOMP_ANISOTROPY", "1 (the game's filtering), 2, 4, 8 or 16" },
     { "antialiasing", "RECOMP_ANTIALIASING", "off, fxaa, smaa, msaa2x, msaa4x or msaa8x" },
-    { "framerate", "RECOMP_FRAMERATE", "60, or display: interpolated frames at a 120 or 240 Hz display's rate" },
+    { "framerate", "RECOMP_FRAMERATE",
+      "60 (the game's), display (interpolated frames at the display's rate) or a rate in Hz (90, 120, 144, 165,"
+      " 180, 240: interpolated, shown evenly where the display can)" },
     { "adaptive_framerate", "RECOMP_FRAMERATE_ADAPTIVE",
       "1: fewer interpolated frames while game frames run late, 0: always the display's count" },
     { "hud", "RECOMP_HUD", "centre (the game's 4:3 places) or edges: the HUD counters at the screen's edges, wider than 4:3" },
@@ -102,6 +104,28 @@ static const char *g_pacing_names[TWOC_PACING_COUNT] = { "auto", "vsync", "limit
 const char *twoc_pacing_name(int pacing)
 {
     return pacing >= 0 && pacing < TWOC_PACING_COUNT ? g_pacing_names[pacing] : "auto";
+}
+
+/* Step 77: framerate = 60 | display | N. 0 the game's 60 (also unset or
+ * anything unknown), 1 the display's rate, N > 60 a rate in Hz. */
+int twoc_framerate_parse(const char *v)
+{
+    int n;
+
+    if (!v || !*v)
+        return 0;
+    if (_stricmp(v, "display") == 0)
+        return 1;
+    n = atoi(v);
+    return n > 60 ? (n > 1000 ? 1000 : n) : 0;
+}
+
+void twoc_framerate_text(int fr, char *buf, size_t cap)
+{
+    if (fr >= 2)
+        snprintf(buf, cap, "%d", fr);
+    else
+        snprintf(buf, cap, "%s", fr ? "display" : "60");
 }
 
 int twoc_pacing_parse(const char *v)
@@ -266,8 +290,7 @@ void twoc_settings_current(twoc_settings_t *s)
     a = v ? atoi(v) : 1;
     s->anisotropy = a >= 16 ? 16 : a >= 8 ? 8 : a >= 4 ? 4 : a >= 2 ? 2 : 1;
     s->antialiasing = twoc_aa_parse(getenv("RECOMP_ANTIALIASING"));
-    v = getenv("RECOMP_FRAMERATE");
-    s->framerate = v && _stricmp(v, "display") == 0;
+    s->framerate = twoc_framerate_parse(getenv("RECOMP_FRAMERATE"));
     v = getenv("RECOMP_FRAMERATE_ADAPTIVE");
     s->adaptive = !(v && strcmp(v, "0") == 0);
     v = getenv("RECOMP_HUD");
@@ -332,7 +355,7 @@ static void key_text(const twoc_settings_t *s, size_t i, char *buf, size_t cap)
     else if (strcmp(k, "antialiasing") == 0)
         snprintf(buf, cap, "%s", twoc_aa_name(s->antialiasing));
     else if (strcmp(k, "framerate") == 0)
-        snprintf(buf, cap, "%s", s->framerate ? "display" : "60");
+        twoc_framerate_text(s->framerate, buf, cap);
     else if (strcmp(k, "adaptive_framerate") == 0)
         snprintf(buf, cap, "%d", s->adaptive ? 1 : 0);
     else if (strcmp(k, "hud") == 0)

@@ -1059,7 +1059,7 @@ static void mirror_create_device(const d3db_args_t *a)
     g_guest_h = MEM32(pp + 4 * PP_HEIGHT);
     g_pp_interval = MEM32(pp + 4 * PP_INTERVAL);
     g_pacing_mode = twoc_pacing_parse(getenv("RECOMP_PACING"));
-    g_framerate_on = getenv("RECOMP_FRAMERATE") && _stricmp(getenv("RECOMP_FRAMERATE"), "display") == 0;
+    g_framerate_on = twoc_framerate_parse(getenv("RECOMP_FRAMERATE"));     /* step 77: 0, 1 (display) or N Hz */
     pacing_for(g_pacing_mode, 0, g_framerate_on, &interval, &hz);  /* auto: as before; step 77: the plan */
     host_size(g_guest_w ? g_guest_w : 640, g_guest_h ? g_guest_h : 480, &host_w, &host_h);
     d3dh_create(g_guest_w, g_guest_h, host_w, host_h, d3db_wide, g_render_w != 0, interval, hz,
@@ -4501,7 +4501,8 @@ static void mirror_swap(void)
                             " 4 %u, 5 %u, 6 %u, 7 %u, more %u\n", d[0], d[1], d[2], d[3], d[4], d[5], d[6], d[7], d[8]);
             }
             {   /* 18.48: refreshes between consecutive frames on screen (d3d_host.c) */
-                static unsigned last_disp[9], last_unmeasured, last_off;
+                static unsigned last_disp[9], last_unmeasured, last_off, last_msn, last_mse;
+                static double last_msd;
                 unsigned k, d[9], total = 0;
                 for (k = 0; k < 9; k++) {
                     d[k] = st.displayed[k] - last_disp[k];
@@ -4515,6 +4516,13 @@ static void mirror_swap(void)
                             st.display_off - last_off);
                 last_unmeasured = st.display_unmeasured;
                 last_off = st.display_off;
+                if (st.disp_ms_n != last_msn)   /* step 77: under a frame-rate plan's limiter, in ms */
+                    log_block_printf(&lb, "[D3DB] host frames shown under the limiter: %u timed, %u within 1 ms of the"
+                            " gap presented, off by %.2f ms on average\n", st.disp_ms_n - last_msn,
+                            st.disp_ms_even - last_mse, (st.disp_ms_dev - last_msd) / (st.disp_ms_n - last_msn));
+                last_msn = st.disp_ms_n;
+                last_mse = st.disp_ms_even;
+                last_msd = st.disp_ms_dev;
             }
             log_block_printf(&lb, "[D3DB] host draws: mirrored %ld (to render targets %ld, with pixel shaders %ld,"
                     " immediate %ld, of them pre-transformed %ld; DrawVertices calls %ld),"

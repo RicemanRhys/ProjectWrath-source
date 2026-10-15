@@ -595,6 +595,12 @@ static int tab_display(twoc_settings_t *s, const ovl_info_t *in)
          "keeps 59.94 frames a second on any display; with vsync each frame also waits for a refresh.");
     if (in->executor_paces)
         snprintf(line, sizeof(line), "The NV2A executor paces this run (-Bridge).");
+    else if (in->interp_note && in->interp_note[0] && in->frame_hz > 0)     /* step 77: the frame-rate plan */
+        snprintf(line, sizeof(line), "Now: limiter %.2f fps for the frame rate below (variable refresh); the game "
+                 "59.94 fps.", in->frame_hz);
+    else if (in->interp_note && in->interp_note[0])
+        snprintf(line, sizeof(line), "Now: display %.2f Hz vsync for the frame rate below; the game 59.94 fps.",
+                 in->display_hz);
     else if (in->interval && in->frame_hz <= 0)
         snprintf(line, sizeof(line), "Now: display %.2f Hz / %u = %.2f fps.", in->display_hz, in->interval,
                  in->interval ? in->display_hz / in->interval : 0.0);
@@ -603,16 +609,36 @@ static int tab_display(twoc_settings_t *s, const ovl_info_t *in)
     help(line);
 
     {   /* step 61 */
-        static const char *const fr_names[2] = { "Game (60)", "Display (interpolated)" };
+        /* step 77: the game's, the display's, or a rate (the file's own other N listed too) */
+        static const int fr_vals[8] = { 0, 1, 90, 120, 144, 165, 180, 240 };
+        static const char *const fr_names[8] = { "Game (60)", "Match display", "90 fps", "120 fps", "144 fps",
+                                                 "165 fps", "180 fps", "240 fps" };
+        const char *names[9];
+        char other[24];
+        int n = 8, cur = -1;
+        for (i = 0; i < 8; i++) {
+            names[i] = fr_names[i];
+            if (fr_vals[i] == s->framerate)
+                cur = i;
+        }
+        if (cur < 0) {
+            snprintf(other, sizeof(other), "%d fps", s->framerate);
+            names[n] = other;
+            cur = n++;
+        }
         ImGui::SetNextItemWidth(ImGui::GetFontSize() * 12);
-        if (ImGui::Combo("Frame rate", &s->framerate, fr_names, 2))
+        if (ImGui::Combo("Frame rate", &cur, names, n) && cur < 8 && fr_vals[cur] != s->framerate) {
+            s->framerate = fr_vals[cur];
             r |= OVL_CHANGED;
-        more("Display: the game still runs 59.94 updates a second, and each of its frames is drawn again at every "
-             "refresh in between with the camera moved partway from the frame before, so turning and following "
-             "Crash look smooth at 120, 144 or 240 Hz. A camera cut shows at once. Each frame shown is drawn at "
-             "its own moment between two game frames, so on a display that isn't a multiple of 59.94 Hz (144 Hz: "
-             "2 or 3 frames each game frame) motion is still even. Needs vsync pacing (auto or vsync). Applied "
-             "at once.");
+        }
+        more("Above Game (60) the game still runs 59.94 updates a second, and each of its frames is drawn again "
+             "in between with the camera and objects moved partway from the frame before, so turning and "
+             "following Crash look smooth. A camera cut shows at once. Each frame shown is drawn at its own "
+             "moment between two game frames, so motion is even at any rate the display shows evenly: its "
+             "refresh rate (Match display), a whole fraction of it (120 on 240 Hz: each frame held 2 "
+             "refreshes), or any rate with variable refresh (G-SYNC, FreeSync). On another rate it falls back "
+             "to the highest even one below (90 on 240 Hz: 80); the line below says which. Needs vsync pacing "
+             "(auto or vsync). Applied at once.");
         if (!s->framerate)
             snprintf(line, sizeof(line), "Now: the game's 59.94 fps.");
         else if (in->interp_on && in->interp_now > 0 && in->interp_now < in->interp_fps - 0.01)
@@ -627,6 +653,8 @@ static int tab_display(twoc_settings_t *s, const ovl_info_t *in)
             snprintf(line, sizeof(line), "Now: 59.94 fps, one frame each game frame: %s.",
                      in->interp_why ? in->interp_why : "this pacing");
         help(line);
+        if (s->framerate && in->interp_note && in->interp_note[0])
+            help(in->interp_note);      /* step 77: even or not on this display, and why */
         if (s->framerate) {             /* step 75 */
             static const char *const ad_names[2] = { "On", "Off" };
             int cur = s->adaptive ? 0 : 1;

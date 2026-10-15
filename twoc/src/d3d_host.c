@@ -241,6 +241,7 @@ static struct {
     int limiter;                        /* slots are the limiter's ticks (variable refresh), not refreshes */
     double span;                        /* slots a game frame */
     double slot_hz;                     /* slots a second */
+    double disp_hz;                     /* the display's mode rate */
     double game_hz;                     /* the game's rate it was made for (59.94) */
     unsigned interval;                  /* the pacing it set: DXGI interval (vsync) */
     unsigned gen;                       /* bumped at every plan */
@@ -248,7 +249,15 @@ static struct {
     double step[FP_MAX_STEPS];          /* slots between presents; 0: one present a game frame, as recorded */
     double cost_i[FP_MAX_STEPS], cost_p[FP_MAX_STEPS], cost_f[FP_MAX_STEPS];   /* a game frame's interpolated
                                          * passes, plain passes, and pairings at each step (mean) */
+    int fr;                             /* the setting it was made for (1: the display's rate, N Hz) */
+    double want;                        /* that rate (the display's for 1) */
+    int even;                           /* shown evenly: a refresh or whole fraction, or variable refresh */
+    int probing;                        /* the limiter at a rate variable refresh would show: measuring it */
+    int needs_vrr;                      /* the target isn't a whole fraction: the window mode matters */
+    int fs;                             /* fullscreen when made */
+    char note[256];                     /* what it does and why, for the overlay */
 } g_fp;
+static volatile LONG g_fp_replan;       /* made again at the end of the next present (a measurement, a new mode) */
 static struct {
     double pos;                         /* the last present's slot */
     double end;                         /* the last game frame's end (slot) */
@@ -530,6 +539,9 @@ static LRESULT CALLBACK wnd_proc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp)
         fflush(stderr);
         TerminateProcess(GetCurrentProcess(), 0);
         return 0;
+    case WM_DISPLAYCHANGE:              /* step 77: another mode (a refresh rate): the plan made again */
+        InterlockedExchange(&g_fp_replan, 1);
+        break;
     case WM_SIZE:                       /* the swap chain follows at the next present */
         if (hwnd == g_hwnd && wp != SIZE_MINIMIZED) {
             InterlockedExchange(&g_client_w, (LONG)LOWORD(lp));
@@ -684,9 +696,9 @@ int d3dh_create(unsigned width, unsigned height, unsigned host_w, unsigned host_
             fprintf(stderr, "[D3DB] host record and replay: each frame's host draws recorded and drawn at its present"
                     "%s (%d pass%s)\n", g_replay > 1 ? ", again and again as a cost check" : "", g_replay,
                     g_replay > 1 ? "es" : "");
-        e = getenv("RECOMP_FRAMERATE");                 /* step 61 */
-        if (e && _stricmp(e, "display") == 0)
-            d3dh_set_framerate(1);
+        e = getenv("RECOMP_FRAMERATE");                 /* step 61; step 77: display or N Hz */
+        if (twoc_framerate_parse(e))
+            d3dh_set_framerate(twoc_framerate_parse(e));
         e = getenv("RECOMP_HUD");                       /* step 65: centre (unset) or edges */
         if (e && _stricmp(e, "edges") == 0) {
             const char *mg = getenv("RECOMP_HUD_MARGIN");
@@ -2925,6 +2937,251 @@ static void fp_frame(fp_frame_t *f, unsigned k)
     }
 }
 
+/* ── Step 77: variable refresh (notes 18.80) ────────────────────
+ * A target that isn't the display's refresh or a whole fraction of it
+ * (90 fps at 240 Hz) is only shown evenly by a display running variable
+ * refresh (G-SYNC, FreeSync, VESA Adaptive-Sync), which shows each frame
+ * when it comes. Windows has no user-mode call that says whether that is on
+ * (the driver's VariableRefresh capability is kernel-side, and DXGI's
+ * tearing support says what the system allows, not the display), so:
+ *  - the EDID (the monitor's registry copy, found by the display path's
+ *    device name): its range limits' vertical range with the "continuous
+ *    frequency" bit, or AMD's FreeSync data block, say the display claims
+ *    a range (the user's MSI MAG321UX OLED: 48-240 Hz, both);
+ *  - NVIDIA's driver answers outright (nvapi64.dll, NvAPI_Disp_GetVRRInfo,
+ *    ids from NVIDIA's MIT nvapi headers): possible and on, or not;
+ *  - and the frames decide: a plan that needs variable refresh presents
+ *    from the limiter at its rate, and DXGI's frame statistics give the
+ *    time each frame reached the screen. On a fixed refresh they fall on
+ *    its grid (90 fps at 240 Hz: 8.3 and 12.5 ms apart), with variable
+ *    refresh where they were presented (11.1). 120 measured frames decide
+ *    for the window mode (windowed, fullscreen) for the rest of the run;
+ *    not even, the plan falls back to an even rate.
+ * RECOMP_VRR=0 never assumes it, =1 always (no measuring), =measure
+ * measures whatever the driver says (test aids). */
+#define VRR_SAMPLES 120
+static struct {
+    HMONITOR mon;                       /* what these were read for (NULL: not yet) */
+    int edid_min, edid_max, continuous; /* the EDID's vertical range (Hz, 0: none), its continuous-frequency bit */
+    int fs_min, fs_max;                 /* AMD's FreeSync block (0: none) */
+    int nv;                             /* NVIDIA: 1 possible and on, 0 not, -1 no answer (not NVIDIA) */
+    int measured[2];                    /* windowed [0], fullscreen [1]: -1 not yet, 0 fixed refresh, 1 variable */
+    unsigned follow, grid, seen;        /* the measuring under way: as presented, on the grid, frames seen */
+    char result[160];                   /* the last measurement, for the log and the overlay */
+} g_vrr = { NULL, 0, 0, 0, 0, 0, -1, { -1, -1 } };
+
+/* The EDID and NVIDIA's answer for monitor `mon`. */
+static void vrr_read(HMONITOR mon)
+{
+    MONITORINFOEXA mi;
+    UINT32 np = 0, nm = 0, i;
+    DISPLAYCONFIG_PATH_INFO *paths = NULL;
+    DISPLAYCONFIG_MODE_INFO *modes = NULL;
+    unsigned char edid[1024];
+    DWORD esz = 0;
+
+    g_vrr.mon = mon;
+    g_vrr.edid_min = g_vrr.edid_max = g_vrr.continuous = g_vrr.fs_min = g_vrr.fs_max = 0;
+    g_vrr.nv = -1;
+    memset(&mi, 0, sizeof(mi));
+    mi.cbSize = sizeof(mi);
+    if (!GetMonitorInfoA(mon, (MONITORINFO *)&mi))
+        return;
+    if (GetDisplayConfigBufferSizes(QDC_ONLY_ACTIVE_PATHS, &np, &nm) == ERROR_SUCCESS) {
+        paths = (DISPLAYCONFIG_PATH_INFO *)calloc(np, sizeof(*paths));
+        modes = (DISPLAYCONFIG_MODE_INFO *)calloc(nm, sizeof(*modes));
+    }
+    if (paths && modes && QueryDisplayConfig(QDC_ONLY_ACTIVE_PATHS, &np, paths, &nm, modes, NULL) == ERROR_SUCCESS)
+        for (i = 0; i < np && !esz; i++) {
+            DISPLAYCONFIG_SOURCE_DEVICE_NAME sn;
+            DISPLAYCONFIG_TARGET_DEVICE_NAME tn;
+            char name[64], path[300], key[400], *part[4] = { NULL }, *p;
+            int n = 0;
+            HKEY k;
+            memset(&sn, 0, sizeof(sn));
+            sn.header.type = DISPLAYCONFIG_DEVICE_INFO_GET_SOURCE_NAME;
+            sn.header.size = sizeof(sn);
+            sn.header.adapterId = paths[i].sourceInfo.adapterId;
+            sn.header.id = paths[i].sourceInfo.id;
+            if (DisplayConfigGetDeviceInfo(&sn.header) != ERROR_SUCCESS)
+                continue;
+            WideCharToMultiByte(CP_ACP, 0, sn.viewGdiDeviceName, -1, name, sizeof(name), NULL, NULL);
+            if (_stricmp(name, mi.szDevice) != 0)
+                continue;
+            memset(&tn, 0, sizeof(tn));
+            tn.header.type = DISPLAYCONFIG_DEVICE_INFO_GET_TARGET_NAME;
+            tn.header.size = sizeof(tn);
+            tn.header.adapterId = paths[i].targetInfo.adapterId;
+            tn.header.id = paths[i].targetInfo.id;
+            if (DisplayConfigGetDeviceInfo(&tn.header) != ERROR_SUCCESS)
+                break;
+            /* \\?\DISPLAY#MSI3DD3#5&2db65555&0&UID4353#{guid} -> Enum\DISPLAY\MSI3DD3\5&2db65555&0&UID4353 */
+            WideCharToMultiByte(CP_ACP, 0, tn.monitorDevicePath, -1, path, sizeof(path), NULL, NULL);
+            p = strncmp(path, "\\\\?\\", 4) == 0 ? path + 4 : path;
+            for (part[n++] = p; *p && n < 4; p++)
+                if (*p == '#') {
+                    *p = 0;
+                    part[n++] = p + 1;
+                }
+            if (n < 3)
+                break;
+            snprintf(key, sizeof(key), "SYSTEM\\CurrentControlSet\\Enum\\%s\\%s\\%s\\Device Parameters", part[0],
+                     part[1], part[2]);
+            if (RegOpenKeyExA(HKEY_LOCAL_MACHINE, key, 0, KEY_READ, &k) == ERROR_SUCCESS) {
+                esz = sizeof(edid);
+                if (RegQueryValueExA(k, "EDID", NULL, NULL, edid, &esz) != ERROR_SUCCESS)
+                    esz = 0;
+                RegCloseKey(k);
+            }
+            break;
+        }
+    free(paths);
+    free(modes);
+    if (esz >= 128) {
+        unsigned d, x;
+        g_vrr.continuous = edid[24] & 1;
+        for (d = 54; d < 126; d += 18)
+            if (!edid[d] && !edid[d + 1] && edid[d + 3] == 0xFD) {   /* display range limits */
+                g_vrr.edid_min = edid[d + 5] + ((edid[d + 4] & 1) ? 255 : 0);
+                g_vrr.edid_max = edid[d + 6] + ((edid[d + 4] & 2) ? 255 : 0);
+            }
+        for (x = 1; (x + 1) * 128 <= esz; x++) {    /* CTA-861 extensions: AMD's vendor block (OUI 00001A) */
+            const unsigned char *b = edid + x * 128;
+            unsigned p;
+            if (b[0] != 2)
+                continue;
+            for (p = 4; p < b[2] && p < 127;) {
+                unsigned tag = b[p] >> 5, len = b[p] & 31;
+                if (tag == 3 && len >= 8 && p + 8 < 128 && b[p + 1] == 0x1A && !b[p + 2] && !b[p + 3]) {
+                    g_vrr.fs_min = b[p + 6];
+                    g_vrr.fs_max = b[p + 7];
+                }
+                p += 1 + len;
+            }
+        }
+    }
+    {   /* NVIDIA */
+        static HMODULE nv;
+        static int tried;
+        typedef void *(__cdecl *qi_t)(unsigned);
+        typedef int(__cdecl *init_t)(void);
+        typedef int(__cdecl *byname_t)(const char *, unsigned *);
+        typedef int(__cdecl *vrr_t)(unsigned, void *);
+        static vrr_t vrr;
+        static byname_t byname;
+        unsigned id = 0, info[6];
+        if (!tried) {
+            qi_t qi;
+            init_t init;
+            tried = 1;
+            nv = LoadLibraryA("nvapi64.dll");
+            qi = nv ? (qi_t)GetProcAddress(nv, "nvapi_QueryInterface") : NULL;
+            init = qi ? (init_t)qi(0x0150e828) : NULL;                  /* NvAPI_Initialize */
+            byname = qi ? (byname_t)qi(0xae457190) : NULL;              /* NvAPI_DISP_GetDisplayIdByDisplayName */
+            vrr = qi ? (vrr_t)qi(0xdf8fda57) : NULL;                    /* NvAPI_Disp_GetVRRInfo (R525+) */
+            if (!init || init() != 0)
+                vrr = NULL;
+        }
+        memset(info, 0, sizeof(info));
+        info[0] = (unsigned)sizeof(info) | (1u << 16);                  /* NV_GET_VRR_INFO_VER1 */
+        if (vrr && byname && byname(mi.szDevice, &id) == 0 && vrr(id, info) == 0)
+            g_vrr.nv = (info[1] & 2) && (info[1] & 5) ? 1 : 0;          /* possible, and enabled or requested */
+    }
+    fprintf(stderr, "[D3DB] display %s: EDID vertical range %d-%d Hz%s, FreeSync block %d-%d Hz; NVIDIA variable"
+            " refresh %s\n", mi.szDevice, g_vrr.edid_min, g_vrr.edid_max, g_vrr.continuous ? " (continuous)" : "",
+            g_vrr.fs_min, g_vrr.fs_max, g_vrr.nv < 0 ? "(no answer: not NVIDIA)" : g_vrr.nv ? "on" : "off");
+}
+
+/* Whether a plan may count on variable refresh on the window's monitor for
+ * `hz` frames a second: 1 yes, 2 perhaps (measure it), 0 no, with why in
+ * `why`. A measurement made in this window mode decides. */
+static int vrr_claim(double hz, char *why, size_t cap)
+{
+    const char *e = getenv("RECOMP_VRR");
+    HMONITOR mon;
+    int m, range;
+
+    if (e && strcmp(e, "0") == 0) {
+        snprintf(why, cap, "RECOMP_VRR=0");
+        return 0;
+    }
+    if (e && strcmp(e, "1") == 0) {
+        snprintf(why, cap, "RECOMP_VRR=1, not measured");
+        return 1;
+    }
+    if (g_hwnd)
+        mon = MonitorFromWindow(g_hwnd, MONITOR_DEFAULTTONEAREST);
+    else {
+        POINT o = { 0, 0 };
+        mon = MonitorFromPoint(o, MONITOR_DEFAULTTOPRIMARY);
+    }
+    if (mon != g_vrr.mon) {
+        vrr_read(mon);
+        g_vrr.measured[0] = g_vrr.measured[1] = -1;
+    }
+    m = g_vrr.measured[g_fs ? 1 : 0];
+    if (e && strcmp(e, "measure") == 0 && m < 0) {
+        snprintf(why, cap, "RECOMP_VRR=measure");
+        return 2;                       /* a check: measured whatever the driver and the display say */
+    }
+    if (g_vrr.nv == 0 && m < 0) {
+        snprintf(why, cap, "NVIDIA's driver has variable refresh off for this display");
+        return 0;
+    }
+    if (m == 0) {
+        snprintf(why, cap, "%s", g_vrr.result);
+        return 0;
+    }
+    if (m == 1) {
+        snprintf(why, cap, "%s", g_vrr.result);
+        return 1;
+    }
+    range = (g_vrr.fs_min > 0 && g_vrr.fs_min <= hz && g_vrr.fs_max >= hz) ||
+            (g_vrr.continuous && g_vrr.edid_min > 0 && g_vrr.edid_min <= hz && g_vrr.edid_max >= hz);
+    if (g_vrr.nv == 1 || range) {
+        snprintf(why, cap, "%s", g_vrr.nv == 1 ? "NVIDIA's driver has variable refresh on" :
+                 "the display reports a variable refresh range");
+        return 2;
+    }
+    snprintf(why, cap, "the display reports no variable refresh range");
+    return 0;
+}
+
+/* A frame shown `gap_ms` after the one before, presented `want_ms` after
+ * it, while a plan measures variable refresh (DXGI's frame statistics, in
+ * present_one). Called with g_lock held. */
+static void vrr_sample(double gap_ms, double want_ms, double refresh_ms)
+{
+    double grid;
+    int fs = g_fs ? 1 : 0;
+
+    if (!g_fp.on || !g_fp.limiter || !g_fp.probing || g_vrr.measured[fs] >= 0 || refresh_ms <= 0)
+        return;
+    g_vrr.seen++;
+    grid = refresh_ms * floor(want_ms / refresh_ms + 0.5);
+    if (fabs(want_ms - grid) > 0.3) {   /* a gap the grid can't make: the sample tells */
+        if (fabs(gap_ms - want_ms) < fabs(gap_ms - refresh_ms * floor(gap_ms / refresh_ms + 0.5)))
+            g_vrr.follow++;
+        else
+            g_vrr.grid++;
+    }
+    if (g_vrr.follow + g_vrr.grid >= VRR_SAMPLES || g_vrr.seen >= 8 * VRR_SAMPLES) {
+        unsigned n = g_vrr.follow + g_vrr.grid;
+        g_vrr.measured[fs] = n >= VRR_SAMPLES / 2 && g_vrr.follow * 10 >= n * 8;
+        if (n >= VRR_SAMPLES / 2)
+            snprintf(g_vrr.result, sizeof(g_vrr.result), "measured %s: %u of %u frames shown %s",
+                     fs ? "fullscreen" : "in a window", g_vrr.measured[fs] ? g_vrr.follow : g_vrr.grid, n,
+                     g_vrr.measured[fs] ? "as presented" : "on the refresh grid");
+        else
+            snprintf(g_vrr.result, sizeof(g_vrr.result), "not measurable %s (no frame statistics)",
+                     fs ? "fullscreen" : "in a window");
+        fprintf(stderr, "[D3DB] display: variable refresh %s: %s (%.2f fps presented, refresh %.3f ms)\n",
+                g_vrr.measured[fs] ? "on" : "not seen", g_vrr.result, g_fp.slot_hz, refresh_ms);
+        g_vrr.follow = g_vrr.grid = g_vrr.seen = 0;
+        InterlockedExchange(&g_fp_replan, 1);
+    }
+}
+
 /* Step 77: the frame-rate plan for setting `fr` (1: the display's own
  * rate), for a game presenting at `game_hz` under vsync pacing (the pacing
  * setting Auto or Vsync): the display's mode rate, game frames `span`
@@ -2934,9 +3191,10 @@ static void fp_frame(fp_frame_t *f, unsigned k)
  * returns 1; 0 (fr 0, no rate known): no plan, the caller's own pacing. */
 int d3dh_frame_plan(int fr, double game_hz, unsigned *interval, double *hz)
 {
-    double r = fr ? d3dh_monitor_hz() : 0, span;
-    unsigned k, n = 0;
-    int ready = g_ready;
+    double r = fr ? d3dh_monitor_hz() : 0, span, want;
+    unsigned k, n = 0, m, m0 = 0;
+    int ready = g_ready, claim;
+    char why[160];
 
     if (r <= 0 && fr)
         r = d3dh_display_hz();
@@ -2951,29 +3209,75 @@ int d3dh_frame_plan(int fr, double game_hz, unsigned *interval, double *hz)
             LeaveCriticalSection(&g_lock);
         return 0;
     }
-    span = r / game_hz;
+    want = fr == 1 ? r : fr;
+    n = g_fp.gen + 1;
+    memset(&g_fp, 0, sizeof(g_fp));
+    g_fp.gen = n;
+    n = 0;
+    g_fp.fr = fr;
+    g_fp.fs = g_fs ? 1 : 0;
+    g_fp.disp_hz = r;
+    if (want > r * 1.005) {             /* above the display: its own rate */
+        snprintf(g_fp.note, sizeof(g_fp.note), "%d fps is above this %.2f Hz display: %.2f fps, a frame each "
+                 "refresh (even).", fr, r, r);
+        want = r;
+        m0 = 1;
+    }
+    for (m = 1; !m0 && m <= 16; m++)    /* the refresh or a whole fraction of it: even */
+        if (fabs(r / m - want) <= 0.005 * want)
+            m0 = m;
+    if (m0 && !g_fp.note[0]) {
+        if (m0 == 1)
+            snprintf(g_fp.note, sizeof(g_fp.note), "Even: a frame each refresh of this %.2f Hz display.", r);
+        else
+            snprintf(g_fp.note, sizeof(g_fp.note), "Even: %.2f fps, each frame held %u refreshes of this %.2f Hz "
+                     "display.", r / m0, m0, r);
+    }
+    if (!m0) {                          /* only variable refresh shows it evenly */
+        g_fp.needs_vrr = 1;
+        claim = vrr_claim(want, why, sizeof(why));
+        if (claim) {
+            g_fp.limiter = 1;
+            g_fp.probing = claim == 2;
+            if (claim == 1)
+                snprintf(g_fp.note, sizeof(g_fp.note), "Even: %d fps by variable refresh (%s).", fr, why);
+            else
+                snprintf(g_fp.note, sizeof(g_fp.note), "Checking whether this %.2f Hz display shows %d fps evenly "
+                         "(variable refresh: %s)...", r, fr, why);
+        } else {                        /* the highest even rate not above the target, else the lowest above the game's */
+            for (m = 1; !m0 && m <= 16; m++)
+                if (r / m <= want * 1.005 && r / m >= game_hz * 0.995)
+                    m0 = m;
+            for (m = 16; !m0 && m >= 1; m--)
+                if (r / m >= game_hz * 0.995)
+                    m0 = m;
+            m0 = m0 ? m0 : 1;
+            snprintf(g_fp.note, sizeof(g_fp.note), "%d fps isn't even on this %.2f Hz display (no variable refresh: "
+                     "%s): %.2f fps instead, each frame held %u refresh%s.", fr, r, why, r / m0, m0,
+                     m0 > 1 ? "es" : "");
+        }
+    }
+    g_fp.want = g_fp.limiter ? want : r / m0;
+    g_fp.even = !g_fp.limiter || !g_fp.probing;
+    g_fp.slot_hz = g_fp.limiter ? want : r;
+    span = g_fp.slot_hz / game_hz;
     k = (unsigned)(span + 0.5);
     if (k >= 1 && fabs(span - k) <= 0.005 * span)
         span = k;                       /* a whole multiple, as the pacing always took it */
     else
         k = 0;
-    n = g_fp.gen + 1;
-    memset(&g_fp, 0, sizeof(g_fp));
-    g_fp.gen = n;
-    n = 0;
     g_fp.on = 1;
-    g_fp.limiter = 0;
     g_fp.span = span;
-    g_fp.slot_hz = r;
     g_fp.game_hz = game_hz;
-    g_fp.interval = k >= 1 && k <= 4 ? k : 1;
-    if (k) {                            /* 4, 2, 1 at 4; 3, 1 at 3: the old counts */
+    g_fp.interval = g_fp.limiter ? 1 : k >= 1 && k <= 4 ? k : 1;
+    m0 = g_fp.limiter ? 1 : m0;
+    if (m0 < span - 1e-6)
+        g_fp.step[n++] = m0;            /* the target's own */
+    if (k && !g_fp.limiter) {           /* below it, the old counts: 4, 2, 1 at 4; 3, 1 at 3 */
         unsigned j;
         for (j = k; j >= 2; j--)
-            if (k % j == 0 && n < FP_MAX_STEPS - 1)
+            if (k % j == 0 && k / j > m0 && n < FP_MAX_STEPS - 1)
                 g_fp.step[n++] = k / j;
-    } else if (span > 1) {
-        g_fp.step[n++] = 1;             /* every refresh */
     }
     g_fp.step[n++] = 0;                 /* one a game frame */
     g_fp.nsteps = n;
@@ -2981,12 +3285,13 @@ int d3dh_frame_plan(int fr, double game_hz, unsigned *interval, double *hz)
     for (n = 0; n < 8; n++)
         g_st.interp_step_fps[n] = n < g_fp.nsteps ? fp_step_fps(n) : 0;
     *interval = g_fp.interval;
-    *hz = 0;
+    *hz = g_fp.limiter ? g_fp.slot_hz : 0;
     if (ready)
         LeaveCriticalSection(&g_lock);
-    fprintf(stderr, "[D3DB] host frame rate plan: the display's %.3f Hz, %.4f refreshes a game frame (%.3f fps):"
-            " %s, vsync interval %u\n", r, span, game_hz, k ? "a whole multiple, each game frame's presents at"
-            " t = j/k" : "each present drawn at its own refresh's time between two game frames", g_fp.interval);
+    fprintf(stderr, "[D3DB] host frame rate plan: %s at %.3f fps on the display's %.3f Hz, %.4f %s a game frame"
+            " (%.3f fps), %s %u: %s\n", fr == 1 ? "the display's rate" : "the setting", fp_step_fps(0), r, span,
+            g_fp.limiter ? "limiter ticks" : "refreshes", game_hz, g_fp.limiter ? "the limiter, vsync interval" :
+            "vsync interval", g_fp.interval, g_fp.note);
     return 1;
 }
 
@@ -6068,6 +6373,7 @@ static int ovl_draw(ID3D11Texture2D *dst, int running)
         in.interp_per = fp_step_per(0);
         in.interp_now = fp_step_fps(ia_k());        /* step 74 */
     }
+    in.interp_note = g_fp.on ? g_fp.note : NULL;    /* step 77 */
     in.interp_on = g_interp && in.interp_fps > 0;
     if (in.interp_fps <= 0) {           /* step 63 */
         static char why[256];
@@ -6447,6 +6753,8 @@ static int present_one(double t_s, unsigned swap_no, unsigned interval, unsigned
         static double phase[64];        /* ms after DWM's vblank, by present count mod 64 */
         static unsigned work[64][5];    /* draws, texture uploads, target draws, copies, us since the last */
         static unsigned char ivl[64];   /* step 74: each present's interval, by present count mod 64 */
+        static float gap[64];           /* step 77: under the limiter, ms presented after the one before */
+        static LONGLONG last_sync;
         DXGI_FRAME_STATISTICS fs;
         DWM_TIMING_INFO ti;
         LARGE_INTEGER q, f;
@@ -6456,6 +6764,7 @@ static int present_one(double t_s, unsigned swap_no, unsigned interval, unsigned
             log_on = e && *e && *e != '0';
         }
         ivl[g_st.presents & 63] = (unsigned char)interval;
+        gap[g_st.presents & 63] = g_fp.on && g_fp.limiter ? (float)(slots * 1000.0 / g_fp.slot_hz) : 0.0f;
         memset(&ti, 0, sizeof(ti));
         ti.cbSize = sizeof(ti);
         QueryPerformanceCounter(&q);
@@ -6486,7 +6795,16 @@ static int present_one(double t_s, unsigned swap_no, unsigned interval, unsigned
                 if (last_pc && fs.PresentCount == last_pc + 1) {
                     UINT d = fs.PresentRefreshCount - last_prc;
                     g_st.displayed[d > 8 ? 8 : d]++;
-                    if (d != ivl[fs.PresentCount & 63])
+                    if (gap[fs.PresentCount & 63] > 0 && last_sync) {
+                        /* step 77: the limiter's gaps aren't refreshes: when shown against when presented, in
+                         * ms (variable refresh shows each as presented; a fixed refresh, on its grid) */
+                        double ms = (double)(fs.SyncQPCTime.QuadPart - last_sync) * 1000.0 / f.QuadPart;
+                        double want = gap[fs.PresentCount & 63];
+                        g_st.disp_ms_n++;
+                        g_st.disp_ms_dev += fabs(ms - want);
+                        g_st.disp_ms_even += fabs(ms - want) < 1.0;
+                        vrr_sample(ms, want, 1000.0 / g_fp.disp_hz);
+                    } else if (d != ivl[fs.PresentCount & 63])
                         g_st.display_off++;     /* step 74: not the gap it was presented with */
                     if (log_on && d != ivl[fs.PresentCount & 63]) {
                         unsigned *a = work[(fs.PresentCount - 1) & 63], *b = work[fs.PresentCount & 63];
@@ -6501,6 +6819,7 @@ static int present_one(double t_s, unsigned swap_no, unsigned interval, unsigned
                 }
                 last_pc = fs.PresentCount;
                 last_prc = fs.PresentRefreshCount;
+                last_sync = fs.SyncQPCTime.QuadPart;
             }
         } else {
             g_st.display_unmeasured++;
@@ -6624,7 +6943,10 @@ void d3dh_present(double t_s, unsigned swap_no)
                 }
                 LeaveCriticalSection(&g_lock);
             }
-            ovl_r |= present_slots(t_s, swap_no, fr.slots[sub - 1], sub, fr.n, fr.n == 1 || g_imid);
+            /* step 77: a present held 3 refreshes or more (80 fps at 240 Hz) is held to mid-refresh too:
+             * sent the moment the queue had room, 13% were shown 2 or 4 refreshes after the one before */
+            ovl_r |= present_slots(t_s, swap_no, fr.slots[sub - 1], sub, fr.n,
+                                   fr.n == 1 || g_imid || (!g_fp.limiter && fr.slots[sub - 1] >= 3));
             g_st.interp_subs++;
         }
     } else {
@@ -6652,6 +6974,12 @@ void d3dh_present(double t_s, unsigned swap_no)
         if (!g_interp)
             ic_queue(0);
         LeaveCriticalSection(&g_lock);
+    }
+    if (g_fp.on && (InterlockedExchange(&g_fp_replan, 0) || (g_fp.needs_vrr && g_fp.fs != (g_fs ? 1 : 0)))) {
+        unsigned iv;                    /* step 77: variable refresh measured, the display's mode changed, or a */
+        double hz;                      /* plan that counts on variable refresh in the other window mode */
+        if (d3dh_frame_plan(g_fp.fr, g_fp.game_hz, &iv, &hz))
+            d3dh_set_pacing(iv, hz);
     }
     if (g_ovs.active && (ovl_r || !g_ovl_open)) {
         AcquireSRWLockExclusive(&g_pause_lock);

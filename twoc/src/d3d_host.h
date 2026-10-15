@@ -29,6 +29,8 @@ typedef struct {
     unsigned displayed[9];  /* refreshes between consecutive displayed frames: [0]..[7], [8] more (18.48) */
     unsigned display_unmeasured;    /* frame statistics unavailable, or more than one frame shown between two reads */
     unsigned display_off;           /* step 74: of `displayed`, shown at another gap than its present's interval */
+    unsigned disp_ms_n, disp_ms_even;   /* step 77: under the limiter, shown frames timed, and those shown */
+    double disp_ms_dev;                 /* within 1 ms of the gap presented; the sum of |shown - presented| ms */
     unsigned rhw_full, rhw_pillar;  /* 18.56: pre-transformed draws on a scaled screen, stretched / pillarboxed */
     unsigned copy_unscaled;         /* 18.56: copies into a target the host couldn't scale them to */
     unsigned aa_mode, ms_samples;   /* step 58: TWOC_AA_*, the back buffer's samples (0: single) */
