@@ -77,6 +77,7 @@ typedef struct CombinerCacheEntry {
 
 static CombinerCacheEntry g_cache[COMBINER_CACHE_SIZE];
 static uint32_t g_frame_counter = 0;
+static int g_last_slot = -1;    /* perf only: the slot the last lookup found (consecutive draws share a state) */
 
 /* ================================================================
  * Hashing
@@ -97,9 +98,22 @@ static uint32_t fnv1a_hash(const void *data, size_t len)
     return h;
 }
 
+/* Perf only (crash_twoc step 74): the state is ~1.4 KB and is looked up at
+ * every draw; byte-wise FNV-1a over it was ~12% of the game thread in a
+ * 1,600-draw room. FNV-1a over 32-bit words instead (the hash only picks a
+ * slot; entries are still matched on the whole state). */
 static uint32_t combiner_state_hash(const NV2ACombinerState *state)
 {
-    return fnv1a_hash(state, sizeof(NV2ACombinerState));
+    const uint32_t *w = (const uint32_t *)state;
+    uint64_t h = 0xCBF29CE484222325ull;
+    size_t i;
+
+    for (i = 0; i < sizeof(NV2ACombinerState) / 4; i++) {
+        h ^= w[i];
+        h *= 0x100000001B3ull;
+    }
+    (void)fnv1a_hash;
+    return (uint32_t)(h ^ (h >> 32));
 }
 
 static BOOL combiner_state_equal(const NV2ACombinerState *a,
@@ -949,9 +963,16 @@ static ID3D11PixelShader *compile_combiner_shader(const NV2ACombinerState *state
 
 ID3D11PixelShader *d3d8_combiners_get_shader(const NV2ACombinerState *state)
 {
-    uint32_t hash = combiner_state_hash(state);
-    uint32_t idx = hash & (COMBINER_CACHE_SIZE - 1);
+    uint32_t hash, idx;
     int probe;
+
+    if (g_last_slot >= 0 && g_cache[g_last_slot].in_use &&
+        memcmp(&g_cache[g_last_slot].state, state, sizeof(NV2ACombinerState)) == 0) {
+        g_cache[g_last_slot].last_used_frame = g_frame_counter;
+        return g_cache[g_last_slot].shader;
+    }
+    hash = combiner_state_hash(state);
+    idx = hash & (COMBINER_CACHE_SIZE - 1);
 
     /* Linear probe lookup */
     for (probe = 0; probe < COMBINER_CACHE_SIZE; probe++) {
@@ -968,12 +989,14 @@ ID3D11PixelShader *d3d8_combiners_get_shader(const NV2ACombinerState *state)
             memcpy(&entry->state, state, sizeof(NV2ACombinerState));
             entry->shader = ps;
             entry->last_used_frame = g_frame_counter;
+            g_last_slot = (int)slot;
             return ps;
         }
 
         if (entry->hash == hash && combiner_state_equal(&entry->state, state)) {
             /* Cache hit */
             entry->last_used_frame = g_frame_counter;
+            g_last_slot = (int)slot;
             return entry->shader;
         }
     }
@@ -1007,6 +1030,7 @@ ID3D11PixelShader *d3d8_combiners_get_shader(const NV2ACombinerState *state)
         memcpy(&entry->state, state, sizeof(NV2ACombinerState));
         entry->shader = ps;
         entry->last_used_frame = g_frame_counter;
+        g_last_slot = (int)lru_slot;
         return ps;
     }
 }
