@@ -1674,11 +1674,88 @@ static void pa_MmGetPhysicalAddress(void)
  * reaches the rear bins the 5.1 output plays. Any other index, or stereo
  * output: the runtime, as before. The AV pack (HalBootSMCVideoMode, 0 here)
  * doesn't mask the flags.
+ *
+ * Step 74: the time zone. Save times in the Load Game list showed UTC. XAPI's
+ * GetTimeZoneInformation (sub_000ECD9E, through XQueryValue sub_000EDC0F)
+ * reads XC_MAX_OS (0xFF), the EEPROM's whole user section, and takes the
+ * bias at +4, the 4-letter names at +8 and +0xC, the standard and daylight
+ * dates at +0x18 and +0x1C (month, week of the month, day of the week,
+ * hour), their biases at +0x28 and +0x2C, and "daylight saving off" from bit
+ * 1 of the flags at +0x58. The runtime zero-fills that index (UTC, no
+ * daylight saving). Now XC_MAX_OS and XC_TIMEZONE_BIAS .. XC_TZ_DLT_BIAS
+ * (0-6) answer Windows' time zone and its "adjust for daylight saving time"
+ * setting, as the dashboard would have stored them; the rest of the section
+ * stays zero, as before.
  */
 #define NV_QUERY_THUNK        0x0015AB28u      /* [thunk] = ExQueryNonVolatileSetting (ordinal 24) */
 #define NV_XC_AUDIO           9u
 #define NV_AUDIO_SURROUND     0x00000002u      /* XC_AUDIO_FLAGS_SURROUND */
+#define NV_XC_TZ_LAST         6u               /* XC_TIMEZONE_BIAS (0) .. XC_TZ_DLT_BIAS (6) */
+#define NV_XC_MAX_OS          0xFFu            /* the user section, 0x60 bytes */
+#define NV_USER_SIZE          0x60u
+#define NV_MISC_DST_OFF       0x00000002u      /* XC_MISC_FLAG_DSTOFF, at +0x58 */
 extern int mcpx_apu_output_channels(int *device_channels);
+
+/* Windows' "Eastern Daylight Time" as the dashboard's 4 letters: the words'
+ * initials ("EDT"; "AUS Eastern Standard Time" -> "AEST"). */
+static void nv_tz_name(const WCHAR *w, uint8_t out[4])
+{
+    int n = 0, start = 1;
+
+    memset(out, 0, 4);
+    for (; *w && n < 4; w++) {
+        if (*w == L' ' || *w == L'.' || *w == L'(' || *w == L')') {
+            start = 1;
+        } else if (start) {
+            out[n++] = *w < 0x80 ? (uint8_t)*w : '?';
+            start = 0;
+        }
+    }
+}
+
+/* A rule's date: month, the week of the month it falls in (5: the last),
+ * the day of the week, the hour. */
+static void nv_tz_date(const SYSTEMTIME *t, uint8_t out[4])
+{
+    out[0] = (uint8_t)t->wMonth;
+    out[1] = (uint8_t)(t->wYear ? (t->wDay + 6) / 7 : t->wDay);     /* an absolute date: its week */
+    out[2] = (uint8_t)t->wDayOfWeek;
+    out[3] = (uint8_t)t->wHour;
+}
+
+/* The user section's time zone fields from Windows (the rest left as it
+ * is); returns the misc flags' daylight-saving bit. */
+static uint32_t nv_tz_user(uint8_t u[NV_USER_SIZE])
+{
+    static volatile LONG told;
+    TIME_ZONE_INFORMATION tz;
+    DYNAMIC_TIME_ZONE_INFORMATION dz;
+    int32_t v;
+    uint32_t off = 0;
+
+    memset(&tz, 0, sizeof(tz));
+    if (GetTimeZoneInformation(&tz) == TIME_ZONE_ID_INVALID)
+        return 0;
+    memset(&dz, 0, sizeof(dz));
+    if (GetDynamicTimeZoneInformation(&dz) != TIME_ZONE_ID_INVALID && dz.DynamicDaylightTimeDisabled)
+        off = NV_MISC_DST_OFF;
+    v = (int32_t)tz.Bias;
+    memcpy(u + 0x04, &v, 4);
+    nv_tz_name(tz.StandardName, u + 0x08);
+    nv_tz_name(tz.DaylightName, u + 0x0C);
+    nv_tz_date(&tz.StandardDate, u + 0x18);
+    nv_tz_date(&tz.DaylightDate, u + 0x1C);
+    v = (int32_t)tz.StandardBias;
+    memcpy(u + 0x28, &v, 4);
+    v = (int32_t)tz.DaylightBias;
+    memcpy(u + 0x2C, &v, 4);
+    if (InterlockedIncrement(&told) == 1)
+        fprintf(stderr, "[TIME] the game's time zone: bias %ld min, standard %.4s (%+ld, month %u week %u day %u"
+                " %u:00), daylight %.4s (%+ld, month %u week %u day %u %u:00)%s\n", tz.Bias, (const char *)u + 0x08,
+                tz.StandardBias, u[0x18], u[0x19], u[0x1A], u[0x1B], (const char *)u + 0x0C, tz.DaylightBias,
+                u[0x1C], u[0x1D], u[0x1E], u[0x1F], off ? "; daylight saving off" : "");
+    return off;
+}
 
 /* NTSTATUS ExQueryNonVolatileSetting(ValueIndex, Type*, Value*, ValueLength, ResultLength*); ret 20 */
 static void nv_ExQueryNonVolatileSetting(void)
@@ -1688,6 +1765,33 @@ static void nv_ExQueryNonVolatileSetting(void)
     coop_thread_t *self;
     static volatile LONG told;
 
+    if (index <= NV_XC_TZ_LAST || index == NV_XC_MAX_OS) {     /* step 74: the time zone */
+        static const uint8_t field[7][2] = { { 0x04, 4 }, { 0x08, 4 }, { 0x0C, 4 }, { 0x18, 4 }, { 0x1C, 4 },
+                                             { 0x28, 4 }, { 0x2C, 4 } };
+        uint8_t u[NV_USER_SIZE];
+        uint32_t i, n;
+
+        self = coop_enter();
+        memset(u, 0, sizeof(u));
+        u[0x58] |= (uint8_t)nv_tz_user(u);
+        if (index == NV_XC_MAX_OS) {
+            n = len;                       /* as the runtime answers: the length asked, zeros past the section */
+            for (i = 0; value && i < n; i++)
+                MEM8(value + i) = i < NV_USER_SIZE ? u[i] : 0;
+        } else {
+            n = len < field[index][1] ? len : field[index][1];
+            for (i = 0; value && i < len; i++)
+                MEM8(value + i) = i < n ? u[field[index][0] + i] : 0;
+        }
+        if (type)
+            MEM32(type) = 4;               /* as the runtime answers */
+        if (result)
+            MEM32(result) = n;
+        eax = value ? 0 : 0xC000000Du;     /* STATUS_SUCCESS; STATUS_INVALID_PARAMETER without a buffer */
+        esp += 24;                         /* ret 20 */
+        coop_leave(self);
+        return;
+    }
     if (index != NV_XC_AUDIO || mcpx_apu_output_channels(NULL) != 6) {
         t_coop_kernel_va = MEM32(NV_QUERY_THUNK);
         coop_kernel_call();
