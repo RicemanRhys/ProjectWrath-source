@@ -636,14 +636,14 @@ static int render_size_parse(const char *v, unsigned *pw, unsigned *ph)
 /* The host back buffer for the guest's gw x gh: the picture's aspect (the
  * guest's, or d3db_wide), at the guest's height, or the largest that fits in
  * RECOMP_RENDER_SIZE. Widths even. Neither set: the guest's own size. */
-static void host_size(uint32_t gw, uint32_t gh, unsigned *w, unsigned *h)
+static void host_size_for(uint32_t gw, uint32_t gh, double wide, unsigned *w, unsigned *h)
 {
-    double r = d3db_wide > 0 ? d3db_wide : (double)gw / (double)gh;
+    double r = wide > 0 ? wide : (double)gw / (double)gh;
 
     *w = gw;
     *h = gh;
     if (!g_render_w) {
-        if (d3db_wide > 0)
+        if (wide > 0)
             *w = 2 * (unsigned)(gh * r / 2.0 + 0.5);
         return;
     }
@@ -654,6 +654,11 @@ static void host_size(uint32_t gw, uint32_t gh, unsigned *w, unsigned *h)
         *w = g_render_w & ~1u;
         *h = (unsigned)(g_render_w / r + 0.5);
     }
+}
+
+static void host_size(uint32_t gw, uint32_t gh, unsigned *w, unsigned *h)
+{
+    host_size_for(gw, gh, d3db_wide, w, h);
 }
 
 static void wide_init(void)
@@ -987,32 +992,47 @@ static void pacing_for(int mode, int live, int fr, unsigned *interval, double *h
     }
 }
 
-/* Step 54: settings changed in the overlay, on the presenting thread with
- * the game held. The aspect takes effect at the game's next projection, the
- * host picture and the pacing at once. */
-static void settings_apply(const twoc_settings_t *s)
+/* The picture's width over height a setting asks for (0: 4:3). */
+static double settings_wide(const twoc_settings_t *s)
 {
-    double wide = 0;
-    unsigned rw, rh, w, h, interval;
-    double hz;
+    return s->widescreen && s->wide_h > 0 && s->wide_w / s->wide_h > 4.0 / 3.0 + 1e-6 ? s->wide_w / s->wide_h : 0;
+}
 
-    if (s->widescreen && s->wide_h > 0 && s->wide_w / s->wide_h > 4.0 / 3.0 + 1e-6)
-        wide = s->wide_w / s->wide_h;
+/* Step 54: settings changed in the overlay. Step 78 (notes 18.81): queued by
+ * the host and applied in two parts at the frame boundaries. The game side's,
+ * on the game thread at its Swap: the aspect (at the game's next projection)
+ * and the draw distance, which its translation reads. */
+static void settings_apply_game(const twoc_settings_t *s)
+{
+    double wide = settings_wide(s);
+
     if (wide != d3db_wide && wide > 0)  /* step 64: which ratio */
         fprintf(stderr, "[WIDE] widescreen on, %g:%g (live)\n", s->wide_w, s->wide_h);
     else if (wide != d3db_wide)
         fprintf(stderr, "[WIDE] widescreen off, 4:3 (live)\n");
     d3db_wide = wide;
+    d3dh_record_wide(wide);
     if (s->draw_distance != d3db_draw_distance) {   /* step 69: at the game's next fog, sky and projection */
         d3db_draw_distance = s->draw_distance < 1.0 ? 1.0 : s->draw_distance > 4.0 ? 4.0 : s->draw_distance;
         fprintf(stderr, "[DRAW] draw distance x%g (live)\n", d3db_draw_distance);
     }
+}
+
+/* ... and the host side's, between frames: the host picture (the render
+ * size, the aspect) and the pacing. It reads only the settings and its own
+ * state (the render size, the pacing chosen), not the game side's. */
+static void settings_apply_host(const twoc_settings_t *s)
+{
+    double wide = settings_wide(s);
+    unsigned rw, rh, w, h, interval;
+    double hz;
+
     if (render_size_parse(s->render_size, &rw, &rh) == 0) {
         g_render_w = rw;
         g_render_h = rh;
     }
-    host_size(g_guest_w ? g_guest_w : 640, g_guest_h ? g_guest_h : 480, &w, &h);
-    d3dh_resize(w, h, d3db_wide);
+    host_size_for(g_guest_w ? g_guest_w : 640, g_guest_h ? g_guest_h : 480, wide, &w, &h);
+    d3dh_resize(w, h, wide);
     /* Only when the pacing itself changed, or (step 63) frame interpolation
      * was turned on under auto pacing: the rate is read again, so a limiter
      * chosen on a misread rate gives way. Step 77: or the frame rate changed
@@ -1064,7 +1084,7 @@ static void mirror_create_device(const d3db_args_t *a)
     host_size(g_guest_w ? g_guest_w : 640, g_guest_h ? g_guest_h : 480, &host_w, &host_h);
     d3dh_create(g_guest_w, g_guest_h, host_w, host_h, d3db_wide, g_render_w != 0, interval, hz,
                 host_dump_prefix(prefix, sizeof(prefix)));
-    d3dh_set_apply(settings_apply);
+    d3dh_set_apply(settings_apply_game, settings_apply_host);
     if (host_dump_prefix(prefix, sizeof(prefix)))
         snprintf(g_check_prefix, sizeof(g_check_prefix), "%s", prefix);
 }

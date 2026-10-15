@@ -289,10 +289,20 @@ void d3dh_stats(d3dh_stats_t *out);
  * Esc on the host window opens the overlay at the next present: that present
  * holds the game until it closes. Settings the host can't apply itself (the
  * aspect, the render size, the pacing: d3d_bridge.c decides them) go to the
- * callback set here, on the presenting thread, without the host's lock. */
+ * callbacks set here, without the host's lock.
+ *
+ * Step 78 (notes 18.81): a live change is queued and each side applies it
+ * at its own frame boundary, the way a render thread will need: `game` (the
+ * aspect and draw distance the game thread's translation reads) on the game
+ * thread at its Swap, `host` (the host picture's size, the pacing) on the
+ * presenting side between frames. */
 #include "settings.h"
 typedef void (*d3dh_apply_fn)(const twoc_settings_t *s);
-void d3dh_set_apply(d3dh_apply_fn fn);
+void d3dh_set_apply(d3dh_apply_fn game, d3dh_apply_fn host);
+/* Step 78: the picture's width over height (0: 4:3) as the game side
+ * records frames under it (the HUD at the screen edges); the bridge's game
+ * part sets it with the aspect. */
+void d3dh_record_wide(double wide);
 /* The host picture at a new size and aspect (`wide` as for d3dh_create).
  * From the first change on, a host render target of that size stands in for
  * xbox_d3d8's back buffer, whose size is fixed; screen-sized render targets

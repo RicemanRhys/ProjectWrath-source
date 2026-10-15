@@ -296,7 +296,8 @@ static int g_aa;                        /* step 58, RECOMP_ANTIALIASING: TWOC_AA
 static unsigned g_msaa = 1;             /* step 58: the samples a pixel MSAA asks for, 1 without */
 static volatile LONG g_ovl_open;        /* Esc: the next present runs the overlay */
 static SRWLOCK g_pause_lock = SRWLOCK_INIT;
-static d3dh_apply_fn g_apply;
+static d3dh_apply_fn g_apply_game, g_apply_host;   /* step 78: the bridge's parts of a settings change */
+static double g_rwide;                  /* step 78: g_wide as the game side records under it (d3dh_record_wide) */
 
 /* S4: host render-target textures, by guest Data. A target lives until the
  * guest frees its memory (d3dh_memory_freed) or, with every slot in use, it
@@ -766,6 +767,7 @@ int d3dh_create(unsigned width, unsigned height, unsigned host_w, unsigned host_
     g_w = host_w ? host_w : g_gw;
     g_h = host_h ? host_h : g_gh;
     g_wide = wide;
+    g_rwide = wide;
     g_dpi_aware = dpi_aware;
     g_interval = interval;
     g_frame_hz = frame_hz > 0 ? frame_hz : 0;
@@ -1246,6 +1248,17 @@ typedef struct ra_chunk {
     double data[1];                     /* aligned storage, `cap` bytes */
 } ra_chunk_t;
 
+/* Step 78: the live settings queue ("Step 78: live settings, queued", below). */
+static struct {
+    SRWLOCK lock;
+    twoc_settings_t s;                  /* the latest asked for */
+    unsigned gen;                       /* changes queued so far */
+    struct {
+        twoc_settings_t was;            /* what it applied last */
+        unsigned gen;                   /* ... up to this change */
+    } side[2];                          /* [0] the game side, [1] the host side */
+} g_sq = { SRWLOCK_INIT };
+
 /* Step 78 (notes 18.81): a recorded frame lives in a slot, the way a render
  * thread will take it over: the game side records into one (g_rs) while the
  * replay side draws another (g_ps), handed over at the guest's Swap
@@ -1272,6 +1285,7 @@ typedef struct {
     texup_t *up;                        /* its texture uploads, in order */
     unsigned up_n, up_cap;
     unsigned seq;                       /* the frame recorded in it (handovers so far) */
+    unsigned set_gen;                   /* the game side's settings it was recorded under (g_sq) */
     int it;                             /* its interpolation tables (g_itab), -1 none */
 } fslot_t;
 #define FSLOTS 2
@@ -5101,6 +5115,10 @@ static void slot_handover(void)
                 (int)(g_ps - g_slot), g_ps->seq);
     f->seq = ++g_slot_seq;
     f->it = g_ir;
+    f->set_gen = g_sq.side[0].gen;
+    if (g_sq.side[1].gen < f->set_gen)  /* never on one thread: the host side drains first */
+        fprintf(stderr, "[D3DB] host frame slots: frame %u recorded under settings %u, the host side's at %u\n",
+                f->seq, f->set_gen, g_sq.side[1].gen);
     g_ps = f;
     g_rs = &g_slot[(f - g_slot + 1) % FSLOTS];
     g_ic = g_ir;
@@ -5316,7 +5334,7 @@ static void hud_anchor(unsigned first)
     static double box[HUD_MAX][4], el[HUD_MAX][4];
     static unsigned cmd[HUD_MAX];
     static int par[HUD_MAX], anc[HUD_MAX], logn = -1;
-    double s = (4.0 / 3.0) / g_wide, mg = 0.02 * (double)g_hud_margin, dl, dr;
+    double s = (4.0 / 3.0) / g_rwide, mg = 0.02 * (double)g_hud_margin, dl, dr;
     unsigned i, j, n = 0;
 
     if (logn < 0) {
@@ -5415,7 +5433,7 @@ void d3dh_overlay_pass(int begin)
     if (begin) {
         g_st.overlay_passes++;
         g_ovl_in = 1;
-        g_ovl_anchor = g_hud_edges && g_wide > 0 && !g_replay_check;
+        g_ovl_anchor = g_hud_edges && g_rwide > 0 && !g_replay_check;
         g_ovl_first = g_rs->rc_n;
         g_ovl_defer = g_ovl_anchor && !g_replay && !g_interp;
     } else if (g_ovl_in) {
@@ -6268,9 +6286,15 @@ double d3dh_monitor_hz(void)
     return hz;
 }
 
-void d3dh_set_apply(d3dh_apply_fn fn)
+void d3dh_set_apply(d3dh_apply_fn game, d3dh_apply_fn host)
 {
-    g_apply = fn;
+    g_apply_game = game;
+    g_apply_host = host;
+}
+
+void d3dh_record_wide(double wide)
+{
+    g_rwide = wide;
 }
 
 static volatile LONG g_ovl_closes;      /* times the overlay has closed (the controller gate) */
@@ -6529,8 +6553,35 @@ static float overlay_scale(void)
     return k < 0.75f ? 0.75f : k;
 }
 
-/* What changed between `was` and `s`, applied now; then `was` = `s`. */
-static void overlay_apply(twoc_settings_t *was, const twoc_settings_t *s)
+/* ── Step 78: live settings, queued (notes 18.81) ─────────────────
+ *
+ * A change in the overlay (or the sub-frame trigger file's test switches)
+ * that the frames depend on is queued, and each side applies it at its own
+ * frame boundary, the way a render thread will need: the host side
+ * (fullscreen, anisotropic filtering, anti-aliasing, the adaptive frame rate,
+ * and the bridge's host part: the host picture's size, the pacing) on the
+ * presenting side between frames, and the game side (the frame-rate setting,
+ * which decides whether frames are recorded, and the bridge's game part: the
+ * aspect and draw distance its translation reads) on the game thread at its
+ * Swap. On one thread both drain where the change used to be applied at
+ * once (after an overlay frame, after the hold), the host side first.
+ * Settings the frames don't depend on (the HUD, read at record time and
+ * interlocked; audio, pads, controls, thread-safe already) still apply at
+ * once. A slot carries the game side's settings it was recorded under
+ * (fslot_t.set_gen); the replay side's must have reached them. */
+
+static void sq_push(const twoc_settings_t *was, const twoc_settings_t *s)
+{
+    AcquireSRWLockExclusive(&g_sq.lock);
+    if (!g_sq.gen)                      /* what was in effect before the first change */
+        g_sq.side[0].was = g_sq.side[1].was = *was;
+    g_sq.s = *s;
+    g_sq.gen++;
+    ReleaseSRWLockExclusive(&g_sq.lock);
+}
+
+/* The host side's part of a change, between frames. */
+static void sq_apply_host(const twoc_settings_t *was, const twoc_settings_t *s)
 {
     if (!s->fullscreen != !was->fullscreen)
         PostMessageA(g_hwnd, WM_TWOC_FULLSCREEN, s->fullscreen ? 1 : 0, 0);
@@ -6541,12 +6592,56 @@ static void overlay_apply(twoc_settings_t *was, const twoc_settings_t *s)
     }
     if (s->antialiasing != was->antialiasing)
         set_antialiasing(s->antialiasing);      /* step 58 */
-    if (s->framerate != was->framerate)
-        d3dh_set_framerate(s->framerate);       /* step 61: from the frame after this one */
     if (s->adaptive != was->adaptive) {         /* step 75: at the next present */
         d3dh_set_interp_adaptive(s->adaptive);
         fprintf(stderr, "[OVL] adaptive frame rate: %s\n", s->adaptive ? "on" : "off");
     }
+    if (g_apply_host && (s->widescreen != was->widescreen || s->wide_w != was->wide_w || s->wide_h != was->wide_h ||
+                         strcmp(s->render_size, was->render_size) != 0 || s->pacing != was->pacing ||
+                         s->framerate != was->framerate))
+        g_apply_host(s);                /* d3d_bridge.c: the host picture's size, the pacing */
+}
+
+/* The game side's part, at the game's Swap. */
+static void sq_apply_game(const twoc_settings_t *was, const twoc_settings_t *s)
+{
+    if (s->framerate != was->framerate)
+        d3dh_set_framerate(s->framerate);       /* step 61: from the frame after this one */
+    if (g_apply_game && (s->widescreen != was->widescreen || s->wide_w != was->wide_w || s->wide_h != was->wide_h ||
+                         s->draw_distance != was->draw_distance))
+        g_apply_game(s);                /* d3d_bridge.c: the aspect, the draw distance */
+}
+
+/* Side `k` (0 the game's, 1 the host's) applies what was queued since it
+ * last did. */
+static void sq_drain(int k)
+{
+    twoc_settings_t s, was;
+
+    if (g_sq.side[k].gen == g_sq.gen)
+        return;
+    AcquireSRWLockExclusive(&g_sq.lock);
+    s = g_sq.s;
+    was = g_sq.side[k].was;
+    g_sq.side[k].was = s;
+    g_sq.side[k].gen = g_sq.gen;
+    ReleaseSRWLockExclusive(&g_sq.lock);
+    if (k)
+        sq_apply_host(&was, &s);
+    else
+        sq_apply_game(&was, &s);
+}
+
+/* What changed between `was` and `s`: queued for the frames (sq_drain), or
+ * applied now; then `was` = `s`. */
+static void overlay_apply(twoc_settings_t *was, const twoc_settings_t *s)
+{
+    if (!s->fullscreen != !was->fullscreen || s->anisotropy != was->anisotropy ||
+        s->antialiasing != was->antialiasing || s->framerate != was->framerate || s->adaptive != was->adaptive ||
+        s->widescreen != was->widescreen || s->wide_w != was->wide_w || s->wide_h != was->wide_h ||
+        strcmp(s->render_size, was->render_size) != 0 || s->pacing != was->pacing ||
+        s->draw_distance != was->draw_distance)
+        sq_push(was, s);                /* step 78 */
     if (s->hud != was->hud || s->hud_margin != was->hud_margin) {   /* step 65: from the next overlay pass */
         d3dh_set_hud(s->hud, s->hud_margin);
         fprintf(stderr, "[OVL] HUD position: %s, margin %d%%\n", s->hud ? "screen edges" : "centre (4:3)",
@@ -6571,10 +6666,6 @@ static void overlay_apply(twoc_settings_t *was, const twoc_settings_t *s)
         fprintf(stderr, "[OVL] controls: keyboard %s, controller map %s\n", s->keyboard ? "on" : "off",
                 controls_pad_is_default(&s->controls) ? "the default" : "changed");
     }
-    if (g_apply && (s->widescreen != was->widescreen || s->wide_w != was->wide_w || s->wide_h != was->wide_h ||
-                    strcmp(s->render_size, was->render_size) != 0 || s->pacing != was->pacing ||
-                    s->framerate != was->framerate || s->draw_distance != was->draw_distance))
-        g_apply(s);                     /* d3d_bridge.c: the aspect, the render size, the pacing, the draw distance */
     *was = *s;
 }
 
@@ -6771,6 +6862,7 @@ static void overlay_pause(void)
         IDXGISwapChain1_Present(g_flip, g_interval, 0);
         LeaveCriticalSection(&g_lock);
         ovl_after(r);
+        sq_drain(1);                    /* step 78: the host side's settings, between overlay frames */
     }
     twoc_audio_mute(0);
     g_ovs.muted = 0;
@@ -7168,29 +7260,64 @@ void d3dh_present(double t_s, unsigned swap_no)
     if (g_subdump_trigger[0] && GetFileAttributesA(g_subdump_trigger) != INVALID_FILE_ATTRIBUTES) {
         FILE *f = fopen(g_subdump_trigger, "r");
         unsigned n = 0;
-        int fr = -1, ad = -1;
+        int fr = -1, ad = -1, set = 0;
+        twoc_settings_t ts;
+        if (!g_ovs.have) {
+            twoc_settings_current(&g_ovs.s);
+            g_ovs.s.fullscreen = g_fs;
+            g_ovs.was = g_ovs.s;
+            g_ovs.have = 1;
+        }
+        ts = g_ovs.s;
         if (f) {
             char line[64] = "";
             if (fgets(line, sizeof(line), f) && sscanf(line, "framerate %d", &fr) != 1 &&
                 sscanf(line, "adaptive %d", &ad) != 1 && sscanf(line, "%u", &n) != 1)
                 n = 0;                  /* "framerate 0|1", "adaptive 0|1" (step 75): test aids, the settings as */
-            fclose(f);                  /* the overlay changes them */
+            do {                        /* the overlay changes them; step 78: "set KEY VALUE" lines too, */
+                char k[16], v[40];      /* applied as the overlay's at the frame's end (a live change) */
+                if (sscanf(line, "set %15s %39s", k, v) != 2)
+                    continue;
+                set = 1;
+                if (strcmp(k, "aspect") == 0) {
+                    ts.widescreen = sscanf(v, "%lf:%lf", &ts.wide_w, &ts.wide_h) == 2;
+                } else if (strcmp(k, "render") == 0) {
+                    snprintf(ts.render_size, sizeof(ts.render_size), "%s", strcmp(v, "0") == 0 ? "" : v);
+                } else if (strcmp(k, "aa") == 0) {
+                    ts.antialiasing = twoc_aa_parse(v);
+                } else if (strcmp(k, "aniso") == 0) {
+                    ts.anisotropy = atoi(v);
+                } else if (strcmp(k, "distance") == 0) {
+                    ts.draw_distance = atof(v);
+                } else if (strcmp(k, "framerate") == 0) {
+                    ts.framerate = twoc_framerate_parse(v);
+                } else if (strcmp(k, "adaptive") == 0) {
+                    ts.adaptive = atoi(v) != 0;
+                } else if (strcmp(k, "fullscreen") == 0) {
+                    ts.fullscreen = atoi(v) != 0;
+                } else if (strcmp(k, "pacing") == 0) {
+                    ts.pacing = twoc_pacing_parse(v);
+                } else {
+                    fprintf(stderr, "[D3DB] trigger file: set %s: not a setting here\n", k);
+                }
+            } while (fgets(line, sizeof(line), f));
+            fclose(f);
         }
         DeleteFileA(g_subdump_trigger);
         if (fr >= 0 || ad >= 0) {       /* step 63: through overlay_apply, as the overlay does */
-            if (!g_ovs.have) {
-                twoc_settings_current(&g_ovs.s);
-                g_ovs.s.fullscreen = g_fs;
-                g_ovs.was = g_ovs.s;
-                g_ovs.have = 1;
-            }
             if (fr >= 0)
                 g_ovs.s.framerate = fr;
             if (ad >= 0)
                 g_ovs.s.adaptive = ad != 0;
             overlay_apply(&g_ovs.was, &g_ovs.s);
+            sq_drain(1);                /* step 78: at once, as before */
+            sq_drain(0);
+        } else if (set) {               /* step 78: queued, at this present's end */
+            fprintf(stderr, "[D3DB] trigger file: settings changed at guest swap %u\n", swap_no);
+            g_ovs.s = ts;
+            overlay_apply(&g_ovs.was, &g_ovs.s);
         }
-        n = fr >= 0 || ad >= 0 ? 0 : n ? n : 8;
+        n = fr >= 0 || ad >= 0 || set ? 0 : n ? n : 8;
         if (n) {
             g_subdump_from = swap_no;
             g_subdump_to = swap_no + n - 1;
@@ -7263,8 +7390,10 @@ void d3dh_present(double t_s, unsigned swap_no)
                 ovl_begin();
             ReleaseSRWLockExclusive(&g_pause_lock);
         }
-        if (g_ovl_open && g_ovs.active && g_ovs.s.pause)
+        if (g_ovl_open && g_ovs.active && g_ovs.s.pause) {
             overlay_pause();            /* this frame waits under the overlay */
+            sq_drain(0);                /* step 78: the game side's settings, as the game goes on */
+        }
         if (fr.n) {                     /* step 77: one present to the game frame's last slot */
             double slots = 0;
             for (sub = 0; sub < fr.n; sub++)
@@ -7298,6 +7427,8 @@ void d3dh_present(double t_s, unsigned swap_no)
         }
         ReleaseSRWLockExclusive(&g_pause_lock);
     }
+    sq_drain(1);                        /* step 78: the frame's boundary: settings queued, the host side's */
+    sq_drain(0);                        /* then the game side's */
 }
 
 /* ── Pixel-shader probe (S4) ───────────────────────────────── */
