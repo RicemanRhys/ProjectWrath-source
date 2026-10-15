@@ -1,0 +1,14 @@
+b21|21|1:1|burst:cs:20:5 x:play.py:TAG:60 pad:buttons=0x10 wait:0.15 pad: wait:3 grab:pause|rmw.py 5629A8 0xFFFFFFEF 0|3|600
+b23|23|2:1|burst:cs:20:5 x:play.py:TAG:60 pad:buttons=0x10 wait:0.15 pad: wait:3 grab:pause|rmw.py 5629A8 0xFFFFFBFF 0|3|600
+b22|22|3:1|burst:cs:20:5 x:play.py:TAG:60 pad:buttons=0x10 wait:0.15 pad: wait:3 grab:pause|rmw.py 5629A8 0xFFFF7FFF 0|3|600
+b24|24|4:1|burst:cs:20:5 x:play.py:TAG:60 pad:buttons=0x10 wait:0.15 pad: wait:3 grab:pause|rmw.py 5629A8 0xFFEFFFFF 0|3|600
+b25|25|5:1|burst:cs:20:5 x:play.py:TAG:60 pad:buttons=0x10 wait:0.15 pad: wait:3 grab:pause|rmw.py 5629A8 0xFDFFFFFF 0|3|600
+u1|u|1|x:play.py:TAG:60 pad:buttons=0x10 wait:0.15 pad: wait:3 grab:pause||20|600
+u2|u|2|x:play.py:TAG:60 pad:buttons=0x10 wait:0.15 pad: wait:3 grab:pause||20|600
+u3|u|3|x:play.py:TAG:60 pad:buttons=0x10 wait:0.15 pad: wait:3 grab:pause||20|600
+u4|u|4|x:play.py:TAG:60 pad:buttons=0x10 wait:0.15 pad: wait:3 grab:pause||20|600
+u5|u|5|x:play.py:TAG:60 pad:buttons=0x10 wait:0.15 pad: wait:3 grab:pause||20|600
+pz|7|1:1|pad:buttons=0x10 wait:0.15 pad: wait:4 grab:pz0 pad:buttons=0x8 wait:2 pad: wait:2 grab:pz1 pad:buttons=0x8 wait:2 pad: wait:2 grab:pz2 pad:buttons=0x8 wait:2 pad: wait:2 grab:pz3 pad:buttons=0x8 wait:2 pad: wait:2 grab:pz4 pad:buttons=0x4 wait:2 pad: wait:2 grab:pz5 pad:buttons=0x2 wait:0.15 pad: wait:1 grab:pz6 pad:a=255 wait:0.15 pad: wait:2 grab:opt0 pad:buttons=0x2 wait:0.15 pad: wait:1 grab:opt1 pad:b=255 wait:0.15 pad: wait:2 grab:opt2 pad:buttons=0x2 wait:0.15 pad: wait:1 grab:pz7 pad:a=255 wait:0.15 pad: wait:1.5 grab:wr0 pad:buttons=0x1 wait:0.15 pad: wait:0.5 pad:a=255 wait:0.15 pad: wait:10 grab:hub0 wait:5 x:play.py:TAG:20||20|600
+go|25|5:1|burst:go:44:5 pad:a=255 wait:0.15 pad: burst:go2:12:5 pad:a=255 wait:0.15 pad: burst:go3:12:5|poke.py 56299C 1 0|3|900
+e3|43|1:1|burst:e:100:5|poke.py 17BE64 4 3|3|900
+e4|43|1:1|burst:e:100:5|poke.py 17BE64 4 4|3|900
