@@ -761,16 +761,22 @@ static void *convert_fan_or_quad(D3DPRIMITIVETYPE pt, const void *src,
  * DrawPrimitiveUP call, use a persistent ring buffer.
  * ================================================================ */
 
-#define UP_RING_BUFFER_SIZE (16 * 1024 * 1024)  /* 16MB ring buffer (4MB before indexed draws used it too, twoc notes 18.63) */
+/* 64MB ring buffer (4MB before indexed draws used it too, twoc notes 18.63;
+ * 16MB before draws drawn again kept their data in it, 18.79) */
+#define UP_RING_BUFFER_SIZE (64 * 1024 * 1024)
 
 static ID3D11Buffer *g_up_ring_buffer = NULL;
 static UINT          g_up_ring_offset = 0;
 
 /* DrawIndexedPrimitiveUP's indices go through a ring of their own (local
- * perf change, twoc notes 18.63). */
-#define IB_RING_BUFFER_SIZE (2 * 1024 * 1024)
+ * perf change, twoc notes 18.63; 2MB before 18.79). */
+#define IB_RING_BUFFER_SIZE (8 * 1024 * 1024)
 static ID3D11Buffer *g_ib_ring_buffer = NULL;
 static UINT          g_ib_ring_offset = 0;
+
+/* Bumped whenever either ring starts over: what it held is gone (18.79,
+ * D3D8UpKept). */
+static UINT          g_ring_gen = 1;
 
 static HRESULT up_ring_init(void)
 {
@@ -818,6 +824,7 @@ static UINT up_ring_upload(const void *data, UINT size, UINT stride)
     if (offset + size > UP_RING_BUFFER_SIZE) {
         offset = 0;
         map_type = D3D11_MAP_WRITE_DISCARD;
+        g_ring_gen++;
     } else {
         map_type = D3D11_MAP_WRITE_NO_OVERWRITE;
     }
@@ -856,6 +863,7 @@ static UINT ib_ring_upload(const void *data, UINT size)
     if (g_ib_ring_offset + size > IB_RING_BUFFER_SIZE) {
         g_ib_ring_offset = 0;
         map_type = D3D11_MAP_WRITE_DISCARD;
+        g_ring_gen++;
     } else {
         map_type = D3D11_MAP_WRITE_NO_OVERWRITE;
     }
@@ -923,9 +931,11 @@ static HRESULT __stdcall dev_DrawIndexedPrimitive(IDirect3DDevice8 *self, D3DPRI
     return S_OK;
 }
 
-static HRESULT __stdcall dev_DrawPrimitiveUP(IDirect3DDevice8 *self, D3DPRIMITIVETYPE PrimitiveType, UINT PrimitiveCount, const void *pVertexData, UINT VertexStreamZeroStride)
+/* DrawPrimitiveUP; with `kept` (18.79, D3D8UpKept) the vertices a draw
+ * uploaded before, while the ring still holds them. */
+static HRESULT draw_primitive_up(D3DPRIMITIVETYPE PrimitiveType, UINT PrimitiveCount, const void *pVertexData,
+                                 UINT VertexStreamZeroStride, D3D8UpKept *kept)
 {
-    (void)self;
     g_d3d_draw_count++;
     D3D11_PRIMITIVE_TOPOLOGY topology;
     UINT vertex_count, vb_size, ring_offset;
@@ -937,21 +947,29 @@ static HRESULT __stdcall dev_DrawPrimitiveUP(IDirect3DDevice8 *self, D3DPRIMITIV
     topology = map_primitive_type(PrimitiveType, PrimitiveCount, &vertex_count);
     if (vertex_count == 0) return E_INVALIDARG;
 
-    /* Convert triangle fans and quad lists to triangle lists */
-    if (PrimitiveType == D3DPT_TRIANGLEFAN || PrimitiveType == D3DPT_QUADLIST) {
-        converted = convert_fan_or_quad(PrimitiveType, pVertexData,
-                                         PrimitiveCount, VertexStreamZeroStride,
-                                         &vertex_count);
-        if (converted) draw_data = converted;
+    if (kept && kept->gen == g_ring_gen) {
+        ring_offset = kept->vb_offset;  /* the count is the converted one: map_primitive_type's */
+    } else {
+        /* Convert triangle fans and quad lists to triangle lists */
+        if (PrimitiveType == D3DPT_TRIANGLEFAN || PrimitiveType == D3DPT_QUADLIST) {
+            converted = convert_fan_or_quad(PrimitiveType, pVertexData,
+                                             PrimitiveCount, VertexStreamZeroStride,
+                                             &vertex_count);
+            if (converted) draw_data = converted;
+        }
+
+        vb_size = vertex_count * VertexStreamZeroStride;
+
+        /* Upload to ring buffer */
+        ring_offset = up_ring_upload(draw_data, vb_size, VertexStreamZeroStride);
+        if (converted) free(converted);
+
+        if (ring_offset == (UINT)-1) return E_OUTOFMEMORY;
+        if (kept) {
+            kept->gen = g_ring_gen;
+            kept->vb_offset = ring_offset;
+        }
     }
-
-    vb_size = vertex_count * VertexStreamZeroStride;
-
-    /* Upload to ring buffer */
-    ring_offset = up_ring_upload(draw_data, vb_size, VertexStreamZeroStride);
-    if (converted) free(converted);
-
-    if (ring_offset == (UINT)-1) return E_OUTOFMEMORY;
 
     /* The ring bound at 0, the draw from its vertices (18.79: it was bound at
      * the draw's offset, and the stream source bound again after the draw;
@@ -967,9 +985,24 @@ static HRESULT __stdcall dev_DrawPrimitiveUP(IDirect3DDevice8 *self, D3DPRIMITIV
     return S_OK;
 }
 
-static HRESULT __stdcall dev_DrawIndexedPrimitiveUP(IDirect3DDevice8 *self, D3DPRIMITIVETYPE PrimitiveType, UINT MinVertexIndex, UINT NumVertices, UINT PrimitiveCount, const void *pIndexData, D3DFORMAT IndexDataFormat, const void *pVertexData, UINT VertexStreamZeroStride)
+static HRESULT __stdcall dev_DrawPrimitiveUP(IDirect3DDevice8 *self, D3DPRIMITIVETYPE PrimitiveType, UINT PrimitiveCount, const void *pVertexData, UINT VertexStreamZeroStride)
 {
-    (void)self; (void)MinVertexIndex;
+    (void)self;
+    return draw_primitive_up(PrimitiveType, PrimitiveCount, pVertexData, VertexStreamZeroStride, NULL);
+}
+
+HRESULT d3d8_DrawPrimitiveUPKept(D3DPRIMITIVETYPE PrimitiveType, UINT PrimitiveCount,
+                                 const void *pVertexData, UINT VertexStreamZeroStride, D3D8UpKept *kept)
+{
+    return draw_primitive_up(PrimitiveType, PrimitiveCount, pVertexData, VertexStreamZeroStride, kept);
+}
+
+/* DrawIndexedPrimitiveUP; with `kept` (18.79, D3D8UpKept) the vertices and
+ * indices a draw uploaded before, while the rings still hold them. */
+static HRESULT draw_indexed_primitive_up(D3DPRIMITIVETYPE PrimitiveType, UINT NumVertices, UINT PrimitiveCount,
+                                         const void *pIndexData, D3DFORMAT IndexDataFormat,
+                                         const void *pVertexData, UINT VertexStreamZeroStride, D3D8UpKept *kept)
+{
     g_d3d_draw_count++;
     D3D11_PRIMITIVE_TOPOLOGY topology;
     UINT index_count, vb_size, ib_size, vb_offset, ib_offset;
@@ -989,10 +1022,20 @@ static HRESULT __stdcall dev_DrawIndexedPrimitiveUP(IDirect3DDevice8 *self, D3DP
     /* Vertices and indices through the ring buffers (local perf change, twoc
      * notes 18.63: two immutable buffers were created and released for every
      * draw, ~4.4 us of its ~7). */
-    vb_offset = up_ring_upload(pVertexData, vb_size, VertexStreamZeroStride);
-    if (vb_offset == (UINT)-1) return E_OUTOFMEMORY;
-    ib_offset = ib_ring_upload(pIndexData, ib_size);
-    if (ib_offset == (UINT)-1) return E_OUTOFMEMORY;
+    if (kept && kept->gen == g_ring_gen) {
+        vb_offset = kept->vb_offset;
+        ib_offset = kept->ib_offset;
+    } else {
+        vb_offset = up_ring_upload(pVertexData, vb_size, VertexStreamZeroStride);
+        if (vb_offset == (UINT)-1) return E_OUTOFMEMORY;
+        ib_offset = ib_ring_upload(pIndexData, ib_size);
+        if (ib_offset == (UINT)-1) return E_OUTOFMEMORY;
+        if (kept) {                     /* the generation after both: either may have started over */
+            kept->gen = g_ring_gen;
+            kept->vb_offset = vb_offset;
+            kept->ib_offset = ib_offset;
+        }
+    }
 
     /* Bind, prepare, draw: the rings bound at 0, the draw from its indices
      * and vertices (18.79: they were bound at the draw's offsets, and the
@@ -1008,6 +1051,21 @@ static HRESULT __stdcall dev_DrawIndexedPrimitiveUP(IDirect3DDevice8 *self, D3DP
     ID3D11DeviceContext_DrawIndexed(g_device_state.d3d11_context, index_count, ib_offset / idx_bytes,
                                     (INT)(vb_offset / VertexStreamZeroStride));
     return S_OK;
+}
+
+static HRESULT __stdcall dev_DrawIndexedPrimitiveUP(IDirect3DDevice8 *self, D3DPRIMITIVETYPE PrimitiveType, UINT MinVertexIndex, UINT NumVertices, UINT PrimitiveCount, const void *pIndexData, D3DFORMAT IndexDataFormat, const void *pVertexData, UINT VertexStreamZeroStride)
+{
+    (void)self; (void)MinVertexIndex;
+    return draw_indexed_primitive_up(PrimitiveType, NumVertices, PrimitiveCount, pIndexData, IndexDataFormat,
+                                     pVertexData, VertexStreamZeroStride, NULL);
+}
+
+HRESULT d3d8_DrawIndexedPrimitiveUPKept(D3DPRIMITIVETYPE PrimitiveType, UINT NumVertices, UINT PrimitiveCount,
+                                        const void *pIndexData, D3DFORMAT IndexDataFormat,
+                                        const void *pVertexData, UINT VertexStreamZeroStride, D3D8UpKept *kept)
+{
+    return draw_indexed_primitive_up(PrimitiveType, NumVertices, PrimitiveCount, pIndexData, IndexDataFormat,
+                                     pVertexData, VertexStreamZeroStride, kept);
 }
 
 static HRESULT __stdcall dev_CreateTexture(IDirect3DDevice8 *self, UINT Width, UINT Height, UINT Levels, DWORD Usage, D3DFORMAT Format, D3DPOOL Pool, IDirect3DTexture8 **ppTexture)

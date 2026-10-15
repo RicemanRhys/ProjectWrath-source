@@ -416,6 +416,27 @@ static __inline void d3d8_bind_topology(ID3D11DeviceContext *ctx, D3D11_PRIMITIV
     }
 }
 
+/* ================================================================
+ * UP draws drawn again (d3d8_device.c)
+ *
+ * Local perf change (twoc notes 18.79): DrawPrimitiveUP and
+ * DrawIndexedPrimitiveUP, for a caller that draws the same draw several
+ * times with its data unchanged. `kept` starts zeroed; the first draw
+ * uploads into the rings and notes where, and later draws use that while
+ * the rings still hold it (until either starts over).
+ * ================================================================ */
+
+typedef struct {
+    UINT gen;                           /* the rings' generation then, 0 none */
+    UINT vb_offset, ib_offset;
+} D3D8UpKept;
+
+HRESULT d3d8_DrawPrimitiveUPKept(D3DPRIMITIVETYPE PrimitiveType, UINT PrimitiveCount,
+                                 const void *pVertexData, UINT VertexStreamZeroStride, D3D8UpKept *kept);
+HRESULT d3d8_DrawIndexedPrimitiveUPKept(D3DPRIMITIVETYPE PrimitiveType, UINT NumVertices, UINT PrimitiveCount,
+                                        const void *pIndexData, D3DFORMAT IndexDataFormat,
+                                        const void *pVertexData, UINT VertexStreamZeroStride, D3D8UpKept *kept);
+
 #endif /* _WIN32 -- end of D3D11 backend section */
 
 #endif /* BURNOUT3_D3D8_INTERNAL_H */
