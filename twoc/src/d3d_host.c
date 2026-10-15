@@ -173,6 +173,48 @@
 #define DUMP_PERIOD_MS      10000
 
 static CRITICAL_SECTION g_lock;
+
+/* ── Step 78: the game side and the replay side (notes 18.81) ─────────
+ *
+ * Every function here that calls D3D11, DXGI or xbox_d3d8 (or reads what
+ * they hold: the render targets, the host textures, the swap chain) is the
+ * replay side's, marked REPLAY_SIDE(); the recording and the tables the
+ * game side keeps (what the host holds, the programs parsed, the targets'
+ * Data, the settings the game's translation reads) are the game side's,
+ * GAME_SIDE(). On one thread the game thread is both, one after the other:
+ * it records (SIDE_GAME) and at its Swap hands the frame over and replays it
+ * (SIDE_REPLAY); a draw made at once, frames not being recorded, is both at
+ * once (SIDE_NOW), as are the checks that draw at once. With
+ * RECOMP_D3D_BRIDGE_THREADCHECK=1 each marked function checks the side its
+ * thread is on and ends the process (a [D3DB] THREADCHECK line, exit code
+ * 120) when it doesn't fit: replay-side code while the game side records (it
+ * would race a render thread for the device) or game-side code while the
+ * replay side replays (it would race the game for its tables). A render
+ * thread will make the sides threads. */
+enum { SIDE_ANY, SIDE_GAME, SIDE_REPLAY, SIDE_NOW };
+static __declspec(thread) int t_side;  /* the side this thread is on now */
+static int g_tcheck;                    /* RECOMP_D3D_BRIDGE_THREADCHECK */
+
+static void side_fail(const char *fn, int want)
+{
+    static const char *name[] = { "any", "game", "replay", "now" };
+
+    fprintf(stderr, "[D3DB] THREADCHECK: %s, the %s side's, ran on the %s side (thread %lu): ending the process\n", fn,
+            name[want], name[t_side], GetCurrentThreadId());
+    fflush(stderr);
+    TerminateProcess(GetCurrentProcess(), 120);
+}
+#define REPLAY_SIDE() do { if (g_tcheck && t_side == SIDE_GAME) side_fail(__FUNCTION__, SIDE_REPLAY); } while (0)
+#define GAME_SIDE() do { if (g_tcheck && t_side == SIDE_REPLAY) side_fail(__FUNCTION__, SIDE_GAME); } while (0)
+
+/* This thread on side `s` from now; returns the side it was on. */
+static int side_set(int s)
+{
+    int was = t_side;
+
+    t_side = s;
+    return was;
+}
 static volatile LONG g_ready;
 static HWND g_hwnd;                     /* visible: the flip-model swap chain */
 static HWND g_hwnd_dev;                 /* hidden: xbox_d3d8's own swap chain */
@@ -694,6 +736,13 @@ int d3dh_create(unsigned width, unsigned height, unsigned host_w, unsigned host_
         return g_ready ? 0 : -1;        /* the game creates its device once */
     InitializeCriticalSection(&g_lock);
     QueryPerformanceFrequency(&g_qpf);
+    {   /* step 78 */
+        const char *e = getenv("RECOMP_D3D_BRIDGE_THREADCHECK");
+        g_tcheck = e && *e && strcmp(e, "0") != 0;
+        if (g_tcheck)
+            fprintf(stderr, "[D3DB] host THREADCHECK: replay-side code checked against the game side's recording,"
+                    " and game-side code against the replay\n");
+    }
     {   /* step 60 */
         const char *e = getenv("RECOMP_D3D_BRIDGE_REPLAY");
         g_replay = e && *e ? atoi(e) : 0;
@@ -915,6 +964,7 @@ static unsigned ms_samples(D3DFORMAT fmt)
     unsigned n;
     UINT q;
 
+    REPLAY_SIDE();
     for (n = g_msaa; n > 1; n /= 2)
         if (SUCCEEDED(ID3D11Device_CheckMultisampleQualityLevels(d, d3d8_to_dxgi_format(fmt), n, &q)) && q &&
             SUCCEEDED(ID3D11Device_CheckMultisampleQualityLevels(d, DXGI_FORMAT_D24_UNORM_S8_UINT, n, &q)) && q)
@@ -933,6 +983,7 @@ static IDirect3DSurface8 *ms_surface(unsigned w, unsigned h, D3DFORMAT fmt, unsi
     D3D8Surface *sf;
     HRESULT hr = E_OUTOFMEMORY;
 
+    REPLAY_SIDE();
     memset(&td, 0, sizeof(td));
     td.Width = w;
     td.Height = h;
@@ -976,6 +1027,7 @@ static void ms_resolve(IDirect3DTexture8 *tex, IDirect3DSurface8 *ms)
     ID3D11Texture2D *dst = ((D3D8Texture *)tex)->d3d11_texture;
     D3D11_TEXTURE2D_DESC dd;
 
+    REPLAY_SIDE();
     ID3D11Texture2D_GetDesc(dst, &dd);
     ID3D11DeviceContext_ResolveSubresource(d3d8_GetD3D11Context(), (ID3D11Resource *)dst, 0,
                                            (ID3D11Resource *)((D3D8Surface *)ms)->d3d11_texture, 0, dd.Format);
@@ -987,6 +1039,7 @@ static void ms_resolve(IDirect3DTexture8 *tex, IDirect3DSurface8 *ms)
 static void ms_fill(IDirect3DSurface8 *ms, IDirect3DSurface8 *ms_depth, IDirect3DTexture8 *tex, unsigned w,
                     unsigned h)
 {
+    REPLAY_SIDE();
     g_dev->lpVtbl->SetRenderTarget(g_dev, ms, ms_depth);
     g_dev->lpVtbl->Clear(g_dev, 0, NULL, D3DCLEAR_TARGET | D3DCLEAR_ZBUFFER | D3DCLEAR_STENCIL, 0, 1.0f, 0);
     if (aa_copy(((D3D8Surface *)ms)->rtv, ((D3D8Texture *)tex)->srv, w, h) == 0)
@@ -997,6 +1050,7 @@ static void ms_fill(IDirect3DSurface8 *ms, IDirect3DSurface8 *ms_depth, IDirect3
  * texture (MSAA only). Called with g_lock held. */
 static void target_drawn(void)
 {
+    REPLAY_SIDE();
     if (g_cur_target == -1 && g_bb.ms)
         g_bb.dirty = 1;
     else if (g_cur_target >= 0 && g_rt[g_cur_target].ms)
@@ -1007,6 +1061,7 @@ static void target_drawn(void)
  * surface. Called with g_lock held. */
 static void rt_resolve(int i)
 {
+    REPLAY_SIDE();
     if (g_rt[i].ms && g_rt[i].dirty) {
         ms_resolve(g_rt[i].tex, g_rt[i].ms);
         g_rt[i].dirty = 0;
@@ -1016,6 +1071,7 @@ static void rt_resolve(int i)
 /* Drop render target i's multisampled surfaces, its texture kept up to date. */
 static void rt_ms_release(int i)
 {
+    REPLAY_SIDE();
     if (!g_rt[i].ms)
         return;
     rt_resolve(i);
@@ -1034,6 +1090,7 @@ static void rt_ms_make(int i)
 {
     unsigned n;
 
+    REPLAY_SIDE();
     if (g_msaa <= 1 || g_rt[i].ms || g_rt[i].width != g_gw || g_rt[i].height != g_gh)
         return;
     n = ms_samples((D3DFORMAT)g_rt[i].format);
@@ -1065,6 +1122,7 @@ static void rt_release(int i)
 {
     int s;
 
+    REPLAY_SIDE();
     if (g_cur_target == i) {
         g_dev->lpVtbl->SetRenderTarget(g_dev, NULL, NULL);
         g_cur_target = g_bb.tex ? -2 : -1;      /* step 54: the stand-in back buffer is bound at the next use */
@@ -1092,6 +1150,7 @@ static int rt_find(const d3dh_target_t *t, int create)
     IDirect3DSurface8 *surf = NULL, *depth = NULL;
     HRESULT hr;
 
+    REPLAY_SIDE();
     for (i = 0; i < RT_SLOTS; i++) {
         if (g_rt[i].tex && g_rt[i].data == t->data) {
             if (g_rt[i].width == t->width && g_rt[i].height == t->height && g_rt[i].format == t->format) {
@@ -1172,6 +1231,7 @@ static int bind_target(const d3dh_target_t *t)
 {
     int i;
 
+    REPLAY_SIDE();
     if (!t->data) {
         if (g_cur_target != -1) {
             if (g_bb.tex)               /* step 54: the host picture's size changed */
@@ -1312,6 +1372,7 @@ static void *ra_alloc(size_t n)
     fslot_t *f = g_rs;
     ra_chunk_t *c = f->ra_cur;
 
+    GAME_SIDE();
     n = (n + 15) & ~(size_t)15;
     if (c && c->used + n <= c->cap) {
         void *p = (uint8_t *)c->data + c->used;
@@ -1364,6 +1425,7 @@ static rcmd_t *rc_push(int kind)
 {
     fslot_t *f = g_rs;
 
+    GAME_SIDE();
     if (f->rc_n == f->rc_cap) {
         unsigned cap = f->rc_cap ? 2 * f->rc_cap : 1024;
         rcmd_t *n = (rcmd_t *)realloc(f->rc, cap * sizeof(rcmd_t));
@@ -1382,6 +1444,7 @@ static void rc_target(uint32_t data)
     fslot_t *f = g_rs;
     unsigned i;
 
+    GAME_SIDE();
     if (!data)
         return;
     for (i = 0; i < f->targets_n; i++)
@@ -1404,6 +1467,7 @@ static int rc_maybe_target(uint32_t data)
     unsigned i;
     int r = 0;
 
+    GAME_SIDE();
     if (f->overflow)
         return 1;
     AcquireSRWLockShared(&g_gt_lock);
@@ -1430,6 +1494,7 @@ static void freed_exec(uint32_t data, uint32_t bytes)
 {
     int i;
 
+    REPLAY_SIDE();
     for (i = 0; i < RT_SLOTS; i++)
         if (g_rt[i].tex && g_rt[i].data >= data && g_rt[i].data - data < bytes) {
             rt_release(i);
@@ -1439,20 +1504,26 @@ static void freed_exec(uint32_t data, uint32_t bytes)
 
 void d3dh_memory_freed(uint32_t data, uint32_t bytes)
 {
+    int side;
+
     if (!g_ready)
         return;
     EnterCriticalSection(&g_lock);
+    side = side_set(SIDE_GAME);         /* step 78 */
     if (REC_ON() && !g_replay_check) {  /* step 60: in its place among the frame's commands */
         rcmd_t *c = rc_push(RC_FREED);
         if (c) {
             c->u.freed.data = data;
             c->u.freed.bytes = bytes;
         } else {
+            side_set(SIDE_NOW);
             freed_exec(data, bytes);
         }
     } else {
+        side_set(SIDE_NOW);
         freed_exec(data, bytes);
     }
+    side_set(side);
     LeaveCriticalSection(&g_lock);
 }
 
@@ -1460,13 +1531,19 @@ void d3dh_memory_freed(uint32_t data, uint32_t bytes)
 
 void d3dh_clear(const d3dh_target_t *target, uint32_t xdk_flags, uint32_t color, float z, uint32_t stencil)
 {
+    int side;
+
     if (!g_ready)
         return;
     EnterCriticalSection(&g_lock);
+    side = side_set(SIDE_GAME);         /* step 78 */
     if (REC_ON()) {                     /* step 60 */
         rcmd_t *c = rc_push(RC_CLEAR);
-        if (g_replay_check)
+        if (g_replay_check) {
+            side_set(SIDE_NOW);
             clear_exec(target, xdk_flags, color, z, stencil);
+            side_set(SIDE_GAME);
+        }
         if (c) {
             c->u.clear.t = *target;
             c->u.clear.flags = xdk_flags;
@@ -1476,8 +1553,10 @@ void d3dh_clear(const d3dh_target_t *target, uint32_t xdk_flags, uint32_t color,
             rc_target(target->data);
         }
     } else {
+        side_set(SIDE_NOW);
         clear_exec(target, xdk_flags, color, z, stencil);
     }
+    side_set(side);
     LeaveCriticalSection(&g_lock);
 }
 
@@ -1486,6 +1565,7 @@ static void clear_exec(const d3dh_target_t *target, uint32_t xdk_flags, uint32_t
 {
     DWORD pc = 0;
 
+    REPLAY_SIDE();
     if ((xdk_flags & 0xF0) == 0xF0)
         pc |= D3DCLEAR_TARGET;
     if (xdk_flags & 1)
@@ -1588,6 +1668,7 @@ static void tex_release(tex_cache_t *tc, unsigned i)
 {
     int s;
 
+    REPLAY_SIDE();
     if (!tc->h[i])
         return;
     for (s = 0; s < 4; s++)             /* xbox_d3d8 keeps the bound pointer */
@@ -1606,6 +1687,7 @@ static int tex_upload(IDirect3DBaseTexture8 *base, const d3dh_tex_t *t)
     const uint8_t *src = t->bits;
     uint32_t l, face = 0;
 
+    REPLAY_SIDE();
     for (l = 0; l < t->levels; l++) {
         uint32_t w = level_dim(t->width, l), h = level_dim(t->height, l);
         uint32_t n = level_bytes((D3DFORMAT)t->format, w, h, t->pitch);
@@ -1647,6 +1729,7 @@ static int tex_lookup(tex_cache_t *tc, const d3dh_tex_t *t, int *up)
     gtex_t *e = NULL, *oldest = NULL;
     uint32_t i, h = (t->key >> 4) * 2654435761u;
 
+    GAME_SIDE();
     *up = 0;
     if (tc->nbad && InterlockedExchange(&tc->nbad, 0))     /* uploads the replay side couldn't make */
         for (i = 0; i < TEX_CACHE_SLOTS; i++)
@@ -1703,6 +1786,7 @@ static IDirect3DBaseTexture8 *tex_make(tex_cache_t *tc, unsigned i, const d3dh_t
     uint32_t host_fmt = t->format == XDK_FMT_P8 ? XDK_FMT_A8R8G8B8 : t->format;
     HRESULT hr;
 
+    REPLAY_SIDE();
     tex_release(tc, i);
     if (t->cube)
         hr = g_dev->lpVtbl->CreateCubeTexture(g_dev, t->width, t->levels, 0, (D3DFORMAT)host_fmt,
@@ -1736,6 +1820,7 @@ static IDirect3DBaseTexture8 *tex_get(tex_cache_t *tc, const d3dh_tex_t *t)
 {
     int i, up;
 
+    REPLAY_SIDE();
     for (i = 0; i < RT_SLOTS; i++)      /* S4: what the host rendered, not guest memory */
         if (g_rt[i].tex && g_rt[i].data == t->data) {
             g_rt[i].last_use = ++g_rt_clock;
@@ -1764,6 +1849,7 @@ static int tex_snap(unsigned i, unsigned stage, const d3dh_tex_t *t)
     fslot_t *f = g_rs;
     texup_t *u;
 
+    GAME_SIDE();
     if (f->up_n == f->up_cap) {
         unsigned cap = f->up_cap ? 2 * f->up_cap : 256;
         texup_t *n = (texup_t *)realloc(f->up, cap * sizeof(texup_t));
@@ -1794,6 +1880,7 @@ static void slot_prepare(fslot_t *f, unsigned from)
 {
     unsigned i, s, u = 0;
 
+    REPLAY_SIDE();
     while (u < f->up_n && f->up[u].at < from)
         u++;
     for (i = from; i < f->rc_n; i++) {
@@ -1830,6 +1917,7 @@ void d3dh_texture_touch(uint32_t data)
     if (!g_ready)
         return;
     EnterCriticalSection(&g_lock);
+    GAME_SIDE();
     for (k = 0; k < 2; k++) {
         tex_cache_t *tc = k ? &g_tcc : &g_tc;
         for (i = 0; i < TEX_CACHE_SLOTS; i++)
@@ -1857,6 +1945,7 @@ static const void *rescale_rhw_map(const void *verts, uint32_t count, uint32_t s
     float sx, sy;
     uint32_t i;
 
+    REPLAY_SIDE();
     if (!vp->Width || !vp->Height ||
         (vp->X == 0 && vp->Y == 0 && vp->Width == g_dev_w && vp->Height == g_dev_h && map_identity(m)))
         return verts;
@@ -1911,6 +2000,7 @@ static void apply_ff(const d3dh_ff_t *ff, int lit)
     D3DMATERIAL8 m;
     unsigned i;
 
+    REPLAY_SIDE();
     g_dev->lpVtbl->SetTransform(g_dev, D3DTS_WORLD, (const D3DMATRIX *)ff->world);
     g_dev->lpVtbl->SetTransform(g_dev, D3DTS_VIEW, (const D3DMATRIX *)ff->view);
     g_dev->lpVtbl->SetTransform(g_dev, D3DTS_PROJECTION, (const D3DMATRIX *)ff->proj);
@@ -2022,6 +2112,7 @@ static int vs_slot(const d3dh_vprog_t *p)
     int f = vs_find(p->key);
     unsigned i = (unsigned)g_vs_n;
 
+    GAME_SIDE();
     if (f >= 0)
         return f;
     if (i == VS_SLOTS)
@@ -2053,6 +2144,7 @@ static int vs_slot(const d3dh_vprog_t *p)
  * first draw. Returns its handle, 0 if it couldn't be. */
 static DWORD vs_make(int i, const d3dh_vprog_t *p)
 {
+    REPLAY_SIDE();
     if (!g_vsh[i].made) {
         g_vsh[i].made = 1;
         if (FAILED(d3d8_vsh_create_shader((const DWORD *)p->code, (int)p->n_insns, &g_vsh[i].handle))) {
@@ -2067,13 +2159,15 @@ static DWORD vs_make(int i, const d3dh_vprog_t *p)
 
 uint16_t d3dh_vs_inputs(const d3dh_vprog_t *p)
 {
-    int i;
+    int i, side;
     uint16_t r;
 
     if (!g_ready)
         return 0;
     EnterCriticalSection(&g_lock);
+    side = side_set(SIDE_GAME);         /* step 78 */
     i = vs_slot(p);
+    side_set(side);
     r = i < 0 ? 0 : g_vs[i].inputs;
     LeaveCriticalSection(&g_lock);
     return r;
@@ -2081,13 +2175,15 @@ uint16_t d3dh_vs_inputs(const d3dh_vprog_t *p)
 
 int d3dh_vs_consts(const d3dh_vprog_t *p, uint32_t mask[6])
 {
-    int i, r = -1;
+    int i, r = -1, side;
 
     memset(mask, 0, 6 * sizeof(uint32_t));
     if (!g_ready)
         return -1;
     EnterCriticalSection(&g_lock);
+    side = side_set(SIDE_GAME);         /* step 78 */
     i = vs_slot(p);
+    side_set(side);
     if (i >= 0) {
         memcpy(mask, g_vs[i].cmask, 6 * sizeof(uint32_t));
         r = g_vs[i].rel_base;
@@ -2117,6 +2213,7 @@ static int vs_bind(const d3dh_vprog_t *p)
     int i = vs_find(p->key), lo = -1, hi = -1, k, w;
     DWORD h;
 
+    REPLAY_SIDE();
     if (i < 0)                          /* step 78: one the game side never parsed (a probe's): at once */
         i = vs_slot(p);
     if (i < 0 || !(h = vs_make(i, p)))
@@ -2170,6 +2267,7 @@ static int draw_exec(const d3dh_draw_t *d, IDirect3DBaseTexture8 *const *pin, co
     int lit = 0;
     LARGE_INTEGER t0, t1;
 
+    REPLAY_SIDE();
     if (d->hud_dx != 0.0f) {            /* step 65: a HUD element at its screen edge: x_clip += dx w */
         static float k4[192 * 4];
         d3dh_draw_t m = *d;
@@ -2318,6 +2416,7 @@ static int rec_draw(const d3dh_draw_t *d)
     unsigned s;
     int bad = 0;
 
+    GAME_SIDE();
     if (!c) {
         g_st.draw_fails++;
         return -1;
@@ -2397,6 +2496,7 @@ static void replay_pass(int interp)
     LARGE_INTEGER t0, t1;
     unsigned i;
 
+    REPLAY_SIDE();
     QueryPerformanceCounter(&t0);
     for (i = 0; i < g_ps->rc_n; i++) {
         const rcmd_t *c = &g_ps->rc[i];
@@ -2430,6 +2530,7 @@ static void replay_done(void)
 {
     unsigned i, s;
 
+    REPLAY_SIDE();
     for (i = 0; i < g_ps->rc_n; i++)
         if (g_ps->rc[i].kind == RC_DRAW)
             for (s = 0; s < 4; s++)
@@ -2453,6 +2554,7 @@ static void replay_run(void)
 {
     int p;
 
+    REPLAY_SIDE();
     if (!g_ps)
         return;
     if (!g_ps->rc_n && !g_ps->ra_bytes) {
@@ -2837,6 +2939,7 @@ static void ic_obj(rcmd_t *c, uint32_t key, const double *w, const float *k4, co
     uint32_t lk;
     iobj_t *o;
 
+    GAME_SIDE();
     if (!d->mesh || g_isnap <= 0)
         return;
     if (g_iobj_n[cur] == g_iobj_cap[cur]) {
@@ -2942,6 +3045,7 @@ static void ic_record(rcmd_t *c)
     uint32_t key = ic_key(d, 0);
     icam_t *cam;
 
+    GAME_SIDE();
     if (g_ikey_n[cur] == g_ikey_cap[cur]) {
         unsigned cap = g_ikey_cap[cur] ? 2 * g_ikey_cap[cur] : 2048;
         uint32_t *n = (uint32_t *)realloc(g_ikey[cur], cap * sizeof(uint32_t));
@@ -3165,6 +3269,7 @@ static void fp_frame(fp_frame_t *f, unsigned k)
 {
     double g = g_fp.step[k], end, r, prev;
 
+    REPLAY_SIDE();
     if (g_fc.gen != g_fp.gen) {
         g_fc.pos = g_fc.end = 0;
         g_fc.gen = g_fp.gen;
@@ -3463,6 +3568,7 @@ int d3dh_frame_plan(int fr, double game_hz, unsigned *interval, double *hz)
     int ready = g_ready, claim;
     char why[160];
 
+    REPLAY_SIDE();
     if (r <= 0 && fr)
         r = d3dh_display_hz();
     if (ready)
@@ -3743,6 +3849,7 @@ static void ia_frame(const fslot_t *f)
     double dt, busy, cmds = 0, since, pair_ms = g_st.pair_ms - g_ia.pair0, game_ms = f->game_ms, replay_ms = g_ia.replay_ms;
     char why[256];
 
+    REPLAY_SIDE();
     QueryPerformanceCounter(&q);
     dt = g_ia.last ? (double)(q.QuadPart - g_ia.last) * 1000.0 / (double)g_qpf.QuadPart : 0.0;
     /* Busy: on one thread the time between the frames' replays less the
@@ -4524,6 +4631,7 @@ static void ic_pair(void)
     int matched;
     LARGE_INTEGER t0, t1;
 
+    REPLAY_SIDE();
     if (!g_iobj_n[cur])
         return;
     QueryPerformanceCounter(&t0);
@@ -4699,6 +4807,7 @@ static int ic_begin(unsigned swap_no, int ovl, int need)
     double frac = 1.0, step = 0.0, turn = 0.0;
     const char *why = NULL;
 
+    REPLAY_SIDE();
     if (g_irec_trigger[0])
         ic_rec_dump(swap_no);
     qsort(g_ikey[cur], g_ikey_n[cur], sizeof(uint32_t), cmp_u32);    /* the frame before's next */
@@ -4818,6 +4927,7 @@ static void ic_sub(double t)
 {
     unsigned cur = (unsigned)g_ic, prv = (unsigned)g_ip, i, j;
 
+    REPLAY_SIDE();
     g_it = t;
     g_isub_stamp++;                     /* step 66: the skeletons' G at this t, made again */
     for (i = 0; i < g_icam_n[cur]; i++) {
@@ -4886,6 +4996,7 @@ static void ic_draw(const rcmd_t *c)
     double wt[16];
     int i, j, n, cam_on, w_move = 0, b_move = 0, in_place = 0;
 
+    REPLAY_SIDE();
 #define IC_KEEP(r) do {                                                         \
         if (in_place) {                                                         \
             keep[n_keep].reg = (unsigned)(r);                                   \
@@ -5092,6 +5203,7 @@ static void ic_draw(const rcmd_t *c)
  * handover). */
 static void ic_end(void)
 {
+    REPLAY_SIDE();
     g_ip = g_ic;
     g_iprev_ok = 1;
 }
@@ -5110,6 +5222,7 @@ static void ic_apply(void)
 {
     int want = g_interp_want && !g_replay_check && g_replay <= 1;
 
+    GAME_SIDE();
     if (want == g_interp)
         return;
     g_interp = want;
@@ -5131,6 +5244,7 @@ static void slot_handover(double t_s, unsigned swap_no)
     fslot_t *f = g_rs;
     LARGE_INTEGER q;
 
+    GAME_SIDE();
     if (g_ps)                           /* never on one thread: the slot before is replayed in its own Swap */
         fprintf(stderr, "[D3DB] host frame slots: slot %d (frame %u) not replayed before the next\n",
                 (int)(g_ps - g_slot), g_ps->seq);
@@ -5168,14 +5282,17 @@ void d3dh_set_framerate(int display)
 
 int d3dh_draw_up(const d3dh_draw_t *d)
 {
-    int r;
+    int r, side;
 
     if (!g_ready)
         return -1;
     EnterCriticalSection(&g_lock);
+    side = side_set(SIDE_GAME);         /* step 78 */
     if (g_replay_check) {               /* at once, as without replay, and recorded */
         g_tc_now = &g_tcc;              /* step 78: at once the old way, from guest memory, in a cache of its own */
+        side_set(SIDE_NOW);
         r = draw_exec(d, NULL, NULL, NULL);
+        side_set(SIDE_GAME);
         g_tc_now = &g_tc;
         rec_draw(d);
     } else if (REC_ON()) {
@@ -5186,8 +5303,10 @@ int d3dh_draw_up(const d3dh_draw_t *d)
         g_st.rec_ms += (double)(t1.QuadPart - t0.QuadPart) * 1000.0 / (double)g_qpf.QuadPart;
         g_st.rec_draws++;
     } else {
+        side_set(SIDE_NOW);
         r = draw_exec(d, NULL, NULL, NULL);
     }
+    side_set(side);
     if (d->overlay)                     /* step 65 */
         g_st.overlay_draws++;
     if (d->world_cam)
@@ -5364,6 +5483,7 @@ static void hud_anchor(unsigned first)
     double s = (4.0 / 3.0) / g_rwide, mg = 0.02 * (double)g_hud_margin, dl, dr;
     unsigned i, j, n = 0;
 
+    GAME_SIDE();
     if (logn < 0) {
         const char *e = getenv("RECOMP_D3D_BRIDGE_HUDLOG");
         logn = e ? atoi(e) : 0;
@@ -5432,6 +5552,7 @@ static void rc_forget(unsigned first)
 {
     unsigned i, s;
 
+    REPLAY_SIDE();
     for (i = first; i < g_rs->rc_n; i++)
         if (g_rs->rc[i].kind == RC_DRAW)
             for (s = 0; s < 4; s++)
@@ -5453,10 +5574,12 @@ static void rc_forget(unsigned first)
 void d3dh_overlay_pass(int begin)
 {
     unsigned i;
+    int side;
 
     if (!g_ready)
         return;
     EnterCriticalSection(&g_lock);
+    side = side_set(SIDE_GAME);         /* step 78 */
     if (begin) {
         g_st.overlay_passes++;
         g_ovl_in = 1;
@@ -5468,6 +5591,7 @@ void d3dh_overlay_pass(int begin)
             hud_anchor(g_ovl_first);
         if (g_ovl_defer) {              /* drawn now, as recorded, and forgotten */
             g_ovl_defer = 0;
+            side_set(SIDE_NOW);         /* step 78: frames aren't recorded: at once */
             slot_prepare(g_rs, g_ovl_first);    /* step 78: their textures uploaded and pinned */
             for (i = g_ovl_first; i < g_rs->rc_n; i++) {
                 const rcmd_t *c = &g_rs->rc[i];
@@ -5484,6 +5608,7 @@ void d3dh_overlay_pass(int begin)
         }
         g_ovl_in = g_ovl_anchor = 0;
     }
+    side_set(side);
     LeaveCriticalSection(&g_lock);
 }
 
@@ -5498,6 +5623,7 @@ static ID3D11Texture2D *back_tex(void)
 {
     ID3D11Texture2D *t = NULL;
 
+    REPLAY_SIDE();
     if (g_bb.tex) {
         if (g_bb.ms && g_bb.dirty) {
             ms_resolve(g_bb.tex, g_bb.surf);
@@ -5519,6 +5645,7 @@ static ID3D11Texture2D *frame_tex(void)
 {
     ID3D11Texture2D *src = back_tex(), *out = NULL;
 
+    REPLAY_SIDE();
     if (!src || (g_aa != TWOC_AA_FXAA && g_aa != TWOC_AA_SMAA))
         return src;
     if (aa_post(g_aa, src, &out) != 0) {
@@ -5532,15 +5659,19 @@ static ID3D11Texture2D *frame_tex(void)
 
 int d3dh_copy_back(const d3dh_target_t *dst, const int32_t *rects, const int32_t *points, unsigned n)
 {
-    int ok = 0;
+    int ok = 0, side;
 
     if (!g_ready)
         return -1;
     EnterCriticalSection(&g_lock);
+    side = side_set(SIDE_GAME);         /* step 78 */
     if (REC_ON()) {                     /* step 60: the rects and points copied */
         rcmd_t *c = rc_push(RC_COPY);
-        if (g_replay_check)
+        if (g_replay_check) {
+            side_set(SIDE_NOW);
             ok = copy_exec(dst, rects, points, n);
+            side_set(SIDE_GAME);
+        }
         if (c) {
             c->u.copy.t = *dst;
             c->u.copy.n = n;
@@ -5555,8 +5686,10 @@ int d3dh_copy_back(const d3dh_target_t *dst, const int32_t *rects, const int32_t
             ok = -1;
         }
     } else {
+        side_set(SIDE_NOW);
         ok = copy_exec(dst, rects, points, n);
     }
+    side_set(side);
     LeaveCriticalSection(&g_lock);
     return ok;
 }
@@ -5571,6 +5704,7 @@ static int copy_exec(const d3dh_target_t *dst, const int32_t *rects, const int32
     unsigned k;
     int i, ok = -1;
 
+    REPLAY_SIDE();
     /* D3D11 copies only within a format family, and the guest's A8R8G8B8 is
      * B8G8R8A8 there: the copy is kept as R8G8B8A8, which samples the same. */
     t.format = XDK_FMT_LIN_A8B8G8R8;
@@ -5649,6 +5783,7 @@ static void dump_texture(ID3D11Texture2D *src, ID3D11Texture2D **staging, const 
     int bgra;
     FILE *f;
 
+    REPLAY_SIDE();
     ID3D11Texture2D_GetDesc(src, &desc);
     bgra = desc.Format == DXGI_FORMAT_B8G8R8A8_UNORM || desc.Format == DXGI_FORMAT_B8G8R8X8_UNORM;
     if (!bgra && desc.Format != DXGI_FORMAT_R8G8B8A8_UNORM)
@@ -5726,6 +5861,7 @@ static void dump_targets(const char *path)
     size_t n = strlen(path);
     int i;
 
+    REPLAY_SIDE();
     for (i = 0; i < RT_SLOTS; i++)
         if (g_rt[i].tex) {
             rt_resolve(i);              /* step 58 */
@@ -5739,16 +5875,18 @@ static void dump_targets(const char *path)
 int d3dh_texture_check(const d3dh_tex_t *t, const char *path)
 {
     IDirect3DBaseTexture8 *tex;
-    int ok = -1;
+    int ok = -1, side;
 
     if (!g_ready || t->cube)
         return -1;
     EnterCriticalSection(&g_lock);
+    side = side_set(SIDE_NOW);          /* step 78: a check, at once */
     tex = tex_get(&g_tcc, t);           /* step 78: apart from the cache recorded frames use */
     if (tex) {
         dump_texture(((D3D8Texture *)tex)->d3d11_texture, NULL, path, 1);
         ok = 0;
     }
+    side_set(side);
     LeaveCriticalSection(&g_lock);
     return ok;
 }
@@ -5782,6 +5920,7 @@ static void present_mid_refresh(void)
     double since, left, period_ms, want, deadline;
     LONGLONG d;
 
+    REPLAY_SIDE();
     if (target_ms < 0) {
         const char *e = getenv("RECOMP_D3D_BRIDGE_PRESENT_PHASE");
         target_ms = e && *e ? atof(e) : 1e9;       /* 1e9: half the period, once known */
@@ -5857,6 +5996,7 @@ static void pace(int mid, double slots)
     LARGE_INTEGER now;
     double period, left;
 
+    REPLAY_SIDE();
     if (!g_latency && g_vs_held) {      /* step 63: vsync pacing again after a stall */
         AcquireSRWLockExclusive(&pace_lock);
         if (!freq.QuadPart)
@@ -6018,6 +6158,7 @@ static int blit_init(void)
     D3D11_SAMPLER_DESC sd;
     HRESULT hr;
 
+    REPLAY_SIDE();
     if (g_blit_state)
         return g_blit_state > 0 ? 0 : -1;
     g_blit_state = -1;
@@ -6058,6 +6199,7 @@ static int shot_take(ID3D11Texture2D *src)
 {
     D3D11_TEXTURE2D_DESC sd, hd;
 
+    REPLAY_SIDE();
     ID3D11Texture2D_GetDesc(src, &sd);
     if (g_shot) {
         ID3D11Texture2D_GetDesc(g_shot, &hd);
@@ -6120,6 +6262,7 @@ static int blit_draw(ID3D11Texture2D *dst, unsigned w, unsigned h)
     } old;
     int i;
 
+    REPLAY_SIDE();
     if (!g_shot || blit_init() != 0 ||
         FAILED(ID3D11Device_CreateRenderTargetView(d3d8_GetD3D11Device(), (ID3D11Resource *)dst, NULL, &rtv)))
         return -1;
@@ -6207,6 +6350,7 @@ static void copy_unscaled(ID3D11Texture2D *dst, ID3D11Texture2D *src)
     D3D11_TEXTURE2D_DESC sd;
     D3D11_BOX box;
 
+    REPLAY_SIDE();
     ID3D11Texture2D_GetDesc(src, &sd);
     box.left = box.top = box.front = 0;
     box.right = sd.Width < g_buf_w ? sd.Width : g_buf_w;
@@ -6230,6 +6374,7 @@ static void ic_queue(int on)
     unsigned nb = on ? g_iq_buffers : 2, lat = on ? g_iq_latency : 2;
     HRESULT hr;
 
+    REPLAY_SIDE();
     if (!g_flip || !g_latency || on == g_iq_on)
         return;
     nb = nb < 2 ? 2 : nb > 8 ? 8 : nb;
@@ -6249,6 +6394,7 @@ static void flip_fit(void)
     unsigned w = g_fs ? (unsigned)g_client_w : g_w, h = g_fs ? (unsigned)g_client_h : g_h;
     HRESULT hr;
 
+    REPLAY_SIDE();
     if (!w || !h || (w == g_buf_w && h == g_buf_h))
         return;
     hr = IDXGISwapChain1_ResizeBuffers(g_flip, 0, w, h, DXGI_FORMAT_UNKNOWN, g_flip_flags);
@@ -6348,6 +6494,7 @@ static int recreate_flip(UINT flags)
     HRESULT hr = E_FAIL;
     int attempt;
 
+    REPLAY_SIDE();
     if (FAILED(IDXGISwapChain_GetParent(d3d8_GetSwapChain(), &IID_IDXGIFactory2, (void **)&f)))
         return -1;
     IDXGISwapChain1_Release(g_flip);
@@ -6403,6 +6550,7 @@ void d3dh_set_pacing(unsigned interval, double frame_hz)
 {
     UINT want = interval && frame_hz <= 0 ? DXGI_SWAP_CHAIN_FLAG_FRAME_LATENCY_WAITABLE_OBJECT : 0;
 
+    REPLAY_SIDE();
     if (!g_ready)
         return;
     EnterCriticalSection(&g_lock);
@@ -6436,6 +6584,7 @@ static HRESULT bb_rebuild(unsigned w, unsigned h)
     ID3D11Texture2D *old = NULL, *dst = NULL;
     HRESULT hr = S_OK;
 
+    REPLAY_SIDE();
     if (w != g_dev_w || h != g_dev_h || n > 1) {
         hr = g_dev->lpVtbl->CreateTexture(g_dev, w, h, 1, D3DUSAGE_RENDERTARGET, (D3DFORMAT)XDK_FMT_LIN_A8B8G8R8,
                                           D3DPOOL_DEFAULT, &tex);
@@ -6502,6 +6651,7 @@ static void set_antialiasing(int aa)
     HRESULT hr = S_OK;
     int i;
 
+    REPLAY_SIDE();
     EnterCriticalSection(&g_lock);
     g_aa = aa;
     g_msaa = twoc_aa_samples(aa);
@@ -6529,6 +6679,7 @@ void d3dh_resize(unsigned host_w, unsigned host_h, double wide)
     HRESULT hr;
     int i;
 
+    REPLAY_SIDE();
     if (!g_ready || !host_w || !host_h)
         return;
     EnterCriticalSection(&g_lock);
@@ -6610,6 +6761,7 @@ static void sq_push(const twoc_settings_t *was, const twoc_settings_t *s)
 /* The host side's part of a change, between frames. */
 static void sq_apply_host(const twoc_settings_t *was, const twoc_settings_t *s)
 {
+    REPLAY_SIDE();
     if (!s->fullscreen != !was->fullscreen)
         PostMessageA(g_hwnd, WM_TWOC_FULLSCREEN, s->fullscreen ? 1 : 0, 0);
     if (s->anisotropy != was->anisotropy) {
@@ -6632,6 +6784,7 @@ static void sq_apply_host(const twoc_settings_t *was, const twoc_settings_t *s)
 /* The game side's part, at the game's Swap. */
 static void sq_apply_game(const twoc_settings_t *was, const twoc_settings_t *s)
 {
+    GAME_SIDE();
     if (s->framerate != was->framerate)
         d3dh_set_framerate(s->framerate);       /* step 61: from the frame after this one */
     if (g_apply_game && (s->widescreen != was->widescreen || s->wide_w != was->wide_w || s->wide_h != was->wide_h ||
@@ -6644,9 +6797,11 @@ static void sq_apply_game(const twoc_settings_t *was, const twoc_settings_t *s)
 static void sq_drain(int k)
 {
     twoc_settings_t s, was;
+    int side;
 
     if (g_sq.side[k].gen == g_sq.gen)
         return;
+    side = side_set(k ? SIDE_REPLAY : SIDE_GAME);
     AcquireSRWLockExclusive(&g_sq.lock);
     s = g_sq.s;
     was = g_sq.side[k].was;
@@ -6657,6 +6812,7 @@ static void sq_drain(int k)
         sq_apply_host(&was, &s);
     else
         sq_apply_game(&was, &s);
+    side_set(side);
 }
 
 /* What changed between `was` and `s`: queued for the frames (sq_drain), or
@@ -6715,6 +6871,7 @@ static struct {
 /* The present after Esc: the overlay's first frame. No lock held. */
 static int ovl_begin(void)
 {
+    REPLAY_SIDE();
     EnterCriticalSection(&g_lock);
     if (!g_ovs.ready)
         g_ovs.ready = ovl_init(d3d8_GetD3D11Device(), d3d8_GetD3D11Context()) == 0 && blit_init() == 0 ? 1 : -1;
@@ -6773,6 +6930,7 @@ static int ovl_draw(ID3D11Texture2D *dst, int running)
     ovl_info_t in;
     int r = 0;
 
+    REPLAY_SIDE();
     QueryPerformanceCounter(&now);
     if (g_fs != g_ovs.fs_seen) {        /* Alt+Enter while open */
         g_ovs.fs_seen = g_fs;
@@ -6838,6 +6996,7 @@ static void overlay_pause(void)
 {
     int ok, aa_seen;
 
+    REPLAY_SIDE();
     AcquireSRWLockExclusive(&g_pause_lock);
     if (!g_ovl_open || !g_ready || (!g_ovs.active && ovl_begin() != 0) || !g_ovs.s.pause) {
         ReleaseSRWLockExclusive(&g_pause_lock);
@@ -6916,6 +7075,7 @@ static void replay_check_snap(int restore, ID3D11Texture2D *bb)
     D3D11_TEXTURE2D_DESC a, b;
     int i;
 
+    REPLAY_SIDE();
     for (i = 0; i <= RT_SLOTS; i++) {
         ID3D11Texture2D *t = i == RT_SLOTS ? bb : g_rt[i].tex ? ((D3D8Texture *)g_rt[i].tex)->d3d11_texture : NULL;
         uint32_t data = i == RT_SLOTS ? 0xFFFFFFFFu : g_rt[i].data;
@@ -6984,6 +7144,7 @@ static void replay_check(int after, unsigned swap_no)
     D3D11_MAPPED_SUBRESOURCE ma, mb;
     unsigned x, y, k, diff = 0, maxd = 0, x0 = ~0u, y0 = ~0u, x1 = 0, y1 = 0;
 
+    REPLAY_SIDE();
     if (!bb)
         return;
     ID3D11Texture2D_GetDesc(bb, &d);
@@ -7087,6 +7248,7 @@ static int present_one(double t_s, unsigned swap_no, unsigned interval, unsigned
     int ovl_r = 0;
     ID3D11Texture2D *src;
 
+    REPLAY_SIDE();
     {
         LARGE_INTEGER p0, p1;
         QueryPerformanceCounter(&p0);
@@ -7267,6 +7429,7 @@ static int present_slots(double t_s, unsigned swap_no, double slots, unsigned su
     unsigned n;
     int r = 0;
 
+    REPLAY_SIDE();
     if (g_fp.limiter)
         return present_one(t_s, swap_no, 1, sub, k, mid, slots);
     n = (unsigned)(slots + 0.5);
@@ -7300,6 +7463,7 @@ static int replay_frame(fslot_t *f)
     double t_s = f->t_s;
     fp_frame_t fr;
 
+    REPLAY_SIDE();
     fr.n = 0;
     if (f->rec || g_ia.gen || g_fp.on) {    /* step 60: the frame's recorded commands, drawn now */
         EnterCriticalSection(&g_lock);
@@ -7391,6 +7555,7 @@ static int replay_frame(fslot_t *f)
  * asked for one, the overlay's frame applied, the host side's settings. */
 static void replay_tail(int ovl_r)
 {
+    REPLAY_SIDE();
     if (g_fp.on && (InterlockedExchange(&g_fp_replan, 0) || (g_fp.needs_vrr && g_fp.fs != (g_fs ? 1 : 0)))) {
         unsigned iv;                    /* step 77: variable refresh measured, the display's mode changed, or a */
         double hz;                      /* plan that counts on variable refresh in the other window mode */
@@ -7412,10 +7577,11 @@ static void replay_tail(int ovl_r)
 
 void d3dh_present(double t_s, unsigned swap_no)
 {
-    int ovl_r;
+    int ovl_r, side;
 
     if (!g_ready)
         return;
+    side = side_set(SIDE_REPLAY);       /* step 78: the trigger file's test aids are the replay side's */
     if (g_subdump_trigger[0] && GetFileAttributesA(g_subdump_trigger) != INVALID_FILE_ATTRIBUTES) {
         FILE *f = fopen(g_subdump_trigger, "r");
         unsigned n = 0;
@@ -7484,20 +7650,25 @@ void d3dh_present(double t_s, unsigned swap_no)
         }
     }
     EnterCriticalSection(&g_lock);      /* step 78: the frame recorded, to the replay side */
+    side_set(SIDE_GAME);
     slot_handover(t_s, swap_no);
+    side_set(SIDE_REPLAY);
     LeaveCriticalSection(&g_lock);
     ovl_r = replay_frame(g_ps);
     sq_drain(0);                        /* step 78: settings changed while the overlay held the game */
     if (g_interp_want != g_interp || (g_iq_on && !g_interp)) {     /* step 61: between frames, nothing recorded */
         EnterCriticalSection(&g_lock);
+        side_set(SIDE_GAME);            /* step 78: the game side takes the setting (whether it records) */
         if (!g_rs->rc_n)
             ic_apply();
+        side_set(SIDE_REPLAY);          /* ... the replay side's queue follows */
         if (!g_interp)
             ic_queue(0);
         LeaveCriticalSection(&g_lock);
     }
     replay_tail(ovl_r);
     sq_drain(0);                        /* step 78: then the game side's */
+    side_set(side);
     QueryPerformanceCounter(&g_game_t0);
 }
 
@@ -7508,6 +7679,7 @@ void d3dh_present(double t_s, unsigned swap_no)
 int d3dh_ps_probe(const d3dh_ps_t *ps, uint32_t diffuse, uint32_t specular, const uint32_t tex_argb[4],
                   uint32_t *out_argb)
 {
+    int side = SIDE_ANY;
     static IDirect3DTexture8 *rt_tex, *src[4];
     static IDirect3DSurface8 *rt_surf, *rt_depth;
     static ID3D11Texture2D *staging;
@@ -7532,6 +7704,7 @@ int d3dh_ps_probe(const d3dh_ps_t *ps, uint32_t diffuse, uint32_t specular, cons
     if (!g_ready || !ps || !ps->token)
         return -1;
     EnterCriticalSection(&g_lock);
+    side = side_set(SIDE_NOW);         /* step 78: a check, at once */
     ctx = d3d8_GetD3D11Context();
     if (!rt_tex) {
         D3D11_TEXTURE2D_DESC desc;
@@ -7556,6 +7729,7 @@ int d3dh_ps_probe(const d3dh_ps_t *ps, uint32_t diffuse, uint32_t specular, cons
         if (FAILED(hr)) {
             fprintf(stderr, "[D3DB] host pixel-shader probe unavailable: 0x%08lX\n", (unsigned long)hr);
             rt_tex = NULL;              /* leaks what was made; tried once per call */
+            side_set(side);
             LeaveCriticalSection(&g_lock);
             return -1;
         }
@@ -7612,6 +7786,7 @@ int d3dh_ps_probe(const d3dh_ps_t *ps, uint32_t diffuse, uint32_t specular, cons
         }
     }
     g_st.ps_probes++;
+    side_set(side);
     LeaveCriticalSection(&g_lock);
     return ok;
 }
@@ -7623,6 +7798,7 @@ int d3dh_ps_probe(const d3dh_ps_t *ps, uint32_t diffuse, uint32_t specular, cons
 int d3dh_vs_probe(const d3dh_vprog_t *p, const void *vert, uint32_t stride, const d3dh_draw_t *view, int *px,
                   int *py, uint32_t *argb)
 {
+    int side = SIDE_ANY;
     static IDirect3DTexture8 *rt_tex;
     static IDirect3DSurface8 *rt_surf, *rt_depth;
     static ID3D11Texture2D *staging;
@@ -7642,6 +7818,7 @@ int d3dh_vs_probe(const d3dh_vprog_t *p, const void *vert, uint32_t stride, cons
     if (!g_ready || !w || !h || w > 4096 || h > 4096)
         return -1;
     EnterCriticalSection(&g_lock);
+    side = side_set(SIDE_NOW);         /* step 78: a check, at once */
     ctx = d3d8_GetD3D11Context();
     if (!rt_tex || rt_w != w || rt_h != h) {
         D3D11_TEXTURE2D_DESC desc;
@@ -7671,6 +7848,7 @@ int d3dh_vs_probe(const d3dh_vprog_t *p, const void *vert, uint32_t stride, cons
         if (FAILED(hr)) {
             fprintf(stderr, "[D3DB] host vertex-program probe unavailable: 0x%08lX\n", (unsigned long)hr);
             rt_tex = NULL;              /* leaks what was made; tried again at the next call */
+            side_set(side);
             LeaveCriticalSection(&g_lock);
             return -1;
         }
@@ -7722,6 +7900,7 @@ int d3dh_vs_probe(const d3dh_vprog_t *p, const void *vert, uint32_t stride, cons
         }
     }
     g_st.vs_probes++;
+    side_set(side);
     LeaveCriticalSection(&g_lock);
     return found;
 }
