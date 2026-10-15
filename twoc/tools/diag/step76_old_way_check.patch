@@ -1,0 +1,98 @@
+diff --git a/twoc/src/d3d_host.c b/twoc/src/d3d_host.c
+index 09e1eb0..010a888 100644
+--- a/twoc/src/d3d_host.c
++++ b/twoc/src/d3d_host.c
+@@ -1832,9 +1832,13 @@ static int vs_bind(const d3dh_vprog_t *p)
+ 
+     if (i < 0 || !g_vs[i].handle)
+         return -1;
+-    if (!g_vs_consts_valid) {
+-        lo = 0;
+-        hi = 191;
++    if (!g_vs_consts_valid || d3d8_tmp_old) {    /* TMP step 76: the old way compared all 192 */
++        for (k = 0; k < 192; k++)
++            if (!g_vs_consts_valid || memcmp(&g_vs_consts[4 * k], &p->consts[4 * k], 16) != 0) {
++                if (lo < 0)
++                    lo = k;
++                hi = k;
++            }
+     } else {
+         int all = g_vs[i].rel_base >= 0;
+         for (w = 0; w < 6; w++) {
+@@ -1993,7 +1997,7 @@ static int draw_exec(const d3dh_draw_t *d, IDirect3DBaseTexture8 *const *pin, co
+             verts = rescale_rhw_map(d->verts, d->vert_count, d->stride, &vp, &map);
+         }
+     }
+-    if (verts != d->verts)              /* made for this pass (rescale_rhw): uploaded each time */
++    if (verts != d->verts || d3d8_tmp_old)      /* made for this pass (rescale_rhw): uploaded each time */
+         kept = NULL;
+     if (d->indices) {                   /* xbox_d3d8 uploads vert_count vertices from `verts` */
+         hr = kept ? d3d8_DrawIndexedPrimitiveUPKept((D3DPRIMITIVETYPE)d->prim, d->vert_count, d->prim_count,
+@@ -4107,7 +4111,7 @@ static void ic_draw(const rcmd_t *c)
+          * written), so only a camera-position register among c96-c99 or the
+          * bones, where a later write would read an earlier one, takes the
+          * copy. */
+-        in_place = 1;
++        in_place = !d3d8_tmp_old;       /* TMP step 76 */
+         for (n = 0; n < c->u.draw.n_cpos; n++)
+             if ((c->u.draw.cpos[n] >= 96 && c->u.draw.cpos[n] < 100) ||
+                 (c->u.draw.cpos[n] >= IC_BONE_BASE && c->u.draw.cpos[n] < IC_BONE_BASE + IC_BONE_REGS))
+@@ -4294,7 +4298,9 @@ int d3dh_draw_up(const d3dh_draw_t *d)
+         return -1;
+     EnterCriticalSection(&g_lock);
+     if (g_replay_check) {               /* at once, as without replay, and recorded */
++        d3d8_tmp_old = 1;               /* TMP step 76: the old way at once, the new one replayed */
+         r = draw_exec(d, NULL, NULL, NULL);
++        d3d8_tmp_old = 0;
+         rec_draw(d);
+     } else if (REC_ON()) {
+         LARGE_INTEGER t0, t1;
+@@ -6108,6 +6114,27 @@ static void replay_check(int after, unsigned swap_no)
+     }
+ }
+ 
++/* TMP step 76: a sub-frame pass, with TMP_ICHECK drawn the old way and the
++ * new way from the same targets and compared. */
++static int g_tmp_icheck = -1;
++static void tmp_pass(int interp, unsigned swap_no)
++{
++    if (g_tmp_icheck < 0) {
++        const char *e = getenv("TMP_ICHECK");
++        g_tmp_icheck = e && *e == '1';
++    }
++    if (!g_tmp_icheck) {
++        replay_pass(interp);
++        return;
++    }
++    d3d8_tmp_old = 1;
++    replay_pass(interp);
++    d3d8_tmp_old = 0;
++    replay_check(0, swap_no);           /* kept, the targets as the pass found them */
++    replay_pass(interp);
++    replay_check(1, swap_no);           /* compared; where the next one starts */
++}
++
+ /* One present: the back buffer (as drawn now) dumped when due and shown at
+  * DXGI `interval`, after its wait. Step 61: sub-frame `sub` of `k` (k 1: the
+  * frame itself; only the last of a frame is a frame's dump). Returns the
+@@ -6332,7 +6359,7 @@ void d3dh_present(double t_s, unsigned swap_no)
+         }
+         if (k > 1) {
+             ic_sub(g_interp_t0 ? 0.0 : 1.0 / k);
+-            replay_pass(1);             /* the first sub-frame */
++            tmp_pass(1, swap_no);       /* the first sub-frame */
+         } else {
+             if (g_replay_check)
+                 replay_check(0, swap_no);
+@@ -6350,9 +6377,9 @@ void d3dh_present(double t_s, unsigned swap_no)
+                 EnterCriticalSection(&g_lock);
+                 if (sub < k) {
+                     ic_sub((double)(sub - g_interp_t0) / k);
+-                    replay_pass(1);
++                    tmp_pass(1, swap_no);
+                 } else {
+-                    replay_pass(0);     /* t = 1: the frame as recorded */
++                    tmp_pass(0, swap_no);   /* t = 1: the frame as recorded */
+                     replay_done();
+                     ic_end();
+                 }

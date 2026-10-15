@@ -1,0 +1,107 @@
+diff --git a/src/d3d/d3d8_combiners.c b/src/d3d/d3d8_combiners.c
+index b466e74..75f7460 100644
+--- a/src/d3d/d3d8_combiners.c
++++ b/src/d3d/d3d8_combiners.c
+@@ -1198,7 +1198,7 @@ BOOL d3d8_combiners_prepare_draw(void)
+             cb->alpha_only[i] = format == D3DFMT_A8 || format == D3DFMT_LIN_A8;
+         }
+ 
+-        if (g_cb_held_by != g_combiner_cb || memcmp(&g_cb_held, cb, sizeof(*cb)) != 0) {
++        if (d3d8_tmp_old || g_cb_held_by != g_combiner_cb || memcmp(&g_cb_held, cb, sizeof(*cb)) != 0) {
+             hr = ID3D11DeviceContext_Map(ctx, (ID3D11Resource *)g_combiner_cb,
+                                         0, D3D11_MAP_WRITE_DISCARD, 0, &mapped);
+             if (SUCCEEDED(hr)) {
+diff --git a/src/d3d/d3d8_device.c b/src/d3d/d3d8_device.c
+index 7ebc781..fd05588 100644
+--- a/src/d3d/d3d8_device.c
++++ b/src/d3d/d3d8_device.c
+@@ -895,6 +895,7 @@ static HRESULT __stdcall dev_DrawPrimitive(IDirect3DDevice8 *self, D3DPRIMITIVET
+ {
+     (void)self;
+     g_d3d_draw_count++;
++    if (d3d8_tmp_old) d3d8_bound_reset();   /* TMP */
+     D3D11_PRIMITIVE_TOPOLOGY topology;
+     UINT vertex_count;
+ 
+@@ -915,6 +916,7 @@ static HRESULT __stdcall dev_DrawIndexedPrimitive(IDirect3DDevice8 *self, D3DPRI
+ {
+     (void)self; (void)MinVertexIndex; (void)NumVertices;
+     g_d3d_draw_count++;
++    if (d3d8_tmp_old) d3d8_bound_reset();   /* TMP */
+     D3D11_PRIMITIVE_TOPOLOGY topology;
+     UINT index_count;
+ 
+@@ -937,6 +939,7 @@ static HRESULT draw_primitive_up(D3DPRIMITIVETYPE PrimitiveType, UINT PrimitiveC
+                                  UINT VertexStreamZeroStride, D3D8UpKept *kept)
+ {
+     g_d3d_draw_count++;
++    if (d3d8_tmp_old) d3d8_bound_reset();   /* TMP */
+     D3D11_PRIMITIVE_TOPOLOGY topology;
+     UINT vertex_count, vb_size, ring_offset;
+     const void *draw_data = pVertexData;
+@@ -1004,6 +1007,7 @@ static HRESULT draw_indexed_primitive_up(D3DPRIMITIVETYPE PrimitiveType, UINT Nu
+                                          const void *pVertexData, UINT VertexStreamZeroStride, D3D8UpKept *kept)
+ {
+     g_d3d_draw_count++;
++    if (d3d8_tmp_old) d3d8_bound_reset();   /* TMP */
+     D3D11_PRIMITIVE_TOPOLOGY topology;
+     UINT index_count, vb_size, ib_size, vb_offset, ib_offset;
+     UINT idx_bytes;
+diff --git a/src/d3d/d3d8_internal.h b/src/d3d/d3d8_internal.h
+index d54c99d..0e26bd8 100644
+--- a/src/d3d/d3d8_internal.h
++++ b/src/d3d/d3d8_internal.h
+@@ -346,6 +346,7 @@ typedef struct {
+ } D3D8Bound;
+ 
+ extern D3D8Bound g_d3d8_bound;
++extern int d3d8_tmp_old;   /* TMP step 76 check: every bind and upload made, as before 18.79 */
+ void d3d8_bound_reset(void);
+ 
+ static __inline void d3d8_bind_vs(ID3D11DeviceContext *ctx, ID3D11VertexShader *vs)
+diff --git a/src/d3d/d3d8_shaders.c b/src/d3d/d3d8_shaders.c
+index de5517e..6e5abfe 100644
+--- a/src/d3d/d3d8_shaders.c
++++ b/src/d3d/d3d8_shaders.c
+@@ -1185,7 +1185,7 @@ static void ff_ps_prepare_draw(ID3D11DeviceContext *ctx)
+             pc->stage_alpha[stage][1] = tss[D3DTSS_ALPHAARG2] ? tss[D3DTSS_ALPHAARG2] : D3DTA_CURRENT;
+         }
+ 
+-        if (g_ps_held_by != g_ps_cb || memcmp(&g_ps_held, pc, sizeof(*pc)) != 0) {
++        if (d3d8_tmp_old || g_ps_held_by != g_ps_cb || memcmp(&g_ps_held, pc, sizeof(*pc)) != 0) {
+             hr = ID3D11DeviceContext_Map(ctx, (ID3D11Resource *)g_ps_cb, 0, D3D11_MAP_WRITE_DISCARD, 0, &mapped);
+             if (SUCCEEDED(hr)) {
+                 memcpy(mapped.pData, pc, sizeof(*pc));
+@@ -1211,6 +1211,11 @@ void d3d8_shaders_prepare_draw(DWORD handle)
+      * programmable: the combiners' shader when one is set and it has one,
+      * else the fixed-function one (18.79: that was built and bound at every
+      * draw, then replaced by the combiners'). */
++    if (d3d8_tmp_old) {                 /* TMP: as before, fixed function then the combiners' */
++        ff_ps_prepare_draw(ctx);
++        d3d8_combiners_prepare_draw();
++        return;
++    }
+     if (!d3d8_combiners_prepare_draw())
+         ff_ps_prepare_draw(ctx);
+ }
+diff --git a/src/d3d/d3d8_states.c b/src/d3d/d3d8_states.c
+index e72bc68..9d11ea6 100644
+--- a/src/d3d/d3d8_states.c
++++ b/src/d3d/d3d8_states.c
+@@ -40,6 +40,7 @@ static BOOL g_sampler_last_ok[4];
+ 
+ /* What the draws last bound (d3d8_internal.h). */
+ D3D8Bound g_d3d8_bound;
++int d3d8_tmp_old;
+ 
+ void d3d8_bound_reset(void)
+ {
+@@ -326,7 +327,7 @@ void d3d8_states_apply_sampler(DWORD stage)
+ 
+     /* The stage's description as at its last draw, and its object still
+      * bound: nothing to do (18.79). */
+-    if (g_sampler_last_ok[stage] && g_d3d8_bound.samp[stage] == g_sampler_states[stage] &&
++    if (!d3d8_tmp_old && g_sampler_last_ok[stage] && g_d3d8_bound.samp[stage] == g_sampler_states[stage] &&
+         memcmp(&g_sampler_last[stage], &sd, sizeof(sd)) == 0)
+         return;
+ 
