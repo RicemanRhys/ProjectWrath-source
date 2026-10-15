@@ -1,0 +1,423 @@
+diff --git a/twoc/src/d3d_bridge.c b/twoc/src/d3d_bridge.c
+index 3c5e5b8..f8b0988 100644
+--- a/twoc/src/d3d_bridge.c
++++ b/twoc/src/d3d_bridge.c
+@@ -4406,6 +4406,8 @@ static void mirror_draw_vertices(const d3db_args_t *a)
+  * ticks: draws, swaps (dump, copy, present), everything else; and, within
+  * draws, immediate ones (End) on their own (step 35). */
+ static volatile LONG64 g_mirror_ticks[4];
++LONG64 d3db_fprof_ticks(int i) { return g_mirror_ticks[i]; }   /* step 75 FPROF */
++extern volatile int twoc_fp_phase;
+ 
+ /* Gaps between guest swaps this interval (18.46): the stutter a player
+  * sees, counted in the log so a playtest's own log measures it. */
+@@ -4934,6 +4936,7 @@ void d3db_leave(int id, d3db_args_t *a)
+     if (d3db_host_on && id != D3DB_DATA2F && id != D3DB_DATA4F) {  /* those: d3db_vertex_data */
+         LARGE_INTEGER t0, t1;
+         QueryPerformanceCounter(&t0);
++        twoc_fp_phase = 7;
+         switch (id) {
+         case D3DB_CREATE_DEVICE: mirror_create_device(a); break;
+         case D3DB_CLEAR:         mirror_clear(a);         break;
+@@ -4945,6 +4948,7 @@ void d3db_leave(int id, d3db_args_t *a)
+         case D3DB_COPYRECTS:     mirror_copy_rects(a);    break;
+         }
+         QueryPerformanceCounter(&t1);
++        twoc_fp_phase = 0;
+         InterlockedAdd64(&g_mirror_ticks[id == D3DB_DRAW_UP || id == D3DB_DRAW_INDEXED || id == D3DB_END ||
+                                          id == D3DB_DRAW ? 0 : id == D3DB_SWAP ? 1 : 2],
+                          t1.QuadPart - t0.QuadPart);
+diff --git a/twoc/src/d3d_host.c b/twoc/src/d3d_host.c
+index 54bae68..6329620 100644
+--- a/twoc/src/d3d_host.c
++++ b/twoc/src/d3d_host.c
+@@ -229,6 +229,15 @@ static unsigned g_rp_n[2];              /* step 74: those passes */
+ static volatile LONG g_iadapt = 1;      /* step 74: 0 always the display's count; step 75: the setting (RECOMP_FRAMERATE_ADAPTIVE), live */
+ static LONG g_iadapt_seen = 1;          /* step 75: g_iadapt as ia_frame last applied it */
+ static unsigned g_ifixed;               /* step 74: RECOMP_D3D_BRIDGE_INTERP_FIXED=K, always K sub-frames (a measurement aid) */
++static int g_fp_on;                     /* step 75 FPROF (defined below) */
++static void m4_mul(const double *a, const double *b, double *o);
++static unsigned g_fp_cull_n, g_fp_cull_off, g_fp_cull_v, g_fp_cull_voff;
++static unsigned g_fp_sub;
++static double g_fp_rp[9];
++static unsigned g_fp_cmds;
++static double fp_ms(LARGE_INTEGER a, LARGE_INTEGER b);
++static void fp_ts(int tag);
++volatile int twoc_fp_phase;             /* step 75 FPROF: what the game thread is doing, for hs2.py */
+ 
+ /* Step 54: borderless fullscreen. g_fs and the client size are the window
+  * thread's; g_buf_w x g_buf_h is the visible swap chain's, changed only by a
+@@ -2044,6 +2053,57 @@ static int rec_draw(const d3dh_draw_t *d)
+     if (g_interp) {                     /* step 61 */
+         o->camera = d->camera ? (const float *)ra_dup(d->camera, 32 * sizeof(float)) : NULL;
+         ic_record(c);
++        if (g_fp_on > 0 && c->u.draw.cls == 1 /* IC_VP */ && o->verts && o->vprog && o->stride >= 16) {  /* step 75 FPROF: off screen? */
++            int si = vs_slot(o->vprog);
++            if (si >= 0 && (g_vs[si].inputs & 1)) {
++                const float *k = o->vprog->consts;
++                unsigned vi, all = 0x3F;
++                for (vi = 0; vi < o->vert_count && all; vi++) {
++                    const float *v = (const float *)((const uint8_t *)o->verts + (size_t)vi * o->stride);
++                    float cl[4];
++                    unsigned j, f = 0;
++                    for (j = 0; j < 4; j++)
++                        cl[j] = v[0] * k[4 * (96 + j)] + v[1] * k[4 * (96 + j) + 1] + v[2] * k[4 * (96 + j) + 2] +
++                                v[3] * k[4 * (96 + j) + 3];
++                    f |= (cl[0] < -cl[3]) | (cl[0] > cl[3]) << 1 | (cl[1] < -cl[3]) << 2 | (cl[1] > cl[3]) << 3 |
++                         (cl[2] < 0) << 4 | (cl[2] > cl[3]) << 5;
++                    all &= f;
++                }
++                g_fp_cull_n++;
++                g_fp_cull_v += o->vert_count;
++                if (all) {
++                    g_fp_cull_off++;
++                    g_fp_cull_voff += o->vert_count;
++                }
++            }
++        }
++        if (g_fp_on > 0 && (c->u.draw.cls == 2 || c->u.draw.cls == 3) && o->verts && o->ff && o->stride >= 12) {
++            double w[16], v[16], pj[16], wv[16], m[16];
++            unsigned vi, all = 0x3F, i;
++            for (i = 0; i < 16; i++) {
++                w[i] = o->ff->world[i];
++                v[i] = o->ff->view[i];
++                pj[i] = o->ff->proj[i];
++            }
++            m4_mul(w, v, wv);
++            m4_mul(wv, pj, m);
++            for (vi = 0; vi < o->vert_count && all; vi++) {
++                const float *p3 = (const float *)((const uint8_t *)o->verts + (size_t)vi * o->stride);
++                double cl[4];
++                unsigned j, f;
++                for (j = 0; j < 4; j++)
++                    cl[j] = p3[0] * m[j] + p3[1] * m[4 + j] + p3[2] * m[8 + j] + m[12 + j];
++                f = (cl[0] < -cl[3]) | (cl[0] > cl[3]) << 1 | (cl[1] < -cl[3]) << 2 | (cl[1] > cl[3]) << 3 |
++                    (cl[2] < 0) << 4 | (cl[2] > cl[3]) << 5;
++                all &= f;
++            }
++            g_fp_cull_n++;
++            g_fp_cull_v += o->vert_count;
++            if (all) {
++                g_fp_cull_off++;
++                g_fp_cull_voff += o->vert_count;
++            }
++        }
+     }
+     return 0;
+ }
+@@ -2059,6 +2119,7 @@ static void replay_pass(int interp)
+     unsigned i;
+ 
+     QueryPerformanceCounter(&t0);
++    twoc_fp_phase = 3;
+     for (i = 0; i < g_rc_n; i++) {
+         const rcmd_t *c = &g_rc[i];
+         switch (c->kind) {
+@@ -2084,6 +2145,11 @@ static void replay_pass(int interp)
+     g_rp_ms[interp != 0] += (double)(t1.QuadPart - t0.QuadPart) * 1000.0 / (double)g_qpf.QuadPart;    /* step 74 */
+     g_rp_cmds[interp != 0] += g_rc_n;
+     g_rp_n[interp != 0]++;
++    if (g_fp_on > 0 && g_fp_sub >= 1 && g_fp_sub <= 8) {   /* step 75 FPROF */
++        fp_ts(10 + (int)g_fp_sub);
++        g_fp_rp[g_fp_sub] += fp_ms(t0, t1);
++        g_fp_cmds = g_rc_n;
++    }
+ }
+ 
+ /* The frame's commands are done with: release what they held, forget them. */
+@@ -2862,6 +2928,117 @@ static void ia_mark(void)
+     g_ia.kused = 0;
+ }
+ 
++
++/* ── Step 75 measurement (not part of the game): RECOMP_D3D_BRIDGE_FPROF=FILE ──
++ * One CSV line a guest frame: the game's window (from the last present's
++ * return to this present: wall, this thread's CPU, the mirror's draws/other,
++ * the recording), then the present: ia_frame, ic_begin (pairing), each
++ * pass's replay, and each sub-frame's pace wait, copy (frame_tex, dumps,
++ * the copy to the flip chain, the overlay), Present call and the rest; GPU
++ * timestamps around each pass and copy (ms after the first pass began). */
++LONG64 d3db_fprof_ticks(int i);
++static FILE *g_fp;
++static int g_fp_on_init = 0;
++static LARGE_INTEGER g_fp_exit;         /* the last present's return */
++static ULONG64 g_fp_cyc_exit;
++static LONG64 g_fp_mt[3];
++static double g_fp_rec0;
++static double g_fp_pace[9], g_fp_copy[9], g_fp_pres[9], g_fp_post[9];
++static double g_fp_ia, g_fp_begin, g_fp_pair0;
++static unsigned g_fp_draws;
++#define FP_TS 20
++static ID3D11Query *g_fp_q[8][FP_TS + 1];   /* [frame ring][0 disjoint, 1.. timestamps] */
++static unsigned g_fp_qn[8], g_fp_qswap[8], g_fp_qf;
++static unsigned char g_fp_qtag[8][FP_TS];
++static FILE *g_fpg;
++
++static double fp_ms(LARGE_INTEGER a, LARGE_INTEGER b)
++{
++    return (double)(b.QuadPart - a.QuadPart) * 1000.0 / (double)g_qpf.QuadPart;
++}
++
++static int fp_on(void)
++{
++    if (!g_fp_on_init) {
++        const char *e = getenv("RECOMP_D3D_BRIDGE_FPROF");
++        g_fp_on_init = 1;
++        g_fp_on = 0;
++        if (e && *e) {
++            char gp[600];
++            g_fp = fopen(e, "w");
++            snprintf(gp, sizeof(gp), "%s.gpu", e);
++            g_fpg = fopen(gp, "w");
++            g_fp_on = g_fp != NULL;
++            if (g_fp)
++                fprintf(g_fp, "swap,k,cmds,draws,game_wall,game_cpu,mirror_draw,mirror_other,rec,present_wall,present_cpu,"
++                        "ia,begin,pair,rp1,rp2,rp3,rp4,pace1,pace2,pace3,pace4,copy1,copy2,copy3,copy4,"
++                        "pres1,pres2,pres3,pres4,post1,post2,post3,post4,vp_draws,vp_off,vp_verts,vp_verts_off\n");
++            if (g_fpg)
++                fprintf(g_fpg, "swap,tag:ms...\n");
++        }
++    }
++    return g_fp_on > 0;
++}
++
++/* A GPU timestamp with a tag (1-4 pass s began, 11-14 pass s ended, 21-24 copy s ended). */
++static void fp_ts(int tag)
++{
++    ID3D11Device *dev = d3d8_GetD3D11Device();
++    ID3D11DeviceContext *ctx = d3d8_GetD3D11Context();
++    unsigned f = g_fp_qf & 7, n = g_fp_qn[f];
++    D3D11_QUERY_DESC qd;
++
++    if (!g_fpg || n >= FP_TS || !dev)
++        return;
++    qd.MiscFlags = 0;
++    if (!g_fp_q[f][0]) {
++        qd.Query = D3D11_QUERY_TIMESTAMP_DISJOINT;
++        ID3D11Device_CreateQuery(dev, &qd, &g_fp_q[f][0]);
++    }
++    if (!g_fp_q[f][n + 1]) {
++        qd.Query = D3D11_QUERY_TIMESTAMP;
++        ID3D11Device_CreateQuery(dev, &qd, &g_fp_q[f][n + 1]);
++    }
++    if (n == 0)
++        ID3D11DeviceContext_Begin(ctx, (ID3D11Asynchronous *)g_fp_q[f][0]);
++    ID3D11DeviceContext_End(ctx, (ID3D11Asynchronous *)g_fp_q[f][n + 1]);
++    g_fp_qtag[f][n] = (unsigned char)tag;
++    g_fp_qn[f] = n + 1;
++}
++
++/* The frame's GPU queries closed; the one 4 frames back read if it is done. */
++static void fp_ts_end(unsigned swap_no)
++{
++    ID3D11DeviceContext *ctx = d3d8_GetD3D11Context();
++    unsigned f = g_fp_qf & 7, o, i;
++
++    if (!g_fpg)
++        return;
++    if (g_fp_qn[f])
++        ID3D11DeviceContext_End(ctx, (ID3D11Asynchronous *)g_fp_q[f][0]);
++    g_fp_qswap[f] = swap_no;
++    g_fp_qf++;
++    o = (g_fp_qf + 3) & 7;              /* 5 frames back */
++    if (g_fp_qn[o]) {
++        D3D11_QUERY_DATA_TIMESTAMP_DISJOINT dj;
++        UINT64 t[FP_TS];
++        int ok = ID3D11DeviceContext_GetData(ctx, (ID3D11Asynchronous *)g_fp_q[o][0], &dj, sizeof(dj),
++                                             D3D11_ASYNC_GETDATA_DONOTFLUSH) == S_OK;
++        for (i = 0; ok && i < g_fp_qn[o]; i++)
++            ok = ID3D11DeviceContext_GetData(ctx, (ID3D11Asynchronous *)g_fp_q[o][i + 1], &t[i], sizeof(t[i]),
++                                             D3D11_ASYNC_GETDATA_DONOTFLUSH) == S_OK;
++        if (ok && !dj.Disjoint && dj.Frequency) {
++            fprintf(g_fpg, "%u", g_fp_qswap[o]);
++            for (i = 0; i < g_fp_qn[o]; i++)
++                fprintf(g_fpg, ",%u:%.3f", g_fp_qtag[o][i], (double)(t[i] - t[0]) * 1000.0 / (double)dj.Frequency);
++            fprintf(g_fpg, "\n");
++        } else {
++            fprintf(g_fpg, "%u,unread\n", g_fp_qswap[o]);
++        }
++        g_fp_qn[o] = 0;
++    }
++}
++
+ /* At each present while interpolating (and once after): the frame before
+  * measured, and the count for this one chosen. Called with g_lock held. */
+ static void ia_frame(unsigned swap_no)
+@@ -4215,7 +4392,9 @@ int d3dh_draw_up(const d3dh_draw_t *d)
+     } else if (REC_ON()) {
+         LARGE_INTEGER t0, t1;
+         QueryPerformanceCounter(&t0);
++        twoc_fp_phase = 1;
+         r = rec_draw(d);
++        twoc_fp_phase = 7;
+         QueryPerformanceCounter(&t1);
+         g_st.rec_ms += (double)(t1.QuadPart - t0.QuadPart) * 1000.0 / (double)g_qpf.QuadPart;
+         g_st.rec_draws++;
+@@ -6035,14 +6214,20 @@ static int present_one(double t_s, unsigned swap_no, unsigned interval, unsigned
+     int ovl_r = 0;
+     ID3D11Texture2D *src;
+ 
++    LARGE_INTEGER fq0, fq1, fq2, fq3;   /* step 75 FPROF */
++    unsigned fs = sub >= 1 && sub <= 8 ? sub : 1;
+     {
+         LARGE_INTEGER p0, p1;
+         QueryPerformanceCounter(&p0);
++        twoc_fp_phase = 6;
+         pace(!k || k == 1 || g_imid);
++        twoc_fp_phase = 4;
+         QueryPerformanceCounter(&p1);
+         g_ia.pace_ms += (double)(p1.QuadPart - p0.QuadPart) * 1000.0 / (double)g_qpf.QuadPart;   /* step 74 */
++        g_fp_pace[fs] += fp_ms(p0, p1);
+     }
+     EnterCriticalSection(&g_lock);
++    QueryPerformanceCounter(&fq0);
+     src = frame_tex();                  /* step 58: resolved, and through FXAA or SMAA if one is on */
+     now = GetTickCount64();
+     if (g_dump_prefix[0] && sub && swap_no >= g_subdump_from && swap_no <= g_subdump_to) {
+@@ -6081,7 +6266,13 @@ static int present_one(double t_s, unsigned swap_no, unsigned interval, unsigned
+         if (dst)
+             ID3D11Texture2D_Release(dst);
+     }
++    if (g_fp_on > 0)
++        fp_ts(20 + fs);
++    QueryPerformanceCounter(&fq1);
++    twoc_fp_phase = 5;
+     hr = IDXGISwapChain1_Present(g_flip, interval, 0);
++    twoc_fp_phase = 4;
++    QueryPerformanceCounter(&fq2);
+     g_st.presents++;
+     {   /* How many DWM compositions apart consecutive presents land: the
+          * index of the first one after each present, from DWM's timing (its
+@@ -6190,6 +6381,10 @@ static int present_one(double t_s, unsigned swap_no, unsigned interval, unsigned
+         fprintf(stderr, "[D3DB] host Present returned status 0x%08lX\n", (unsigned long)hr);
+     if (sub == k)
+         g_frame_work = 0;
++    QueryPerformanceCounter(&fq3);
++    g_fp_copy[fs] += fp_ms(fq0, fq1);
++    g_fp_pres[fs] += fp_ms(fq1, fq2);
++    g_fp_post[fs] += fp_ms(fq2, fq3);
+     LeaveCriticalSection(&g_lock);
+     return ovl_r;
+ }
+@@ -6198,9 +6393,36 @@ void d3dh_present(double t_s, unsigned swap_no)
+ {
+     int ovl_r = 0;
+     unsigned k = 1, sub;
++    LARGE_INTEGER fe0, fe1;             /* step 75 FPROF */
++    ULONG64 fc0 = 0, fc1 = 0;
++    double f_game = 0, f_gcpu = 0, f_md = 0, f_mo = 0, f_rec = 0;
+ 
+     if (!g_ready)
+         return;
++    QueryPerformanceCounter(&fe0);
++    twoc_fp_phase = 2;
++    if (fp_on()) {
++        LONG64 mt[3];
++        int i;
++        QueryThreadCycleTime(GetCurrentThread(), &fc0);
++        for (i = 0; i < 3; i++)
++            mt[i] = d3db_fprof_ticks(i);
++        if (g_fp_exit.QuadPart) {
++            f_game = fp_ms(g_fp_exit, fe0);
++            f_gcpu = (double)(fc0 - g_fp_cyc_exit) / 4.2e6;      /* cycles at ~4.2 GHz, ms */
++            f_md = (double)(mt[0] - g_fp_mt[0]) * 1000.0 / (double)g_qpf.QuadPart;
++            f_mo = (double)(mt[2] - g_fp_mt[2]) * 1000.0 / (double)g_qpf.QuadPart;
++        }
++        f_rec = g_st.rec_ms - g_fp_rec0;
++        memset(g_fp_rp, 0, sizeof(g_fp_rp));
++        memset(g_fp_pace, 0, sizeof(g_fp_pace));
++        memset(g_fp_copy, 0, sizeof(g_fp_copy));
++        memset(g_fp_pres, 0, sizeof(g_fp_pres));
++        memset(g_fp_post, 0, sizeof(g_fp_post));
++        g_fp_ia = g_fp_begin = 0;
++        g_fp_pair0 = g_st.pair_ms;
++        g_fp_draws = g_st.draws;
++    }
+     if (g_subdump_trigger[0] && GetFileAttributesA(g_subdump_trigger) != INVALID_FILE_ATTRIBUTES) {
+         FILE *f = fopen(g_subdump_trigger, "r");
+         unsigned n = 0;
+@@ -6236,16 +6458,25 @@ void d3dh_present(double t_s, unsigned swap_no)
+     if (REC_ON() || g_ia.kmax) {        /* step 60: the frame's recorded commands, drawn now */
+         EnterCriticalSection(&g_lock);
+         ic_queue(g_interp && ic_k_possible());      /* step 61 */
++        LARGE_INTEGER fb0, fb1, fb2;
++        QueryPerformanceCounter(&fb0);
+         if (g_interp || g_ia.kmax)
+             ia_frame(swap_no);          /* step 74: the frame before measured, this one's count chosen */
++        QueryPerformanceCounter(&fb1);
++        g_fp_ia = fp_ms(fb0, fb1);
+         if (g_interp) {
+             int held = g_ovl_open && (!g_ovs.active || g_ovs.s.pause);
+             k = ic_begin(swap_no, held);    /* step 61 */
++            QueryPerformanceCounter(&fb2);
++            g_fp_begin = fp_ms(fb1, fb2);
+             if (!held && ic_k_possible()) {
+                 g_ia.kused = k;         /* step 74: this frame is measured at the next present */
+                 g_st.interp_at[ia_k(ic_k_possible()) <= 4 ? ia_k(ic_k_possible()) : 4]++;
+             }
+         }
++        g_fp_sub = 1;
++        if (g_fp_on > 0)
++            fp_ts(1);
+         if (k > 1) {
+             ic_sub(g_interp_t0 ? 0.0 : 1.0 / k);
+             replay_pass(1);             /* the first sub-frame */
+@@ -6264,6 +6495,9 @@ void d3dh_present(double t_s, unsigned swap_no)
+         for (sub = 1; sub <= k; sub++) {
+             if (sub > 1) {
+                 EnterCriticalSection(&g_lock);
++                g_fp_sub = sub;
++                if (g_fp_on > 0)
++                    fp_ts(sub);
+                 if (sub < k) {
+                     ic_sub((double)(sub - g_interp_t0) / k);
+                     replay_pass(1);
+@@ -6296,6 +6530,48 @@ void d3dh_present(double t_s, unsigned swap_no)
+             ic_queue(0);
+         LeaveCriticalSection(&g_lock);
+     }
++    if (g_fp_on > 0) {                  /* step 75 FPROF: the frame's line */
++        double pw, pc;
++        int i;
++        EnterCriticalSection(&g_lock);
++        fp_ts_end(swap_no);
++        LeaveCriticalSection(&g_lock);
++        QueryPerformanceCounter(&fe1);
++        QueryThreadCycleTime(GetCurrentThread(), &fc1);
++        pw = fp_ms(fe0, fe1);
++        pc = (double)(fc1 - fc0) / 4.2e6;
++        fprintf(g_fp, "%u,%u,%u,%u,%.3f,%.3f,%.3f,%.3f,%.3f,%.3f,%.3f,%.3f,%.3f,%.3f", swap_no, k, g_fp_cmds,
++                g_st.draws - g_fp_draws, f_game, f_gcpu, f_md, f_mo, f_rec, pw, pc, g_fp_ia, g_fp_begin,
++                g_st.pair_ms - g_fp_pair0);
++        for (i = 1; i <= 4; i++)
++            fprintf(g_fp, ",%.3f", g_fp_rp[i]);
++        for (i = 1; i <= 4; i++)
++            fprintf(g_fp, ",%.3f", g_fp_pace[i]);
++        for (i = 1; i <= 4; i++)
++            fprintf(g_fp, ",%.3f", g_fp_copy[i]);
++        for (i = 1; i <= 4; i++)
++            fprintf(g_fp, ",%.3f", g_fp_pres[i]);
++        for (i = 1; i <= 4; i++)
++            fprintf(g_fp, ",%.3f", g_fp_post[i]);
++        fprintf(g_fp, ",%u,%u,%u,%u\n", g_fp_cull_n, g_fp_cull_off, g_fp_cull_v, g_fp_cull_voff);
++        g_fp_cull_n = g_fp_cull_off = g_fp_cull_v = g_fp_cull_voff = 0;
++        if ((swap_no & 63) == 0) {
++            fflush(g_fp);
++            if (g_fpg)
++                fflush(g_fpg);
++        }
++        g_fp_rec0 = g_st.rec_ms;
++        {
++            LONG64 j;
++            for (i = 0; i < 3; i++) {
++                j = d3db_fprof_ticks(i);
++                g_fp_mt[i] = j;
++            }
++        }
++        QueryPerformanceCounter(&g_fp_exit);
++        QueryThreadCycleTime(GetCurrentThread(), &g_fp_cyc_exit);
++    }
++    twoc_fp_phase = 7;
+     if (g_ovs.active && (ovl_r || !g_ovl_open)) {
+         AcquireSRWLockExclusive(&g_pause_lock);
+         if (g_ovs.active) {
