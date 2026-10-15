@@ -1161,6 +1161,7 @@ typedef struct {
             uint8_t cam, cls;           /* step 61: its camera (IC_NO_CAM: none), IC_* */
             uint8_t n_cpos, cpos[4];    /* step 61: program registers holding the camera's position */
             int32_t obj;                /* step 62: its object (g_iobj), -1 none */
+            D3D8UpKept kept;            /* step 76: where xbox_d3d8's rings hold its vertices and indices */
         } draw;
         struct {
             d3dh_target_t t;
@@ -1809,20 +1810,50 @@ int d3dh_vs_consts(const d3dh_vprog_t *p, uint32_t mask[6])
     return r;
 }
 
-/* Bind the program and upload the constants that changed. Returns 0, or -1
- * if the host has no shader for it. Called with g_lock held. */
+/* Does register k differ from the last upload? */
+static int vs_const_differs(const float *consts, int k)
+{
+    const uint64_t *a = (const uint64_t *)&g_vs_consts[4 * k], *b = (const uint64_t *)&consts[4 * k];
+    return a[0] != b[0] || a[1] != b[1];
+}
+
+/* Bind the program and upload the constants that changed. Step 76 (notes
+ * 18.79): only the registers the program reads are compared: those its
+ * microcode reads directly (step 60's masks) and c58/c59, which xbox_d3d8's
+ * translation reads to undo the viewport mapping; one it doesn't read may
+ * keep a value another program left. A program that reads relative to a0.x
+ * (a0 may be negative) has all 192 compared. The span uploaded, lowest to
+ * highest that differs, is copied whole, so g_vs_consts stays what xbox_d3d8
+ * holds. Returns 0, or -1 if the host has no shader for it. Called with
+ * g_lock held. */
 static int vs_bind(const d3dh_vprog_t *p)
 {
-    int i = vs_slot(p), lo = -1, hi = -1, k;
+    int i = vs_slot(p), lo = -1, hi = -1, k, w;
 
     if (i < 0 || !g_vs[i].handle)
         return -1;
-    for (k = 0; k < 192; k++)
-        if (!g_vs_consts_valid || memcmp(&g_vs_consts[4 * k], &p->consts[4 * k], 16) != 0) {
-            if (lo < 0)
-                lo = k;
-            hi = k;
+    if (!g_vs_consts_valid) {
+        lo = 0;
+        hi = 191;
+    } else {
+        int all = g_vs[i].rel_base >= 0;
+        for (w = 0; w < 6; w++) {
+            uint32_t m = all ? 0xFFFFFFFFu : g_vs[i].cmask[w];
+            if (w == 58 / 32)                           /* c58, c59: the translation's viewport */
+                m |= 3u << (58 % 32);
+            while (m) {
+                unsigned long b;
+                _BitScanForward(&b, m);
+                m &= m - 1;
+                k = 32 * w + (int)b;
+                if (vs_const_differs(p->consts, k)) {
+                    if (lo < 0)
+                        lo = k;
+                    hi = k;
+                }
+            }
         }
+    }
     if (lo >= 0) {
         memcpy(&g_vs_consts[4 * lo], &p->consts[4 * lo], 16 * (size_t)(hi - lo + 1));
         g_dev->lpVtbl->SetVertexShaderConstant(g_dev, lo, &p->consts[4 * lo], (DWORD)(hi - lo + 1));
@@ -1836,8 +1867,11 @@ static int vs_bind(const d3dh_vprog_t *p)
 /* A draw on the host, now: the body of d3dh_draw_up (step 60: also each
  * recorded draw at its replay). `pinned[s]` set: stage s takes `pin[s]`, the
  * texture fetched when the draw was recorded, instead of a fetch now.
- * Called with g_lock held. */
-static int draw_exec(const d3dh_draw_t *d, IDirect3DBaseTexture8 *const *pin, const uint8_t *pinned)
+ * `kept` (step 76, a recorded draw's): its vertices and indices are uploaded
+ * at its first pass and drawn from there by the next ones, while xbox_d3d8's
+ * rings still hold them. Called with g_lock held. */
+static int draw_exec(const d3dh_draw_t *d, IDirect3DBaseTexture8 *const *pin, const uint8_t *pinned,
+                     D3D8UpKept *kept)
 {
     D3DVIEWPORT8 vp;
     xmap_t map;
@@ -1868,7 +1902,7 @@ static int draw_exec(const d3dh_draw_t *d, IDirect3DBaseTexture8 *const *pin, co
             m.vprog = &vp;
         }
         m.hud_dx = 0.0f;
-        return draw_exec(&m, pin, pinned);
+        return draw_exec(&m, pin, pinned, kept);
     }
     QueryPerformanceCounter(&t0);       /* step 60: the host draw's time */
     if (bind_target(&d->target) != 0)
@@ -1959,12 +1993,18 @@ static int draw_exec(const d3dh_draw_t *d, IDirect3DBaseTexture8 *const *pin, co
             verts = rescale_rhw_map(d->verts, d->vert_count, d->stride, &vp, &map);
         }
     }
+    if (verts != d->verts)              /* made for this pass (rescale_rhw): uploaded each time */
+        kept = NULL;
     if (d->indices) {                   /* xbox_d3d8 uploads vert_count vertices from `verts` */
-        hr = g_dev->lpVtbl->DrawIndexedPrimitiveUP(g_dev, (D3DPRIMITIVETYPE)d->prim, 0, d->vert_count,
-                                                   d->prim_count, d->indices, D3DFMT_INDEX16, verts, d->stride);
+        hr = kept ? d3d8_DrawIndexedPrimitiveUPKept((D3DPRIMITIVETYPE)d->prim, d->vert_count, d->prim_count,
+                                                    d->indices, D3DFMT_INDEX16, verts, d->stride, kept)
+                  : g_dev->lpVtbl->DrawIndexedPrimitiveUP(g_dev, (D3DPRIMITIVETYPE)d->prim, 0, d->vert_count,
+                                                          d->prim_count, d->indices, D3DFMT_INDEX16, verts,
+                                                          d->stride);
         g_st.indexed_draws++;
     } else {
-        hr = g_dev->lpVtbl->DrawPrimitiveUP(g_dev, (D3DPRIMITIVETYPE)d->prim, d->prim_count, verts, d->stride);
+        hr = kept ? d3d8_DrawPrimitiveUPKept((D3DPRIMITIVETYPE)d->prim, d->prim_count, verts, d->stride, kept)
+                  : g_dev->lpVtbl->DrawPrimitiveUP(g_dev, (D3DPRIMITIVETYPE)d->prim, d->prim_count, verts, d->stride);
     }
     target_drawn();
     g_st.draws++;
@@ -2066,7 +2106,7 @@ static void replay_pass(int interp)
             if (interp)
                 ic_draw(c);
             else
-                draw_exec(&c->u.draw.d, c->u.draw.pin, c->u.draw.pinned);
+                draw_exec(&c->u.draw.d, c->u.draw.pin, c->u.draw.pinned, (D3D8UpKept *)&c->u.draw.kept);
             break;
         case RC_CLEAR:
             clear_exec(&c->u.clear.t, c->u.clear.flags, c->u.clear.color, c->u.clear.z, c->u.clear.stencil);
@@ -3988,20 +4028,33 @@ static void ic_sub(double t)
  * was. Called with g_lock held. */
 static void ic_draw(const rcmd_t *c)
 {
-    static float k4[192 * 4];
+    static float k4_copy[192 * 4];
     static d3dh_ff_t ff;
     static d3dh_vprog_t vp;
+    static struct {                     /* step 76: registers changed in place, as they were */
+        unsigned reg;
+        float v[4];
+    } keep[4 + 4 + IC_BONE_REGS];
+    unsigned n_keep;
+    float *k4 = k4_copy;
     const d3dh_draw_t *d = &c->u.draw.d;
     const iobj_t *o = NULL, *p = NULL;
     const float *pb = NULL;
     d3dh_draw_t m;
     double wt[16];
-    int i, j, n, cam_on, w_move = 0, b_move = 0;
+    int i, j, n, cam_on, w_move = 0, b_move = 0, in_place = 0;
+
+#define IC_KEEP(r) do {                                                         \
+        if (in_place) {                                                         \
+            keep[n_keep].reg = (unsigned)(r);                                   \
+            memcpy(keep[n_keep++].v, &k4[4 * (r)], 4 * sizeof(float));         \
+        }                                                                       \
+    } while (0)
 
     if (c->u.draw.cls != IC_NONE && c->u.draw.cam != g_imc) {
         g_st.interp_kept++;             /* step 65: under another camera than the world's: as recorded */
         g_st.interp_other_cam++;
-        draw_exec(d, c->u.draw.pin, c->u.draw.pinned);
+        draw_exec(d, c->u.draw.pin, c->u.draw.pinned, (D3D8UpKept *)&c->u.draw.kept);
         return;
     }
     cam_on = c->u.draw.cam < IC_CAMS && g_isub[c->u.draw.cam].on;
@@ -4019,7 +4072,7 @@ static void ic_draw(const rcmd_t *c)
     }
     if (c->u.draw.cls == IC_NONE || (!cam_on && !w_move && !b_move)) {
         g_st.interp_kept++;
-        draw_exec(d, c->u.draw.pin, c->u.draw.pinned);
+        draw_exec(d, c->u.draw.pin, c->u.draw.pinned, (D3D8UpKept *)&c->u.draw.kept);
         return;
     }
     if (w_move) {                       /* W(t), from the frame before's W and this one's */
@@ -4043,10 +4096,28 @@ static void ic_draw(const rcmd_t *c)
         wt[15] = 1;
     }
     m = *d;
+    n_keep = 0;
     if (c->u.draw.cls == IC_VP) {
         const float *s = d->vprog->consts;
         double wvp[16], t1[16], t2[16];
-        memcpy(k4, s, sizeof(k4));
+        /* Step 76: the registers that change are changed in the recording
+         * itself, each kept first and put back after the draw, instead of
+         * 3 KB copied for every draw. Writes go in the order they always did
+         * (the camera's position, c96-c99, the bones, each read before it is
+         * written), so only a camera-position register among c96-c99 or the
+         * bones, where a later write would read an earlier one, takes the
+         * copy. */
+        in_place = 1;
+        for (n = 0; n < c->u.draw.n_cpos; n++)
+            if ((c->u.draw.cpos[n] >= 96 && c->u.draw.cpos[n] < 100) ||
+                (c->u.draw.cpos[n] >= IC_BONE_BASE && c->u.draw.cpos[n] < IC_BONE_BASE + IC_BONE_REGS))
+                in_place = 0;
+        if (in_place) {
+            k4 = (float *)s;
+        } else {
+            k4 = k4_copy;
+            memcpy(k4, s, sizeof(k4_copy));
+        }
         for (j = 0; j < 4; j++)         /* c(96+j) is column j of WVP */
             for (i = 0; i < 4; i++)
                 wvp[4 * i + j] = s[4 * (96 + j) + i];
@@ -4063,13 +4134,17 @@ static void ic_draw(const rcmd_t *c)
             m4_from(g_isub[c->u.draw.cam].c, t1);
             m4_mul(wvp, t1, t2);
             memcpy(wvp, t2, sizeof(wvp));
-            for (n = 0; n < c->u.draw.n_cpos; n++)
+            for (n = 0; n < c->u.draw.n_cpos; n++) {
+                IC_KEEP(c->u.draw.cpos[n]);
                 memcpy(&k4[4 * c->u.draw.cpos[n]], g_isub[c->u.draw.cam].pos, 3 * sizeof(float));
+            }
             g_st.interp_cpos += c->u.draw.n_cpos;
         }
-        for (j = 0; j < 4; j++)
+        for (j = 0; j < 4; j++) {
+            IC_KEEP(96 + j);
             for (i = 0; i < 4; i++)
                 k4[4 * (96 + j) + i] = (float)wvp[4 * i + j];
+        }
         if (b_move) {                   /* the bones at t */
             int bi, moved = 0;
             const double *gt = o->grp >= 0 ? ic_group_g((unsigned)o->grp) : NULL;
@@ -4102,6 +4177,8 @@ static void ic_draw(const rcmd_t *c)
                     rl[12] = rl[13] = rl[14] = 0;
                     rl[15] = 1;
                     m4_mul(gt, rl, mt);
+                    for (i = 0; i < 3; i++)
+                        IC_KEEP(IC_BONE_BASE + 3 * bi + i);
                     for (i = 0; i < 12; i++)
                         bo[i] = (float)mt[i];
                     moved = 1;
@@ -4124,6 +4201,8 @@ static void ic_draw(const rcmd_t *c)
                     continue;           /* a bone that jumped, or a register not read */
                 }
                 aff_lerp(&a, &b, g_it, &r);
+                for (i = 0; i < 3; i++)
+                    IC_KEEP(IC_BONE_BASE + 3 * bi + i);
                 for (i = 0; i < 3; i++) {
                     for (j = 0; j < 3; j++)
                         bo[4 * i + j] = (float)r.r[3 * j + i];
@@ -4158,7 +4237,12 @@ static void ic_draw(const rcmd_t *c)
         m.ff = &ff;
         g_st.interp_ff++;
     }
-    draw_exec(&m, c->u.draw.pin, c->u.draw.pinned);
+    draw_exec(&m, c->u.draw.pin, c->u.draw.pinned, (D3D8UpKept *)&c->u.draw.kept);
+    while (n_keep) {                    /* step 76: the recording as it was, for the next sub-frame */
+        n_keep--;
+        memcpy(&k4[4 * keep[n_keep].reg], keep[n_keep].v, 4 * sizeof(float));
+    }
+#undef IC_KEEP
 }
 
 /* After the frame's last sub-frame: this frame becomes the frame before. */
@@ -4210,7 +4294,7 @@ int d3dh_draw_up(const d3dh_draw_t *d)
         return -1;
     EnterCriticalSection(&g_lock);
     if (g_replay_check) {               /* at once, as without replay, and recorded */
-        r = draw_exec(d, NULL, NULL);
+        r = draw_exec(d, NULL, NULL, NULL);
         rec_draw(d);
     } else if (REC_ON()) {
         LARGE_INTEGER t0, t1;
@@ -4220,7 +4304,7 @@ int d3dh_draw_up(const d3dh_draw_t *d)
         g_st.rec_ms += (double)(t1.QuadPart - t0.QuadPart) * 1000.0 / (double)g_qpf.QuadPart;
         g_st.rec_draws++;
     } else {
-        r = draw_exec(d, NULL, NULL);
+        r = draw_exec(d, NULL, NULL, NULL);
     }
     if (d->overlay)                     /* step 65 */
         g_st.overlay_draws++;
@@ -4503,7 +4587,7 @@ void d3dh_overlay_pass(int begin)
             for (i = g_ovl_first; i < g_rc_n; i++) {
                 const rcmd_t *c = &g_rc[i];
                 if (c->kind == RC_DRAW)
-                    draw_exec(&c->u.draw.d, c->u.draw.pin, c->u.draw.pinned);
+                    draw_exec(&c->u.draw.d, c->u.draw.pin, c->u.draw.pinned, NULL);
                 else if (c->kind == RC_CLEAR)
                     clear_exec(&c->u.clear.t, c->u.clear.flags, c->u.clear.color, c->u.clear.z, c->u.clear.stencil);
                 else if (c->kind == RC_COPY)
