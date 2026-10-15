@@ -27,6 +27,8 @@ Set-up (once, in the copy):
 | `endur.sh TAG` + `cycle.py`, `procmon.py` | Endurance: new game, then for `MIN` minutes a level on pad 1:1, 120 s of play, pause > WARP ROOM > YES, 30 s in the hub; `procmon.py` writes handles, threads, private bytes and the latest stat lines every 60 s to `runs/TAG.mon.txt`; `monan.py` tabulates it. |
 | `summ.py TAG...` (or `"a*"`) | One line a run: levels loaded, play summary, `[CRASH` count, exit code, interpolation. |
 | `overview.py`, `cs.py`, `stack.py`, `sh.sh`, `ov1.txt` | Contact sheets. |
+| `upst.py TAG` | Step 74: ride the hub's central lift upstairs (the heaviest room of steps 60-62) and stay; for `sx.sh` as `PRE="upst.py TAG"` with LEVEL `-`. |
+| `adsum.py TAG...` (or `"m*"`) | Step 74: per run, the level, play fps, and after the level load the game frames by sub-frames allowed (4/2/1), the changes and their direction, mean ms apart and busy (`[D3DB] host interpolation sub-frames` lines). |
 | `rmw.py`, `peek.py`, `poke.py` | Guest memory read-modify-write, read, write. |
 
 Traps: a race level (`west_a`) needs throttle the play script doesn't press; random play reaches game over (WOMBAT
