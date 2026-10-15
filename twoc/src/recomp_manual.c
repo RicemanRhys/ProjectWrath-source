@@ -2027,6 +2027,42 @@ static __declspec(noinline) void heap_watch_lines(void)
     log_block_flush(&lb);
 }
 
+/* ── Step 73: a title that leaves for the dashboard says why ── */
+
+/*
+ * XAPI opens U: (game_files\UDATA\56550003) for writing at startup. When it
+ * can't (the folder read-only for this user), it boots to the dashboard with
+ * XLD_LAUNCH_DASHBOARD_ERROR / XLD_ERROR_INVALID_HARD_DISK, and here that was a
+ * silent exit about a second after launch. The exit still happens; on that
+ * path only, the reason goes to the log and a message box first.
+ */
+#define HAL_RETURN_THUNK      0x0015AAD8u      /* [thunk] = HalReturnToFirmware (ordinal 49) */
+#define LAUNCH_PAGE_THUNK     0x0015AACCu      /* [thunk] = &LaunchDataPage (ordinal 164) */
+
+static void hal_HalReturnToFirmware(void)
+{
+    uint32_t va = MEM32(HAL_RETURN_THUNK);
+    uint32_t var = MEM32(LAUNCH_PAGE_THUNK);
+    uint32_t page = var ? MEM32(var) : 0;
+
+    /* LAUNCH_DATA_PAGE: type at +0 (1 = the dashboard), LD_LAUNCH_DASHBOARD
+     * at +1024 (dwReason 1 = an error, dwParameter1 2 = the hard disk) */
+    if (page && MEM32(page) == 1 && MEM32(page + 1024) == 1 && MEM32(page + 1032) == 2) {
+        char dir[MAX_PATH], msg[MAX_PATH + 256];
+        if (!GetFullPathNameA("game_files\\UDATA\\56550003", sizeof(dir), dir, NULL))
+            strcpy(dir, "game_files\\UDATA\\56550003");
+        fprintf(stderr, "[SAVE] the game could not open its save folder %s for writing, and quits"
+                " (the Xbox's \"hard disk\" error)\n", dir);
+        fflush(stderr);
+        _snprintf(msg, sizeof(msg), "Crash can't write to its save folder:\n\n%s\n\n"
+                  "Make the folder writable (or delete it: the game makes a new one) and start again.", dir);
+        msg[sizeof(msg) - 1] = 0;
+        MessageBoxA(NULL, msg, "Crash TWOC", MB_ICONERROR | MB_OK);
+    }
+    t_coop_kernel_va = va;
+    coop_kernel_call();
+}
+
 recomp_func_t recomp_lookup_manual(uint32_t xbox_va)
 {
     /* Guest kernel calls: cooperative suspension, see above. */
@@ -2045,6 +2081,7 @@ recomp_func_t recomp_lookup_manual(uint32_t xbox_va)
         if (xbox_va == MEM32(POOL_ALLOC_TAG_THUNK)) return pool_ExAllocatePoolWithTag;
         if (xbox_va == MEM32(POOL_FREE_THUNK))      return pool_ExFreePool;
         if (xbox_va == MEM32(POOL_QSIZE_THUNK))     return pool_ExQueryPoolBlockSize;
+        if (xbox_va == MEM32(HAL_RETURN_THUNK))     return hal_HalReturnToFirmware;
         if (recomp_lookup_kernel(xbox_va)) {
             t_coop_kernel_va = xbox_va;
             return coop_kernel_call;
