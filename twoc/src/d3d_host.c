@@ -316,6 +316,18 @@ typedef struct {
 } host_rt_t;
 static host_rt_t g_rt[RT_SLOTS];
 static unsigned g_rt_clock;
+/* Step 78: g_rt's Data (0: none) for the game side, which decides at record
+ * time whether a texture may be a render target (rc_maybe_target); kept by
+ * the replay side as it makes and releases them (gt_set). */
+static uint32_t g_gt_data[RT_SLOTS];
+static SRWLOCK g_gt_lock = SRWLOCK_INIT;
+
+static void gt_set(int i, uint32_t data)
+{
+    AcquireSRWLockExclusive(&g_gt_lock);
+    g_gt_data[i] = data;
+    ReleaseSRWLockExclusive(&g_gt_lock);
+}
 static int g_cur_target = -1;           /* -1 the back buffer, else a g_rt index; -2 unknown */
 
 /* ── Guest pixels on the host (18.56) ──────────────────────────
@@ -1065,6 +1077,7 @@ static void rt_release(int i)
     g_rt[i].surf->lpVtbl->Release(g_rt[i].surf);
     g_rt[i].tex->lpVtbl->Release(g_rt[i].tex);
     memset(&g_rt[i], 0, sizeof(g_rt[i]));
+    gt_set(i, 0);                       /* step 78 */
 }
 
 /* The host render target for guest Data, created on first use. Called with
@@ -1136,6 +1149,7 @@ static int rt_find(const d3dh_target_t *t, int create)
     g_rt[free_i].surf = surf;
     g_rt[free_i].depth = depth;
     g_rt[free_i].last_use = ++g_rt_clock;
+    gt_set(free_i, t->data);            /* step 78 */
     g_st.rt_created++;
     if (hw != t->width || hh != t->height)
         fprintf(stderr, "[D3DB] host render target %d for guest Data %08X: %ux%u format %02X, at %ux%u on the host\n",
@@ -1203,6 +1217,7 @@ typedef struct {
             d3dh_draw_t d;
             IDirect3DBaseTexture8 *pin[4];
             uint8_t pinned[4];
+            int16_t tslot[4];           /* step 78: pinned stages' entries in the cache (g_tc), -1 none */
             uint8_t cam, cls;           /* step 61: its camera (IC_NO_CAM: none), IC_* */
             uint8_t n_cpos, cpos[4];    /* step 61: program registers holding the camera's position */
             int32_t obj;                /* step 62: its object (g_iobj), -1 none */
@@ -1237,6 +1252,15 @@ typedef struct ra_chunk {
  * (slot_handover). On one thread, as now, the slot recorded is handed over
  * and replayed inside the same Swap, so the other is always free again
  * before the next frame starts. */
+/* Step 78: a texture upload recorded in a frame: entry `slot` of the cache
+ * made again from `desc` (its bytes and palette copied into the arena), before
+ * stage `stage` of draw command `at` is pinned. */
+typedef struct {
+    unsigned at;
+    uint16_t slot, stage;
+    d3dh_tex_t desc;
+} texup_t;
+
 typedef struct {
     rcmd_t *rc;                         /* the frame's commands */
     unsigned rc_n, rc_cap;
@@ -1245,6 +1269,8 @@ typedef struct {
     uint32_t targets[64];               /* Data of targets drawn, cleared or copied into this frame */
     unsigned targets_n;
     int overflow;                       /* more than 64: every texture fetched at the replay */
+    texup_t *up;                        /* its texture uploads, in order */
+    unsigned up_n, up_cap;
     unsigned seq;                       /* the frame recorded in it (handovers so far) */
     int it;                             /* its interpolation tables (g_itab), -1 none */
 } fslot_t;
@@ -1348,20 +1374,34 @@ static void rc_target(uint32_t data)
 }
 
 /* Whether a texture with this Data may sample a host render target at the
- * replay: one exists now, or the frame draws, clears or copies into one. */
+ * replay: one exists now, or the frame draws, clears or copies into one.
+ * Step 78: "exists" from the game side's copy of the targets' Data
+ * (g_gt_data, kept by the replay side), and a frame handed over but not yet
+ * replayed counts with its targets (never, on one thread). */
 static int rc_maybe_target(uint32_t data)
 {
     fslot_t *f = g_rs;
     unsigned i;
+    int r = 0;
 
     if (f->overflow)
         return 1;
-    for (i = 0; i < RT_SLOTS; i++)
-        if (g_rt[i].tex && g_rt[i].data == data)
-            return 1;
+    AcquireSRWLockShared(&g_gt_lock);
+    for (i = 0; i < RT_SLOTS && !r; i++)
+        r = g_gt_data[i] == data;
+    ReleaseSRWLockShared(&g_gt_lock);
+    if (r)
+        return 1;
     for (i = 0; i < f->targets_n; i++)
         if (f->targets[i] == data)
             return 1;
+    if (g_ps && g_ps != f) {
+        if (g_ps->overflow)
+            return 1;
+        for (i = 0; i < g_ps->targets_n; i++)
+            if (g_ps->targets[i] == data)
+                return 1;
+    }
     return 0;
 }
 
@@ -1455,17 +1495,39 @@ static void clear_exec(const d3dh_target_t *target, uint32_t xdk_flags, uint32_t
 /* xbox_d3d8 textures made from guest ones, keyed by the guest header. An
  * entry is reused only while the header's Data, format, size and content
  * signature all match; otherwise it is recreated and uploaded again. The
- * least recently used entry makes room when the table is full. */
+ * least recently used entry makes room when the table is full.
+ *
+ * Step 78 (notes 18.81): the cache in two halves, the way a render thread
+ * will need it. The game side keeps the table of what the host holds (each
+ * entry's description, whether it is held, when it was last used:
+ * tex_lookup) and decides at record time, exactly as the cache did, whether
+ * a draw's texture is there or has to be uploaded, and into which entry. On
+ * a miss it copies the guest bytes (and a P8 palette) into the frame's arena
+ * and records the upload (texup_t, tex_snap); the replay side makes and
+ * fills the host textures from those copies before the frame's first pass
+ * (slot_prepare), in the order the draws asked for them, and pins each
+ * draw's textures there. So a recorded frame's textures never read guest
+ * memory on the replay side, and a texture the guest rewrites later in the
+ * frame still draws as it was, as before. A draw made at once (frames not
+ * recorded) looks up and uploads in one go (tex_get). */
 #define TEX_CACHE_SLOTS 1024
 
 typedef struct {
-    d3dh_tex_t desc;                    /* bits unused once uploaded */
-    IDirect3DBaseTexture8 *tex;         /* an IDirect3DTexture8, or an IDirect3DCubeTexture8 (desc.cube) */
+    d3dh_tex_t desc;                    /* bits and palette unused */
     unsigned last_use;
-} host_tex_t;
+    int live;                           /* the host holds it (or will, once its recorded upload is made) */
+} gtex_t;
 
-static host_tex_t g_tex[TEX_CACHE_SLOTS];
-static unsigned g_tex_clock;
+typedef struct {
+    gtex_t g[TEX_CACHE_SLOTS];          /* game side: what the host holds */
+    unsigned clock;
+    IDirect3DBaseTexture8 *h[TEX_CACHE_SLOTS];  /* replay side: an IDirect3DTexture8, or an IDirect3DCubeTexture8 */
+    volatile LONG bad[TEX_CACHE_SLOTS];         /* replay side to game side: that upload failed, the entry is empty */
+    volatile LONG nbad;
+} tex_cache_t;
+static tex_cache_t g_tc;                /* the cache */
+static tex_cache_t g_tcc;               /* the old path apart: REPLAY_CHECK's draws made at once, TEXCHECK */
+static tex_cache_t *g_tc_now = &g_tc;   /* the cache a draw made at once uses */
 
 static uint32_t level_dim(uint32_t d, uint32_t level)
 {
@@ -1501,16 +1563,17 @@ uint32_t d3dh_texture_bytes(uint32_t format, uint32_t width, uint32_t height, ui
     return n;
 }
 
-static void tex_release(host_tex_t *e)
+/* Replay side: entry i's host texture released. */
+static void tex_release(tex_cache_t *tc, unsigned i)
 {
     int s;
 
-    if (!e->tex)
+    if (!tc->h[i])
         return;
     for (s = 0; s < 4; s++)             /* xbox_d3d8 keeps the bound pointer */
         g_dev->lpVtbl->SetTexture(g_dev, s, NULL);
-    e->tex->lpVtbl->Release(e->tex);
-    e->tex = NULL;
+    tc->h[i]->lpVtbl->Release(tc->h[i]);
+    tc->h[i] = NULL;
 }
 
 /* Copy each level from the guest layout into xbox_d3d8's (the same bytes:
@@ -1555,33 +1618,33 @@ static int tex_upload(IDirect3DBaseTexture8 *base, const d3dh_tex_t *t)
     return 0;
 }
 
-static IDirect3DBaseTexture8 *tex_get(const d3dh_tex_t *t)
+/* Game side: the entry for `t` in `tc`, used now. Returns its index, with
+ * *up set when it has to be (re)made and filled from `t` (the table already
+ * holds `t`), or -1 when it can't be: a P8 texture without its palette, no
+ * texture, as before. */
+static int tex_lookup(tex_cache_t *tc, const d3dh_tex_t *t, int *up)
 {
-    host_tex_t *e = NULL, *oldest = NULL;
+    gtex_t *e = NULL, *oldest = NULL;
     uint32_t i, h = (t->key >> 4) * 2654435761u;
 
-    for (i = 0; i < RT_SLOTS; i++)      /* S4: what the host rendered, not guest memory */
-        if (g_rt[i].tex && g_rt[i].data == t->data) {
-            g_rt[i].last_use = ++g_rt_clock;
-            g_st.rt_sampled++;
-            if (g_cur_target == (int)i)
-                g_st.rt_feedback++;     /* D3D11 unbinds the view: the stage samples black */
-            rt_resolve((int)i);         /* step 58: what the multisampled surface holds (with MSAA, even while bound) */
-            return (IDirect3DBaseTexture8 *)g_rt[i].tex;
-        }
-    g_tex_clock++;
+    *up = 0;
+    if (tc->nbad && InterlockedExchange(&tc->nbad, 0))     /* uploads the replay side couldn't make */
+        for (i = 0; i < TEX_CACHE_SLOTS; i++)
+            if (tc->bad[i] && InterlockedExchange(&tc->bad[i], 0))
+                tc->g[i].live = 0;
+    tc->clock++;
     for (i = 0; i < TEX_CACHE_SLOTS; i++) {
-        host_tex_t *s = &g_tex[(h + i) & (TEX_CACHE_SLOTS - 1)];
+        gtex_t *s = &tc->g[(h + i) & (TEX_CACHE_SLOTS - 1)];
         /* Step 52: a header and its level count. A stage with MIPFILTER
          * NONE gets level 0 alone (d3d_bridge.c), so one header bound to
          * two stages that filter differently is two host textures; keyed
          * by the header alone, each stage replaced the other's every draw
          * (Bamboozled's ball rings: its highlight map on stages 1 and 2). */
-        if (s->tex && s->desc.key == t->key && s->desc.levels == t->levels) {
+        if (s->live && s->desc.key == t->key && s->desc.levels == t->levels) {
             e = s;
             break;
         }
-        if (!s->tex) {
+        if (!s->live) {
             if (!e)
                 e = s;
             break;
@@ -1591,45 +1654,144 @@ static IDirect3DBaseTexture8 *tex_get(const d3dh_tex_t *t)
     }
     if (!e) {                           /* full along this probe run: evict */
         e = oldest;
-        tex_release(e);
+        e->live = 0;
         g_st.tex_evictions++;
     }
-    if (e->tex && (e->desc.data != t->data || e->desc.format != t->format || e->desc.width != t->width ||
-                   e->desc.height != t->height || e->desc.levels != t->levels || e->desc.pitch != t->pitch ||
-                   e->desc.sig != t->sig || e->desc.pal_sig != t->pal_sig || e->desc.cube != t->cube))
-        tex_release(e);
-    if (!e->tex) {
-        IDirect3DBaseTexture8 *tex = NULL;
-        uint32_t host_fmt = t->format == XDK_FMT_P8 ? XDK_FMT_A8R8G8B8 : t->format;
-        HRESULT hr;
+    if (e->live && (e->desc.data != t->data || e->desc.format != t->format || e->desc.width != t->width ||
+                    e->desc.height != t->height || e->desc.levels != t->levels || e->desc.pitch != t->pitch ||
+                    e->desc.sig != t->sig || e->desc.pal_sig != t->pal_sig || e->desc.cube != t->cube))
+        e->live = 0;
+    if (!e->live) {
         if (t->format == XDK_FMT_P8 && (!t->palette || !t->pal_entries))
-            return NULL;
-        if (t->cube)
-            hr = g_dev->lpVtbl->CreateCubeTexture(g_dev, t->width, t->levels, 0, (D3DFORMAT)host_fmt,
-                                                  D3DPOOL_MANAGED, (IDirect3DCubeTexture8 **)&tex);
-        else
-            hr = g_dev->lpVtbl->CreateTexture(g_dev, t->width, t->height, t->levels, 0, (D3DFORMAT)host_fmt,
-                                              D3DPOOL_MANAGED, (IDirect3DTexture8 **)&tex);
-        if (FAILED(hr) || tex_upload(tex, t) != 0) {
-            if (tex)
-                tex->lpVtbl->Release(tex);
-            if (++g_st.tex_upload_fails <= 5)
-                fprintf(stderr, "[D3DB] host texture upload failed: header %08X format %02X %ux%u levels %u%s\n",
-                        t->key, t->format, t->width, t->height, t->levels, t->cube ? " cube" : "");
-            return NULL;
-        }
-        e->tex = tex;
+            return -1;
         e->desc = *t;
         e->desc.bits = NULL;
         e->desc.palette = NULL;
-        g_st.tex_uploads++;
-        if (t->format == XDK_FMT_P8)
-            g_st.p8_uploads++;
-        if (t->cube)
-            g_st.cube_uploads++;
+        e->live = 1;
+        *up = 1;
     }
-    e->last_use = g_tex_clock;
-    return e->tex;
+    e->last_use = tc->clock;
+    return (int)(e - tc->g);
+}
+
+/* Replay side: entry i made again and filled from `t` (its bytes in the
+ * arena for a recorded frame, in guest memory for a draw made at once).
+ * Returns the texture, or NULL (the entry empty; the game side is told). */
+static IDirect3DBaseTexture8 *tex_make(tex_cache_t *tc, unsigned i, const d3dh_tex_t *t)
+{
+    IDirect3DBaseTexture8 *tex = NULL;
+    uint32_t host_fmt = t->format == XDK_FMT_P8 ? XDK_FMT_A8R8G8B8 : t->format;
+    HRESULT hr;
+
+    tex_release(tc, i);
+    if (t->cube)
+        hr = g_dev->lpVtbl->CreateCubeTexture(g_dev, t->width, t->levels, 0, (D3DFORMAT)host_fmt,
+                                              D3DPOOL_MANAGED, (IDirect3DCubeTexture8 **)&tex);
+    else
+        hr = g_dev->lpVtbl->CreateTexture(g_dev, t->width, t->height, t->levels, 0, (D3DFORMAT)host_fmt,
+                                          D3DPOOL_MANAGED, (IDirect3DTexture8 **)&tex);
+    if (FAILED(hr) || !t->bits || tex_upload(tex, t) != 0) {
+        if (tex)
+            tex->lpVtbl->Release(tex);
+        if (++g_st.tex_upload_fails <= 5)
+            fprintf(stderr, "[D3DB] host texture upload failed: header %08X format %02X %ux%u levels %u%s\n",
+                    t->key, t->format, t->width, t->height, t->levels, t->cube ? " cube" : "");
+        InterlockedExchange(&tc->bad[i], 1);
+        InterlockedExchange(&tc->nbad, 1);
+        return NULL;
+    }
+    tc->h[i] = tex;
+    g_st.tex_uploads++;
+    if (t->format == XDK_FMT_P8)
+        g_st.p8_uploads++;
+    if (t->cube)
+        g_st.cube_uploads++;
+    return tex;
+}
+
+/* A draw's texture now (a draw made at once, or fetched at its replay):
+ * the host render target with its Data, else from the cache `tc`, made and
+ * filled from guest memory now if it has to be. */
+static IDirect3DBaseTexture8 *tex_get(tex_cache_t *tc, const d3dh_tex_t *t)
+{
+    int i, up;
+
+    for (i = 0; i < RT_SLOTS; i++)      /* S4: what the host rendered, not guest memory */
+        if (g_rt[i].tex && g_rt[i].data == t->data) {
+            g_rt[i].last_use = ++g_rt_clock;
+            g_st.rt_sampled++;
+            if (g_cur_target == i)
+                g_st.rt_feedback++;     /* D3D11 unbinds the view: the stage samples black */
+            rt_resolve(i);              /* step 58: what the multisampled surface holds (with MSAA, even while bound) */
+            return (IDirect3DBaseTexture8 *)g_rt[i].tex;
+        }
+    if (g_ps) {                         /* step 78: a recorded draw's, fetched at its replay as a render target */
+        if (++g_st.tex_at_replay <= 5)  /* that isn't one there: guest memory read at the replay, as before */
+            fprintf(stderr, "[D3DB] host texture %08X (Data %08X) fetched at the replay, not a render target there:"
+                    " uploaded from guest memory now\n", t->key, t->data);
+    }
+    i = tex_lookup(tc, t, &up);
+    if (i < 0)
+        return NULL;
+    return up ? tex_make(tc, (unsigned)i, t) : tc->h[i];
+}
+
+/* Game side, recording: entry i's upload from `t`, its bytes copied into
+ * the frame's arena, before stage `stage` of the draw being recorded is
+ * pinned. Returns 0, or -1 (out of memory: the entry left empty). */
+static int tex_snap(unsigned i, unsigned stage, const d3dh_tex_t *t)
+{
+    fslot_t *f = g_rs;
+    texup_t *u;
+
+    if (f->up_n == f->up_cap) {
+        unsigned cap = f->up_cap ? 2 * f->up_cap : 256;
+        texup_t *n = (texup_t *)realloc(f->up, cap * sizeof(texup_t));
+        if (!n)
+            return -1;
+        f->up = n;
+        f->up_cap = cap;
+    }
+    u = &f->up[f->up_n];
+    u->at = f->rc_n - 1;
+    u->slot = (uint16_t)i;
+    u->stage = (uint16_t)stage;
+    u->desc = *t;
+    u->desc.bits = (const uint8_t *)ra_dup(t->bits, t->bytes);
+    u->desc.palette = t->palette ? (const uint32_t *)ra_dup(t->palette, 4 * (size_t)t->pal_entries) : NULL;
+    if (!u->desc.bits || (t->palette && !u->desc.palette))
+        return -1;
+    f->up_n++;
+    g_st.tex_snaps++;
+    g_st.tex_snap_bytes += (double)t->bytes;
+    return 0;
+}
+
+/* Replay side, before the first pass over commands [from, rc_n) of slot
+ * `f`: their recorded uploads made, in order, and each draw's textures
+ * pinned where it was recorded (an upload before its stage's pin). */
+static void slot_prepare(fslot_t *f, unsigned from)
+{
+    unsigned i, s, u = 0;
+
+    while (u < f->up_n && f->up[u].at < from)
+        u++;
+    for (i = from; i < f->rc_n; i++) {
+        rcmd_t *c = &f->rc[i];
+        for (s = 0; s < 4; s++) {
+            for (; u < f->up_n && f->up[u].at == i && f->up[u].stage == s; u++)
+                tex_make(&g_tc, f->up[u].slot, &f->up[u].desc);
+            if (c->kind == RC_DRAW && c->u.draw.pinned[s] && c->u.draw.tslot[s] >= 0) {
+                IDirect3DBaseTexture8 *t = g_tc.h[c->u.draw.tslot[s]];
+                c->u.draw.pin[s] = t;
+                if (t) {
+                    t->lpVtbl->AddRef(t);
+                    g_st.replay_pins++;
+                }
+            }
+        }
+    }
+    f->up_n = 0;
 }
 
 void d3dh_dump_range(unsigned from, unsigned to)
@@ -1638,16 +1800,22 @@ void d3dh_dump_range(unsigned from, unsigned to)
     g_dump_to = to;
 }
 
+/* Game side (step 78): the table's entries that hold it no longer match,
+ * so their next draw uploads them again. */
 void d3dh_texture_touch(uint32_t data)
 {
     uint32_t i;
+    int k;
 
     if (!g_ready)
         return;
     EnterCriticalSection(&g_lock);
-    for (i = 0; i < TEX_CACHE_SLOTS; i++)
-        if (g_tex[i].tex && data >= g_tex[i].desc.data && data - g_tex[i].desc.data < g_tex[i].desc.bytes)
-            g_tex[i].desc.sig ^= 0x80000000u;   /* no longer matches: re-upload at its next draw */
+    for (k = 0; k < 2; k++) {
+        tex_cache_t *tc = k ? &g_tcc : &g_tc;
+        for (i = 0; i < TEX_CACHE_SLOTS; i++)
+            if (tc->g[i].live && data >= tc->g[i].desc.data && data - tc->g[i].desc.data < tc->g[i].desc.bytes)
+                tc->g[i].desc.sig ^= 0x80000000u;   /* no longer matches: re-upload at its next draw */
+    }
     LeaveCriticalSection(&g_lock);
 }
 
@@ -1989,7 +2157,7 @@ static int draw_exec(const d3dh_draw_t *d, IDirect3DBaseTexture8 *const *pin, co
     {
         IDirect3DBaseTexture8 *bound[4];
         for (s = 0; s < 4; s++)
-            bound[s] = !d->tex[s] ? NULL : pinned && pinned[s] ? pin[s] : tex_get(d->tex[s]);
+            bound[s] = !d->tex[s] ? NULL : pinned && pinned[s] ? pin[s] : tex_get(g_tc_now, d->tex[s]);
         for (s = 0; s < 4; s++)
             g_dev->lpVtbl->SetTexture(g_dev, s, bound[s]);
     }
@@ -2132,17 +2300,27 @@ static int rec_draw(const d3dh_draw_t *d)
         return -1;
     }
     /* The textures as they are now; those that may be render targets at the
-     * replay are fetched there (fetched here as the old path did, so the
-     * cache sees the same sequence). */
+     * replay are fetched there. Step 78: looked up in the game side's table
+     * in the order the old path fetched them, so the cache sees the same
+     * sequence; a miss copies the guest bytes for the replay side's upload,
+     * and the replay side pins them (slot_prepare). */
     for (s = 0; s < 4; s++) {
+        int i, up;
+        c->u.draw.tslot[s] = -1;
         if (!o->tex[s] || rc_maybe_target(o->tex[s]->data))
             continue;
-        c->u.draw.pin[s] = tex_get(o->tex[s]);
         c->u.draw.pinned[s] = 1;
-        if (c->u.draw.pin[s]) {
-            c->u.draw.pin[s]->lpVtbl->AddRef(c->u.draw.pin[s]);
-            g_st.replay_pins++;
+        i = tex_lookup(&g_tc, o->tex[s], &up);
+        if (i < 0)
+            continue;
+        if (up && tex_snap((unsigned)i, s, o->tex[s]) != 0) {
+            g_tc.g[i].live = 0;         /* out of memory: drawn without it */
+            if (++g_st.tex_upload_fails <= 5)
+                fprintf(stderr, "[D3DB] host texture %08X not copied for its upload (out of memory)\n",
+                        o->tex[s]->key);
+            continue;
         }
+        c->u.draw.tslot[s] = (int16_t)i;
     }
     rc_target(d->target.data);
     c->u.draw.cam = 0xFF;
@@ -2210,6 +2388,7 @@ static void replay_done(void)
     g_ps->ra_bytes = 0;
     g_ps->targets_n = 0;
     g_ps->overflow = 0;
+    g_ps->up_n = 0;
     g_ps = NULL;                        /* step 78: the slot free for the game side again */
 }
 
@@ -4915,7 +5094,9 @@ int d3dh_draw_up(const d3dh_draw_t *d)
         return -1;
     EnterCriticalSection(&g_lock);
     if (g_replay_check) {               /* at once, as without replay, and recorded */
+        g_tc_now = &g_tcc;              /* step 78: at once the old way, from guest memory, in a cache of its own */
         r = draw_exec(d, NULL, NULL, NULL);
+        g_tc_now = &g_tc;
         rec_draw(d);
     } else if (REC_ON()) {
         LARGE_INTEGER t0, t1;
@@ -5177,6 +5358,8 @@ static void rc_forget(unsigned first)
                 if (g_rs->rc[i].u.draw.pin[s])
                     g_rs->rc[i].u.draw.pin[s]->lpVtbl->Release(g_rs->rc[i].u.draw.pin[s]);
     g_rs->rc_n = first;
+    while (g_rs->up_n && g_rs->up[g_rs->up_n - 1].at >= first)   /* step 78: their uploads, if not made */
+        g_rs->up_n--;
     if (!first) {
         g_rs->ra_cur = NULL;
         g_rs->ra_bytes = 0;
@@ -5205,6 +5388,7 @@ void d3dh_overlay_pass(int begin)
             hud_anchor(g_ovl_first);
         if (g_ovl_defer) {              /* drawn now, as recorded, and forgotten */
             g_ovl_defer = 0;
+            slot_prepare(g_rs, g_ovl_first);    /* step 78: their textures uploaded and pinned */
             for (i = g_ovl_first; i < g_rs->rc_n; i++) {
                 const rcmd_t *c = &g_rs->rc[i];
                 if (c->kind == RC_DRAW)
@@ -5480,7 +5664,7 @@ int d3dh_texture_check(const d3dh_tex_t *t, const char *path)
     if (!g_ready || t->cube)
         return -1;
     EnterCriticalSection(&g_lock);
-    tex = tex_get(t);
+    tex = tex_get(&g_tcc, t);           /* step 78: apart from the cache recorded frames use */
     if (tex) {
         dump_texture(((D3D8Texture *)tex)->d3d11_texture, NULL, path, 1);
         ok = 0;
@@ -6982,6 +7166,7 @@ void d3dh_present(double t_s, unsigned swap_no)
     if (REC_ON() || g_ia.gen || g_fp.on) {  /* step 60: the frame's recorded commands, drawn now */
         EnterCriticalSection(&g_lock);
         slot_handover();                /* step 78: the frame recorded, to the replay side */
+        slot_prepare(g_ps, 0);          /* ... its textures uploaded and pinned */
         ic_queue(g_interp && ic_possible());        /* step 61 */
         if (g_interp || g_ia.gen)
             ia_frame(swap_no);          /* step 74: the frame before measured, this one's step chosen */

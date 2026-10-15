@@ -16,6 +16,9 @@ typedef struct {
     unsigned dumps;
     unsigned draws, draw_fails;
     unsigned tex_uploads, tex_upload_fails, tex_evictions;
+    unsigned tex_snaps, tex_at_replay;  /* step 78: recorded uploads (guest bytes copied); recorded draws' textures
+                                         * fetched at the replay from guest memory (not a render target there) */
+    double tex_snap_bytes;
     unsigned rt_created, rt_fails, rt_draws, rt_clears, rt_sampled, rt_feedback;  /* S4 */
     unsigned rt_released, rt_evicted;                                             /* step 52 */
     unsigned p8_uploads, ps_draws, ps_probes;                                     /* S4 */

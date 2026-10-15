@@ -4606,6 +4606,10 @@ static void mirror_swap(void)
                                  f ? (st.replay_bytes - lby) / 1024.0 / f : 0.0,
                                  r ? 1000.0 * (st.rec_ms - lrec) / r : 0.0, f ? (st.rec_ms - lrec) / f : 0.0,
                                  f ? (st.replay_ms - lms) / f : 0.0, st.replay_pins - lp);
+                if (st.tex_snaps || st.tex_at_replay)  /* step 78 */
+                    log_block_printf(&lb, "[D3DB] host recorded texture uploads: %u (%.1f MB of guest bytes copied);"
+                                     " recorded draws' textures read from guest memory at the replay %u\n",
+                                     st.tex_snaps, st.tex_snap_bytes / 1048576.0, st.tex_at_replay);
                 if (st.replay_checked)
                     log_block_printf(&lb, "[D3DB] host replay check: %u frames compared, %u differ\n",
                                      st.replay_checked, st.replay_check_diff);
