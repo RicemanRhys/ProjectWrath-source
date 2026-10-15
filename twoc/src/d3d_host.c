@@ -3270,18 +3270,29 @@ int d3dh_frame_plan(int fr, double game_hz, unsigned *interval, double *hz)
     g_fp.span = span;
     g_fp.game_hz = game_hz;
     g_fp.interval = g_fp.limiter ? 1 : k >= 1 && k <= 4 ? k : 1;
-    m0 = g_fp.limiter ? 1 : m0;
-    if (m0 < span - 1e-6)
-        g_fp.step[n++] = m0;            /* the target's own */
-    if (k && !g_fp.limiter) {           /* below it, the old counts: 4, 2, 1 at 4; 3, 1 at 3 */
-        unsigned j;
-        for (j = k; j >= 2; j--)
-            if (k % j == 0 && k / j > m0 && n < FP_MAX_STEPS - 1)
-                g_fp.step[n++] = k / j;
-    }
+    /* The target's own step, then (item 3) each slower whole number of
+     * slots still faster than the game, then one present a game frame. A
+     * step is kept only if it costs less than the one above it (passes, an
+     * interpolated one counted as two plain). At 240 Hz the ladder is 240,
+     * 120, 80 and 60 fps (80: a present every 3 refreshes, 1 interpolated
+     * pass and 1/3 plain a game frame against 120's 1 and 1); at 144 Hz
+     * 144, 72 and 60. */
+    for (m = g_fp.limiter ? 1 : m0; m < span - 1e-6 && n < FP_MAX_STEPS - 1; m++)
+        g_fp.step[n++] = m;
     g_fp.step[n++] = 0;                 /* one a game frame */
     g_fp.nsteps = n;
     fp_costs();
+    for (m = n = 1; m < g_fp.nsteps; m++) {
+        double c = 2 * g_fp.cost_i[m] + g_fp.cost_p[m], above = 2 * g_fp.cost_i[n - 1] + g_fp.cost_p[n - 1];
+        if (g_fp.step[m] > 0 && c > above - 0.01)
+            continue;
+        g_fp.step[n] = g_fp.step[m];
+        g_fp.cost_i[n] = g_fp.cost_i[m];
+        g_fp.cost_p[n] = g_fp.cost_p[m];
+        g_fp.cost_f[n] = g_fp.cost_f[m];
+        n++;
+    }
+    g_fp.nsteps = n;
     for (n = 0; n < 8; n++)
         g_st.interp_step_fps[n] = n < g_fp.nsteps ? fp_step_fps(n) : 0;
     *interval = g_fp.interval;
@@ -3309,7 +3320,11 @@ int d3dh_frame_plan(int fr, double game_hz, unsigned *interval, double *hz)
  * half the overrun (not a load): the next count that divides the display's
  * (4 -> 2 -> 1, 3 -> 1). Up: IA_UP frames on time at a count held at least
  * `hold` s, whose mean busy time plus the next count's extra passes (x
- * IA_PASS_X; the pairing too, going up from 1) fits in IA_FIT of T. A drop
+ * IA_PASS_X; the pairing too, going up from 1) fits in IA_FIT of T. Step 77
+ * (item 3): the counts are the frame-rate plan's steps, and a change goes
+ * as far as fits: down to the fastest lower step whose predicted busy time
+ * fits IA_FIT of T (none: the slowest), up to the fastest that fits (144 ->
+ * 72 -> 60 fps at 144 Hz; 240 -> 120, 80 or straight to 60 at 240). A drop
  * within IA_FAIL s of a rise doubles the hold (IA_HOLD0 to IA_HOLD_MAX); a
  * rise kept IA_KEPT s sets it back. A frame's k sub-frames are presented
  * at the display's interval / k, so every game frame still spans the same
@@ -3365,12 +3380,25 @@ static struct {
     double hold;                        /* seconds at a count before a rise */
 } g_ia;
 
-/* The step after `k`, up (fewer slots apart, more frames) or down. */
-static unsigned ia_next(unsigned k, int up)
+/* The step to go to from `k` (item 3), up (fewer slots apart, more frames)
+ * or down: the fastest on that side whose frame, `busy` ms now with `cmds`
+ * commands, fits IA_FIT of a game frame (going up, its extra passes x
+ * IA_PASS_X); none fits: down, the slowest; up, `k` itself. */
+static double ia_cost(unsigned from, unsigned to, double cmds);
+static unsigned ia_next(unsigned k, int up, double busy, double cmds)
 {
-    if (up)
-        return k > 0 ? k - 1 : k;
-    return k + 1 < g_fp.nsteps ? k + 1 : k;
+    unsigned j;
+
+    if (up) {
+        for (j = 0; j < k; j++)
+            if (busy + ia_cost(k, j, cmds) * IA_PASS_X <= g_ia.t_ms * IA_FIT)
+                return j;
+        return k;
+    }
+    for (j = k + 1; j < g_fp.nsteps; j++)
+        if (busy + ia_cost(k, j, cmds) <= g_ia.t_ms * IA_FIT)
+            return j;
+    return g_fp.nsteps ? g_fp.nsteps - 1 : k;
 }
 
 /* The step this frame may have (an index into g_fp.step). */
@@ -3522,7 +3550,7 @@ static void ia_frame(unsigned swap_no)
     g_ia.wi += used > 1 || paired;
     if (g_ia.w.n >= IA_WIN) {
         double mdt = g_ia.w.dt / g_ia.w.n, mb = g_ia.w.busy / g_ia.w.n, mc = g_ia.w.cmds / g_ia.w.n;
-        kn = ia_next(cur, 0);
+        kn = ia_next(cur, 0, mb, mc);
         if (kn != cur && mdt > g_ia.t_ms * IA_LATE && 2 * g_ia.wi >= g_ia.w.n && mb > g_ia.t_ms * IA_BUSY &&
             -ia_cost(cur, kn, mc) >= 0.5 * (mdt - g_ia.t_ms)) {
             int failed = g_ia.rose && g_ia.rose == g_ia.changed && since < IA_FAIL;
@@ -3542,9 +3570,9 @@ static void ia_frame(unsigned swap_no)
         ia_add(&g_ia.u, dt, busy, cmds);
         if (g_ia.u.n >= IA_UP) {
             double mdt = g_ia.u.dt / g_ia.u.n, mb = g_ia.u.busy / g_ia.u.n, mc = g_ia.u.cmds / g_ia.u.n, want;
-            kn = ia_next(cur, 1);
+            kn = ia_next(cur, 1, mb, mc);
             want = mb + ia_cost(cur, kn, mc) * IA_PASS_X;
-            if (since >= g_ia.hold && mdt <= g_ia.t_ms * 1.01 && want <= g_ia.t_ms * IA_FIT) {
+            if (kn != cur && since >= g_ia.hold && mdt <= g_ia.t_ms * 1.01) {
                 snprintf(why, sizeof(why), "room for them, %.2f ms busy a frame over the last %u, ~%.2f with %.4g"
                          " more (%.0f commands, an interpolated pass %.2f ms) of %.2f", mb, g_ia.u.n, want,
                          fp_step_per(kn) - fp_step_per(cur), mc, mc * g_ia.c_pass[1], g_ia.t_ms);
