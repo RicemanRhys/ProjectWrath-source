@@ -35,6 +35,12 @@ Set-up (once, in the copy):
 | `upst.py TAG` | Step 74: ride the hub's central lift upstairs (the heaviest room of steps 60-62) and stay; for `sx.sh` as `PRE="upst.py TAG"` with LEVEL `-`. |
 | `adsum.py TAG...` (or `"m*"`) | Step 74: per run, the level, play fps, and after the level load the game frames by sub-frames allowed (4/2/1), the changes and their direction, mean ms apart and busy (`[D3DB] host interpolation sub-frames` lines). |
 | `rmw.py`, `peek.py`, `poke.py` | Guest memory read-modify-write, read, write. |
+| `t2.sh EXEDIR PFX`, `t3.sh`, `t4.sh`, `t180.sh` | Step 77 (notes 18.80): the frame-rate targets at 240 Hz (upstairs standing: 120, 90, 90 with `RECOMP_VRR=1` and `=measure`, 144, display; cast_bug gliding with sub-frame dumps), the adaptive ladder (cast_bug at display and 120, upstairs), avalanch + the overlay + `id.sh`, and the display at 180 Hz. They expect exe copies in `exe_item2`, `exe_item3` and (with `../step77_camera_log.patch`) `exe_cam` beside them. |
+| `glsub.py TAG SECS Z0 Z1 SPEED AT N` | Step 77: `glide.py`, and AT s into it the sub-frame dump trigger (`runs/TAG/sub.trig`, for `RECOMP_D3D_BRIDGE_SUBDUMP=@` with forward-slash paths: a backslash before the file name was lost on the way in step 77's first try). |
+| `subev.py DIR PREFIX` | Step 77: the shift of the picture between consecutive sub-frame dumps by phase correlation (`SUBEV_TOP=1`: the top quarter, the walls, away from the fruit and Coco, which bob and animate). Read with care: the glide's own speed varies from game frame to game frame. |
+| `camev.py ERRLOG [N]` | Step 77: a `step77_camera_log.patch` run's camera log: off-the-line error and motion per present. |
+| `esc.py` | Step 77: posts Esc to the bridge window (the settings overlay); grab it with act.py's `grab:`, at `RS=2560x1440` (at 1280x720 the 225% overlay doesn't fit). |
+| `id.sh A B`, `idcmp.sh A B` | Steps 76-77: identity, `drive.py` 150 s bridge off and host-only with `sw/A` and `sw/B`'s exes, then CdRom opens, `[PATH]`, exits, host device and pacing lines and the first 8 host dumps compared (edit `M`, the scratch folder, first). |
 
 Traps: a race level (`west_a`) needs throttle the play script doesn't press; random play reaches game over (WOMBAT
 starts with 4 lives) and from the title or hub can walk onto other pads; cycle.py's pad trigger sometimes needs a

@@ -1,0 +1,37 @@
+--- a/twoc/src/d3d_host.c	2026-10-16 03:43:59.043869100 +1100
++++ b/twoc/src/d3d_host.c	2026-10-16 03:43:59.096469100 +1100
+@@ -6579,8 +6579,33 @@
+         ic_queue(g_interp && ic_possible());        /* step 61 */
+         if (g_interp || g_ia.gen)
+             ia_frame(swap_no);          /* step 74: the frame before measured, this one's step chosen */
+-        if (fp_active())                /* step 77: this game frame's presents on the plan's clock */
++        if (fp_active()) {              /* step 77: this game frame's presents on the plan's clock */
+             fp_frame(&fr, g_interp && ic_possible() ? ia_k() : g_fp.nsteps - 1);
++            {   /* TMP step 77 check: the old counts' presents (k = the step's frames each game frame, t = j/k,
++                 * T0 (j-1)/k, interval g_interval/k, the last at t = 1, the frame g_interval refreshes) */
++                static unsigned chk, bad;
++                unsigned s = g_interp && ic_possible() ? ia_k() : g_fp.nsteps - 1;
++                unsigned kk = (unsigned)(fp_step_per(s) + 0.5), j, iv = g_interval >= kk ? g_interval / kk : 1;
++                int bd = fr.n != kk;
++                double tot = 0;
++                for (j = 0; j < fr.n; j++) {
++                    double want = j + 1 == kk ? 1.0 : (double)(j + 1) / kk;
++                    double want0 = kk == 1 ? 1.0 : (double)j / kk;     /* the last's t0 is (k-1)/k, unused */
++                    bd |= fr.t[j] != want || fr.t0[j] != want0 || fr.slots[j] != (double)iv;
++                    tot += fr.slots[j];
++                }
++                bd |= tot != (double)g_interval;
++                bd |= fr.interp != (kk > 1);
++                chk++;
++                bad += bd;
++                if (bd && bad <= 10)
++                    fprintf(stderr, "[TMP] fpcheck differs at swap %u: n %u k %u t %.17g %.17g slots %g interval %u\n",
++                            swap_no, fr.n, kk, fr.t[0], fr.n > 1 ? fr.t[1] : 0.0, fr.slots[0], g_interval);
++                if (chk % 600 == 0)
++                    fprintf(stderr, "[TMP] fpcheck %u frames, %u differ (now step %u: %u each game frame)\n", chk, bad,
++                            s, kk);
++            }
++        }
+         if (g_interp) {
+             int held = g_ovl_open && (!g_ovs.active || g_ovs.s.pause);
+             interp = ic_begin(swap_no, held, fr.n && fr.interp);    /* step 61 */

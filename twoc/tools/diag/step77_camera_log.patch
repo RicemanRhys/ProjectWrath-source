@@ -1,0 +1,20 @@
+--- a/twoc/src/d3d_host.c	2026-10-16 04:48:38.410063500 +1100
++++ b/twoc/src/d3d_host.c	2026-10-16 04:48:38.463715800 +1100
+@@ -4584,6 +4584,9 @@
+         for (j = 0; j < 3; j++)
+             g_isub[i].pos[j] = (float)ci[12 + j];
+         g_isub[i].on = 1;
++        if (i == 0 && getenv("TMP_CAMLOG"))   /* TMP step 77 */
++            fprintf(stderr, "[TMP] cam t %.4f a %.4f %.4f %.4f b %.4f %.4f %.4f at %.4f %.4f %.4f\n", t,
++                    a->m[12], a->m[13], a->m[14], b->m[12], b->m[13], b->m[14], ci[12], ci[13], ci[14]);
+     }
+ }
+ 
+@@ -6964,6 +6967,7 @@
+                     replay_pass(1);
+                 } else {
+                     replay_pass(0);     /* t = 1: the frame as recorded */
++                    if (getenv("TMP_CAMLOG")) fprintf(stderr, "[TMP] cam plain\n");
+                 }
+                 if (sub == fr.n) {
+                     replay_done();
