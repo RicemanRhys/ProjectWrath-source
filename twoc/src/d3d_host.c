@@ -224,6 +224,10 @@ static int g_imid;                      /* RECOMP_D3D_BRIDGE_INTERP_MID=1: sub-f
 static unsigned g_iq_buffers = 4, g_iq_latency = 4;     /* RECOMP_D3D_BRIDGE_INTERP_QUEUE=buffers,latency */
 static char g_irec_trigger[MAX_PATH];   /* RECOMP_D3D_BRIDGE_INTERP_REC=FILE: once FILE.go appears, N frames' draws */
 static unsigned g_irec_left;
+static double g_rp_ms[2], g_rp_cmds[2]; /* step 74: replay passes' time and commands, plain [0] and interpolated [1] */
+static unsigned g_rp_n[2];              /* step 74: those passes */
+static int g_iadapt = 1;                /* step 74: RECOMP_D3D_BRIDGE_INTERP_ADAPT=0, always the display's count (a test switch) */
+static unsigned g_ifixed;               /* step 74: RECOMP_D3D_BRIDGE_INTERP_FIXED=K, always K sub-frames (a measurement aid) */
 
 /* Step 54: borderless fullscreen. g_fs and the client size are the window
  * thread's; g_buf_w x g_buf_h is the visible swap chain's, changed only by a
@@ -676,6 +680,15 @@ int d3dh_create(unsigned width, unsigned height, unsigned host_w, unsigned host_
         g_imatch = !(e && strcmp(e, "0") == 0);
         e = getenv("RECOMP_D3D_BRIDGE_PAIRLOG");
         g_ipairlog = e && *e && strcmp(e, "0") != 0;
+        e = getenv("RECOMP_D3D_BRIDGE_INTERP_ADAPT");      /* step 74: "0" always the display's count */
+        g_iadapt = !(e && strcmp(e, "0") == 0);
+        e = getenv("RECOMP_D3D_BRIDGE_INTERP_FIXED");      /* step 74: K sub-frames whatever the cost */
+        if (e && *e)
+            g_ifixed = (unsigned)atoi(e);
+        if (!g_iadapt || g_ifixed)
+            fprintf(stderr, "[D3DB] host interpolation: sub-frames not adaptive: %s\n",
+                    g_ifixed ? "a fixed count (RECOMP_D3D_BRIDGE_INTERP_FIXED)" : "always the display's count"
+                    " (RECOMP_D3D_BRIDGE_INTERP_ADAPT=0)");
         e = getenv("RECOMP_D3D_BRIDGE_SUBDUMP");
         if (e && strcmp(e, "cuts") == 0) {
             g_subdump_cuts = 1;
@@ -2066,6 +2079,9 @@ static void replay_pass(int interp)
     }
     QueryPerformanceCounter(&t1);
     g_st.replay_ms += (double)(t1.QuadPart - t0.QuadPart) * 1000.0 / (double)g_qpf.QuadPart;
+    g_rp_ms[interp != 0] += (double)(t1.QuadPart - t0.QuadPart) * 1000.0 / (double)g_qpf.QuadPart;    /* step 74 */
+    g_rp_cmds[interp != 0] += g_rc_n;
+    g_rp_n[interp != 0]++;
 }
 
 /* The frame's commands are done with: release what they held, forget them. */
@@ -2700,6 +2716,243 @@ static void ic_log_possible(unsigned k)
             fprintf(stderr, "[D3DB] host interpolation %s (display %.3f Hz)\n", now, d3dh_monitor_hz());
         else
             fprintf(stderr, "[D3DB] host interpolation off, one frame each game frame: %s\n", now);
+    }
+}
+
+/* ── Step 74: adaptive sub-frames (notes 18.77) ───────────────
+ * Each sub-frame replays the whole frame, and above ~1,000 draws (cast_bug,
+ * avalanch) four of them didn't fit a game frame: 37-56 fps. How many
+ * sub-frames a frame gets now follows how the frames before ran: the time
+ * between the game's presents (dt), the part of it outside the pacing wait
+ * (busy: the game, the recording, the replays and the presents), and what a
+ * replayed command costs, plain and interpolated (per command, so a new
+ * scene's count of draws is priced at once).
+ * Down: a window of IA_WIN measured frames, mostly interpolated, whose mean
+ * dt is over a frame's time T by IA_LATE, while busy (over IA_BUSY of T: the
+ * work, not a wait elsewhere) and the passes dropped would save at least
+ * half the overrun (not a load): the next count that divides the display's
+ * (4 -> 2 -> 1, 3 -> 1). Up: IA_UP frames on time at a count held at least
+ * `hold` s, whose mean busy time plus the next count's extra passes (x
+ * IA_PASS_X; the pairing too, going up from 1) fits in IA_FIT of T. A drop
+ * within IA_FAIL s of a rise doubles the hold (IA_HOLD0 to IA_HOLD_MAX); a
+ * rise kept IA_KEPT s sets it back. A frame's k sub-frames are presented
+ * at the display's interval / k, so every game frame still spans the same
+ * refreshes and a change shows nothing on screen. The queue counts presents,
+ * though, so at fewer sub-frames it holds more time (at 1, as many game
+ * frames as without interpolation's queue would at 4), and after a rise the
+ * game waits while it drains: the first IA_SETTLE frames after a change
+ * aren't judged. (Presenting each of the k sub-frames 4 / k times at
+ * interval 1 kept the queue's time, but back-to-back presents wait for the
+ * GPU: 0.7 ms each, 54.6 fps at 1 in cast_bug against 60 this way.) Each
+ * change is logged.
+ * RECOMP_D3D_BRIDGE_INTERP_ADAPT=0 keeps the display's count (the "always 4"
+ * test switch), RECOMP_D3D_BRIDGE_INTERP_FIXED=K always K. */
+#define IA_WIN 30
+#define IA_UP 120
+#define IA_LATE 1.03
+#define IA_BUSY 0.85
+#define IA_SETTLE 15
+#define IA_FIT 0.85
+#define IA_PASS_X 1.15
+#define IA_HOLD0 2.0
+#define IA_HOLD_MAX 32.0
+#define IA_FAIL 5.0
+#define IA_KEPT 20.0
+typedef struct {
+    unsigned n;                         /* frames */
+    double dt, busy, cmds;              /* their sums: ms apart, ms busy, commands a pass */
+} ia_sum_t;
+static struct {
+    unsigned k;                         /* sub-frames allowed now (a divisor of kmax) */
+    unsigned kmax;                      /* the display's count it was chosen under; 0: not started */
+    double t_ms;                        /* a game frame's time on this display */
+    unsigned kused;                     /* sub-frames the frame being measured got; 0: not measured */
+    LONGLONG last;                      /* QPC: that frame's present began; 0: none */
+    double pace_ms;                     /* its time in pace() */
+    double rp_ms0[2], rp_cmds0[2], pair0;   /* g_rp_ms, g_rp_cmds, g_st.pair_ms at its start */
+    unsigned rp_n0[2];                  /* g_rp_n at its start */
+    double c_pass[2];                   /* ms a command, plain and interpolated passes (0: not known yet) */
+    double c_pair;                      /* ms a command pairing (going up from 1) */
+    ia_sum_t w;                         /* the down window */
+    unsigned wi;                        /* of it, frames interpolated */
+    unsigned settle;                    /* frames after a change not judged */
+    ia_sum_t u;                         /* the up stretch */
+    LONGLONG changed, rose;             /* QPC: the last change, the last rise (0: none) */
+    double hold;                        /* seconds at a count before a rise */
+} g_ia;
+
+/* The count after `k` among the divisors of `kmax`, up or down. */
+static unsigned ia_next(unsigned k, unsigned kmax, int up)
+{
+    unsigned j;
+
+    if (up) {
+        for (j = k + 1; j <= kmax; j++)
+            if (kmax % j == 0)
+                return j;
+    } else {
+        for (j = k - 1; j >= 1; j--)
+            if (kmax % j == 0)
+                return j;
+    }
+    return k;
+}
+
+/* The sub-frames this frame may have when the display allows `kmax`. */
+static unsigned ia_k(unsigned kmax)
+{
+    if (g_ifixed)
+        return g_ifixed <= kmax && kmax % g_ifixed == 0 ? g_ifixed : kmax;
+    if (!g_iadapt || g_ia.kmax != kmax || !g_ia.k)
+        return kmax;
+    return g_ia.k;
+}
+
+/* What `from` -> `to` sub-frames add to a frame of `cmds` commands (ms;
+ * negative going down). */
+static double ia_cost(unsigned from, unsigned to, double cmds)
+{
+    double ci = g_ia.c_pass[1] > 0 ? g_ia.c_pass[1] : 2.0 * g_ia.c_pass[0];    /* not seen yet: twice a plain one */
+    double d = ((double)to - from) * cmds * ci;
+
+    if (from == 1 && to > 1)
+        d += cmds * g_ia.c_pair;
+    else if (to == 1 && from > 1)
+        d -= cmds * g_ia.c_pair;
+    return d;
+}
+
+static void ia_change(unsigned k, LONGLONG q, unsigned swap_no, const char *why)
+{
+    fprintf(stderr, "[D3DB] host interpolation: %u frames each game frame from guest swap %u (was %u): %s\n", k,
+            swap_no, g_ia.k, why);
+    g_st.interp_adapt_changes++;
+    if (k > g_ia.k)
+        g_ia.rose = q;
+    g_ia.k = k;
+    g_ia.changed = q;
+    g_ia.settle = IA_SETTLE;
+    memset(&g_ia.w, 0, sizeof(g_ia.w));
+    memset(&g_ia.u, 0, sizeof(g_ia.u));
+    g_ia.wi = 0;
+}
+
+static void ia_add(ia_sum_t *s, double dt, double busy, double cmds)
+{
+    s->n++;
+    s->dt += dt;
+    s->busy += busy;
+    s->cmds += cmds;
+}
+
+/* The frame's replay counters, as the next frame's start. */
+static void ia_mark(void)
+{
+    memcpy(g_ia.rp_ms0, g_rp_ms, sizeof(g_rp_ms));
+    memcpy(g_ia.rp_cmds0, g_rp_cmds, sizeof(g_rp_cmds));
+    memcpy(g_ia.rp_n0, g_rp_n, sizeof(g_rp_n));
+    g_ia.pair0 = g_st.pair_ms;
+    g_ia.pace_ms = 0;
+    g_ia.kused = 0;
+}
+
+/* At each present while interpolating (and once after): the frame before
+ * measured, and the count for this one chosen. Called with g_lock held. */
+static void ia_frame(unsigned swap_no)
+{
+    LARGE_INTEGER q;
+    unsigned kmax = ic_k_possible(), used = g_ia.kused, cur, kn, i;
+    double dt, busy, cmds = 0, since, pair_ms = g_st.pair_ms - g_ia.pair0;
+    char why[256];
+
+    QueryPerformanceCounter(&q);
+    dt = g_ia.last ? (double)(q.QuadPart - g_ia.last) * 1000.0 / (double)g_qpf.QuadPart : 0.0;
+    busy = dt - g_ia.pace_ms;
+    for (i = 0; i < 2; i++) {           /* ms a command, plain and interpolated passes */
+        unsigned n = g_rp_n[i] - g_ia.rp_n0[i];
+        double c = g_rp_cmds[i] - g_ia.rp_cmds0[i], ms = g_rp_ms[i] - g_ia.rp_ms0[i];
+        if (n && c >= 50) {
+            g_ia.c_pass[i] = g_ia.c_pass[i] > 0 ? 0.9 * g_ia.c_pass[i] + 0.1 * ms / c : ms / c;
+            if (i == 0)
+                cmds = c / n;           /* every recorded frame ends with a plain pass */
+        }
+    }
+    if (used > 1 && cmds >= 50 && pair_ms > 0)
+        g_ia.c_pair = g_ia.c_pair > 0 ? 0.9 * g_ia.c_pair + 0.1 * pair_ms / cmds : pair_ms / cmds;
+    g_ia.last = q.QuadPart;
+    ia_mark();
+    if (!g_interp || !kmax) {           /* stopped: the next start is from the display's count */
+        if (g_ia.kmax && g_ia.k != g_ia.kmax)
+            fprintf(stderr, "[D3DB] host interpolation: sub-frames back to the display's count (it stopped)\n");
+        memset(&g_ia, 0, sizeof(g_ia));
+        return;
+    }
+    if (kmax != g_ia.kmax) {            /* started, or another display rate */
+        double hz = d3dh_monitor_hz(), cp[2] = { g_ia.c_pass[0], g_ia.c_pass[1] }, cr = g_ia.c_pair;
+        memset(&g_ia, 0, sizeof(g_ia));
+        g_ia.c_pass[0] = cp[0];
+        g_ia.c_pass[1] = cp[1];
+        g_ia.c_pair = cr;
+        g_ia.kmax = g_ia.k = kmax;
+        g_ia.t_ms = hz > 0 ? 1000.0 * g_interval / hz : 1001.0 / 60.0;
+        g_ia.hold = IA_HOLD0;
+        g_ia.last = q.QuadPart;
+        g_ia.changed = q.QuadPart;
+        ia_mark();
+        return;
+    }
+    if (!used || !cmds)
+        return;                         /* not measured: the overlay held the game, nothing recorded */
+    if (dt > 4.0 * g_ia.t_ms)
+        return;                         /* a stall (a load): not the sub-frames' cost */
+    cur = g_ia.k;
+    g_st.interp_adapt_frames++;
+    g_st.interp_adapt_dt += dt;
+    g_st.interp_adapt_busy += busy;
+    if (!g_iadapt || g_ifixed)
+        return;                         /* measured only */
+    if (g_ia.settle) {
+        g_ia.settle--;                  /* the queue settling after a change */
+        return;
+    }
+    since = (double)(q.QuadPart - g_ia.changed) / (double)g_qpf.QuadPart;
+    if (g_ia.rose && g_ia.rose == g_ia.changed && since > IA_KEPT)
+        g_ia.hold = IA_HOLD0;           /* the last rise held */
+    ia_add(&g_ia.w, dt, busy, cmds);
+    g_ia.wi += used > 1;
+    if (g_ia.w.n >= IA_WIN) {
+        double mdt = g_ia.w.dt / g_ia.w.n, mb = g_ia.w.busy / g_ia.w.n, mc = g_ia.w.cmds / g_ia.w.n;
+        kn = ia_next(cur, g_ia.kmax, 0);
+        if (cur > 1 && mdt > g_ia.t_ms * IA_LATE && 2 * g_ia.wi >= g_ia.w.n && mb > g_ia.t_ms * IA_BUSY &&
+            -ia_cost(cur, kn, mc) >= 0.5 * (mdt - g_ia.t_ms)) {
+            int failed = g_ia.rose && g_ia.rose == g_ia.changed && since < IA_FAIL;
+            if (failed)
+                g_ia.hold = g_ia.hold * 2 > IA_HOLD_MAX ? IA_HOLD_MAX : g_ia.hold * 2;
+            snprintf(why, sizeof(why), "game frames ran late, %.1f fps over the last %u (%.2f ms a frame against"
+                     " %.2f, %.2f ms of it busy; %.0f commands, an interpolated pass %.2f ms)%s", 1000.0 / mdt,
+                     g_ia.w.n, mdt, g_ia.t_ms, mb, mc, mc * g_ia.c_pass[1],
+                     failed ? "; the next rise after a longer hold" : "");
+            ia_change(kn, q.QuadPart, swap_no, why);
+            return;
+        }
+        memset(&g_ia.w, 0, sizeof(g_ia.w));
+        g_ia.wi = 0;
+    }
+    if (cur < g_ia.kmax) {
+        ia_add(&g_ia.u, dt, busy, cmds);
+        if (g_ia.u.n >= IA_UP) {
+            double mdt = g_ia.u.dt / g_ia.u.n, mb = g_ia.u.busy / g_ia.u.n, mc = g_ia.u.cmds / g_ia.u.n, want;
+            kn = ia_next(cur, g_ia.kmax, 1);
+            want = mb + ia_cost(cur, kn, mc) * IA_PASS_X;
+            if (since >= g_ia.hold && mdt <= g_ia.t_ms * 1.01 && want <= g_ia.t_ms * IA_FIT) {
+                snprintf(why, sizeof(why), "room for them, %.2f ms busy a frame over the last %u, ~%.2f with %u more"
+                         " (%.0f commands, an interpolated pass %.2f ms) of %.2f", mb, g_ia.u.n, want, kn - cur, mc,
+                         mc * g_ia.c_pass[1], g_ia.t_ms);
+                ia_change(kn, q.QuadPart, swap_no, why);
+                return;
+            }
+            memset(&g_ia.u, 0, sizeof(g_ia.u));
+        }
     }
 }
 
@@ -3552,6 +3805,9 @@ static unsigned ic_begin(unsigned swap_no, int ovl)
         g_st.interp_cut_first++;
         return 1;
     }
+    k = ia_k(k);                        /* step 74: fewer while game frames run late */
+    if (k == 1)
+        return 1;                       /* nothing to pair or to cut */
     for (i = j = 0; i < g_ikey_n[cur] && j < g_ikey_n[prv];) {
         if (g_ikey[cur][i] == g_ikey[prv][j]) {
             matched++;
@@ -5458,6 +5714,7 @@ static int ovl_draw(ID3D11Texture2D *dst, int running)
     in.ms_samples = g_bb.ms;
     in.interp_k = ic_k_possible();      /* step 61 */
     in.interp_on = g_interp && in.interp_k;
+    in.interp_now = in.interp_k ? ia_k(in.interp_k) : 0;   /* step 74 */
     if (!in.interp_k) {                 /* step 63 */
         static char why[256];
         ic_why(why, sizeof(why));
@@ -5745,7 +6002,13 @@ static int present_one(double t_s, unsigned swap_no, unsigned interval, unsigned
     int ovl_r = 0;
     ID3D11Texture2D *src;
 
-    pace(!k || k == 1 || g_imid);
+    {
+        LARGE_INTEGER p0, p1;
+        QueryPerformanceCounter(&p0);
+        pace(!k || k == 1 || g_imid);
+        QueryPerformanceCounter(&p1);
+        g_ia.pace_ms += (double)(p1.QuadPart - p0.QuadPart) * 1000.0 / (double)g_qpf.QuadPart;   /* step 74 */
+    }
     EnterCriticalSection(&g_lock);
     src = frame_tex();                  /* step 58: resolved, and through FXAA or SMAA if one is on */
     now = GetTickCount64();
@@ -5828,6 +6091,7 @@ static int present_one(double t_s, unsigned swap_no, unsigned interval, unsigned
         static int log_on = -1;
         static double phase[64];        /* ms after DWM's vblank, by present count mod 64 */
         static unsigned work[64][5];    /* draws, texture uploads, target draws, copies, us since the last */
+        static unsigned char ivl[64];   /* step 74: each present's interval, by present count mod 64 */
         DXGI_FRAME_STATISTICS fs;
         DWM_TIMING_INFO ti;
         LARGE_INTEGER q, f;
@@ -5836,6 +6100,7 @@ static int present_one(double t_s, unsigned swap_no, unsigned interval, unsigned
             const char *e = getenv("RECOMP_D3D_BRIDGE_DISPLAYLOG");
             log_on = e && *e && *e != '0';
         }
+        ivl[g_st.presents & 63] = (unsigned char)interval;
         memset(&ti, 0, sizeof(ti));
         ti.cbSize = sizeof(ti);
         QueryPerformanceCounter(&q);
@@ -5866,7 +6131,9 @@ static int present_one(double t_s, unsigned swap_no, unsigned interval, unsigned
                 if (last_pc && fs.PresentCount == last_pc + 1) {
                     UINT d = fs.PresentRefreshCount - last_prc;
                     g_st.displayed[d > 8 ? 8 : d]++;
-                    if (log_on && d != interval) {
+                    if (d != ivl[fs.PresentCount & 63])
+                        g_st.display_off++;     /* step 74: not the gap it was presented with */
+                    if (log_on && d != ivl[fs.PresentCount & 63]) {
                         unsigned *a = work[(fs.PresentCount - 1) & 63], *b = work[fs.PresentCount & 63];
                         fprintf(stderr, "[D3DB] host display: present %u shown %u refreshes after the one before"
                                 " (presents at +%.2f, +%.2f ms after a vblank; %u presents made; work before/this:"
@@ -5929,11 +6196,19 @@ void d3dh_present(double t_s, unsigned swap_no)
             fprintf(stderr, "[D3DB] host sub-frame dumps: guest swaps %u-%u\n", g_subdump_from, g_subdump_to);
         }
     }
-    if (REC_ON()) {                     /* step 60: the frame's recorded commands, drawn now */
+    if (REC_ON() || g_ia.kmax) {        /* step 60: the frame's recorded commands, drawn now */
         EnterCriticalSection(&g_lock);
         ic_queue(g_interp && ic_k_possible());      /* step 61 */
-        if (g_interp)
-            k = ic_begin(swap_no, g_ovl_open && (!g_ovs.active || g_ovs.s.pause));   /* step 61 */
+        if (g_interp || g_ia.kmax)
+            ia_frame(swap_no);          /* step 74: the frame before measured, this one's count chosen */
+        if (g_interp) {
+            int held = g_ovl_open && (!g_ovs.active || g_ovs.s.pause);
+            k = ic_begin(swap_no, held);    /* step 61 */
+            if (!held && ic_k_possible()) {
+                g_ia.kused = k;         /* step 74: this frame is measured at the next present */
+                g_st.interp_at[ia_k(ic_k_possible()) <= 4 ? ia_k(ic_k_possible()) : 4]++;
+            }
+        }
         if (k > 1) {
             ic_sub(g_interp_t0 ? 0.0 : 1.0 / k);
             replay_pass(1);             /* the first sub-frame */
@@ -5948,7 +6223,7 @@ void d3dh_present(double t_s, unsigned swap_no)
         }
         LeaveCriticalSection(&g_lock);
     }
-    if (k > 1) {                        /* step 61: k presents at interval 1, the game held in its Swap */
+    if (k > 1) {                        /* step 61: k presents, the game held in its Swap */
         for (sub = 1; sub <= k; sub++) {
             if (sub > 1) {
                 EnterCriticalSection(&g_lock);
@@ -5962,7 +6237,7 @@ void d3dh_present(double t_s, unsigned swap_no)
                 }
                 LeaveCriticalSection(&g_lock);
             }
-            ovl_r |= present_one(t_s, swap_no, 1, sub, k);
+            ovl_r |= present_one(t_s, swap_no, g_interval >= k ? g_interval / k : 1, sub, k);  /* step 74: 1 at 4 */
             g_st.interp_subs++;
         }
     } else {

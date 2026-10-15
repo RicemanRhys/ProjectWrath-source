@@ -4486,7 +4486,7 @@ static void mirror_swap(void)
                             " 4 %u, 5 %u, 6 %u, 7 %u, more %u\n", d[0], d[1], d[2], d[3], d[4], d[5], d[6], d[7], d[8]);
             }
             {   /* 18.48: refreshes between consecutive frames on screen (d3d_host.c) */
-                static unsigned last_disp[9], last_unmeasured;
+                static unsigned last_disp[9], last_unmeasured, last_off;
                 unsigned k, d[9], total = 0;
                 for (k = 0; k < 9; k++) {
                     d[k] = st.displayed[k] - last_disp[k];
@@ -4495,9 +4495,11 @@ static void mirror_swap(void)
                 }
                 if (total || st.display_unmeasured != last_unmeasured)
                     log_block_printf(&lb, "[D3DB] host frames shown this interval, by refreshes since the last shown: 1 %u, 2 %u,"
-                            " 3 %u, 4 %u, 5 %u, 6 %u, 7 %u, more %u; unmeasured %u\n", d[1], d[2], d[3], d[4], d[5],
-                            d[6], d[7], d[8], st.display_unmeasured - last_unmeasured);
+                            " 3 %u, 4 %u, 5 %u, 6 %u, 7 %u, more %u; unmeasured %u; at another gap than presented %u\n",
+                            d[1], d[2], d[3], d[4], d[5], d[6], d[7], d[8], st.display_unmeasured - last_unmeasured,
+                            st.display_off - last_off);
                 last_unmeasured = st.display_unmeasured;
+                last_off = st.display_off;
             }
             log_block_printf(&lb, "[D3DB] host draws: mirrored %ld (to render targets %ld, with pixel shaders %ld,"
                     " immediate %ld, of them pre-transformed %ld; DrawVertices calls %ld),"
@@ -4620,6 +4622,21 @@ static void mirror_swap(void)
                 loc = st.interp_other_cam;
                 lcp = st.interp_cpos;
                 lmt = st.interp_matched;
+            }
+            if (st.interp_adapt_frames || st.interp_adapt_changes) {    /* step 74: adaptive sub-frames */
+                static unsigned la[5], lc, lfr;
+                static double ldt, lbu;
+                unsigned fr = st.interp_adapt_frames - lfr;
+                log_block_printf(&lb, "[D3DB] host interpolation sub-frames: game frames allowed 4: %u, 3: %u, 2: %u,"
+                                 " 1: %u; changes %u; measured frames %u, %.2f ms apart, %.2f ms of it busy\n",
+                                 st.interp_at[4] - la[4], st.interp_at[3] - la[3], st.interp_at[2] - la[2],
+                                 st.interp_at[1] - la[1], st.interp_adapt_changes - lc, fr,
+                                 fr ? (st.interp_adapt_dt - ldt) / fr : 0.0, fr ? (st.interp_adapt_busy - lbu) / fr : 0.0);
+                memcpy(la, st.interp_at, sizeof(la));
+                lc = st.interp_adapt_changes;
+                lfr = st.interp_adapt_frames;
+                ldt = st.interp_adapt_dt;
+                lbu = st.interp_adapt_busy;
             }
             if (st.interp_obj) {                        /* step 62: objects */
                 static unsigned lf, ls, lo, ln, lsn, lvp, lff, lbn, lbs, lsw, lsk, lskb;

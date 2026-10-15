@@ -35,6 +35,7 @@ typedef struct {
     unsigned interp_k;                  /* step 61: frames shown a game frame when interpolating (0: can't here) */
     int interp_on;                      /* step 61: interpolating now */
     const char *interp_why;             /* step 63: why interp_k is 0 */
+    unsigned interp_now;                /* step 74: frames shown a game frame now (fewer than interp_k while late) */
 } ovl_info_t;
 
 enum { OVL_CHANGED = 1, OVL_CLOSE = 2 };

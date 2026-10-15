@@ -28,6 +28,7 @@ typedef struct {
     unsigned shown[9];      /* DWM compositions between presents: [0]..[7], [8] more (18.45) */
     unsigned displayed[9];  /* refreshes between consecutive displayed frames: [0]..[7], [8] more (18.48) */
     unsigned display_unmeasured;    /* frame statistics unavailable, or more than one frame shown between two reads */
+    unsigned display_off;           /* step 74: of `displayed`, shown at another gap than its present's interval */
     unsigned rhw_full, rhw_pillar;  /* 18.56: pre-transformed draws on a scaled screen, stretched / pillarboxed */
     unsigned copy_unscaled;         /* 18.56: copies into a target the host couldn't scale them to */
     unsigned aa_mode, ms_samples;   /* step 58: TWOC_AA_*, the back buffer's samples (0: single) */
@@ -56,6 +57,11 @@ typedef struct {
     unsigned interp_obj_motion;         /* step 68: stepped over the snap, but on with its own motion */
     unsigned interp_skel, interp_skel_bones;    /* step 66: skeletons a frame; bones blended in one */
     double interp_matched;              /* sum of each interpolated frame's fraction of draws matched */
+    /* Step 74: adaptive sub-frames. Game frames by the sub-frames allowed
+     * then ([1]..[4]), changes of that count, and the measured frames' sum
+     * of time between presents and of it outside the pacing wait (ms). */
+    unsigned interp_at[5], interp_adapt_changes, interp_adapt_frames;
+    double interp_adapt_dt, interp_adapt_busy;
     /* Step 65: the game's overlay pass: passes, its draws, those under the
      * world's camera (the HUD counters and title cards). */
     unsigned overlay_passes, overlay_draws, overlay_world_cam;
