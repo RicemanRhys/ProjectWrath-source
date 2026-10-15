@@ -15,6 +15,8 @@
  *   anisotropy  = 1 | 2 | 4 | 8 | 16          RECOMP_ANISOTROPY (1: the game's own filtering)
  *   antialiasing = off | fxaa | smaa | msaa2x | msaa4x | msaa8x    RECOMP_ANTIALIASING (unset: off)
  *   framerate   = 60 | display                RECOMP_FRAMERATE (unset: 60)
+ *   adaptive_framerate = 0 | 1                RECOMP_FRAMERATE_ADAPTIVE (unset: on; step 75. The old
+ *                                             name RECOMP_D3D_BRIDGE_INTERP_ADAPT still reads)
  *   hud         = centre | edges              RECOMP_HUD (unset: centre)
  *   hud_margin  = 0-10                        RECOMP_HUD_MARGIN (percent of the width; unset: 0)
  *   draw_distance = 1 | 1.5 | 2 | 3           RECOMP_DRAW_DISTANCE (unset: 1, the game's)
@@ -51,6 +53,12 @@
  * refresh in between with the camera interpolated from the frame before
  * (d3d_host.c), on a display at 2, 3 or 4 x 59.94 Hz paced by its vsync.
  * The game still runs 59.94 updates a second. From the next frame.
+ *
+ * Step 75: the adaptive frame rate. With the frame rate at display, a frame
+ * too heavy to draw at every refresh gets fewer frames in between (notes
+ * 18.77) while that lasts; adaptive_framerate 0 draws them all whatever the
+ * cost, and in the heaviest places the game then runs slower than 59.94
+ * updates a second. Applied at once.
  *
  * Step 65: the HUD position (notes 18.68). In a picture wider than 4:3 the
  * game's HUD counters sit in the middle 4:3; edges moves those on the left
@@ -94,6 +102,7 @@ typedef struct {
     int anisotropy;                     /* 1 (off), 2, 4, 8, 16 */
     int antialiasing;                   /* TWOC_AA_* */
     int framerate;                      /* step 61: 0 the game's 60, 1 the display's (interpolated) */
+    int adaptive;                       /* step 75: 1 fewer sub-frames while late (also when unset), 0 always all */
     int hud, hud_margin;                /* step 65: 0 the HUD in the middle 4:3, 1 at the edges; 0-10 percent in */
     double draw_distance;               /* step 69: the far plane and fog times this; 1 the game's (also unset) */
     int volume;                         /* 0-100; -1: never set (Windows' own level) */

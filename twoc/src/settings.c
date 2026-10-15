@@ -24,6 +24,8 @@ static const key_t_ g_fixed[] = {
     { "anisotropy", "RECOMP_ANISOTROPY", "1 (the game's filtering), 2, 4, 8 or 16" },
     { "antialiasing", "RECOMP_ANTIALIASING", "off, fxaa, smaa, msaa2x, msaa4x or msaa8x" },
     { "framerate", "RECOMP_FRAMERATE", "60, or display: interpolated frames at a 120 or 240 Hz display's rate" },
+    { "adaptive_framerate", "RECOMP_FRAMERATE_ADAPTIVE",
+      "1: fewer interpolated frames while game frames run late, 0: always the display's count" },
     { "hud", "RECOMP_HUD", "centre (the game's 4:3 places) or edges: the HUD counters at the screen's edges, wider than 4:3" },
     { "hud_margin", "RECOMP_HUD_MARGIN", "0-10: percent of the screen's width the HUD at the edges keeps in from them" },
     { "draw_distance", "RECOMP_DRAW_DISTANCE", "1 (the game's), 1.5, 2 or 3: the level's far plane and fog times this" },
@@ -169,6 +171,11 @@ void twoc_settings_load(void)
     int lineno = 0;
 
     keys_init();
+    {   /* step 75: step 74's test switch is the setting's old name */
+        const char *old = getenv("RECOMP_D3D_BRIDGE_INTERP_ADAPT");
+        if (old && *old && !getenv("RECOMP_FRAMERATE_ADAPTIVE"))
+            _putenv_s("RECOMP_FRAMERATE_ADAPTIVE", old);
+    }
     if (!f)
         return;                         /* no file: nothing set, the run as before */
     fprintf(stderr, "[CFG] settings from %s\n", twoc_settings_path());
@@ -261,6 +268,8 @@ void twoc_settings_current(twoc_settings_t *s)
     s->antialiasing = twoc_aa_parse(getenv("RECOMP_ANTIALIASING"));
     v = getenv("RECOMP_FRAMERATE");
     s->framerate = v && _stricmp(v, "display") == 0;
+    v = getenv("RECOMP_FRAMERATE_ADAPTIVE");
+    s->adaptive = !(v && strcmp(v, "0") == 0);
     v = getenv("RECOMP_HUD");
     s->hud = v && _stricmp(v, "edges") == 0;
     v = getenv("RECOMP_HUD_MARGIN");
@@ -324,6 +333,8 @@ static void key_text(const twoc_settings_t *s, size_t i, char *buf, size_t cap)
         snprintf(buf, cap, "%s", twoc_aa_name(s->antialiasing));
     else if (strcmp(k, "framerate") == 0)
         snprintf(buf, cap, "%s", s->framerate ? "display" : "60");
+    else if (strcmp(k, "adaptive_framerate") == 0)
+        snprintf(buf, cap, "%d", s->adaptive ? 1 : 0);
     else if (strcmp(k, "hud") == 0)
         snprintf(buf, cap, "%s", s->hud ? "edges" : "centre");
     else if (strcmp(k, "hud_margin") == 0)

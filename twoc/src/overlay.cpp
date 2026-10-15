@@ -610,8 +610,7 @@ static int tab_display(twoc_settings_t *s, const ovl_info_t *in)
         more("Display: the game still runs 59.94 updates a second, and each of its frames is drawn again at every "
              "refresh in between with the camera moved partway from the frame before, so turning and following "
              "Crash look smooth at 120 or 240 Hz. Objects move at the game's rate. A camera cut shows at once. "
-             "Needs vsync pacing (auto or vsync) on a display at 2, 3 or 4 x 59.94 Hz. Applied at once. "
-             "Where a frame is too heavy to draw that often, fewer frames are drawn in between until it isn't.");
+             "Needs vsync pacing (auto or vsync) on a display at 2, 3 or 4 x 59.94 Hz. Applied at once.");
         if (!s->framerate)
             snprintf(line, sizeof(line), "Now: the game's 59.94 fps.");
         else if (in->interp_on && in->interp_now && in->interp_now < in->interp_k)
@@ -626,6 +625,19 @@ static int tab_display(twoc_settings_t *s, const ovl_info_t *in)
             snprintf(line, sizeof(line), "Now: 59.94 fps, one frame each game frame: %s.",
                      in->interp_why ? in->interp_why : "this pacing");
         help(line);
+        if (s->framerate) {             /* step 75 */
+            static const char *const ad_names[2] = { "On", "Off" };
+            int cur = s->adaptive ? 0 : 1;
+            ImGui::SetNextItemWidth(ImGui::GetFontSize() * 12);
+            if (ImGui::Combo("Adaptive frame rate", &cur, ad_names, 2)) {
+                s->adaptive = cur == 0;
+                r |= OVL_CHANGED;
+            }
+            more("On: where a frame is too heavy to draw at every refresh, fewer frames are drawn in between "
+                 "(half, or one) until there is room again, so the game keeps its 59.94 updates a second. "
+                 "Off: always a frame at every refresh; in the heaviest places the game itself then runs "
+                 "slower than it should. Applied at once.");
+        }
     }
 
     ImGui::SeparatorText("Textures");

@@ -226,7 +226,8 @@ static char g_irec_trigger[MAX_PATH];   /* RECOMP_D3D_BRIDGE_INTERP_REC=FILE: on
 static unsigned g_irec_left;
 static double g_rp_ms[2], g_rp_cmds[2]; /* step 74: replay passes' time and commands, plain [0] and interpolated [1] */
 static unsigned g_rp_n[2];              /* step 74: those passes */
-static int g_iadapt = 1;                /* step 74: RECOMP_D3D_BRIDGE_INTERP_ADAPT=0, always the display's count (a test switch) */
+static volatile LONG g_iadapt = 1;      /* step 74: 0 always the display's count; step 75: the setting (RECOMP_FRAMERATE_ADAPTIVE), live */
+static LONG g_iadapt_seen = 1;          /* step 75: g_iadapt as ia_frame last applied it */
 static unsigned g_ifixed;               /* step 74: RECOMP_D3D_BRIDGE_INTERP_FIXED=K, always K sub-frames (a measurement aid) */
 
 /* Step 54: borderless fullscreen. g_fs and the client size are the window
@@ -680,15 +681,16 @@ int d3dh_create(unsigned width, unsigned height, unsigned host_w, unsigned host_
         g_imatch = !(e && strcmp(e, "0") == 0);
         e = getenv("RECOMP_D3D_BRIDGE_PAIRLOG");
         g_ipairlog = e && *e && strcmp(e, "0") != 0;
-        e = getenv("RECOMP_D3D_BRIDGE_INTERP_ADAPT");      /* step 74: "0" always the display's count */
-        g_iadapt = !(e && strcmp(e, "0") == 0);
+        e = getenv("RECOMP_FRAMERATE_ADAPTIVE");   /* step 75: "0" always the display's count (settings.c reads */
+        g_iadapt = !(e && strcmp(e, "0") == 0);    /* step 74's RECOMP_D3D_BRIDGE_INTERP_ADAPT into it) */
+        g_iadapt_seen = g_iadapt;
         e = getenv("RECOMP_D3D_BRIDGE_INTERP_FIXED");      /* step 74: K sub-frames whatever the cost */
         if (e && *e)
             g_ifixed = (unsigned)atoi(e);
         if (!g_iadapt || g_ifixed)
             fprintf(stderr, "[D3DB] host interpolation: sub-frames not adaptive: %s\n",
                     g_ifixed ? "a fixed count (RECOMP_D3D_BRIDGE_INTERP_FIXED)" : "always the display's count"
-                    " (RECOMP_D3D_BRIDGE_INTERP_ADAPT=0)");
+                    " (adaptive frame rate off)");
         e = getenv("RECOMP_D3D_BRIDGE_SUBDUMP");
         if (e && strcmp(e, "cuts") == 0) {
             g_subdump_cuts = 1;
@@ -2746,7 +2748,11 @@ static void ic_log_possible(unsigned k)
  * GPU: 0.7 ms each, 54.6 fps at 1 in cast_bug against 60 this way.) Each
  * change is logged.
  * RECOMP_D3D_BRIDGE_INTERP_ADAPT=0 keeps the display's count (the "always 4"
- * test switch), RECOMP_D3D_BRIDGE_INTERP_FIXED=K always K. */
+ * test switch), RECOMP_D3D_BRIDGE_INTERP_FIXED=K always K.
+ * Step 75: that switch is now the setting "Adaptive frame rate" (Esc,
+ * Display; `adaptive_framerate`, RECOMP_FRAMERATE_ADAPTIVE), on unless set
+ * to 0, applied live (d3dh_set_interp_adaptive): a change goes back to the
+ * display's count and judges afresh from there. */
 #define IA_WIN 30
 #define IA_UP 120
 #define IA_LATE 1.03
@@ -2885,6 +2891,7 @@ static void ia_frame(unsigned swap_no)
         if (g_ia.kmax && g_ia.k != g_ia.kmax)
             fprintf(stderr, "[D3DB] host interpolation: sub-frames back to the display's count (it stopped)\n");
         memset(&g_ia, 0, sizeof(g_ia));
+        g_iadapt_seen = g_iadapt;
         return;
     }
     if (kmax != g_ia.kmax) {            /* started, or another display rate */
@@ -2899,6 +2906,23 @@ static void ia_frame(unsigned swap_no)
         g_ia.last = q.QuadPart;
         g_ia.changed = q.QuadPart;
         ia_mark();
+        g_iadapt_seen = g_iadapt;
+        return;
+    }
+    if (g_iadapt != g_iadapt_seen) {    /* step 75: the setting changed: from the display's count, judged afresh */
+        g_iadapt_seen = g_iadapt;
+        fprintf(stderr, "[D3DB] host interpolation: adaptive frame rate %s (the setting)\n", g_iadapt ? "on" : "off");
+        if (g_ia.k != g_ia.kmax)
+            ia_change(g_ia.kmax, q.QuadPart, swap_no, "the adaptive frame rate setting changed");
+        else {
+            memset(&g_ia.w, 0, sizeof(g_ia.w));
+            memset(&g_ia.u, 0, sizeof(g_ia.u));
+            g_ia.wi = 0;
+            g_ia.settle = IA_SETTLE;
+            g_ia.changed = q.QuadPart;
+        }
+        g_ia.rose = 0;
+        g_ia.hold = IA_HOLD0;
         return;
     }
     if (!used || !cmds)
@@ -4163,6 +4187,11 @@ static void ic_apply(void)
     g_ibone_n[g_icur] = 0;
     fprintf(stderr, "[D3DB] host frame rate: %s from present %u\n",
             want ? "the display's, interpolated" : "the game's 59.94", g_st.presents);
+}
+
+void d3dh_set_interp_adaptive(int on)
+{
+    InterlockedExchange(&g_iadapt, on ? 1 : 0);
 }
 
 void d3dh_set_framerate(int display)
@@ -5586,6 +5615,10 @@ static void overlay_apply(twoc_settings_t *was, const twoc_settings_t *s)
         set_antialiasing(s->antialiasing);      /* step 58 */
     if (s->framerate != was->framerate)
         d3dh_set_framerate(s->framerate);       /* step 61: from the frame after this one */
+    if (s->adaptive != was->adaptive) {         /* step 75: at the next present */
+        d3dh_set_interp_adaptive(s->adaptive);
+        fprintf(stderr, "[OVL] adaptive frame rate: %s\n", s->adaptive ? "on" : "off");
+    }
     if (s->hud != was->hud || s->hud_margin != was->hud_margin) {   /* step 65: from the next overlay pass */
         d3dh_set_hud(s->hud, s->hud_margin);
         fprintf(stderr, "[OVL] HUD position: %s, margin %d%%\n", s->hud ? "screen edges" : "centre (4:3)",
@@ -6171,25 +6204,29 @@ void d3dh_present(double t_s, unsigned swap_no)
     if (g_subdump_trigger[0] && GetFileAttributesA(g_subdump_trigger) != INVALID_FILE_ATTRIBUTES) {
         FILE *f = fopen(g_subdump_trigger, "r");
         unsigned n = 0;
-        int fr = -1;
+        int fr = -1, ad = -1;
         if (f) {
             char line[64] = "";
-            if (fgets(line, sizeof(line), f) && sscanf(line, "framerate %d", &fr) != 1 && sscanf(line, "%u", &n) != 1)
-                n = 0;                  /* "framerate 0|1": a test aid, the setting as the overlay changes it */
-            fclose(f);
+            if (fgets(line, sizeof(line), f) && sscanf(line, "framerate %d", &fr) != 1 &&
+                sscanf(line, "adaptive %d", &ad) != 1 && sscanf(line, "%u", &n) != 1)
+                n = 0;                  /* "framerate 0|1", "adaptive 0|1" (step 75): test aids, the settings as */
+            fclose(f);                  /* the overlay changes them */
         }
         DeleteFileA(g_subdump_trigger);
-        if (fr >= 0) {                  /* step 63: through overlay_apply, as the overlay does */
+        if (fr >= 0 || ad >= 0) {       /* step 63: through overlay_apply, as the overlay does */
             if (!g_ovs.have) {
                 twoc_settings_current(&g_ovs.s);
                 g_ovs.s.fullscreen = g_fs;
                 g_ovs.was = g_ovs.s;
                 g_ovs.have = 1;
             }
-            g_ovs.s.framerate = fr;
+            if (fr >= 0)
+                g_ovs.s.framerate = fr;
+            if (ad >= 0)
+                g_ovs.s.adaptive = ad != 0;
             overlay_apply(&g_ovs.was, &g_ovs.s);
         }
-        n = fr >= 0 ? 0 : n ? n : 8;
+        n = fr >= 0 || ad >= 0 ? 0 : n ? n : 8;
         if (n) {
             g_subdump_from = swap_no;
             g_subdump_to = swap_no + n - 1;

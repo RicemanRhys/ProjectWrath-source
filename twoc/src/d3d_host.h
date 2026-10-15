@@ -301,6 +301,10 @@ double d3dh_monitor_hz(void);
 /* Step 61: "Frame rate: display": interpolated sub-frames at each present
  * (on 1, off 0), from the next frame. */
 void d3dh_set_framerate(int display);
+/* Step 75: "Adaptive frame rate": on, fewer sub-frames while game frames
+ * run late (notes 18.77); off, always the display's count. At the next
+ * present. */
+void d3dh_set_interp_adaptive(int on);
 /* For the controller poll (recomp_manual.c): 1 while the overlay is open;
  * *closes counts the times it has closed. Callable with the bridge off. */
 int d3dh_overlay_input(unsigned *closes);
