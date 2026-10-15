@@ -30,14 +30,18 @@ BOOL d3d8_GetLightEnable(DWORD index) { (void)index; return FALSE; }
 const D3DMATERIAL8 *d3d8_GetMaterial(void) { return NULL; }
 UINT d3d8_GetNumLights(void) { return 0; }
 
+/* What the draws last bound (d3d8_states.c, not linked here). */
+D3D8Bound g_d3d8_bound;
+
 /* Model successful programmable-VS preparation without Xbox microcode.
- * Bind real D3D11 vertex state so pixel preparation must preserve it. */
+ * Bind real D3D11 vertex state so pixel preparation must preserve it
+ * (through the bind record, as d3d8_vsh.c does). */
 BOOL d3d8_vsh_prepare_draw(DWORD handle)
 {
     if (handle != 0x10000) return FALSE;
-    ID3D11DeviceContext_VSSetShader(context, vs, NULL, 0);
-    ID3D11DeviceContext_IASetInputLayout(context, NULL);
-    ID3D11DeviceContext_VSSetConstantBuffers(context, 1, 1, &programmable_constants);
+    d3d8_bind_vs(context, vs);
+    d3d8_bind_layout(context, NULL);
+    d3d8_bind_vs_cb(context, 1, programmable_constants);
     return TRUE;
 }
 
@@ -190,7 +194,7 @@ int main(void)
         states[D3DRS_PSFINALCOMBINERINPUTSEFG] = (NV2A_REG_T0 + stage) << 16;
         d3d8_combiners_mark_dirty();
         UINT mode = kind == 1 ? NV2A_TEXMODE_CUBEMAP : kind == 2 ? NV2A_TEXMODE_3D : NV2A_TEXMODE_2D;
-        d3d8_combiners_set_pixel_shader(1u | (mode << (8 + 4 * stage)));
+        DWORD token = 1u | (mode << (8 + 4 * stage));
         for (f = 0; f < sizeof(formats) / sizeof(formats[0]); f++) {
             IDirect3DBaseTexture8 *tex;
             ID3D11ShaderResourceView *srv;
@@ -235,6 +239,9 @@ int main(void)
                 }
                 for (path = 0; path < (kind == 0 ? 3u : 2u); path++) {
                     D3D11_MAPPED_SUBRESOURCE mapped;
+                    /* d3d8_shaders_prepare_draw takes the combiners' shader
+                     * when a token is set: only the combiner path sets one. */
+                    d3d8_combiners_set_pixel_shader(path == 1 ? token : 0);
                     if (path == 2) {
                         D3D8Texture previous = *(D3D8Texture *)tex;
                         ID3D11VertexShader *bound_vs;
@@ -260,8 +267,8 @@ int main(void)
                     } else {
                         d3d8_shaders_prepare_draw(D3DFVF_XYZRHW | D3DFVF_DIFFUSE | D3DFVF_TEX1);
                         if (path && !d3d8_combiners_prepare_draw()) return 1;
-                        ID3D11DeviceContext_VSSetShader(context, vs, NULL, 0);
-                        ID3D11DeviceContext_IASetInputLayout(context, NULL);
+                        d3d8_bind_vs(context, vs);
+                        d3d8_bind_layout(context, NULL);
                     }
                     ID3D11DeviceContext_IASetPrimitiveTopology(context, D3D11_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
                     ID3D11DeviceContext_Draw(context, 3, 0);

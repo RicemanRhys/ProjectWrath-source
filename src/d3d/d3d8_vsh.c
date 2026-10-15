@@ -966,12 +966,12 @@ BOOL d3d8_vsh_prepare_draw(DWORD handle)
     }
 
     /* Bind the vertex shader */
-    ID3D11DeviceContext_VSSetShader(ctx, entry->vs, NULL, 0);
+    d3d8_bind_vs(ctx, entry->vs);
 
     /* Bind the input layout (sizes texcoords from the bound stream FVF) */
     layout = get_cached_layout(entry, d3d8_GetCurrentFVF());
     if (layout)
-        ID3D11DeviceContext_IASetInputLayout(ctx, layout);
+        d3d8_bind_layout(ctx, layout);
 
     /* Update constant buffer if dirty */
     if (g_vsh_constants_dirty) {
@@ -985,7 +985,7 @@ BOOL d3d8_vsh_prepare_draw(DWORD handle)
     }
 
     /* Bind constant buffer to slot b1 */
-    ID3D11DeviceContext_VSSetConstantBuffers(ctx, 1, 1, &g_vsh_cb);
+    d3d8_bind_vs_cb(ctx, 1, g_vsh_cb);
 
     return TRUE;
 }

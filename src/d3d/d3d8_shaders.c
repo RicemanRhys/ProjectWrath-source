@@ -612,6 +612,11 @@ typedef struct {
     UINT  alpha_only[4];
 } PSConstants;
 
+/* What g_ps_cb holds, while g_ps_held_by is it (18.79: uploaded only when a
+ * draw's constants differ). */
+static PSConstants g_ps_held;
+static ID3D11Buffer *g_ps_held_by;
+
 /* ================================================================
  * Input layout cache (FVF → ID3D11InputLayout)
  * ================================================================ */
@@ -864,6 +869,7 @@ HRESULT d3d8_shaders_init(void)
     if (FAILED(hr)) return hr;
 
     /* Create PS constant buffer */
+    g_ps_held_by = NULL;
     cbd.ByteWidth = (sizeof(PSConstants) + 15) & ~15;
     hr = ID3D11Device_CreateBuffer(d3d8_GetD3D11Device(), &cbd, NULL, &g_ps_cb);
     if (FAILED(hr)) return hr;
@@ -913,12 +919,12 @@ static void ff_vs_prepare_draw(DWORD fvf)
     rs = d3d8_GetRenderStates();
     tex_count = (fvf & D3DFVF_TEXCOUNT_MASK) >> D3DFVF_TEXCOUNT_SHIFT;
 
-    ID3D11DeviceContext_VSSetShader(ctx, g_vs, NULL, 0);
+    d3d8_bind_vs(ctx, g_vs);
 
     /* Bind input layout */
     layout = get_or_create_layout(fvf);
     if (layout)
-        ID3D11DeviceContext_IASetInputLayout(ctx, layout);
+        d3d8_bind_layout(ctx, layout);
 
     /* ---- VS Transform CB (b0) ---- */
     hr = ID3D11DeviceContext_Map(ctx, (ID3D11Resource *)g_vs_cb, 0, D3D11_MAP_WRITE_DISCARD, 0, &mapped);
@@ -1086,35 +1092,28 @@ static void ff_vs_prepare_draw(DWORD fvf)
         ID3D11DeviceContext_Unmap(ctx, (ID3D11Resource *)g_vs_light_cb, 0);
     }
 
-    {
-        ID3D11Buffer *vs_cbs[2] = { g_vs_cb, g_vs_light_cb };
-        ID3D11DeviceContext_VSSetConstantBuffers(ctx, 0, 2, vs_cbs);
-    }
+    d3d8_bind_vs_cb(ctx, 0, g_vs_cb);
+    d3d8_bind_vs_cb(ctx, 1, g_vs_light_cb);
 }
 
-void d3d8_shaders_prepare_draw(DWORD handle)
+/* The fixed-function pixel shader and its constants. */
+static void ff_ps_prepare_draw(ID3D11DeviceContext *ctx)
 {
-    ID3D11DeviceContext *ctx = d3d8_GetD3D11Context();
     ID3D11PixelShader *ps;
     D3D11_MAPPED_SUBRESOURCE mapped;
     const DWORD *rs;
     HRESULT hr;
 
-    if (!ctx) return;
-    if (!d3d8_vsh_prepare_draw(handle))
-        ff_vs_prepare_draw(handle);
-
-    /* Pixel state is independent of whether the vertex shader is programmable. */
     if (!g_ps_cb) return;
     ps = ff_ps_get_shader(ff_ps_compute_signature());
     if (!ps) return;
-    ID3D11DeviceContext_PSSetShader(ctx, ps, NULL, 0);
+    d3d8_bind_ps(ctx, ps);
     rs = d3d8_GetRenderStates();
 
-    /* ---- PS Constant Buffer ---- */
-    hr = ID3D11DeviceContext_Map(ctx, (ID3D11Resource *)g_ps_cb, 0, D3D11_MAP_WRITE_DISCARD, 0, &mapped);
-    if (SUCCEEDED(hr)) {
-        PSConstants *pc = (PSConstants *)mapped.pData;
+    /* ---- PS Constant Buffer ----
+     * Built here and uploaded only when it changed (18.79). */
+    {
+        PSConstants buf, *pc = &buf;
         UINT stage;
         memset(pc, 0, sizeof(*pc));
 
@@ -1186,8 +1185,32 @@ void d3d8_shaders_prepare_draw(DWORD handle)
             pc->stage_alpha[stage][1] = tss[D3DTSS_ALPHAARG2] ? tss[D3DTSS_ALPHAARG2] : D3DTA_CURRENT;
         }
 
-        ID3D11DeviceContext_Unmap(ctx, (ID3D11Resource *)g_ps_cb, 0);
+        if (g_ps_held_by != g_ps_cb || memcmp(&g_ps_held, pc, sizeof(*pc)) != 0) {
+            hr = ID3D11DeviceContext_Map(ctx, (ID3D11Resource *)g_ps_cb, 0, D3D11_MAP_WRITE_DISCARD, 0, &mapped);
+            if (SUCCEEDED(hr)) {
+                memcpy(mapped.pData, pc, sizeof(*pc));
+                ID3D11DeviceContext_Unmap(ctx, (ID3D11Resource *)g_ps_cb, 0);
+                g_ps_held = *pc;
+                g_ps_held_by = g_ps_cb;
+            }
+        }
     }
 
-    ID3D11DeviceContext_PSSetConstantBuffers(ctx, 0, 1, &g_ps_cb);
+    d3d8_bind_ps_cb(ctx, g_ps_cb);
+}
+
+void d3d8_shaders_prepare_draw(DWORD handle)
+{
+    ID3D11DeviceContext *ctx = d3d8_GetD3D11Context();
+
+    if (!ctx) return;
+    if (!d3d8_vsh_prepare_draw(handle))
+        ff_vs_prepare_draw(handle);
+
+    /* Pixel state is independent of whether the vertex shader is
+     * programmable: the combiners' shader when one is set and it has one,
+     * else the fixed-function one (18.79: that was built and bound at every
+     * draw, then replaced by the combiners'). */
+    if (!d3d8_combiners_prepare_draw())
+        ff_ps_prepare_draw(ctx);
 }

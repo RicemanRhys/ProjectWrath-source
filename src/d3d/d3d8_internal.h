@@ -316,6 +316,106 @@ void    d3d8_states_apply(void);
 /* Create sampler state from TSS and apply to slot */
 void    d3d8_states_apply_sampler(DWORD stage);
 
+/* ================================================================
+ * What the draws last bound on the D3D11 context (d3d8_states.c)
+ *
+ * Local perf change (twoc notes 18.79): a draw that would bind the object
+ * already bound skips the call. Code outside xbox_d3d8 that binds on the
+ * same context puts back what it found (twoc's present passes, Dear ImGui's
+ * backend), so the record stays true; d3d8_bound_reset forgets it (every
+ * next bind is made).
+ * ================================================================ */
+
+typedef struct {
+    ID3D11VertexShader      *vs;
+    ID3D11PixelShader       *ps;
+    ID3D11InputLayout       *il;
+    ID3D11BlendState        *bs;
+    ID3D11DepthStencilState *dss;
+    UINT                     stencil_ref;
+    ID3D11RasterizerState   *rs;
+    ID3D11SamplerState      *samp[4];
+    ID3D11Buffer            *vs_cb[2];
+    ID3D11Buffer            *ps_cb;
+    ID3D11Buffer            *vb;        /* IA slot 0 */
+    UINT                     vb_stride, vb_offset;
+    ID3D11Buffer            *ib;
+    DXGI_FORMAT              ib_format;
+    UINT                     ib_offset;
+    D3D11_PRIMITIVE_TOPOLOGY topology;
+} D3D8Bound;
+
+extern D3D8Bound g_d3d8_bound;
+void d3d8_bound_reset(void);
+
+static __inline void d3d8_bind_vs(ID3D11DeviceContext *ctx, ID3D11VertexShader *vs)
+{
+    if (g_d3d8_bound.vs != vs) {
+        g_d3d8_bound.vs = vs;
+        ID3D11DeviceContext_VSSetShader(ctx, vs, NULL, 0);
+    }
+}
+
+static __inline void d3d8_bind_ps(ID3D11DeviceContext *ctx, ID3D11PixelShader *ps)
+{
+    if (g_d3d8_bound.ps != ps) {
+        g_d3d8_bound.ps = ps;
+        ID3D11DeviceContext_PSSetShader(ctx, ps, NULL, 0);
+    }
+}
+
+static __inline void d3d8_bind_layout(ID3D11DeviceContext *ctx, ID3D11InputLayout *il)
+{
+    if (g_d3d8_bound.il != il) {
+        g_d3d8_bound.il = il;
+        ID3D11DeviceContext_IASetInputLayout(ctx, il);
+    }
+}
+
+static __inline void d3d8_bind_vs_cb(ID3D11DeviceContext *ctx, UINT slot, ID3D11Buffer *cb)
+{
+    if (g_d3d8_bound.vs_cb[slot] != cb) {
+        g_d3d8_bound.vs_cb[slot] = cb;
+        ID3D11DeviceContext_VSSetConstantBuffers(ctx, slot, 1, &cb);
+    }
+}
+
+static __inline void d3d8_bind_ps_cb(ID3D11DeviceContext *ctx, ID3D11Buffer *cb)
+{
+    if (g_d3d8_bound.ps_cb != cb) {
+        g_d3d8_bound.ps_cb = cb;
+        ID3D11DeviceContext_PSSetConstantBuffers(ctx, 0, 1, &cb);
+    }
+}
+
+static __inline void d3d8_bind_vb(ID3D11DeviceContext *ctx, ID3D11Buffer *vb, UINT stride, UINT offset)
+{
+    if (g_d3d8_bound.vb != vb || g_d3d8_bound.vb_stride != stride || g_d3d8_bound.vb_offset != offset) {
+        g_d3d8_bound.vb = vb;
+        g_d3d8_bound.vb_stride = stride;
+        g_d3d8_bound.vb_offset = offset;
+        ID3D11DeviceContext_IASetVertexBuffers(ctx, 0, 1, &vb, &stride, &offset);
+    }
+}
+
+static __inline void d3d8_bind_ib(ID3D11DeviceContext *ctx, ID3D11Buffer *ib, DXGI_FORMAT format, UINT offset)
+{
+    if (g_d3d8_bound.ib != ib || g_d3d8_bound.ib_format != format || g_d3d8_bound.ib_offset != offset) {
+        g_d3d8_bound.ib = ib;
+        g_d3d8_bound.ib_format = format;
+        g_d3d8_bound.ib_offset = offset;
+        ID3D11DeviceContext_IASetIndexBuffer(ctx, ib, format, offset);
+    }
+}
+
+static __inline void d3d8_bind_topology(ID3D11DeviceContext *ctx, D3D11_PRIMITIVE_TOPOLOGY topology)
+{
+    if (g_d3d8_bound.topology != topology) {
+        g_d3d8_bound.topology = topology;
+        ID3D11DeviceContext_IASetPrimitiveTopology(ctx, topology);
+    }
+}
+
 #endif /* _WIN32 -- end of D3D11 backend section */
 
 #endif /* BURNOUT3_D3D8_INTERNAL_H */

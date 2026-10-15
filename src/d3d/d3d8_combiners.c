@@ -1039,6 +1039,11 @@ ID3D11PixelShader *d3d8_combiners_get_shader(const NV2ACombinerState *state)
  * Initialization / Shutdown
  * ================================================================ */
 
+/* What g_combiner_cb holds, while g_cb_held_by is it (18.79: uploaded only
+ * when a draw's constants differ). */
+static NV2APSConstants g_cb_held;
+static ID3D11Buffer *g_cb_held_by;
+
 HRESULT d3d8_combiners_init(void)
 {
     D3D11_BUFFER_DESC cbd;
@@ -1049,6 +1054,7 @@ HRESULT d3d8_combiners_init(void)
     g_ps_token = 0;
     g_dirty = TRUE;
     g_frame_counter = 0;
+    g_cb_held_by = NULL;
 
     /* Create the PS constant buffer for combiner shaders.
      * Size must match NV2APSConstants, rounded up to 16-byte alignment. */
@@ -1147,17 +1153,17 @@ BOOL d3d8_combiners_prepare_draw(void)
     }
 
     /* Bind the combiner pixel shader */
-    ID3D11DeviceContext_PSSetShader(ctx, ps, NULL, 0);
+    d3d8_bind_ps(ctx, ps);
 
     /* Update the PS constant buffer with current values.
      *
      * Even though the shader structure doesn't change, the constant
      * values (C0, C1, fog, alpha ref) can change every frame via
-     * render state writes. So we always re-upload. */
-    hr = ID3D11DeviceContext_Map(ctx, (ID3D11Resource *)g_combiner_cb,
-                                0, D3D11_MAP_WRITE_DISCARD, 0, &mapped);
-    if (SUCCEEDED(hr)) {
-        NV2APSConstants *cb = (NV2APSConstants *)mapped.pData;
+     * render state writes. They are built at every draw and uploaded
+     * when they differ from what the buffer holds (18.79). */
+    {
+        NV2APSConstants buf, *cb = &buf;
+        memset(cb, 0, sizeof(*cb));
 
         /* Per-stage constants */
         for (i = 0; i < NV2A_MAX_COMBINER_STAGES; i++) {
@@ -1192,11 +1198,20 @@ BOOL d3d8_combiners_prepare_draw(void)
             cb->alpha_only[i] = format == D3DFMT_A8 || format == D3DFMT_LIN_A8;
         }
 
-        ID3D11DeviceContext_Unmap(ctx, (ID3D11Resource *)g_combiner_cb, 0);
+        if (g_cb_held_by != g_combiner_cb || memcmp(&g_cb_held, cb, sizeof(*cb)) != 0) {
+            hr = ID3D11DeviceContext_Map(ctx, (ID3D11Resource *)g_combiner_cb,
+                                        0, D3D11_MAP_WRITE_DISCARD, 0, &mapped);
+            if (SUCCEEDED(hr)) {
+                memcpy(mapped.pData, cb, sizeof(*cb));
+                ID3D11DeviceContext_Unmap(ctx, (ID3D11Resource *)g_combiner_cb, 0);
+                g_cb_held = *cb;
+                g_cb_held_by = g_combiner_cb;
+            }
+        }
     }
 
     /* Bind the constant buffer to PS slot 0 */
-    ID3D11DeviceContext_PSSetConstantBuffers(ctx, 0, 1, &g_combiner_cb);
+    d3d8_bind_ps_cb(ctx, g_combiner_cb);
 
     /* Advance frame counter for LRU tracking */
     g_frame_counter++;

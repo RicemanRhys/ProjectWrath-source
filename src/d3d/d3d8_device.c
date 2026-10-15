@@ -647,9 +647,7 @@ static HRESULT __stdcall dev_SetStreamSource(IDirect3DDevice8 *self, UINT Stream
 
     if (pStreamData) {
         D3D8VertexBuffer *vb = (D3D8VertexBuffer *)pStreamData;
-        UINT offset = 0;
-        ID3D11DeviceContext_IASetVertexBuffers(g_device_state.d3d11_context,
-            0, 1, &vb->d3d11_buffer, &Stride, &offset);
+        d3d8_bind_vb(g_device_state.d3d11_context, vb->d3d11_buffer, Stride, 0);
     }
     return S_OK;
 }
@@ -674,8 +672,7 @@ static HRESULT __stdcall dev_SetIndices(IDirect3DDevice8 *self, IDirect3DIndexBu
         D3D8IndexBuffer *ib = (D3D8IndexBuffer *)pIndexData;
         DXGI_FORMAT fmt = (ib->format == D3DFMT_INDEX32)
             ? DXGI_FORMAT_R32_UINT : DXGI_FORMAT_R16_UINT;
-        ID3D11DeviceContext_IASetIndexBuffer(g_device_state.d3d11_context,
-            ib->d3d11_buffer, fmt, 0);
+        d3d8_bind_ib(g_device_state.d3d11_context, ib->d3d11_buffer, fmt, 0);
     }
     return S_OK;
 }
@@ -800,8 +797,10 @@ static void up_ring_shutdown(void)
     g_ib_ring_offset = 0;
 }
 
-/* Upload vertex data to ring buffer, returns offset. Returns (UINT)-1 on failure. */
-static UINT up_ring_upload(const void *data, UINT size)
+/* Upload vertex data to ring buffer, returns offset. Returns (UINT)-1 on failure.
+ * The offset is a multiple of `stride` (18.79): the ring stays bound at offset
+ * 0 and a draw starts at offset / stride. */
+static UINT up_ring_upload(const void *data, UINT size, UINT stride)
 {
     D3D11_MAPPED_SUBRESOURCE mapped;
     D3D11_MAP map_type;
@@ -815,8 +814,9 @@ static UINT up_ring_upload(const void *data, UINT size)
     if (size > UP_RING_BUFFER_SIZE) return (UINT)-1;
 
     /* Wrap around if not enough space */
-    if (g_up_ring_offset + size > UP_RING_BUFFER_SIZE) {
-        g_up_ring_offset = 0;
+    offset = (g_up_ring_offset + stride - 1) / stride * stride;
+    if (offset + size > UP_RING_BUFFER_SIZE) {
+        offset = 0;
         map_type = D3D11_MAP_WRITE_DISCARD;
     } else {
         map_type = D3D11_MAP_WRITE_NO_OVERWRITE;
@@ -826,13 +826,12 @@ static UINT up_ring_upload(const void *data, UINT size)
         (ID3D11Resource *)g_up_ring_buffer, 0, map_type, 0, &mapped);
     if (FAILED(hr)) return (UINT)-1;
 
-    offset = g_up_ring_offset;
     memcpy((BYTE *)mapped.pData + offset, data, size);
 
     ID3D11DeviceContext_Unmap(g_device_state.d3d11_context,
         (ID3D11Resource *)g_up_ring_buffer, 0);
 
-    g_up_ring_offset = (offset + size + 15) & ~15;  /* 16-byte align */
+    g_up_ring_offset = offset + size;
     return offset;
 }
 
@@ -870,6 +869,20 @@ static UINT ib_ring_upload(const void *data, UINT size)
     return offset;
 }
 
+/* The stream source and indices, for the draws that use them: an UP draw
+ * leaves its rings bound (18.79: they were bound again after each UP draw). */
+static void stream_bind(void)
+{
+    if (g_cur_vb)
+        d3d8_bind_vb(g_device_state.d3d11_context, ((D3D8VertexBuffer *)g_cur_vb)->d3d11_buffer,
+                     g_cur_vb_stride, 0);
+    if (g_cur_ib) {
+        D3D8IndexBuffer *ib = (D3D8IndexBuffer *)g_cur_ib;
+        d3d8_bind_ib(g_device_state.d3d11_context, ib->d3d11_buffer,
+                     ib->format == D3DFMT_INDEX32 ? DXGI_FORMAT_R32_UINT : DXGI_FORMAT_R16_UINT, 0);
+    }
+}
+
 static HRESULT __stdcall dev_DrawPrimitive(IDirect3DDevice8 *self, D3DPRIMITIVETYPE PrimitiveType, UINT StartVertex, UINT PrimitiveCount)
 {
     (void)self;
@@ -881,11 +894,11 @@ static HRESULT __stdcall dev_DrawPrimitive(IDirect3DDevice8 *self, D3DPRIMITIVET
     if (vertex_count == 0) return E_INVALIDARG;
 
     /* Prepare pipeline: shaders, input layout, constant buffers, render states */
-    d3d8_shaders_prepare_draw(g_device_state.vertex_shader);
-    d3d8_combiners_prepare_draw(); /* overrides PS if combiner shader is active */
+    d3d8_shaders_prepare_draw(g_device_state.vertex_shader);   /* and the pixel shader */
     d3d8_states_apply();
+    stream_bind();
 
-    ID3D11DeviceContext_IASetPrimitiveTopology(g_device_state.d3d11_context, topology);
+    d3d8_bind_topology(g_device_state.d3d11_context, topology);
     ID3D11DeviceContext_Draw(g_device_state.d3d11_context, vertex_count, StartVertex);
     return S_OK;
 }
@@ -901,11 +914,11 @@ static HRESULT __stdcall dev_DrawIndexedPrimitive(IDirect3DDevice8 *self, D3DPRI
     if (index_count == 0) return E_INVALIDARG;
 
     /* Vertex shader: try programmable VS first, fall back to FVF fixed-function */
-    d3d8_shaders_prepare_draw(g_device_state.vertex_shader);
-    d3d8_combiners_prepare_draw(); /* overrides PS if combiner shader is active */
+    d3d8_shaders_prepare_draw(g_device_state.vertex_shader);   /* and the pixel shader */
     d3d8_states_apply();
+    stream_bind();
 
-    ID3D11DeviceContext_IASetPrimitiveTopology(g_device_state.d3d11_context, topology);
+    d3d8_bind_topology(g_device_state.d3d11_context, topology);
     ID3D11DeviceContext_DrawIndexed(g_device_state.d3d11_context, index_count, StartIndex, (INT)g_cur_ib_base_vertex);
     return S_OK;
 }
@@ -935,30 +948,22 @@ static HRESULT __stdcall dev_DrawPrimitiveUP(IDirect3DDevice8 *self, D3DPRIMITIV
     vb_size = vertex_count * VertexStreamZeroStride;
 
     /* Upload to ring buffer */
-    ring_offset = up_ring_upload(draw_data, vb_size);
+    ring_offset = up_ring_upload(draw_data, vb_size, VertexStreamZeroStride);
     if (converted) free(converted);
 
     if (ring_offset == (UINT)-1) return E_OUTOFMEMORY;
 
-    /* Bind ring buffer at the right offset */
-    ID3D11DeviceContext_IASetVertexBuffers(g_device_state.d3d11_context,
-        0, 1, &g_up_ring_buffer, &VertexStreamZeroStride, &ring_offset);
+    /* The ring bound at 0, the draw from its vertices (18.79: it was bound at
+     * the draw's offset, and the stream source bound again after the draw;
+     * the draws that use the stream source now bind it themselves). */
+    d3d8_bind_vb(g_device_state.d3d11_context, g_up_ring_buffer, VertexStreamZeroStride, 0);
 
     /* Vertex shader: try programmable VS first, fall back to FVF fixed-function */
-    d3d8_shaders_prepare_draw(g_device_state.vertex_shader);
-    d3d8_combiners_prepare_draw(); /* overrides PS if combiner shader is active */
+    d3d8_shaders_prepare_draw(g_device_state.vertex_shader);   /* and the pixel shader */
     d3d8_states_apply();
 
-    ID3D11DeviceContext_IASetPrimitiveTopology(g_device_state.d3d11_context, topology);
-    ID3D11DeviceContext_Draw(g_device_state.d3d11_context, vertex_count, 0);
-
-    /* Restore previous VB binding if any */
-    if (g_cur_vb) {
-        D3D8VertexBuffer *vb = (D3D8VertexBuffer *)g_cur_vb;
-        UINT restore_offset = 0;
-        ID3D11DeviceContext_IASetVertexBuffers(g_device_state.d3d11_context,
-            0, 1, &vb->d3d11_buffer, &g_cur_vb_stride, &restore_offset);
-    }
+    d3d8_bind_topology(g_device_state.d3d11_context, topology);
+    ID3D11DeviceContext_Draw(g_device_state.d3d11_context, vertex_count, ring_offset / VertexStreamZeroStride);
     return S_OK;
 }
 
@@ -967,7 +972,7 @@ static HRESULT __stdcall dev_DrawIndexedPrimitiveUP(IDirect3DDevice8 *self, D3DP
     (void)self; (void)MinVertexIndex;
     g_d3d_draw_count++;
     D3D11_PRIMITIVE_TOPOLOGY topology;
-    UINT index_count, vb_size, ib_size, offset = 0, vb_offset, ib_offset;
+    UINT index_count, vb_size, ib_size, vb_offset, ib_offset;
     UINT idx_bytes;
     DXGI_FORMAT ib_fmt;
 
@@ -984,38 +989,24 @@ static HRESULT __stdcall dev_DrawIndexedPrimitiveUP(IDirect3DDevice8 *self, D3DP
     /* Vertices and indices through the ring buffers (local perf change, twoc
      * notes 18.63: two immutable buffers were created and released for every
      * draw, ~4.4 us of its ~7). */
-    vb_offset = up_ring_upload(pVertexData, vb_size);
+    vb_offset = up_ring_upload(pVertexData, vb_size, VertexStreamZeroStride);
     if (vb_offset == (UINT)-1) return E_OUTOFMEMORY;
     ib_offset = ib_ring_upload(pIndexData, ib_size);
     if (ib_offset == (UINT)-1) return E_OUTOFMEMORY;
 
-    /* Bind, prepare, draw */
-    ID3D11DeviceContext_IASetVertexBuffers(g_device_state.d3d11_context,
-        0, 1, &g_up_ring_buffer, &VertexStreamZeroStride, &vb_offset);
-    ID3D11DeviceContext_IASetIndexBuffer(g_device_state.d3d11_context,
-        g_ib_ring_buffer, ib_fmt, ib_offset);
+    /* Bind, prepare, draw: the rings bound at 0, the draw from its indices
+     * and vertices (18.79: they were bound at the draw's offsets, and the
+     * stream source and indices bound again after the draw). */
+    d3d8_bind_vb(g_device_state.d3d11_context, g_up_ring_buffer, VertexStreamZeroStride, 0);
+    d3d8_bind_ib(g_device_state.d3d11_context, g_ib_ring_buffer, ib_fmt, 0);
 
     /* Vertex shader: try programmable VS first, fall back to FVF fixed-function */
-    d3d8_shaders_prepare_draw(g_device_state.vertex_shader);
-    d3d8_combiners_prepare_draw(); /* overrides PS if combiner shader is active */
+    d3d8_shaders_prepare_draw(g_device_state.vertex_shader);   /* and the pixel shader */
     d3d8_states_apply();
 
-    ID3D11DeviceContext_IASetPrimitiveTopology(g_device_state.d3d11_context, topology);
-    ID3D11DeviceContext_DrawIndexed(g_device_state.d3d11_context, index_count, 0, 0);
-
-    /* Restore previous bindings */
-    if (g_cur_vb) {
-        D3D8VertexBuffer *vb = (D3D8VertexBuffer *)g_cur_vb;
-        offset = 0;
-        ID3D11DeviceContext_IASetVertexBuffers(g_device_state.d3d11_context,
-            0, 1, &vb->d3d11_buffer, &g_cur_vb_stride, &offset);
-    }
-    if (g_cur_ib) {
-        D3D8IndexBuffer *ib = (D3D8IndexBuffer *)g_cur_ib;
-        DXGI_FORMAT fmt = (ib->format == D3DFMT_INDEX32) ? DXGI_FORMAT_R32_UINT : DXGI_FORMAT_R16_UINT;
-        ID3D11DeviceContext_IASetIndexBuffer(g_device_state.d3d11_context,
-            ib->d3d11_buffer, fmt, 0);
-    }
+    d3d8_bind_topology(g_device_state.d3d11_context, topology);
+    ID3D11DeviceContext_DrawIndexed(g_device_state.d3d11_context, index_count, ib_offset / idx_bytes,
+                                    (INT)(vb_offset / VertexStreamZeroStride));
     return S_OK;
 }
 

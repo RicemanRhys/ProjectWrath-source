@@ -23,13 +23,29 @@ static ID3D11DepthStencilState *g_ds_state = NULL;
 static ID3D11RasterizerState   *g_raster_state = NULL;
 static ID3D11SamplerState      *g_sampler_states[4] = { NULL, NULL, NULL, NULL };   /* bound, from the cache */
 
-/* Sampler objects by description (local perf change, twoc notes 18.63). */
+/* Sampler objects by description (local perf change, twoc notes 18.63),
+ * found by a hash of the description (18.79: a scan of the list for each of
+ * 4 stages at every draw), and each stage's last description, whose object
+ * it still has bound. */
 #define SAMPLER_CACHE_MAX 64
+#define SAMPLER_HASH_SLOTS 256                  /* a power of two, over 2x the most entries */
 static struct {
     D3D11_SAMPLER_DESC desc;
     ID3D11SamplerState *state;
 } g_sampler_cache[SAMPLER_CACHE_MAX];
 static unsigned g_sampler_cache_n;
+static unsigned char g_sampler_hash[SAMPLER_HASH_SLOTS];   /* entry + 1, 0 empty */
+static D3D11_SAMPLER_DESC g_sampler_last[4];
+static BOOL g_sampler_last_ok[4];
+
+/* What the draws last bound (d3d8_internal.h). */
+D3D8Bound g_d3d8_bound;
+
+void d3d8_bound_reset(void)
+{
+    /* An address nothing has: every next bind is made. */
+    memset(&g_d3d8_bound, 0xFF, sizeof(g_d3d8_bound));
+}
 
 /* Last known render state identity for dirty detection */
 static DWORD g_last_blend_hash = 0;
@@ -274,6 +290,17 @@ static D3D11_FILTER d3d8_to_d3d11_filter(DWORD mag, DWORD min, DWORD mip)
     return D3D11_FILTER_MIN_MAG_MIP_POINT;
 }
 
+/* A description's first slot in g_sampler_hash (FNV-1a over its words). */
+static unsigned sampler_slot(const D3D11_SAMPLER_DESC *sd)
+{
+    const DWORD *w = (const DWORD *)sd;
+    unsigned k, h = 2166136261u;
+
+    for (k = 0; k < sizeof(*sd) / sizeof(DWORD); k++)
+        h = (h ^ w[k]) * 16777619u;
+    return h & (SAMPLER_HASH_SLOTS - 1);
+}
+
 void d3d8_states_apply_sampler(DWORD stage)
 {
     const DWORD *tss;
@@ -297,33 +324,51 @@ void d3d8_states_apply_sampler(DWORD stage)
     sd.ComparisonFunc = D3D11_COMPARISON_NEVER;
     sd.MaxLOD = D3D11_FLOAT32_MAX;
 
+    /* The stage's description as at its last draw, and its object still
+     * bound: nothing to do (18.79). */
+    if (g_sampler_last_ok[stage] && g_d3d8_bound.samp[stage] == g_sampler_states[stage] &&
+        memcmp(&g_sampler_last[stage], &sd, sizeof(sd)) == 0)
+        return;
+
     /* A sampler object per distinct description, made once and kept (local
      * perf change, twoc notes 18.63: one was created and released for every
      * stage of every draw). The same description binds an object with the
      * same description, as before. */
     {
-        unsigned i;
-        for (i = 0; i < g_sampler_cache_n; i++)
-            if (memcmp(&g_sampler_cache[i].desc, &sd, sizeof(sd)) == 0)
+        unsigned i, k, h = sampler_slot(&sd);
+        for (;;) {
+            i = g_sampler_hash[h];
+            if (!i || memcmp(&g_sampler_cache[i - 1].desc, &sd, sizeof(sd)) == 0)
                 break;
-        if (i == g_sampler_cache_n) {
+            h = (h + 1) & (SAMPLER_HASH_SLOTS - 1);
+        }
+        if (i) {
+            i--;
+        } else {
             ID3D11SamplerState *st = NULL;
             hr = ID3D11Device_CreateSamplerState(d3d8_GetD3D11Device(), &sd, &st);
             if (FAILED(hr))
                 return;
             if (g_sampler_cache_n == SAMPLER_CACHE_MAX) {   /* full: start again */
-                unsigned k;
                 for (k = 0; k < g_sampler_cache_n; k++)
                     ID3D11SamplerState_Release(g_sampler_cache[k].state);
                 g_sampler_cache_n = 0;
-                i = 0;
+                memset(g_sampler_hash, 0, sizeof(g_sampler_hash));
+                h = sampler_slot(&sd);
             }
+            i = g_sampler_cache_n;
             g_sampler_cache[i].desc = sd;
             g_sampler_cache[i].state = st;
             g_sampler_cache_n = i + 1;
+            g_sampler_hash[h] = (unsigned char)(i + 1);
         }
         g_sampler_states[stage] = g_sampler_cache[i].state;
-        ID3D11DeviceContext_PSSetSamplers(ctx, stage, 1, &g_sampler_states[stage]);
+        g_sampler_last[stage] = sd;
+        g_sampler_last_ok[stage] = TRUE;
+        if (g_d3d8_bound.samp[stage] != g_sampler_states[stage]) {
+            g_d3d8_bound.samp[stage] = g_sampler_states[stage];
+            ID3D11DeviceContext_PSSetSamplers(ctx, stage, 1, &g_sampler_states[stage]);
+        }
     }
 }
 
@@ -334,6 +379,7 @@ void d3d8_states_apply_sampler(DWORD stage)
 HRESULT d3d8_states_init(void)
 {
     /* States are created on first apply */
+    d3d8_bound_reset();
     return S_OK;
 }
 
@@ -348,8 +394,11 @@ void d3d8_states_shutdown(void)
     for (i = 0; i < (int)g_sampler_cache_n; i++)
         ID3D11SamplerState_Release(g_sampler_cache[i].state);
     g_sampler_cache_n = 0;
+    memset(g_sampler_hash, 0, sizeof(g_sampler_hash));
+    memset(g_sampler_last_ok, 0, sizeof(g_sampler_last_ok));
     g_last_blend_hash = 0;
     g_last_raster_hash = 0;
+    d3d8_bound_reset();
 }
 
 void d3d8_states_apply(void)
@@ -364,12 +413,21 @@ void d3d8_states_apply(void)
     update_depth_stencil_state(rs);
     update_rasterizer_state(rs);
 
-    if (g_blend_state)
+    /* Only what changed is bound (18.79). The blend factor and sample mask
+     * are always these. */
+    if (g_blend_state && g_d3d8_bound.bs != g_blend_state) {
+        g_d3d8_bound.bs = g_blend_state;
         ID3D11DeviceContext_OMSetBlendState(ctx, g_blend_state, blend_factor, 0xFFFFFFFF);
-    if (g_ds_state)
+    }
+    if (g_ds_state && (g_d3d8_bound.dss != g_ds_state || g_d3d8_bound.stencil_ref != rs[D3DRS_STENCILREF])) {
+        g_d3d8_bound.dss = g_ds_state;
+        g_d3d8_bound.stencil_ref = rs[D3DRS_STENCILREF];
         ID3D11DeviceContext_OMSetDepthStencilState(ctx, g_ds_state, rs[D3DRS_STENCILREF]);
-    if (g_raster_state)
+    }
+    if (g_raster_state && g_d3d8_bound.rs != g_raster_state) {
+        g_d3d8_bound.rs = g_raster_state;
         ID3D11DeviceContext_RSSetState(ctx, g_raster_state);
+    }
 
     /* Apply samplers for all 4 texture stages */
     {
