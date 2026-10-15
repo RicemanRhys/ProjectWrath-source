@@ -43,7 +43,8 @@ typedef struct {
      * each, the last), and those held instead: a camera step or turn over the
      * limit, too few draws matched, no frame before, or another reason (the
      * overlay, a cost check). Draws redrawn per sub-frame by kind. */
-    unsigned interp_k, interp_frames, interp_subs;
+    double interp_per;                  /* step 77: frames each game frame at the plan's rate (was interp_k) */
+    unsigned interp_frames, interp_subs;
     unsigned interp_cut_step, interp_cut_turn, interp_cut_match, interp_cut_first, interp_off;
     unsigned interp_vp, interp_ff, interp_kept, interp_cpos;
     unsigned interp_other_cam;          /* step 65: 3D draws kept as recorded: another camera than the world's */
@@ -57,11 +58,13 @@ typedef struct {
     unsigned interp_obj_motion;         /* step 68: stepped over the snap, but on with its own motion */
     unsigned interp_skel, interp_skel_bones;    /* step 66: skeletons a frame; bones blended in one */
     double interp_matched;              /* sum of each interpolated frame's fraction of draws matched */
-    /* Step 74: adaptive sub-frames. Game frames by the sub-frames allowed
-     * then ([1]..[4]), changes of that count, and the measured frames' sum
-     * of time between presents and of it outside the pacing wait (ms). */
-    unsigned interp_at[5], interp_adapt_changes, interp_adapt_frames;
+    /* Step 74: adaptive sub-frames. Game frames by the step allowed then
+     * (step 77: [0] the plan's rate, then each lower one: interp_step_fps),
+     * changes of it, and the measured frames' sum of time between presents
+     * and of it outside the pacing wait (ms). */
+    unsigned interp_at[8], interp_adapt_changes, interp_adapt_frames;
     double interp_adapt_dt, interp_adapt_busy;
+    double interp_step_fps[8];          /* step 77: each step's frames a second (0: none) */
     /* Step 65: the game's overlay pass: passes, its draws, those under the
      * world's camera (the HUD counters and title cards). */
     unsigned overlay_passes, overlay_draws, overlay_world_cam;
@@ -301,6 +304,11 @@ double d3dh_monitor_hz(void);
 /* Step 61: "Frame rate: display": interpolated sub-frames at each present
  * (on 1, off 0), from the next frame. */
 void d3dh_set_framerate(int display);
+/* Step 77: the frame-rate plan for the setting `fr` (0: none, 1: the
+ * display's rate) under vsync pacing, for a game presenting at `game_hz`:
+ * sets *interval and *hz for d3dh_create / d3dh_set_pacing and returns 1;
+ * 0: no plan (the caller paces as before). */
+int d3dh_frame_plan(int fr, double game_hz, unsigned *interval, double *hz);
 /* Step 75: "Adaptive frame rate": on, fewer sub-frames while game frames
  * run late (notes 18.77); off, always the display's count. At the next
  * present. */

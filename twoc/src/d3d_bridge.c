@@ -915,13 +915,26 @@ static uint32_t g_pp_interval;          /* the game's XDK presentation interval 
 static int g_pacing_mode;               /* the TWOC_PACING_* in effect */
 static int g_framerate_on;              /* step 63: the frame-rate setting as settings_apply last saw it */
 
-static void pacing_for(int mode, int live, unsigned *interval, double *hz)
+static void pacing_for(int mode, int live, int fr, unsigned *interval, double *hz)
 {
     double r;
     unsigned n;
 
     *interval = present_interval();
     *hz = present_hz(g_pp_interval);
+    {   /* Step 77 (notes 18.80): with the frame rate above the game's, the
+         * display's vsync under the plan (d3d_host.c d3dh_frame_plan), on any
+         * display faster than 59.94 Hz, where Auto took the limiter on one
+         * that isn't a multiple. Not with a test override, or an immediate
+         * or slower game interval. Off: no plan, as before. */
+        const char *vi = getenv("RECOMP_D3D_BRIDGE_INTERVAL"), *vh = getenv("RECOMP_D3D_BRIDGE_HZ");
+        int plan = fr && (mode == TWOC_PACING_AUTO || mode == TWOC_PACING_VSYNC) && !*interval &&
+                   !(vi && *vi) && !(vh && *vh) && fabs(*hz - XBOX_REFRESH_HZ) < 0.01;
+        if (d3dh_frame_plan(plan ? fr : 0, *hz, interval, hz)) {
+            d3dh_pacing_note("");
+            return;
+        }
+    }
     if (mode == TWOC_PACING_AUTO && !live) {
         vsync_pacing(interval, hz);     /* at the start: as before */
         return;
@@ -1002,10 +1015,12 @@ static void settings_apply(const twoc_settings_t *s)
     d3dh_resize(w, h, d3db_wide);
     /* Only when the pacing itself changed, or (step 63) frame interpolation
      * was turned on under auto pacing: the rate is read again, so a limiter
-     * chosen on a misread rate gives way. */
-    if (s->pacing != g_pacing_mode || (s->framerate && !g_framerate_on && s->pacing == TWOC_PACING_AUTO)) {
+     * chosen on a misread rate gives way. Step 77: or the frame rate changed
+     * at all under Auto or Vsync (the plan, or its end). */
+    if (s->pacing != g_pacing_mode ||
+        (s->framerate != g_framerate_on && (s->pacing == TWOC_PACING_AUTO || s->pacing == TWOC_PACING_VSYNC))) {
         g_pacing_mode = s->pacing;
-        pacing_for(s->pacing, 1, &interval, &hz);
+        pacing_for(s->pacing, 1, s->framerate, &interval, &hz);
         d3dh_set_pacing(interval, hz);
     }
     g_framerate_on = s->framerate;
@@ -1045,7 +1060,7 @@ static void mirror_create_device(const d3db_args_t *a)
     g_pp_interval = MEM32(pp + 4 * PP_INTERVAL);
     g_pacing_mode = twoc_pacing_parse(getenv("RECOMP_PACING"));
     g_framerate_on = getenv("RECOMP_FRAMERATE") && _stricmp(getenv("RECOMP_FRAMERATE"), "display") == 0;
-    pacing_for(g_pacing_mode, 0, &interval, &hz);      /* auto: as before */
+    pacing_for(g_pacing_mode, 0, g_framerate_on, &interval, &hz);  /* auto: as before; step 77: the plan */
     host_size(g_guest_w ? g_guest_w : 640, g_guest_h ? g_guest_h : 480, &host_w, &host_h);
     d3dh_create(g_guest_w, g_guest_h, host_w, host_h, d3db_wide, g_render_w != 0, interval, hz,
                 host_dump_prefix(prefix, sizeof(prefix)));
@@ -4598,10 +4613,10 @@ static void mirror_swap(void)
                 static unsigned lf, ls, lst, ltu, lm, lfi, lo, lvp, lff, lk, lcp, loc;
                 static double lmt;
                 unsigned f = st.interp_frames - lf, subs = st.interp_subs - ls;
-                log_block_printf(&lb, "[D3DB] host interpolation: %u frames each game frame; frames interpolated %u"
+                log_block_printf(&lb, "[D3DB] host interpolation: %.4g frames each game frame; frames interpolated %u"
                                  " (draws matched %.1f%%), held: camera step %u, turn %u, matches %u, first %u,"
                                  " other %u; a sub-frame redraws program draws %.0f, fixed-function %.0f, others"
-                                 " as they were %.0f (another camera's %.0f), camera-position registers %.0f\n", st.interp_k, f,
+                                 " as they were %.0f (another camera's %.0f), camera-position registers %.0f\n", st.interp_per, f,
                                  f ? 100.0 * (st.interp_matched - lmt) / f : 0.0, st.interp_cut_step - lst,
                                  st.interp_cut_turn - ltu, st.interp_cut_match - lm, st.interp_cut_first - lfi,
                                  st.interp_off - lo, subs ? (double)(st.interp_vp - lvp) / subs : 0.0,
@@ -4624,13 +4639,18 @@ static void mirror_swap(void)
                 lmt = st.interp_matched;
             }
             if (st.interp_adapt_frames || st.interp_adapt_changes) {    /* step 74: adaptive sub-frames */
-                static unsigned la[5], lc, lfr;
+                static unsigned la[8], lc, lfr;
                 static double ldt, lbu;
-                unsigned fr = st.interp_adapt_frames - lfr;
-                log_block_printf(&lb, "[D3DB] host interpolation sub-frames: game frames allowed 4: %u, 3: %u, 2: %u,"
-                                 " 1: %u; changes %u; measured frames %u, %.2f ms apart, %.2f ms of it busy\n",
-                                 st.interp_at[4] - la[4], st.interp_at[3] - la[3], st.interp_at[2] - la[2],
-                                 st.interp_at[1] - la[1], st.interp_adapt_changes - lc, fr,
+                unsigned fr = st.interp_adapt_frames - lfr, si;
+                char steps[256];
+                int sn = 0;
+                steps[0] = 0;           /* step 77: by rate, the plan's first */
+                for (si = 0; si < 8 && st.interp_step_fps[si] > 0 && sn < (int)sizeof(steps) - 32; si++)
+                    sn += snprintf(steps + sn, sizeof(steps) - sn, "%s%.2f fps: %u", si ? ", " : "",
+                                   st.interp_step_fps[si], st.interp_at[si] - la[si]);
+                log_block_printf(&lb, "[D3DB] host interpolation sub-frames: game frames allowed %s; changes %u;"
+                                 " measured frames %u, %.2f ms apart, %.2f ms of it busy\n", steps,
+                                 st.interp_adapt_changes - lc, fr,
                                  fr ? (st.interp_adapt_dt - ldt) / fr : 0.0, fr ? (st.interp_adapt_busy - lbu) / fr : 0.0);
                 memcpy(la, st.interp_at, sizeof(la));
                 lc = st.interp_adapt_changes;

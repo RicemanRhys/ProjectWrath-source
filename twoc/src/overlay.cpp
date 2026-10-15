@@ -609,18 +609,20 @@ static int tab_display(twoc_settings_t *s, const ovl_info_t *in)
             r |= OVL_CHANGED;
         more("Display: the game still runs 59.94 updates a second, and each of its frames is drawn again at every "
              "refresh in between with the camera moved partway from the frame before, so turning and following "
-             "Crash look smooth at 120 or 240 Hz. Objects move at the game's rate. A camera cut shows at once. "
-             "Needs vsync pacing (auto or vsync) on a display at 2, 3 or 4 x 59.94 Hz. Applied at once.");
+             "Crash look smooth at 120, 144 or 240 Hz. A camera cut shows at once. Each frame shown is drawn at "
+             "its own moment between two game frames, so on a display that isn't a multiple of 59.94 Hz (144 Hz: "
+             "2 or 3 frames each game frame) motion is still even. Needs vsync pacing (auto or vsync). Applied "
+             "at once.");
         if (!s->framerate)
             snprintf(line, sizeof(line), "Now: the game's 59.94 fps.");
-        else if (in->interp_on && in->interp_now && in->interp_now < in->interp_k)
-            snprintf(line, sizeof(line), "Now: %u of %u frames each game frame, %.2f fps (fewer while game frames "
-                     "run late).", in->interp_now, in->interp_k, in->display_hz * in->interp_now / in->interp_k);
+        else if (in->interp_on && in->interp_now > 0 && in->interp_now < in->interp_fps - 0.01)
+            snprintf(line, sizeof(line), "Now: %.2f fps of %.2f (fewer while game frames run late).",
+                     in->interp_now, in->interp_fps);
         else if (in->interp_on)
-            snprintf(line, sizeof(line), "Now: %u frames each game frame, %.2f fps.", in->interp_k,
-                     in->display_hz);
-        else if (in->interp_k)
-            snprintf(line, sizeof(line), "Now: %u frames each game frame from the next frame.", in->interp_k);
+            snprintf(line, sizeof(line), "Now: %.2f fps, %.3g frames each game frame.", in->interp_fps,
+                     in->interp_per);
+        else if (in->interp_fps > 0)
+            snprintf(line, sizeof(line), "Now: %.2f fps from the next frame.", in->interp_fps);
         else
             snprintf(line, sizeof(line), "Now: 59.94 fps, one frame each game frame: %s.",
                      in->interp_why ? in->interp_why : "this pacing");

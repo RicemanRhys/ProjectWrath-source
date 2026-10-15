@@ -32,10 +32,11 @@ typedef struct {
     int running;                        /* step 57: the game runs behind the overlay (pause off) */
     int aa;                             /* step 58: the anti-aliasing in effect (TWOC_AA_*) */
     unsigned ms_samples;                /* step 58: MSAA's samples on the back buffer, 0 without */
-    unsigned interp_k;                  /* step 61: frames shown a game frame when interpolating (0: can't here) */
+    double interp_fps;                  /* step 61/77: frames a second when interpolating (0: can't here) */
+    double interp_per;                  /* ... and frames each game frame (2.4 at 144 Hz) */
     int interp_on;                      /* step 61: interpolating now */
-    const char *interp_why;             /* step 63: why interp_k is 0 */
-    unsigned interp_now;                /* step 74: frames shown a game frame now (fewer than interp_k while late) */
+    const char *interp_why;             /* step 63: why interp_fps is 0 */
+    double interp_now;                  /* step 74/77: frames a second now (fewer than interp_fps while late) */
 } ovl_info_t;
 
 enum { OVL_CHANGED = 1, OVL_CLOSE = 2 };

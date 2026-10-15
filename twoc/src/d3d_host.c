@@ -229,6 +229,39 @@ static unsigned g_rp_n[2];              /* step 74: those passes */
 static volatile LONG g_iadapt = 1;      /* step 74: 0 always the display's count; step 75: the setting (RECOMP_FRAMERATE_ADAPTIVE), live */
 static LONG g_iadapt_seen = 1;          /* step 75: g_iadapt as ia_frame last applied it */
 static unsigned g_ifixed;               /* step 74: RECOMP_D3D_BRIDGE_INTERP_FIXED=K, always K sub-frames (a measurement aid) */
+/* Step 77: the frame-rate plan (fp_plan, notes 18.80). While it paces, game
+ * frames are laid on a clock of slots: the display's refreshes under vsync,
+ * or the frame limiter's ticks. A game frame spans `span` slots (2.4024 at
+ * 144 Hz; an integer on 2, 3 or 4 x 59.94 Hz, as before), and its presents
+ * go on a grid of whole slots (g_fc), each drawn at t = its slot's place
+ * between the game frame's start and end. */
+#define FP_MAX_STEPS 8
+static struct {
+    int on;                             /* the plan paces (vsync, or the limiter at slot_hz) */
+    int limiter;                        /* slots are the limiter's ticks (variable refresh), not refreshes */
+    double span;                        /* slots a game frame */
+    double slot_hz;                     /* slots a second */
+    double game_hz;                     /* the game's rate it was made for (59.94) */
+    unsigned interval;                  /* the pacing it set: DXGI interval (vsync) */
+    unsigned gen;                       /* bumped at every plan */
+    unsigned nsteps;                    /* the rates it can go down to (adaptive): */
+    double step[FP_MAX_STEPS];          /* slots between presents; 0: one present a game frame, as recorded */
+    double cost_i[FP_MAX_STEPS], cost_p[FP_MAX_STEPS], cost_f[FP_MAX_STEPS];   /* a game frame's interpolated
+                                         * passes, plain passes, and pairings at each step (mean) */
+} g_fp;
+static struct {
+    double pos;                         /* the last present's slot */
+    double end;                         /* the last game frame's end (slot) */
+    unsigned gen;                       /* the plan they count for (0: none yet) */
+} g_fc;
+#define FP_MAX_PRESENTS 16
+typedef struct {
+    unsigned n;                         /* presents this game frame */
+    double t[FP_MAX_PRESENTS];          /* each one's place between the frame before and this one (1: this one) */
+    double t0[FP_MAX_PRESENTS];         /* ... a step earlier (RECOMP_D3D_BRIDGE_INTERP_T0, a check) */
+    double slots[FP_MAX_PRESENTS];      /* slots since the present before */
+    int interp;                         /* some t < 1: drawn interpolated */
+} fp_frame_t;
 
 /* Step 54: borderless fullscreen. g_fs and the client size are the window
  * thread's; g_buf_w x g_buf_h is the visible swap chain's, changed only by a
@@ -2715,13 +2748,36 @@ static int cmp_u32(const void *a, const void *b)
     return x < y ? -1 : x > y;
 }
 
-/* The DXGI interval the display paces at, when it is a sub-frame count. */
-static unsigned ic_k_possible(void)
+/* Step 77: the frame-rate plan paces now: its pacing is in effect (not
+ * the limiter standing in for a stalled vsync, step 63). */
+static int fp_active(void)
 {
-    return g_latency && g_frame_hz <= 0 && g_interval >= 2 && g_interval <= 4 ? g_interval : 0;
+    if (!g_fp.on)
+        return 0;
+    if (g_fp.limiter)
+        return !g_latency && g_frame_hz > 0 && fabs(g_frame_hz - g_fp.slot_hz) < 1e-6;
+    return g_latency && g_frame_hz <= 0 && g_interval == g_fp.interval;
 }
 
-/* Step 63: why ic_k_possible() is 0, into `buf`. */
+/* Frames can be interpolated: the plan paces, with more than one slot a
+ * game frame (step 77; before, a display paced at DXGI interval 2, 3 or 4). */
+static int ic_possible(void)
+{
+    return fp_active() && g_fp.nsteps > 1;
+}
+
+/* A step's frames a second, and frames each game frame. */
+static double fp_step_fps(unsigned k)
+{
+    return g_fp.step[k] > 0 ? g_fp.slot_hz / g_fp.step[k] : g_fp.slot_hz / g_fp.span;
+}
+
+static double fp_step_per(unsigned k)
+{
+    return g_fp.step[k] > 0 ? g_fp.span / g_fp.step[k] : 1.0;
+}
+
+/* Step 63: why ic_possible() is 0, into `buf`. */
 static void ic_why(char *buf, size_t cap)
 {
     char note[sizeof(g_pace_why)];
@@ -2729,7 +2785,13 @@ static void ic_why(char *buf, size_t cap)
     AcquireSRWLockShared(&g_why_lock);
     memcpy(note, g_pace_why, sizeof(note));
     ReleaseSRWLockShared(&g_why_lock);
-    if (g_frame_hz > 0)
+    if (g_fp.on && fp_active())         /* step 77 */
+        snprintf(buf, cap, "the display's %.2f Hz is no faster than the game's %.2f fps", g_fp.slot_hz,
+                 g_fp.game_hz);
+    else if (g_fp.on && g_frame_hz > 0 && !g_fp.limiter)
+        snprintf(buf, cap, "the frame limiter stands in for the display's vsync (%.2f fps)%s%s", g_frame_hz,
+                 note[0] ? ": " : "", note);
+    else if (g_frame_hz > 0)
         snprintf(buf, cap, "the frame limiter paces (%.2f fps)%s%s", g_frame_hz, note[0] ? ": " : "", note);
     else if (g_latency && g_interval < 2)
         snprintf(buf, cap, "the display paces one refresh a frame: needs 2, 3 or 4 x 59.94 Hz%s%s",
@@ -2743,13 +2805,14 @@ static void ic_why(char *buf, size_t cap)
 
 /* Step 63: a log line each time interpolation stops or starts being
  * possible while the setting is on. */
-static void ic_log_possible(unsigned k)
+static void ic_log_possible(int k)
 {
     static char last[256] = "?";
     char now[256];
 
     if (k)
-        snprintf(now, sizeof(now), "on: %u frames each game frame", k);
+        snprintf(now, sizeof(now), "on: %.4g frames each game frame, %.2f fps%s", g_fp.span / g_fp.step[0],
+                 g_fp.slot_hz / g_fp.step[0], g_fp.limiter ? " (the frame limiter, variable refresh)" : "");
     else
         ic_why(now, sizeof(now));
     if (strcmp(now, last) != 0) {
@@ -2759,6 +2822,172 @@ static void ic_log_possible(unsigned k)
         else
             fprintf(stderr, "[D3DB] host interpolation off, one frame each game frame: %s\n", now);
     }
+}
+
+/* ── Step 77: time-based sub-frames (notes 18.80) ──────────────
+ * Before, a game frame got a whole number k of sub-frames at t = 1/k .. 1,
+ * k = the display's rate / 59.94 (2-4), so a display that isn't a multiple
+ * (144 Hz) had no interpolation at all. Now the game frames lie on a clock
+ * of slots (a refresh each under vsync; with variable refresh the
+ * limiter's ticks), game frame n ending at slot S(n) = n x span (span =
+ * slots a second / 59.94: 2.4024 at 144 Hz), and the presents go on a grid
+ * of whole slots `step` apart that runs on from one game frame to the next.
+ * Each present at slot r inside game frame n (S(n-1) < r <= S(n)) is drawn
+ * at t = (r - S(n-1)) / span, its own place in time between the two game
+ * frames, so motion is even however many presents a game frame gets (2 or
+ * 3 at 144 Hz, 2.4 on average). The game is still held in its Swap until
+ * its last present, so it runs 59.94 updates a second against the display.
+ * On a whole multiple the span is a whole number (within 0.5%, as the
+ * pacing always took it) and this is the old k sub-frames exactly: slots
+ * 1/k apart from a game frame's start, t = j/k, the last at t = 1, DXGI
+ * interval `step` (1 at 4 of 4; 2 at 2 of 4; 4 at 1). A frame not
+ * interpolated (a cut, the first, the overlay) is one present to the
+ * game frame's last slot on the grid, at that many refreshes. */
+
+/* Each step's mean passes and pairings a game frame (ia_cost), by laying
+ * 1200 game frames on its grid. */
+static void fp_costs(void)
+{
+    unsigned i, n;
+
+    for (i = 0; i < g_fp.nsteps; i++) {
+        double g = g_fp.step[i], pos = 0, end = 0, ni = 0, np = 0, nf = 0;
+        for (n = 0; n < 1200; n++) {
+            double prev = end, r;
+            int any = 0;
+            end += g_fp.span;
+            if (fabs(end - floor(end + 0.5)) < 1e-9)
+                end = floor(end + 0.5);
+            if (g <= 0) {               /* one present, as recorded */
+                np++;
+                pos = g_fp.limiter ? end : floor(end + 1e-6);
+                continue;
+            }
+            for (r = pos + g; r <= end + 1e-6; r += g) {
+                if ((r - prev) / g_fp.span > 1 - 1e-9)
+                    np++;
+                else {
+                    ni++;
+                    any = 1;
+                }
+                pos = r;
+            }
+            nf += any;
+        }
+        g_fp.cost_i[i] = ni / 1200;
+        g_fp.cost_p[i] = np / 1200;
+        g_fp.cost_f[i] = nf / 1200;
+    }
+}
+
+/* This game frame's presents at step `k` (its slots, its t), the clock
+ * moved on past them. */
+static void fp_frame(fp_frame_t *f, unsigned k)
+{
+    double g = g_fp.step[k], end, r, prev;
+
+    if (g_fc.gen != g_fp.gen) {
+        g_fc.pos = g_fc.end = 0;
+        g_fc.gen = g_fp.gen;
+    }
+    end = g_fc.end + g_fp.span;
+    if (fabs(end - floor(end + 0.5)) < 1e-9)
+        end = floor(end + 0.5);         /* a whole span stays whole */
+    f->n = 0;
+    f->interp = 0;
+    prev = g_fc.pos;
+    if (g <= 0) {
+        r = g_fp.limiter ? end : floor(end + 1e-6);
+        f->t[0] = f->t0[0] = 1.0;
+        f->slots[0] = r - prev;
+        f->n = 1;
+        prev = r;
+    } else {
+        for (r = g_fc.pos + g; r <= end + 1e-6 && f->n < FP_MAX_PRESENTS; r += g) {
+            double t = (r - g_fc.end) / g_fp.span;
+            if (t > 1 - 1e-9)
+                t = 1.0;
+            else
+                f->interp = 1;
+            f->t[f->n] = t;
+            f->t0[f->n] = (r - g - g_fc.end) / g_fp.span;
+            f->slots[f->n] = r - prev;
+            f->n++;
+            prev = r;
+        }
+    }
+    g_fc.pos = prev;
+    g_fc.end = end;
+    if (g_fc.pos >= 1048576.0) {        /* by whole slots, so a whole clock stays exact */
+        double b = floor(g_fc.pos);
+        g_fc.pos -= b;
+        g_fc.end -= b;
+    }
+}
+
+/* Step 77: the frame-rate plan for setting `fr` (1: the display's own
+ * rate), for a game presenting at `game_hz` under vsync pacing (the pacing
+ * setting Auto or Vsync): the display's mode rate, game frames `span`
+ * refreshes long, a present every refresh at the top step, and below it the
+ * old counts (whole multiples: each divisor of the span) or one present a
+ * game frame. Sets *interval and *hz for d3dh_create / d3dh_set_pacing and
+ * returns 1; 0 (fr 0, no rate known): no plan, the caller's own pacing. */
+int d3dh_frame_plan(int fr, double game_hz, unsigned *interval, double *hz)
+{
+    double r = fr ? d3dh_monitor_hz() : 0, span;
+    unsigned k, n = 0;
+    int ready = g_ready;
+
+    if (r <= 0 && fr)
+        r = d3dh_display_hz();
+    if (ready)
+        EnterCriticalSection(&g_lock);
+    if (!fr || r <= 0 || game_hz <= 0) {
+        if (g_fp.on)
+            fprintf(stderr, "[D3DB] host frame rate plan: none (%s)\n", fr ? "the display's rate isn't known" :
+                    "the game's 59.94");
+        g_fp.on = 0;
+        if (ready)
+            LeaveCriticalSection(&g_lock);
+        return 0;
+    }
+    span = r / game_hz;
+    k = (unsigned)(span + 0.5);
+    if (k >= 1 && fabs(span - k) <= 0.005 * span)
+        span = k;                       /* a whole multiple, as the pacing always took it */
+    else
+        k = 0;
+    n = g_fp.gen + 1;
+    memset(&g_fp, 0, sizeof(g_fp));
+    g_fp.gen = n;
+    n = 0;
+    g_fp.on = 1;
+    g_fp.limiter = 0;
+    g_fp.span = span;
+    g_fp.slot_hz = r;
+    g_fp.game_hz = game_hz;
+    g_fp.interval = k >= 1 && k <= 4 ? k : 1;
+    if (k) {                            /* 4, 2, 1 at 4; 3, 1 at 3: the old counts */
+        unsigned j;
+        for (j = k; j >= 2; j--)
+            if (k % j == 0 && n < FP_MAX_STEPS - 1)
+                g_fp.step[n++] = k / j;
+    } else if (span > 1) {
+        g_fp.step[n++] = 1;             /* every refresh */
+    }
+    g_fp.step[n++] = 0;                 /* one a game frame */
+    g_fp.nsteps = n;
+    fp_costs();
+    for (n = 0; n < 8; n++)
+        g_st.interp_step_fps[n] = n < g_fp.nsteps ? fp_step_fps(n) : 0;
+    *interval = g_fp.interval;
+    *hz = 0;
+    if (ready)
+        LeaveCriticalSection(&g_lock);
+    fprintf(stderr, "[D3DB] host frame rate plan: the display's %.3f Hz, %.4f refreshes a game frame (%.3f fps):"
+            " %s, vsync interval %u\n", r, span, game_hz, k ? "a whole multiple, each game frame's presents at"
+            " t = j/k" : "each present drawn at its own refresh's time between two game frames", g_fp.interval);
+    return 1;
 }
 
 /* ── Step 74: adaptive sub-frames (notes 18.77) ───────────────
@@ -2808,11 +3037,15 @@ typedef struct {
     unsigned n;                         /* frames */
     double dt, busy, cmds;              /* their sums: ms apart, ms busy, commands a pass */
 } ia_sum_t;
+/* Step 77: the counts are the frame-rate plan's steps (g_fp.step: 4, 2 and
+ * 1 sub-frames at 240 Hz as before; 144 and one frame each game frame at 144
+ * Hz), `k` an index into them, 0 the plan's own rate. */
 static struct {
-    unsigned k;                         /* sub-frames allowed now (a divisor of kmax) */
-    unsigned kmax;                      /* the display's count it was chosen under; 0: not started */
+    unsigned k;                         /* the step allowed now (0: the plan's rate) */
+    unsigned gen;                       /* the plan (g_fp.gen) it was chosen under; 0: not started */
     double t_ms;                        /* a game frame's time on this display */
-    unsigned kused;                     /* sub-frames the frame being measured got; 0: not measured */
+    unsigned kused;                     /* presents the frame being measured got; 0: not measured */
+    int paired;                         /* ... and it was interpolated */
     LONGLONG last;                      /* QPC: that frame's present began; 0: none */
     double pace_ms;                     /* its time in pace() */
     double rp_ms0[2], rp_cmds0[2], pair0;   /* g_rp_ms, g_rp_cmds, g_st.pair_ms at its start */
@@ -2827,53 +3060,48 @@ static struct {
     double hold;                        /* seconds at a count before a rise */
 } g_ia;
 
-/* The count after `k` among the divisors of `kmax`, up or down. */
-static unsigned ia_next(unsigned k, unsigned kmax, int up)
+/* The step after `k`, up (fewer slots apart, more frames) or down. */
+static unsigned ia_next(unsigned k, int up)
 {
-    unsigned j;
-
-    if (up) {
-        for (j = k + 1; j <= kmax; j++)
-            if (kmax % j == 0)
-                return j;
-    } else {
-        for (j = k - 1; j >= 1; j--)
-            if (kmax % j == 0)
-                return j;
-    }
-    return k;
+    if (up)
+        return k > 0 ? k - 1 : k;
+    return k + 1 < g_fp.nsteps ? k + 1 : k;
 }
 
-/* The sub-frames this frame may have when the display allows `kmax`. */
-static unsigned ia_k(unsigned kmax)
+/* The step this frame may have (an index into g_fp.step). */
+static unsigned ia_k(void)
 {
-    if (g_ifixed)
-        return g_ifixed <= kmax && kmax % g_ifixed == 0 ? g_ifixed : kmax;
-    if (!g_iadapt || g_ia.kmax != kmax || !g_ia.k)
-        return kmax;
+    unsigned i;
+
+    if (g_ifixed) {                     /* the step with that many presents each game frame */
+        for (i = 0; i < g_fp.nsteps; i++)
+            if (fabs(fp_step_per(i) - g_ifixed) < 1e-6)
+                return i;
+        return 0;
+    }
+    if (!g_iadapt || g_ia.gen != g_fp.gen)
+        return 0;
     return g_ia.k;
 }
 
-/* What `from` -> `to` sub-frames add to a frame of `cmds` commands (ms;
- * negative going down). */
+/* What step `from` -> `to` adds to a frame of `cmds` commands (ms;
+ * negative going down): its interpolated and plain passes and its pairing
+ * (step 77; on the old counts, (to - from) interpolated passes, and the
+ * pairing to or from 1). */
 static double ia_cost(unsigned from, unsigned to, double cmds)
 {
     double ci = g_ia.c_pass[1] > 0 ? g_ia.c_pass[1] : 2.0 * g_ia.c_pass[0];    /* not seen yet: twice a plain one */
-    double d = ((double)to - from) * cmds * ci;
 
-    if (from == 1 && to > 1)
-        d += cmds * g_ia.c_pair;
-    else if (to == 1 && from > 1)
-        d -= cmds * g_ia.c_pair;
-    return d;
+    return cmds * ((g_fp.cost_i[to] - g_fp.cost_i[from]) * ci + (g_fp.cost_p[to] - g_fp.cost_p[from]) * g_ia.c_pass[0] +
+                   (g_fp.cost_f[to] - g_fp.cost_f[from]) * g_ia.c_pair);
 }
 
 static void ia_change(unsigned k, LONGLONG q, unsigned swap_no, const char *why)
 {
-    fprintf(stderr, "[D3DB] host interpolation: %u frames each game frame from guest swap %u (was %u): %s\n", k,
-            swap_no, g_ia.k, why);
+    fprintf(stderr, "[D3DB] host interpolation: %.2f fps, %.4g frames each game frame, from guest swap %u (was %.2f):"
+            " %s\n", fp_step_fps(k), fp_step_per(k), swap_no, fp_step_fps(g_ia.k), why);
     g_st.interp_adapt_changes++;
-    if (k > g_ia.k)
+    if (k < g_ia.k)
         g_ia.rose = q;
     g_ia.k = k;
     g_ia.changed = q;
@@ -2900,6 +3128,7 @@ static void ia_mark(void)
     g_ia.pair0 = g_st.pair_ms;
     g_ia.pace_ms = 0;
     g_ia.kused = 0;
+    g_ia.paired = 0;
 }
 
 /* At each present while interpolating (and once after): the frame before
@@ -2907,7 +3136,8 @@ static void ia_mark(void)
 static void ia_frame(unsigned swap_no)
 {
     LARGE_INTEGER q;
-    unsigned kmax = ic_k_possible(), used = g_ia.kused, cur, kn, i;
+    unsigned used = g_ia.kused, cur, kn, i;
+    int possible = ic_possible(), paired = g_ia.paired;
     double dt, busy, cmds = 0, since, pair_ms = g_st.pair_ms - g_ia.pair0;
     char why[256];
 
@@ -2919,29 +3149,30 @@ static void ia_frame(unsigned swap_no)
         double c = g_rp_cmds[i] - g_ia.rp_cmds0[i], ms = g_rp_ms[i] - g_ia.rp_ms0[i];
         if (n && c >= 50) {
             g_ia.c_pass[i] = g_ia.c_pass[i] > 0 ? 0.9 * g_ia.c_pass[i] + 0.1 * ms / c : ms / c;
-            if (i == 0)
-                cmds = c / n;           /* every recorded frame ends with a plain pass */
+            if (i == 0 || !cmds)    /* a plain pass's commands, else (step 77: at 144 Hz a game frame */
+                cmds = c / n;       /* seldom ends on a refresh, so few have one) an interpolated one's */
         }
     }
-    if (used > 1 && cmds >= 50 && pair_ms > 0)
+    if ((used > 1 || paired) && cmds >= 50 && pair_ms > 0)
         g_ia.c_pair = g_ia.c_pair > 0 ? 0.9 * g_ia.c_pair + 0.1 * pair_ms / cmds : pair_ms / cmds;
     g_ia.last = q.QuadPart;
     ia_mark();
-    if (!g_interp || !kmax) {           /* stopped: the next start is from the display's count */
-        if (g_ia.kmax && g_ia.k != g_ia.kmax)
-            fprintf(stderr, "[D3DB] host interpolation: sub-frames back to the display's count (it stopped)\n");
+    if (!g_interp || !possible) {       /* stopped: the next start is from the plan's rate */
+        if (g_ia.gen && g_ia.k)
+            fprintf(stderr, "[D3DB] host interpolation: sub-frames back to the plan's rate (it stopped)\n");
         memset(&g_ia, 0, sizeof(g_ia));
         g_iadapt_seen = g_iadapt;
         return;
     }
-    if (kmax != g_ia.kmax) {            /* started, or another display rate */
-        double hz = d3dh_monitor_hz(), cp[2] = { g_ia.c_pass[0], g_ia.c_pass[1] }, cr = g_ia.c_pair;
+    if (g_fp.gen != g_ia.gen) {         /* started, or another plan (display rate, setting) */
+        double cp[2] = { g_ia.c_pass[0], g_ia.c_pass[1] }, cr = g_ia.c_pair;
         memset(&g_ia, 0, sizeof(g_ia));
         g_ia.c_pass[0] = cp[0];
         g_ia.c_pass[1] = cp[1];
         g_ia.c_pair = cr;
-        g_ia.kmax = g_ia.k = kmax;
-        g_ia.t_ms = hz > 0 ? 1000.0 * g_interval / hz : 1001.0 / 60.0;
+        g_ia.gen = g_fp.gen;
+        g_ia.k = 0;
+        g_ia.t_ms = 1000.0 * g_fp.span / g_fp.slot_hz;
         g_ia.hold = IA_HOLD0;
         g_ia.last = q.QuadPart;
         g_ia.changed = q.QuadPart;
@@ -2952,8 +3183,8 @@ static void ia_frame(unsigned swap_no)
     if (g_iadapt != g_iadapt_seen) {    /* step 75: the setting changed: from the display's count, judged afresh */
         g_iadapt_seen = g_iadapt;
         fprintf(stderr, "[D3DB] host interpolation: adaptive frame rate %s (the setting)\n", g_iadapt ? "on" : "off");
-        if (g_ia.k != g_ia.kmax)
-            ia_change(g_ia.kmax, q.QuadPart, swap_no, "the adaptive frame rate setting changed");
+        if (g_ia.k)
+            ia_change(0, q.QuadPart, swap_no, "the adaptive frame rate setting changed");
         else {
             memset(&g_ia.w, 0, sizeof(g_ia.w));
             memset(&g_ia.u, 0, sizeof(g_ia.u));
@@ -2983,11 +3214,11 @@ static void ia_frame(unsigned swap_no)
     if (g_ia.rose && g_ia.rose == g_ia.changed && since > IA_KEPT)
         g_ia.hold = IA_HOLD0;           /* the last rise held */
     ia_add(&g_ia.w, dt, busy, cmds);
-    g_ia.wi += used > 1;
+    g_ia.wi += used > 1 || paired;
     if (g_ia.w.n >= IA_WIN) {
         double mdt = g_ia.w.dt / g_ia.w.n, mb = g_ia.w.busy / g_ia.w.n, mc = g_ia.w.cmds / g_ia.w.n;
-        kn = ia_next(cur, g_ia.kmax, 0);
-        if (cur > 1 && mdt > g_ia.t_ms * IA_LATE && 2 * g_ia.wi >= g_ia.w.n && mb > g_ia.t_ms * IA_BUSY &&
+        kn = ia_next(cur, 0);
+        if (kn != cur && mdt > g_ia.t_ms * IA_LATE && 2 * g_ia.wi >= g_ia.w.n && mb > g_ia.t_ms * IA_BUSY &&
             -ia_cost(cur, kn, mc) >= 0.5 * (mdt - g_ia.t_ms)) {
             int failed = g_ia.rose && g_ia.rose == g_ia.changed && since < IA_FAIL;
             if (failed)
@@ -3002,16 +3233,16 @@ static void ia_frame(unsigned swap_no)
         memset(&g_ia.w, 0, sizeof(g_ia.w));
         g_ia.wi = 0;
     }
-    if (cur < g_ia.kmax) {
+    if (cur > 0) {
         ia_add(&g_ia.u, dt, busy, cmds);
         if (g_ia.u.n >= IA_UP) {
             double mdt = g_ia.u.dt / g_ia.u.n, mb = g_ia.u.busy / g_ia.u.n, mc = g_ia.u.cmds / g_ia.u.n, want;
-            kn = ia_next(cur, g_ia.kmax, 1);
+            kn = ia_next(cur, 1);
             want = mb + ia_cost(cur, kn, mc) * IA_PASS_X;
             if (since >= g_ia.hold && mdt <= g_ia.t_ms * 1.01 && want <= g_ia.t_ms * IA_FIT) {
-                snprintf(why, sizeof(why), "room for them, %.2f ms busy a frame over the last %u, ~%.2f with %u more"
-                         " (%.0f commands, an interpolated pass %.2f ms) of %.2f", mb, g_ia.u.n, want, kn - cur, mc,
-                         mc * g_ia.c_pass[1], g_ia.t_ms);
+                snprintf(why, sizeof(why), "room for them, %.2f ms busy a frame over the last %u, ~%.2f with %.4g"
+                         " more (%.0f commands, an interpolated pass %.2f ms) of %.2f", mb, g_ia.u.n, want,
+                         fp_step_per(kn) - fp_step_per(cur), mc, mc * g_ia.c_pass[1], g_ia.t_ms);
                 ia_change(kn, q.QuadPart, swap_no, why);
                 return;
             }
@@ -3848,30 +4079,29 @@ static void ic_pair(void)
 /* At the present: how many sub-frames this frame gets (1: shown as it is),
  * the cameras paired. `ovl`: the overlay opens or holds the game this
  * present (one frame). Called with g_lock held. */
-static unsigned ic_begin(unsigned swap_no, int ovl)
+static int ic_begin(unsigned swap_no, int ovl, int need)
 {
     static unsigned logged;
-    unsigned cur = (unsigned)g_icur, prv = !cur, i, j, k = ic_k_possible(), mc = IC_NO_CAM, matched = 0;
-    int used[IC_CAMS];
+    unsigned cur = (unsigned)g_icur, prv = !cur, i, j, mc = IC_NO_CAM, matched = 0;
+    int used[IC_CAMS], k = ic_possible();
     double frac = 1.0, step = 0.0, turn = 0.0;
     const char *why = NULL;
 
     if (g_irec_trigger[0])
         ic_rec_dump(swap_no);
     qsort(g_ikey[cur], g_ikey_n[cur], sizeof(uint32_t), cmp_u32);    /* the frame before's next */
-    g_st.interp_k = k ? k : 1;
+    g_st.interp_per = k ? g_fp.span / g_fp.step[0] : 1.0;
     ic_log_possible(k);                 /* step 63 */
     if (!k || ovl) {
         g_st.interp_off++;              /* this pacing, or the overlay opening or holding the game */
-        return 1;
+        return 0;
     }
     if (!g_iprev_ok) {
         g_st.interp_cut_first++;
-        return 1;
+        return 0;
     }
-    k = ia_k(k);                        /* step 74: fewer while game frames run late */
-    if (k == 1)
-        return 1;                       /* nothing to pair or to cut */
+    if (!need)
+        return 0;                       /* step 74/77: one present, as recorded: nothing to pair or to cut */
     for (i = j = 0; i < g_ikey_n[cur] && j < g_ikey_n[prv];) {
         if (g_ikey[cur][i] == g_ikey[prv][j]) {
             matched++;
@@ -3961,14 +4191,14 @@ static unsigned ic_begin(unsigned swap_no, int ovl)
             fprintf(stderr, "[D3DB] host interpolation: guest swap %u shown as it is (%s: %.2f units, %.1f deg, %.0f%%"
                     " of %u draws matched)\n", swap_no, why, step > 1e8 ? 0.0 : step, turn, 100.0 * frac,
                     g_ikey_n[cur]);
-        return 1;
+        return 0;
     }
     g_st.interp_frames++;
     g_imc = mc;
     g_st.interp_matched += frac;
     g_ipair_swap = swap_no;
     ic_pair();
-    return k;
+    return 1;
 }
 
 /* This sub-frame's corrections, camera by camera, at t (0 < t < 1). */
@@ -4959,8 +5189,10 @@ void d3dh_pacing_note(const char *why)
  * holding each for its own refresh kept the game in its Swap 3+ refreshes.)
  * so a loading thread's host calls never queue behind the wait; the game
  * serialises its swaps anyway, and pace_lock keeps the clock consistent if
- * two threads ever swapped at once. */
-static void pace(int mid)
+ * two threads ever swapped at once. Step 77: under the limiter a present
+ * waits `slots` of its ticks (more than 1, or part of one, under a frame-rate
+ * plan's limiter); under vsync the queue paces whatever the slots. */
+static void pace(int mid, double slots)
 {
     static SRWLOCK pace_lock = SRWLOCK_INIT;
     static LARGE_INTEGER freq;
@@ -5045,6 +5277,8 @@ static void pace(int mid)
                     GetLastError());
     }
     period = (double)freq.QuadPart / g_frame_hz;
+    if (next != 0 && slots != 1.0)
+        next += period * (slots - 1.0); /* this present's slot: `slots` ticks after the one before */
     QueryPerformanceCounter(&now);
     if (next == 0 || (double)now.QuadPart - next > period) {
         if (next != 0)
@@ -5829,10 +6063,13 @@ static int ovl_draw(ID3D11Texture2D *dst, int running)
     in.running = running;
     in.aa = g_aa;                       /* step 58 */
     in.ms_samples = g_bb.ms;
-    in.interp_k = ic_k_possible();      /* step 61 */
-    in.interp_on = g_interp && in.interp_k;
-    in.interp_now = in.interp_k ? ia_k(in.interp_k) : 0;   /* step 74 */
-    if (!in.interp_k) {                 /* step 63 */
+    if (ic_possible()) {                /* step 61/77 */
+        in.interp_fps = fp_step_fps(0);
+        in.interp_per = fp_step_per(0);
+        in.interp_now = fp_step_fps(ia_k());        /* step 74 */
+    }
+    in.interp_on = g_interp && in.interp_fps > 0;
+    if (in.interp_fps <= 0) {           /* step 63 */
         static char why[256];
         ic_why(why, sizeof(why));
         in.interp_why = why;
@@ -5902,7 +6139,7 @@ static void overlay_pause(void)
         int r = 0;
 
         if (g_latency || g_frame_hz > 0)
-            pace(1);
+            pace(1, 1.0);
         else
             Sleep(15);                  /* the executor paces this run, not the host */
         EnterCriticalSection(&g_lock);
@@ -6112,7 +6349,8 @@ static void replay_check(int after, unsigned swap_no)
  * DXGI `interval`, after its wait. Step 61: sub-frame `sub` of `k` (k 1: the
  * frame itself; only the last of a frame is a frame's dump). Returns the
  * running overlay's OVL_* bits. */
-static int present_one(double t_s, unsigned swap_no, unsigned interval, unsigned sub, unsigned k)
+static int present_one(double t_s, unsigned swap_no, unsigned interval, unsigned sub, unsigned k, int mid,
+                       double slots)
 {
     ULONGLONG now;
     HRESULT hr;
@@ -6122,7 +6360,7 @@ static int present_one(double t_s, unsigned swap_no, unsigned interval, unsigned
     {
         LARGE_INTEGER p0, p1;
         QueryPerformanceCounter(&p0);
-        pace(!k || k == 1 || g_imid);
+        pace(mid, slots);
         QueryPerformanceCounter(&p1);
         g_ia.pace_ms += (double)(p1.QuadPart - p0.QuadPart) * 1000.0 / (double)g_qpf.QuadPart;   /* step 74 */
     }
@@ -6278,10 +6516,28 @@ static int present_one(double t_s, unsigned swap_no, unsigned interval, unsigned
     return ovl_r;
 }
 
+/* Step 77: a present `slots` of the plan's clock after the one before: the
+ * limiter waits that many ticks; under vsync it is that DXGI interval, the
+ * same picture again for each 4 refreshes past DXGI's longest. */
+static int present_slots(double t_s, unsigned swap_no, double slots, unsigned sub, unsigned k, int mid)
+{
+    unsigned n;
+    int r = 0;
+
+    if (g_fp.limiter)
+        return present_one(t_s, swap_no, 1, sub, k, mid, slots);
+    n = (unsigned)(slots + 0.5);
+    n = n < 1 ? 1 : n;
+    for (; n > 4; n -= 4, mid = 0)
+        r |= present_one(t_s, swap_no, 4, sub, k, mid, 4.0);
+    return r | present_one(t_s, swap_no, n, sub, k, mid, (double)n);
+}
+
 void d3dh_present(double t_s, unsigned swap_no)
 {
-    int ovl_r = 0;
-    unsigned k = 1, sub;
+    int ovl_r = 0, interp = 0;
+    unsigned sub;
+    fp_frame_t fr;
 
     if (!g_ready)
         return;
@@ -6317,22 +6573,30 @@ void d3dh_present(double t_s, unsigned swap_no)
             fprintf(stderr, "[D3DB] host sub-frame dumps: guest swaps %u-%u\n", g_subdump_from, g_subdump_to);
         }
     }
-    if (REC_ON() || g_ia.kmax) {        /* step 60: the frame's recorded commands, drawn now */
+    fr.n = 0;
+    if (REC_ON() || g_ia.gen || g_fp.on) {  /* step 60: the frame's recorded commands, drawn now */
         EnterCriticalSection(&g_lock);
-        ic_queue(g_interp && ic_k_possible());      /* step 61 */
-        if (g_interp || g_ia.kmax)
-            ia_frame(swap_no);          /* step 74: the frame before measured, this one's count chosen */
+        ic_queue(g_interp && ic_possible());        /* step 61 */
+        if (g_interp || g_ia.gen)
+            ia_frame(swap_no);          /* step 74: the frame before measured, this one's step chosen */
+        if (fp_active())                /* step 77: this game frame's presents on the plan's clock */
+            fp_frame(&fr, g_interp && ic_possible() ? ia_k() : g_fp.nsteps - 1);
         if (g_interp) {
             int held = g_ovl_open && (!g_ovs.active || g_ovs.s.pause);
-            k = ic_begin(swap_no, held);    /* step 61 */
-            if (!held && ic_k_possible()) {
-                g_ia.kused = k;         /* step 74: this frame is measured at the next present */
-                g_st.interp_at[ia_k(ic_k_possible()) <= 4 ? ia_k(ic_k_possible()) : 4]++;
+            interp = ic_begin(swap_no, held, fr.n && fr.interp);    /* step 61 */
+            if (!held && ic_possible()) {
+                g_ia.kused = interp ? fr.n : 1;     /* step 74: this frame is measured at the next present */
+                g_ia.paired = interp;
+                g_st.interp_at[ia_k() < 8 ? ia_k() : 7]++;
             }
         }
-        if (k > 1) {
-            ic_sub(g_interp_t0 ? 0.0 : 1.0 / k);
+        if (interp) {
+            ic_sub(g_interp_t0 ? fr.t0[0] : fr.t[0]);
             replay_pass(1);             /* the first sub-frame */
+            if (fr.n == 1) {
+                replay_done();
+                ic_end();
+            }
         } else {
             if (g_replay_check)
                 replay_check(0, swap_no);
@@ -6344,21 +6608,23 @@ void d3dh_present(double t_s, unsigned swap_no)
         }
         LeaveCriticalSection(&g_lock);
     }
-    if (k > 1) {                        /* step 61: k presents, the game held in its Swap */
-        for (sub = 1; sub <= k; sub++) {
+    if (interp) {                       /* step 61: the presents, the game held in its Swap */
+        for (sub = 1; sub <= fr.n; sub++) {
             if (sub > 1) {
                 EnterCriticalSection(&g_lock);
-                if (sub < k) {
-                    ic_sub((double)(sub - g_interp_t0) / k);
+                if (fr.t[sub - 1] < 1) {
+                    ic_sub(g_interp_t0 ? fr.t0[sub - 1] : fr.t[sub - 1]);
                     replay_pass(1);
                 } else {
                     replay_pass(0);     /* t = 1: the frame as recorded */
+                }
+                if (sub == fr.n) {
                     replay_done();
                     ic_end();
                 }
                 LeaveCriticalSection(&g_lock);
             }
-            ovl_r |= present_one(t_s, swap_no, g_interval >= k ? g_interval / k : 1, sub, k);  /* step 74: 1 at 4 */
+            ovl_r |= present_slots(t_s, swap_no, fr.slots[sub - 1], sub, fr.n, fr.n == 1 || g_imid);
             g_st.interp_subs++;
         }
     } else {
@@ -6370,7 +6636,14 @@ void d3dh_present(double t_s, unsigned swap_no)
         }
         if (g_ovl_open && g_ovs.active && g_ovs.s.pause)
             overlay_pause();            /* this frame waits under the overlay */
-        ovl_r = present_one(t_s, swap_no, g_interval, g_interp ? 1 : 0, g_interp ? 1 : 0);
+        if (fr.n) {                     /* step 77: one present to the game frame's last slot */
+            double slots = 0;
+            for (sub = 0; sub < fr.n; sub++)
+                slots += fr.slots[sub];
+            ovl_r = present_slots(t_s, swap_no, slots, g_interp ? 1 : 0, g_interp ? 1 : 0, 1);
+        } else {
+            ovl_r = present_one(t_s, swap_no, g_interval, g_interp ? 1 : 0, g_interp ? 1 : 0, 1, 1.0);
+        }
     }
     if (g_interp_want != g_interp || (g_iq_on && !g_interp)) {     /* step 61: between frames, nothing recorded */
         EnterCriticalSection(&g_lock);
