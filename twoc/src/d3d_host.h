@@ -69,6 +69,7 @@ typedef struct {
      * and of it outside the pacing wait (ms). */
     unsigned interp_at[8], interp_adapt_changes, interp_adapt_frames;
     double interp_adapt_dt, interp_adapt_busy;
+    double interp_adapt_game, interp_adapt_replay;  /* step 78: of it, the game side's time and the replay side's */
     double interp_step_fps[8];          /* step 77: each step's frames a second (0: none) */
     /* Step 65: the game's overlay pass: passes, its draws, those under the
      * world's camera (the HUD counters and title cards). */

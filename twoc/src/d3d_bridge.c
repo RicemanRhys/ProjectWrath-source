@@ -4672,7 +4672,7 @@ static void mirror_swap(void)
             }
             if (st.interp_adapt_frames || st.interp_adapt_changes) {    /* step 74: adaptive sub-frames */
                 static unsigned la[8], lc, lfr;
-                static double ldt, lbu;
+                static double ldt, lbu, lga, lre;
                 unsigned fr = st.interp_adapt_frames - lfr, si;
                 char steps[256];
                 int sn = 0;
@@ -4681,14 +4681,17 @@ static void mirror_swap(void)
                     sn += snprintf(steps + sn, sizeof(steps) - sn, "%s%.2f fps: %u", si ? ", " : "",
                                    st.interp_step_fps[si], st.interp_at[si] - la[si]);
                 log_block_printf(&lb, "[D3DB] host interpolation sub-frames: game frames allowed %s; changes %u;"
-                                 " measured frames %u, %.2f ms apart, %.2f ms of it busy\n", steps,
-                                 st.interp_adapt_changes - lc, fr,
-                                 fr ? (st.interp_adapt_dt - ldt) / fr : 0.0, fr ? (st.interp_adapt_busy - lbu) / fr : 0.0);
+                                 " measured frames %u, %.2f ms apart, %.2f ms of it busy (the game side %.2f, the"
+                                 " replay side %.2f)\n", steps, st.interp_adapt_changes - lc, fr,
+                                 fr ? (st.interp_adapt_dt - ldt) / fr : 0.0, fr ? (st.interp_adapt_busy - lbu) / fr : 0.0,
+                                 fr ? (st.interp_adapt_game - lga) / fr : 0.0, fr ? (st.interp_adapt_replay - lre) / fr : 0.0);
                 memcpy(la, st.interp_at, sizeof(la));
                 lc = st.interp_adapt_changes;
                 lfr = st.interp_adapt_frames;
                 ldt = st.interp_adapt_dt;
                 lbu = st.interp_adapt_busy;
+                lga = st.interp_adapt_game;
+                lre = st.interp_adapt_replay;
             }
             if (st.interp_obj) {                        /* step 62: objects */
                 static unsigned lf, ls, lo, ln, lsn, lvp, lff, lbn, lbs, lsw, lsk, lskb;

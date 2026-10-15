@@ -1286,6 +1286,12 @@ typedef struct {
     unsigned up_n, up_cap;
     unsigned seq;                       /* the frame recorded in it (handovers so far) */
     unsigned set_gen;                   /* the game side's settings it was recorded under (g_sq) */
+    /* What the replay side's frame plan reads from the game side (replay_frame) */
+    unsigned swap_no;                   /* the guest's Swap that handed it over */
+    double t_s;                         /* ... and its time (the dumps' log lines) */
+    int rec;                            /* frames were being recorded (REC_ON) */
+    int interp;                         /* ... for interpolation (g_interp): the frame-rate setting, as taken */
+    double game_ms;                     /* the game side's time on it: from its last Swap's return to this one */
     int it;                             /* its interpolation tables (g_itab), -1 none */
 } fslot_t;
 #define FSLOTS 2
@@ -3626,6 +3632,8 @@ static struct {
     unsigned gen;                       /* the plan (g_fp.gen) it was chosen under; 0: not started */
     double t_ms;                        /* a game frame's time on this display */
     unsigned kused;                     /* presents the frame being measured got; 0: not measured */
+    double game_ms, replay_ms;          /* step 78: its game side's time (the slot's), its replay side's busy time */
+    LONGLONG rp0;                       /* step 78, QPC: its replay began (ia_frame) */
     int paired;                         /* ... and it was interpolated */
     LONGLONG last;                      /* QPC: that frame's present began; 0: none */
     double pace_ms;                     /* its time in pace() */
@@ -3727,17 +3735,23 @@ static void ia_mark(void)
 
 /* At each present while interpolating (and once after): the frame before
  * measured, and the count for this one chosen. Called with g_lock held. */
-static void ia_frame(unsigned swap_no)
+static void ia_frame(const fslot_t *f)
 {
     LARGE_INTEGER q;
-    unsigned used = g_ia.kused, cur, kn, i;
+    unsigned used = g_ia.kused, cur, kn, i, swap_no = f->swap_no;
     int possible = ic_possible(), paired = g_ia.paired;
-    double dt, busy, cmds = 0, since, pair_ms = g_st.pair_ms - g_ia.pair0;
+    double dt, busy, cmds = 0, since, pair_ms = g_st.pair_ms - g_ia.pair0, game_ms = f->game_ms, replay_ms = g_ia.replay_ms;
     char why[256];
 
     QueryPerformanceCounter(&q);
     dt = g_ia.last ? (double)(q.QuadPart - g_ia.last) * 1000.0 / (double)g_qpf.QuadPart : 0.0;
+    /* Busy: on one thread the time between the frames' replays less the
+     * pacing waits, the game's own work included (step 78: the game side's
+     * time on the frame, from the slot, and the replay side's, measured
+     * apart too; with a render thread each runs beside the other, and the
+     * larger of the two will decide). */
     busy = dt - g_ia.pace_ms;
+    g_ia.rp0 = q.QuadPart;
     for (i = 0; i < 2; i++) {           /* ms a command, plain and interpolated passes */
         unsigned n = g_rp_n[i] - g_ia.rp_n0[i];
         double c = g_rp_cmds[i] - g_ia.rp_cmds0[i], ms = g_rp_ms[i] - g_ia.rp_ms0[i];
@@ -3751,10 +3765,11 @@ static void ia_frame(unsigned swap_no)
         g_ia.c_pair = g_ia.c_pair > 0 ? 0.9 * g_ia.c_pair + 0.1 * pair_ms / cmds : pair_ms / cmds;
     g_ia.last = q.QuadPart;
     ia_mark();
-    if (!g_interp || !possible) {       /* stopped: the next start is from the plan's rate */
+    if (!f->interp || !possible) {      /* stopped: the next start is from the plan's rate */
         if (g_ia.gen && g_ia.k)
             fprintf(stderr, "[D3DB] host interpolation: sub-frames back to the plan's rate (it stopped)\n");
         memset(&g_ia, 0, sizeof(g_ia));
+        g_ia.rp0 = q.QuadPart;
         g_iadapt_seen = g_iadapt;
         return;
     }
@@ -3769,6 +3784,7 @@ static void ia_frame(unsigned swap_no)
         g_ia.t_ms = 1000.0 * g_fp.span / g_fp.slot_hz;
         g_ia.hold = IA_HOLD0;
         g_ia.last = q.QuadPart;
+        g_ia.rp0 = q.QuadPart;
         g_ia.changed = q.QuadPart;
         ia_mark();
         g_iadapt_seen = g_iadapt;
@@ -3798,6 +3814,8 @@ static void ia_frame(unsigned swap_no)
     g_st.interp_adapt_frames++;
     g_st.interp_adapt_dt += dt;
     g_st.interp_adapt_busy += busy;
+    g_st.interp_adapt_game += game_ms;  /* step 78 */
+    g_st.interp_adapt_replay += replay_ms;
     if (!g_iadapt || g_ifixed)
         return;                         /* measured only */
     if (g_ia.settle) {
@@ -5106,15 +5124,24 @@ static void ic_apply(void)
  * next one into the other slot and the third table set. On one thread the
  * other slot is free: its frame was replayed inside the Swap before. Called
  * with g_lock held. */
-static void slot_handover(void)
+static LARGE_INTEGER g_game_t0;         /* step 78, game side: its last Swap returned (0: none yet) */
+
+static void slot_handover(double t_s, unsigned swap_no)
 {
     fslot_t *f = g_rs;
+    LARGE_INTEGER q;
 
     if (g_ps)                           /* never on one thread: the slot before is replayed in its own Swap */
         fprintf(stderr, "[D3DB] host frame slots: slot %d (frame %u) not replayed before the next\n",
                 (int)(g_ps - g_slot), g_ps->seq);
+    QueryPerformanceCounter(&q);
     f->seq = ++g_slot_seq;
     f->it = g_ir;
+    f->swap_no = swap_no;
+    f->t_s = t_s;
+    f->rec = REC_ON();
+    f->interp = g_interp;
+    f->game_ms = g_game_t0.QuadPart ? (double)(q.QuadPart - g_game_t0.QuadPart) * 1000.0 / (double)g_qpf.QuadPart : 0;
     f->set_gen = g_sq.side[0].gen;
     if (g_sq.side[1].gen < f->set_gen)  /* never on one thread: the host side drains first */
         fprintf(stderr, "[D3DB] host frame slots: frame %u recorded under settings %u, the host side's at %u\n",
@@ -7249,11 +7276,143 @@ static int present_slots(double t_s, unsigned swap_no, double slots, unsigned su
     return r | present_one(t_s, swap_no, n, sub, k, mid, (double)n);
 }
 
-void d3dh_present(double t_s, unsigned swap_no)
+/* ── Step 78: the frame plan, the replay side's unit (notes 18.81) ──────
+ *
+ * Step 77's plan (g_fp: the slots, the steps) and its clock (g_fc), the
+ * time-based sub-frames (fp_frame), the adaptive ladder (g_ia, ia_frame:
+ * what the frames cost, the step the next gets, "busy") and the presents
+ * (present_slots, present_one, pace) are the replay side's, used from here
+ * and the overlay and pacing code beside it. From the game side they read
+ * only what the slot brings (fslot_t): the swap number and the Swap's time
+ * (dumps, logs), whether frames were recorded and for interpolation (the
+ * frame-rate setting as the game side took it, ic_apply), and the game
+ * side's time on the frame (busy). The plan itself is made on the host side
+ * (d3dh_frame_plan, from the bridge's host part of a settings change, at
+ * the start, and from replay_tail on a new display mode or a measurement):
+ * it reads the display, the window mode and the setting, nothing of the
+ * game's. Called by the game thread's Swap on one thread; a render thread's
+ * loop, with the slot it takes, later. Returns the running overlay's OVL_*
+ * bits. */
+static int replay_frame(fslot_t *f)
 {
     int ovl_r = 0, interp = 0;
-    unsigned sub;
+    unsigned sub, swap_no = f->swap_no;
+    double t_s = f->t_s;
     fp_frame_t fr;
+
+    fr.n = 0;
+    if (f->rec || g_ia.gen || g_fp.on) {    /* step 60: the frame's recorded commands, drawn now */
+        EnterCriticalSection(&g_lock);
+        slot_prepare(f, 0);             /* step 78: its textures uploaded and pinned */
+        ic_queue(f->interp && ic_possible());       /* step 61 */
+        if (f->interp || g_ia.gen)
+            ia_frame(f);                /* step 74: the frame before measured, this one's step chosen */
+        if (fp_active())                /* step 77: this game frame's presents on the plan's clock */
+            fp_frame(&fr, f->interp && ic_possible() ? ia_k() : g_fp.nsteps - 1);
+        if (f->interp) {
+            int held = g_ovl_open && (!g_ovs.active || g_ovs.s.pause);
+            interp = ic_begin(swap_no, held, fr.n && fr.interp);    /* step 61 */
+            if (!held && ic_possible()) {
+                g_ia.kused = interp ? fr.n : 1;     /* step 74: this frame is measured at the next present */
+                g_ia.paired = interp;
+                g_st.interp_at[ia_k() < 8 ? ia_k() : 7]++;
+            }
+        }
+        if (interp) {
+            ic_sub(g_interp_t0 ? fr.t0[0] : fr.t[0]);
+            replay_pass(1);             /* the first sub-frame */
+            if (fr.n == 1) {
+                replay_done();
+                ic_end();
+            }
+        } else {
+            if (g_replay_check)
+                replay_check(0, swap_no);
+            replay_run();
+            if (g_replay_check)
+                replay_check(1, swap_no);
+            if (f->interp)
+                ic_end();
+        }
+        LeaveCriticalSection(&g_lock);
+    } else {
+        g_ps = NULL;                    /* step 78: nothing recorded: the slot free again */
+    }
+    if (interp) {                       /* step 61: the presents, the game held in its Swap */
+        for (sub = 1; sub <= fr.n; sub++) {
+            if (sub > 1) {
+                EnterCriticalSection(&g_lock);
+                if (fr.t[sub - 1] < 1) {
+                    ic_sub(g_interp_t0 ? fr.t0[sub - 1] : fr.t[sub - 1]);
+                    replay_pass(1);
+                } else {
+                    replay_pass(0);     /* t = 1: the frame as recorded */
+                }
+                if (sub == fr.n) {
+                    replay_done();
+                    ic_end();
+                }
+                LeaveCriticalSection(&g_lock);
+            }
+            /* step 77: a present held 3 refreshes or more (80 fps at 240 Hz) is held to mid-refresh too:
+             * sent the moment the queue had room, 13% were shown 2 or 4 refreshes after the one before */
+            ovl_r |= present_slots(t_s, swap_no, fr.slots[sub - 1], sub, fr.n,
+                                   fr.n == 1 || g_imid || (!g_fp.limiter && fr.slots[sub - 1] >= 3));
+            g_st.interp_subs++;
+        }
+    } else {
+        if (g_ovl_open && !g_ovs.active) {  /* step 54: Esc */
+            AcquireSRWLockExclusive(&g_pause_lock);
+            if (g_ovl_open && !g_ovs.active)
+                ovl_begin();
+            ReleaseSRWLockExclusive(&g_pause_lock);
+        }
+        if (g_ovl_open && g_ovs.active && g_ovs.s.pause)
+            overlay_pause();            /* this frame waits under the overlay */
+        if (fr.n) {                     /* step 77: one present to the game frame's last slot */
+            double slots = 0;
+            for (sub = 0; sub < fr.n; sub++)
+                slots += fr.slots[sub];
+            ovl_r = present_slots(t_s, swap_no, slots, f->interp ? 1 : 0, f->interp ? 1 : 0, 1);
+        } else {
+            ovl_r = present_one(t_s, swap_no, g_interval, f->interp ? 1 : 0, f->interp ? 1 : 0, 1, 1.0);
+        }
+    }
+    {   /* step 78: the replay side's busy time on the frame (the adaptive measure's half) */
+        LARGE_INTEGER q;
+        QueryPerformanceCounter(&q);
+        if (g_ia.rp0)
+            g_ia.replay_ms = (double)(q.QuadPart - g_ia.rp0) * 1000.0 / (double)g_qpf.QuadPart - g_ia.pace_ms;
+    }
+    return ovl_r;
+}
+
+/* After the frame's presents, the replay side's: a new plan if the display
+ * asked for one, the overlay's frame applied, the host side's settings. */
+static void replay_tail(int ovl_r)
+{
+    if (g_fp.on && (InterlockedExchange(&g_fp_replan, 0) || (g_fp.needs_vrr && g_fp.fs != (g_fs ? 1 : 0)))) {
+        unsigned iv;                    /* step 77: variable refresh measured, the display's mode changed, or a */
+        double hz;                      /* plan that counts on variable refresh in the other window mode */
+        if (d3dh_frame_plan(g_fp.fr, g_fp.game_hz, &iv, &hz))
+            d3dh_set_pacing(iv, hz);
+    }
+    if (g_ovs.active && (ovl_r || !g_ovl_open)) {
+        AcquireSRWLockExclusive(&g_pause_lock);
+        if (g_ovs.active) {
+            if (ovl_r)                  /* step 57: this present's overlay frame (the pause may just have gone on) */
+                ovl_after(ovl_r);
+            if (!g_ovl_open || !g_ready)
+                ovl_end();              /* closed, whichever way it was last held */
+        }
+        ReleaseSRWLockExclusive(&g_pause_lock);
+    }
+    sq_drain(1);                        /* step 78: the frame's boundary: settings queued, the host side's */
+}
+
+void d3dh_present(double t_s, unsigned swap_no)
+{
+    int ovl_r;
 
     if (!g_ready)
         return;
@@ -7324,85 +7483,11 @@ void d3dh_present(double t_s, unsigned swap_no)
             fprintf(stderr, "[D3DB] host sub-frame dumps: guest swaps %u-%u\n", g_subdump_from, g_subdump_to);
         }
     }
-    fr.n = 0;
-    if (REC_ON() || g_ia.gen || g_fp.on) {  /* step 60: the frame's recorded commands, drawn now */
-        EnterCriticalSection(&g_lock);
-        slot_handover();                /* step 78: the frame recorded, to the replay side */
-        slot_prepare(g_ps, 0);          /* ... its textures uploaded and pinned */
-        ic_queue(g_interp && ic_possible());        /* step 61 */
-        if (g_interp || g_ia.gen)
-            ia_frame(swap_no);          /* step 74: the frame before measured, this one's step chosen */
-        if (fp_active())                /* step 77: this game frame's presents on the plan's clock */
-            fp_frame(&fr, g_interp && ic_possible() ? ia_k() : g_fp.nsteps - 1);
-        if (g_interp) {
-            int held = g_ovl_open && (!g_ovs.active || g_ovs.s.pause);
-            interp = ic_begin(swap_no, held, fr.n && fr.interp);    /* step 61 */
-            if (!held && ic_possible()) {
-                g_ia.kused = interp ? fr.n : 1;     /* step 74: this frame is measured at the next present */
-                g_ia.paired = interp;
-                g_st.interp_at[ia_k() < 8 ? ia_k() : 7]++;
-            }
-        }
-        if (interp) {
-            ic_sub(g_interp_t0 ? fr.t0[0] : fr.t[0]);
-            replay_pass(1);             /* the first sub-frame */
-            if (fr.n == 1) {
-                replay_done();
-                ic_end();
-            }
-        } else {
-            if (g_replay_check)
-                replay_check(0, swap_no);
-            replay_run();
-            if (g_replay_check)
-                replay_check(1, swap_no);
-            if (g_interp)
-                ic_end();
-        }
-        LeaveCriticalSection(&g_lock);
-    }
-    if (interp) {                       /* step 61: the presents, the game held in its Swap */
-        for (sub = 1; sub <= fr.n; sub++) {
-            if (sub > 1) {
-                EnterCriticalSection(&g_lock);
-                if (fr.t[sub - 1] < 1) {
-                    ic_sub(g_interp_t0 ? fr.t0[sub - 1] : fr.t[sub - 1]);
-                    replay_pass(1);
-                } else {
-                    replay_pass(0);     /* t = 1: the frame as recorded */
-                }
-                if (sub == fr.n) {
-                    replay_done();
-                    ic_end();
-                }
-                LeaveCriticalSection(&g_lock);
-            }
-            /* step 77: a present held 3 refreshes or more (80 fps at 240 Hz) is held to mid-refresh too:
-             * sent the moment the queue had room, 13% were shown 2 or 4 refreshes after the one before */
-            ovl_r |= present_slots(t_s, swap_no, fr.slots[sub - 1], sub, fr.n,
-                                   fr.n == 1 || g_imid || (!g_fp.limiter && fr.slots[sub - 1] >= 3));
-            g_st.interp_subs++;
-        }
-    } else {
-        if (g_ovl_open && !g_ovs.active) {  /* step 54: Esc */
-            AcquireSRWLockExclusive(&g_pause_lock);
-            if (g_ovl_open && !g_ovs.active)
-                ovl_begin();
-            ReleaseSRWLockExclusive(&g_pause_lock);
-        }
-        if (g_ovl_open && g_ovs.active && g_ovs.s.pause) {
-            overlay_pause();            /* this frame waits under the overlay */
-            sq_drain(0);                /* step 78: the game side's settings, as the game goes on */
-        }
-        if (fr.n) {                     /* step 77: one present to the game frame's last slot */
-            double slots = 0;
-            for (sub = 0; sub < fr.n; sub++)
-                slots += fr.slots[sub];
-            ovl_r = present_slots(t_s, swap_no, slots, g_interp ? 1 : 0, g_interp ? 1 : 0, 1);
-        } else {
-            ovl_r = present_one(t_s, swap_no, g_interval, g_interp ? 1 : 0, g_interp ? 1 : 0, 1, 1.0);
-        }
-    }
+    EnterCriticalSection(&g_lock);      /* step 78: the frame recorded, to the replay side */
+    slot_handover(t_s, swap_no);
+    LeaveCriticalSection(&g_lock);
+    ovl_r = replay_frame(g_ps);
+    sq_drain(0);                        /* step 78: settings changed while the overlay held the game */
     if (g_interp_want != g_interp || (g_iq_on && !g_interp)) {     /* step 61: between frames, nothing recorded */
         EnterCriticalSection(&g_lock);
         if (!g_rs->rc_n)
@@ -7411,24 +7496,9 @@ void d3dh_present(double t_s, unsigned swap_no)
             ic_queue(0);
         LeaveCriticalSection(&g_lock);
     }
-    if (g_fp.on && (InterlockedExchange(&g_fp_replan, 0) || (g_fp.needs_vrr && g_fp.fs != (g_fs ? 1 : 0)))) {
-        unsigned iv;                    /* step 77: variable refresh measured, the display's mode changed, or a */
-        double hz;                      /* plan that counts on variable refresh in the other window mode */
-        if (d3dh_frame_plan(g_fp.fr, g_fp.game_hz, &iv, &hz))
-            d3dh_set_pacing(iv, hz);
-    }
-    if (g_ovs.active && (ovl_r || !g_ovl_open)) {
-        AcquireSRWLockExclusive(&g_pause_lock);
-        if (g_ovs.active) {
-            if (ovl_r)                  /* step 57: this present's overlay frame (the pause may just have gone on) */
-                ovl_after(ovl_r);
-            if (!g_ovl_open || !g_ready)
-                ovl_end();              /* closed, whichever way it was last held */
-        }
-        ReleaseSRWLockExclusive(&g_pause_lock);
-    }
-    sq_drain(1);                        /* step 78: the frame's boundary: settings queued, the host side's */
-    sq_drain(0);                        /* then the game side's */
+    replay_tail(ovl_r);
+    sq_drain(0);                        /* step 78: then the game side's */
+    QueryPerformanceCounter(&g_game_t0);
 }
 
 /* ── Pixel-shader probe (S4) ───────────────────────────────── */
