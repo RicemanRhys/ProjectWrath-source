@@ -1,14 +1,32 @@
 Legion Go test notes (this file goes into the zip "Collect logs.bat" makes)
 ==========================================================================
 
-Plugged in or battery:
 Legion Space thermal mode:
 Windows power mode:
 Screen refresh rate (Settings):
 Window or full screen:
 
-For each test: the fps line from Esc > Display ("Now: ..."), smooth or stutters (how
-often), does the game itself slow down, fan noise / warmth / CPU temperature.
+First test: cast_bug's start, standing still 30 s each. Write the counter's two numbers
+(Game N/s, Shown N/s), and anything you see (stutter, slow motion).
+
+  Plugged in:
+   a. Match display:
+   b. 90 fps (shown as 72):
+   c. Match display, Render thread Off:
+   d. Game (60):
+
+  On battery (when you unplugged: the time, or "before b"):
+   a. Match display:
+   b. 90 fps (shown as 72):
+   c. Match display, Render thread Off:
+   d. Game (60):
+
+Did View + Menu open and close the settings menu? Did the controller move around in it?
+Did Menu alone still open the game's pause menu at once?
+
+For each test below: the counter's numbers (or the "Measured:" line), smooth or stutters
+(how often), does the game itself slow down, fan noise / warmth / CPU temperature, plugged
+in or battery.
 
 1. Match display
    hub:
