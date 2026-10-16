@@ -161,6 +161,26 @@ unsigned twoc_aa_samples(int aa)
     return aa == TWOC_AA_MSAA2 ? 2 : aa == TWOC_AA_MSAA4 ? 4 : aa == TWOC_AA_MSAA8 ? 8 : 1;
 }
 
+/* Step 79: render_thread = off | on | auto (1 and 0 read too; sync, a check
+ * in d3d_host.c, is on here). */
+static const char *g_rt_names[TWOC_RT_COUNT] = { "off", "on", "auto" };
+
+const char *twoc_rt_name(int rt)
+{
+    return rt >= 0 && rt < TWOC_RT_COUNT ? g_rt_names[rt] : "off";
+}
+
+int twoc_rt_parse(const char *v)
+{
+    if (!v)
+        return TWOC_RT_OFF;
+    if (_stricmp(v, "on") == 0 || strcmp(v, "1") == 0 || _stricmp(v, "sync") == 0)
+        return TWOC_RT_ON;
+    if (_stricmp(v, "auto") == 0)
+        return TWOC_RT_AUTO;
+    return TWOC_RT_OFF;
+}
+
 const char *twoc_settings_path(void)
 {
     static char path[MAX_PATH + 32];
@@ -293,6 +313,7 @@ void twoc_settings_current(twoc_settings_t *s)
     s->framerate = twoc_framerate_parse(getenv("RECOMP_FRAMERATE"));
     v = getenv("RECOMP_FRAMERATE_ADAPTIVE");
     s->adaptive = !(v && strcmp(v, "0") == 0);
+    s->render_thread = twoc_rt_parse(getenv("RECOMP_RENDER_THREAD"));
     v = getenv("RECOMP_HUD");
     s->hud = v && _stricmp(v, "edges") == 0;
     v = getenv("RECOMP_HUD_MARGIN");

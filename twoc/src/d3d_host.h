@@ -19,6 +19,12 @@ typedef struct {
     unsigned tex_snaps, tex_at_replay;  /* step 78: recorded uploads (guest bytes copied); recorded draws' textures
                                          * fetched at the replay from guest memory (not a render target there) */
     double tex_snap_bytes;
+    unsigned tex_at_copy;               /* step 79: ... with the render thread: drawn from their record-time copy */
+    /* Step 79: the render thread: on now, frames it replayed, the game
+     * thread's time waiting in its Swap (for its next slot, the overlay),
+     * the render thread's time waiting for a frame (ms). */
+    unsigned rt_on, rt_frames;
+    double rt_wait_ms, rt_idle_ms;
     unsigned rt_created, rt_fails, rt_draws, rt_clears, rt_sampled, rt_feedback;  /* S4 */
     unsigned rt_released, rt_evicted;                                             /* step 52 */
     unsigned p8_uploads, ps_draws, ps_probes;                                     /* S4 */
@@ -332,5 +338,8 @@ void d3dh_set_interp_adaptive(int on);
 /* For the controller poll (recomp_manual.c): 1 while the overlay is open;
  * *closes counts the times it has closed. Callable with the bridge off. */
 int d3dh_overlay_input(unsigned *closes);
+/* Step 79: "Render thread" (TWOC_RT_OFF, _ON, _AUTO): taken at the game's
+ * next Swap. */
+void d3dh_set_render_thread(int mode);
 
 #endif

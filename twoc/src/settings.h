@@ -92,6 +92,7 @@ extern "C" {
 
 enum { TWOC_PACING_AUTO, TWOC_PACING_VSYNC, TWOC_PACING_LIMITER, TWOC_PACING_LIMITER_VSYNC, TWOC_PACING_COUNT };
 enum { TWOC_AA_OFF, TWOC_AA_FXAA, TWOC_AA_SMAA, TWOC_AA_MSAA2, TWOC_AA_MSAA4, TWOC_AA_MSAA8, TWOC_AA_COUNT };
+enum { TWOC_RT_OFF, TWOC_RT_ON, TWOC_RT_AUTO, TWOC_RT_COUNT };   /* step 79: the render thread */
 
 typedef struct {
     int fullscreen;
@@ -103,6 +104,7 @@ typedef struct {
     int antialiasing;                   /* TWOC_AA_* */
     int framerate;                      /* step 61: 0 the game's 60, 1 the display's (interpolated); step 77: N Hz */
     int adaptive;                       /* step 75: 1 fewer sub-frames while late (also when unset), 0 always all */
+    int render_thread;                  /* step 79: TWOC_RT_* (unset: off) */
     int hud, hud_margin;                /* step 65: 0 the HUD in the middle 4:3, 1 at the edges; 0-10 percent in */
     double draw_distance;               /* step 69: the far plane and fog times this; 1 the game's (also unset) */
     int volume;                         /* 0-100; -1: never set (Windows' own level) */
@@ -128,6 +130,8 @@ int twoc_framerate_parse(const char *v);    /* step 77: 0 (60, unset, unknown), 
 void twoc_framerate_text(int fr, char *buf, size_t cap);    /* the file's word: 60, display or N */
 const char *twoc_aa_name(int aa);       /* the file's word: off, fxaa, smaa, msaa2x, msaa4x, msaa8x */
 int twoc_aa_parse(const char *v);       /* TWOC_AA_OFF for anything unknown */
+const char *twoc_rt_name(int rt);       /* step 79: off, on, auto */
+int twoc_rt_parse(const char *v);       /* TWOC_RT_OFF for anything unknown (sync, a check, is on) */
 unsigned twoc_aa_samples(int aa);       /* MSAA's samples a pixel; 1 for the others */
 
 /* host_audio.cpp: the process's volume in Windows' mixer (its audio session),

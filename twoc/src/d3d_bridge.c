@@ -4626,10 +4626,11 @@ static void mirror_swap(void)
                                  f ? (st.replay_bytes - lby) / 1024.0 / f : 0.0,
                                  r ? 1000.0 * (st.rec_ms - lrec) / r : 0.0, f ? (st.rec_ms - lrec) / f : 0.0,
                                  f ? (st.replay_ms - lms) / f : 0.0, st.replay_pins - lp);
-                if (st.tex_snaps || st.tex_at_replay)  /* step 78 */
+                if (st.tex_snaps || st.tex_at_replay || st.tex_at_copy)  /* step 78; step 79 */
                     log_block_printf(&lb, "[D3DB] host recorded texture uploads: %u (%.1f MB of guest bytes copied);"
-                                     " recorded draws' textures read from guest memory at the replay %u\n",
-                                     st.tex_snaps, st.tex_snap_bytes / 1048576.0, st.tex_at_replay);
+                                     " recorded draws' textures not render targets at the replay: read from guest"
+                                     " memory %u, drawn from their record-time copy (render thread) %u\n",
+                                     st.tex_snaps, st.tex_snap_bytes / 1048576.0, st.tex_at_replay, st.tex_at_copy);
                 if (st.replay_checked)
                     log_block_printf(&lb, "[D3DB] host replay check: %u frames compared, %u differ\n",
                                      st.replay_checked, st.replay_check_diff);
@@ -4692,6 +4693,18 @@ static void mirror_swap(void)
                 lbu = st.interp_adapt_busy;
                 lga = st.interp_adapt_game;
                 lre = st.interp_adapt_replay;
+            }
+            if (st.rt_frames) {     /* step 79: the render thread */
+                static unsigned lrf;
+                static double lrw, lri;
+                unsigned rf = st.rt_frames - lrf;
+                log_block_printf(&lb, "[D3DB] host render thread: %s; frames replayed on it %u, the game waited"
+                                 " %.2f ms a frame in its Swap, the render thread %.2f ms a frame for a frame\n",
+                                 st.rt_on ? "on" : "off", rf, rf ? (st.rt_wait_ms - lrw) / rf : 0.0,
+                                 rf ? (st.rt_idle_ms - lri) / rf : 0.0);
+                lrf = st.rt_frames;
+                lrw = st.rt_wait_ms;
+                lri = st.rt_idle_ms;
             }
             if (st.interp_obj) {                        /* step 62: objects */
                 static unsigned lf, ls, lo, ln, lsn, lvp, lff, lbn, lbs, lsw, lsk, lskb;

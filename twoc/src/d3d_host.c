@@ -196,23 +196,56 @@ static CRITICAL_SECTION g_rec;
  * thread is on and ends the process (a [D3DB] THREADCHECK line, exit code
  * 120) when it doesn't fit: replay-side code while the game side records (it
  * would race a render thread for the device) or game-side code while the
- * replay side replays (it would race the game for its tables). A render
- * thread will make the sides threads. */
+ * replay side replays (it would race the game for its tables). Step 79: with
+ * the render thread on (below) the replay side is that thread: replay-side
+ * code on any other thread fails too (but for a draw made at once while the
+ * game waits for each frame, the sync check), and game-side code on it. */
 enum { SIDE_ANY, SIDE_GAME, SIDE_REPLAY, SIDE_NOW };
 static __declspec(thread) int t_side;  /* the side this thread is on now */
 static int g_tcheck;                    /* RECOMP_D3D_BRIDGE_THREADCHECK */
+
+/* ── Step 79: the render thread (notes 18.82) ──────────────────────
+ *
+ * With Frame rate: Display (any target above the game's 60) and the render
+ * thread on, the replay side runs on a thread of its own: pairing, the
+ * replays, the frame plan, the presents and the pace wait, texture uploads,
+ * shader creation, render targets, the overlay and its hold, resizing,
+ * pacing and anti-aliasing changes, dumps and checks. The game thread
+ * records, hands its frame over at the guest's Swap (one slot of two), and
+ * goes on to the next: hand-over depth 1, the game waits in its Swap until
+ * the render thread has finished replaying the frame before the one it just
+ * handed over (the slot it records into next), so it is never more than
+ * one frame ahead. Frame rate: Game (60) keeps no thread and the old path,
+ * and so does the setting Off. Engaged and left only at the game's Swap with
+ * nothing recorded and the thread drained (g_thr), so the replay-side state
+ * always has one owner. See "Step 79: the render thread's loop" below. */
+static int g_thr;                       /* game side: frames go to the render thread now */
+static volatile LONG g_thr_v;           /* the same, for the checks and the overlay on other threads */
+static volatile LONG g_rt_mode;         /* the setting: TWOC_RT_OFF, TWOC_RT_ON or TWOC_RT_AUTO */
+static int g_rt_sync;                   /* RECOMP_RENDER_THREAD=sync: the game waits for each frame (a check) */
+static unsigned g_rt_cores, g_rt_logical;   /* the CPU's physical cores and logical processors */
+#define RT_AUTO_CORES 4                 /* Auto: on with this many physical cores or more */
+static __declspec(thread) int t_rt;     /* this thread is the render thread */
 
 static void side_fail(const char *fn, int want)
 {
     static const char *name[] = { "any", "game", "replay", "now" };
 
-    fprintf(stderr, "[D3DB] THREADCHECK: %s, the %s side's, ran on the %s side (thread %lu): ending the process\n", fn,
-            name[want], name[t_side], GetCurrentThreadId());
+    fprintf(stderr, "[D3DB] THREADCHECK: %s, the %s side's, ran on the %s side (thread %lu%s%s): ending the process\n",
+            fn, name[want], name[t_side], GetCurrentThreadId(), t_rt ? ", the render thread" : "",
+            g_thr_v && !t_rt ? ", the render thread on" : "");
     fflush(stderr);
     TerminateProcess(GetCurrentProcess(), 120);
 }
-#define REPLAY_SIDE() do { if (g_tcheck && t_side == SIDE_GAME) side_fail(__FUNCTION__, SIDE_REPLAY); } while (0)
-#define GAME_SIDE() do { if (g_tcheck && t_side == SIDE_REPLAY) side_fail(__FUNCTION__, SIDE_GAME); } while (0)
+
+static void side_check(const char *fn, int want)
+{
+    if (want == SIDE_REPLAY ? t_side == SIDE_GAME || (g_thr_v && !t_rt && !(t_side == SIDE_NOW && g_rt_sync))
+                            : t_side == SIDE_REPLAY || t_rt)
+        side_fail(fn, want);
+}
+#define REPLAY_SIDE() do { if (g_tcheck) side_check(__FUNCTION__, SIDE_REPLAY); } while (0)
+#define GAME_SIDE() do { if (g_tcheck) side_check(__FUNCTION__, SIDE_GAME); } while (0)
 
 /* This thread on side `s` from now; returns the side it was on. */
 static int side_set(int s)
@@ -224,15 +257,18 @@ static int side_set(int s)
 }
 
 /* Step 79: a game-side entry point's locks: g_rec, and g_lock with it
- * (`now` 1: a check that draws at once, always). */
+ * while the game thread may draw at once (no render thread, or one it waits
+ * for each frame: the sync check; `now` 1: a check that draws at once,
+ * always). With the render thread on, g_rec alone: it records beside the
+ * replay. */
 static __declspec(thread) int t_rec_both;
 
 static void rec_lock(int now)
 {
-    (void)now;
     EnterCriticalSection(&g_rec);
-    t_rec_both = 1;
-    EnterCriticalSection(&g_lock);
+    t_rec_both = now || !g_thr || g_rt_sync;
+    if (t_rec_both)
+        EnterCriticalSection(&g_lock);
 }
 
 static void rec_unlock(void)
@@ -241,6 +277,40 @@ static void rec_unlock(void)
         LeaveCriticalSection(&g_lock);
     LeaveCriticalSection(&g_rec);
 }
+
+/* Step 79: where the game thread (in its Swap) and the render thread are,
+ * for the deadlock watchdog (rt_watchdog): what each is doing, since when
+ * (QPC) and for which guest swap. */
+enum {
+    WD_G_RUN, WD_G_SLOT, WD_G_HOLD, WD_G_SYNC, WD_G_DRAIN,
+    WD_R_IDLE, WD_R_TAKE, WD_R_PASS, WD_R_PACE, WD_R_PRESENT, WD_R_OVERLAY, WD_R_TAIL, WD_N
+};
+static const char *const g_wd_what[WD_N] = {
+    "running the game", "waiting for its next slot (the render thread still on the frame before)",
+    "waiting while the overlay holds the game", "waiting for the render thread to finish the frame (sync)",
+    "waiting for the render thread to drain", "waiting for a frame", "taking a frame (settings, uploads)",
+    "replaying under the host's lock", "waiting to present (the pace)", "presenting",
+    "holding the game under the overlay", "after the frame's presents (the plan, the overlay)",
+};
+static struct {
+    volatile LONG what, swap;
+    volatile LONG64 since;
+    volatile DWORD tid;
+} g_wd[2];                              /* [0] the game thread, [1] the render thread */
+static double g_wd_secs = 5.0;          /* RECOMP_D3D_BRIDGE_RT_WATCHDOG: the watchdog's limit (0 off) */
+
+static void wd_set(int who, int what, unsigned swap)
+{
+    LARGE_INTEGER q;
+
+    QueryPerformanceCounter(&q);
+    if (swap)                           /* 0: the same swap as before */
+        g_wd[who].swap = (LONG)swap;
+    g_wd[who].since = q.QuadPart;
+    g_wd[who].tid = GetCurrentThreadId();
+    InterlockedExchange(&g_wd[who].what, what);
+}
+#define wd_rt(what, swap) do { if (t_rt) wd_set(1, (what), (swap)); } while (0)
 static volatile LONG g_ready;
 static HWND g_hwnd;                     /* visible: the flip-model swap chain */
 static HWND g_hwnd_dev;                 /* hidden: xbox_d3d8's own swap chain */
@@ -366,6 +436,7 @@ static volatile LONG g_aniso = 1;       /* RECOMP_ANISOTROPY: 1 leaves the game'
 static int g_aa;                        /* step 58, RECOMP_ANTIALIASING: TWOC_AA_* */
 static unsigned g_msaa = 1;             /* step 58: the samples a pixel MSAA asks for, 1 without */
 static volatile LONG g_ovl_open;        /* Esc: the next present runs the overlay */
+static volatile LONG g_ovl_pauses = 1;  /* step 79: "Pause the game while this menu is open", for the game side */
 static SRWLOCK g_pause_lock = SRWLOCK_INIT;
 static d3dh_apply_fn g_apply_game, g_apply_host;   /* step 78: the bridge's parts of a settings change */
 static double g_rwide;                  /* step 78: g_wide as the game side records under it (d3dh_record_wide) */
@@ -769,6 +840,31 @@ int d3dh_create(unsigned width, unsigned height, unsigned host_w, unsigned host_
         if (g_tcheck)
             fprintf(stderr, "[D3DB] host THREADCHECK: replay-side code checked against the game side's recording,"
                     " and game-side code against the replay\n");
+    }
+    {   /* step 79: the render thread (RECOMP_RENDER_THREAD: off, on, auto; sync a check), the CPU, the watchdog */
+        const char *e = getenv("RECOMP_RENDER_THREAD"), *w = getenv("RECOMP_D3D_BRIDGE_RT_WATCHDOG"), *o;
+        SYSTEM_LOGICAL_PROCESSOR_INFORMATION_EX *buf = NULL;
+        DWORD len = 0;
+        g_rt_sync = e && _stricmp(e, "sync") == 0;
+        g_rt_mode = twoc_rt_parse(e);
+        g_rt_logical = GetActiveProcessorCount(ALL_PROCESSOR_GROUPS);
+        GetLogicalProcessorInformationEx(RelationProcessorCore, NULL, &len);
+        if (len && (buf = (SYSTEM_LOGICAL_PROCESSOR_INFORMATION_EX *)malloc(len)) != NULL &&
+            GetLogicalProcessorInformationEx(RelationProcessorCore, buf, &len))
+            for (o = (const char *)buf; o < (const char *)buf + len;
+                 o += ((const SYSTEM_LOGICAL_PROCESSOR_INFORMATION_EX *)o)->Size)
+                g_rt_cores++;
+        free(buf);
+        if (!g_rt_cores)
+            g_rt_cores = g_rt_logical;
+        if (w && *w)
+            g_wd_secs = atof(w);
+        g_ovl_pauses = !(getenv("RECOMP_OVERLAY_PAUSE") && strcmp(getenv("RECOMP_OVERLAY_PAUSE"), "0") == 0);
+        fprintf(stderr, "[D3DB] host render thread: %s%s; this CPU has %u cores, %u logical processors%s\n",
+                twoc_rt_name(g_rt_mode), g_rt_sync ? " (sync: the game waits for each frame, a check)" : "",
+                g_rt_cores, g_rt_logical,
+                g_rt_mode != TWOC_RT_AUTO ? "" : g_rt_cores >= RT_AUTO_CORES ? " (Auto: on with Frame rate: Display)"
+                                                                              : " (Auto: off, under 4 cores)");
     }
     {   /* step 60 */
         const char *e = getenv("RECOMP_D3D_BRIDGE_REPLAY");
@@ -1299,6 +1395,12 @@ static int bind_target(const d3dh_target_t *t)
  * the target's contents are made. Stage 2 interpolates between two recorded
  * frames (notes 18.62). */
 enum { RC_DRAW, RC_CLEAR, RC_COPY, RC_FREED };
+/* A recorded draw's stage: fetched at the replay (0, a texture that may be a
+ * render target there), held from the recording (PIN_HELD), or (step 79,
+ * with the render thread) the render target if there is one at the replay,
+ * else held from the recording: the fetch at the replay read guest memory,
+ * which the render thread must not while the game runs. */
+enum { PIN_FETCH, PIN_HELD, PIN_TARGET };
 typedef struct {
     int kind;
     union {
@@ -1380,12 +1482,32 @@ typedef struct {
     int interp;                         /* ... for interpolation (g_interp): the frame-rate setting, as taken */
     double game_ms;                     /* the game side's time on it: from its last Swap's return to this one */
     int it;                             /* its interpolation tables (g_itab), -1 none */
+    /* Step 79: with the render thread */
+    int state;                          /* SL_*: whose it is (g_ho) */
+    int hold;                           /* the overlay holds the game at this frame (the game waits in its Swap) */
+    twoc_settings_t set;                /* the game side's settings it was recorded under (set_gen), for the */
+    unsigned set_copy;                  /* host side's part: applied before it is replayed; the gen copied */
 } fslot_t;
 #define FSLOTS 2
 static fslot_t g_slot[FSLOTS];
 static fslot_t *g_rs = &g_slot[0];      /* the game side records into this one */
 static fslot_t *g_ps;                   /* the replay side draws this one (NULL: none handed over) */
 static unsigned g_slot_seq;             /* handovers so far */
+/* Step 79: the hand-over between the game thread and the render thread.
+ * Under g_ho: the slots' states, the frame handed over and not yet taken,
+ * whether the render thread is busy, the last frame whose hold is over, and
+ * the interpolation table set it keeps as the frame before (g_ip, so the
+ * game can pick the free one). Order: g_rec, then g_lock, then g_ho. */
+enum { SL_FREE, SL_REC, SL_PEND, SL_REPLAY };
+static CRITICAL_SECTION g_ho;
+static CONDITION_VARIABLE g_ho_rt;      /* the render thread waits on it for a frame */
+static CONDITION_VARIABLE g_ho_game;    /* the game thread waits on it for a slot, the hold, the drain */
+static fslot_t *g_pend;                 /* handed over, not yet taken */
+static int g_rt_busy;                   /* the render thread has a frame (taken, its presents not all done) */
+static unsigned g_hold_done;            /* the seq of the last frame the render thread let the game go after */
+static fslot_t *g_rprev;                /* game side: the slot handed over last (its targets: rc_maybe_target) */
+static LARGE_INTEGER g_rt_take;         /* render thread: when it took the frame it replays (busy from there) */
+static void rt_let_go(const fslot_t *f);
 /* The slots share their memory: a slot whose frame has been replayed gives
  * its arena chunks and its command array back (slot_free), and the slot
  * recorded into next takes them first. On one thread every frame is then
@@ -1509,10 +1631,12 @@ static void rc_target(uint32_t data)
  * replay: one exists now, or the frame draws, clears or copies into one.
  * Step 78: "exists" from the game side's copy of the targets' Data
  * (g_gt_data, kept by the replay side), and a frame handed over but not yet
- * replayed counts with its targets (never, on one thread). */
+ * replayed counts with its targets (never, on one thread). Step 79: with the
+ * render thread, the frame handed over last (g_rprev), replayed or not: its
+ * targets are the game side's until it records into that slot again. */
 static int rc_maybe_target(uint32_t data)
 {
-    fslot_t *f = g_rs;
+    fslot_t *f = g_rs, *p = g_thr ? g_rprev : g_ps;
     unsigned i;
     int r = 0;
 
@@ -1526,11 +1650,11 @@ static int rc_maybe_target(uint32_t data)
     for (i = 0; i < f->targets_n; i++)
         if (f->targets[i] == data)
             return 1;
-    if (g_ps && g_ps != f) {
-        if (g_ps->overflow)
+    if (p && p != f) {
+        if (p->overflow)
             return 1;
-        for (i = 0; i < g_ps->targets_n; i++)
-            if (g_ps->targets[i] == data)
+        for (i = 0; i < p->targets_n; i++)
+            if (p->targets[i] == data)
                 return 1;
     }
     return 0;
@@ -1860,12 +1984,10 @@ static IDirect3DBaseTexture8 *tex_make(tex_cache_t *tc, unsigned i, const d3dh_t
     return tex;
 }
 
-/* A draw's texture now (a draw made at once, or fetched at its replay):
- * the host render target with its Data, else from the cache `tc`, made and
- * filled from guest memory now if it has to be. */
-static IDirect3DBaseTexture8 *tex_get(tex_cache_t *tc, const d3dh_tex_t *t)
+/* The host render target with the texture's Data, NULL if none. */
+static IDirect3DBaseTexture8 *tex_target(const d3dh_tex_t *t)
 {
-    int i, up;
+    int i;
 
     REPLAY_SIDE();
     for (i = 0; i < RT_SLOTS; i++)      /* S4: what the host rendered, not guest memory */
@@ -1877,6 +1999,20 @@ static IDirect3DBaseTexture8 *tex_get(tex_cache_t *tc, const d3dh_tex_t *t)
             rt_resolve(i);              /* step 58: what the multisampled surface holds (with MSAA, even while bound) */
             return (IDirect3DBaseTexture8 *)g_rt[i].tex;
         }
+    return NULL;
+}
+
+/* A draw's texture now (a draw made at once, or fetched at its replay):
+ * the host render target with its Data, else from the cache `tc`, made and
+ * filled from guest memory now if it has to be. */
+static IDirect3DBaseTexture8 *tex_get(tex_cache_t *tc, const d3dh_tex_t *t)
+{
+    IDirect3DBaseTexture8 *rt;
+    int i, up;
+
+    REPLAY_SIDE();
+    if ((rt = tex_target(t)) != NULL)
+        return rt;
     if (g_ps) {                         /* step 78: a recorded draw's, fetched at its replay as a render target */
         if (++g_st.tex_at_replay <= 5)  /* that isn't one there: guest memory read at the replay, as before */
             fprintf(stderr, "[D3DB] host texture %08X (Data %08X) fetched at the replay, not a render target there:"
@@ -2261,8 +2397,8 @@ static int vs_bind(const d3dh_vprog_t *p)
     DWORD h;
 
     REPLAY_SIDE();
-    if (i < 0)                          /* step 78: one the game side never parsed (a probe's): at once */
-        i = vs_slot(p);
+    if (i < 0 && !t_rt)                 /* step 78: one the game side never parsed (a probe's): at once */
+        i = vs_slot(p);                 /* (step 79: never on the render thread: the game side's table) */
     if (i < 0 || !(h = vs_make(i, p)))
         return -1;
     if (!g_vs_consts_valid) {
@@ -2357,7 +2493,17 @@ static int draw_exec(const d3dh_draw_t *d, IDirect3DBaseTexture8 *const *pin, co
     {
         IDirect3DBaseTexture8 *bound[4];
         for (s = 0; s < 4; s++)
-            bound[s] = !d->tex[s] ? NULL : pinned && pinned[s] ? pin[s] : tex_get(g_tc_now, d->tex[s]);
+            if (!d->tex[s])
+                bound[s] = NULL;
+            else if (pinned && pinned[s] == PIN_TARGET) {   /* step 79: the target, else the record-time copy */
+                bound[s] = tex_target(d->tex[s]);
+                if (!bound[s] && pin[s] && ++g_st.tex_at_copy <= 5)
+                    fprintf(stderr, "[D3DB] host texture %08X (Data %08X) not a render target at the replay: drawn"
+                            " from its copy made when it was recorded\n", d->tex[s]->key, d->tex[s]->data);
+                if (!bound[s])
+                    bound[s] = pin[s];
+            } else
+                bound[s] = pinned && pinned[s] ? pin[s] : tex_get(g_tc_now, d->tex[s]);
         for (s = 0; s < 4; s++)
             g_dev->lpVtbl->SetTexture(g_dev, s, bound[s]);
     }
@@ -2508,9 +2654,14 @@ static int rec_draw(const d3dh_draw_t *d)
     for (s = 0; s < 4; s++) {
         int i, up;
         c->u.draw.tslot[s] = -1;
-        if (!o->tex[s] || rc_maybe_target(o->tex[s]->data))
+        if (!o->tex[s])
             continue;
-        c->u.draw.pinned[s] = 1;
+        if (!rc_maybe_target(o->tex[s]->data))
+            c->u.draw.pinned[s] = PIN_HELD;
+        else if (g_thr)                 /* step 79: the target at the replay, else a copy made now (not guest */
+            c->u.draw.pinned[s] = PIN_TARGET;   /* memory read on the render thread) */
+        else
+            continue;
         i = tex_lookup(&g_tc, o->tex[s], &up);
         if (i < 0)
             continue;
@@ -2598,6 +2749,12 @@ static void slot_free(fslot_t *f)
     ReleaseSRWLockExclusive(&g_pool_lock);
     if (g_ps == f)
         g_ps = NULL;
+    if (t_rt) {                         /* step 79: the game may record into it */
+        EnterCriticalSection(&g_ho);
+        f->state = SL_FREE;
+        LeaveCriticalSection(&g_ho);
+        WakeAllConditionVariable(&g_ho_game);
+    }
 }
 
 /* The frame's commands are done with: release what they held, forget them. */
@@ -2617,8 +2774,10 @@ static void replay_done(void)
     g_ps->rc_n = 0;
     g_ps->ra_cur = NULL;
     g_ps->ra_bytes = 0;
-    g_ps->targets_n = 0;
-    g_ps->overflow = 0;
+    if (!t_rt) {                        /* step 79: with the render thread the game still reads them (g_rprev) */
+        g_ps->targets_n = 0;            /* until it records into the slot again, and empties them then */
+        g_ps->overflow = 0;
+    }
     g_ps->up_n = 0;
     slot_free(g_ps);                    /* step 78: the slot free for the game side again */
 }
@@ -3804,6 +3963,7 @@ int d3dh_frame_plan(int fr, double game_hz, unsigned *interval, double *hz)
 typedef struct {
     unsigned n;                         /* frames */
     double dt, busy, cmds;              /* their sums: ms apart, ms busy, commands a pass */
+    double game, replay;                /* step 79: of busy, the game side's and the replay side's */
 } ia_sum_t;
 /* Step 77: the counts are the frame-rate plan's steps (g_fp.step: 4, 2 and
  * 1 sub-frames at 240 Hz as before; 144 and one frame each game frame at 144
@@ -3829,24 +3989,36 @@ static struct {
     LONGLONG changed, rose;             /* QPC: the last change, the last rise (0: none) */
     double hold;                        /* seconds at a count before a rise */
 } g_ia;
+static int g_ia_thr;                    /* step 79: measured on the render thread */
+
+/* Step 79: a frame's mean busy time (`s`'s) with `d` ms more of replays. On
+ * one thread the replays add to the game's time; with the render thread
+ * the two sides run side by side, and busy is the larger of the game side's
+ * time and the render thread's, the replays only on the latter. */
+static double ia_busy(const ia_sum_t *s, double d)
+{
+    double g = s->game / s->n, r = s->replay / s->n + d;
+
+    return g_ia_thr ? (g > r ? g : r) : s->busy / s->n + d;
+}
 
 /* The step to go to from `k` (item 3), up (fewer slots apart, more frames)
- * or down: the fastest on that side whose frame, `busy` ms now with `cmds`
- * commands, fits IA_FIT of a game frame (going up, its extra passes x
+ * or down: the fastest on that side whose frame, as `s` measured it with
+ * `cmds` commands, fits IA_FIT of a game frame (going up, its extra passes x
  * IA_PASS_X); none fits: down, the slowest; up, `k` itself. */
 static double ia_cost(unsigned from, unsigned to, double cmds);
-static unsigned ia_next(unsigned k, int up, double busy, double cmds)
+static unsigned ia_next(unsigned k, int up, const ia_sum_t *s, double cmds)
 {
     unsigned j;
 
     if (up) {
         for (j = 0; j < k; j++)
-            if (busy + ia_cost(k, j, cmds) * IA_PASS_X <= g_ia.t_ms * IA_FIT)
+            if (ia_busy(s, ia_cost(k, j, cmds) * IA_PASS_X) <= g_ia.t_ms * IA_FIT)
                 return j;
         return k;
     }
     for (j = k + 1; j < g_fp.nsteps; j++)
-        if (busy + ia_cost(k, j, cmds) <= g_ia.t_ms * IA_FIT)
+        if (ia_busy(s, ia_cost(k, j, cmds)) <= g_ia.t_ms * IA_FIT)
             return j;
     return g_fp.nsteps ? g_fp.nsteps - 1 : k;
 }
@@ -3894,12 +4066,14 @@ static void ia_change(unsigned k, LONGLONG q, unsigned swap_no, const char *why)
     g_ia.wi = 0;
 }
 
-static void ia_add(ia_sum_t *s, double dt, double busy, double cmds)
+static void ia_add(ia_sum_t *s, double dt, double busy, double cmds, double game, double replay)
 {
     s->n++;
     s->dt += dt;
     s->busy += busy;
     s->cmds += cmds;
+    s->game += game;
+    s->replay += replay;
 }
 
 /* The frame's replay counters, as the next frame's start. */
@@ -3930,10 +4104,16 @@ static void ia_frame(const fslot_t *f)
     /* Busy: on one thread the time between the frames' replays less the
      * pacing waits, the game's own work included (step 78: the game side's
      * time on the frame, from the slot, and the replay side's, measured
-     * apart too; with a render thread each runs beside the other, and the
-     * larger of the two will decide). */
+     * apart too). Step 79: with the render thread each runs beside the
+     * other, and the larger of the two decides: this frame's game side (it
+     * was recorded while the render thread replayed the frame before) and
+     * the render thread's time on the frame before, from taking it to its
+     * last present, less the pacing waits. */
+    g_ia_thr = t_rt;
     busy = dt - g_ia.pace_ms;
-    g_ia.rp0 = q.QuadPart;
+    if (t_rt)
+        busy = game_ms > replay_ms ? game_ms : replay_ms;
+    g_ia.rp0 = t_rt ? g_rt_take.QuadPart : q.QuadPart;
     for (i = 0; i < 2; i++) {           /* ms a command, plain and interpolated passes */
         unsigned n = g_rp_n[i] - g_ia.rp_n0[i];
         double c = g_rp_cmds[i] - g_ia.rp_cmds0[i], ms = g_rp_ms[i] - g_ia.rp_ms0[i];
@@ -3951,7 +4131,7 @@ static void ia_frame(const fslot_t *f)
         if (g_ia.gen && g_ia.k)
             fprintf(stderr, "[D3DB] host interpolation: sub-frames back to the plan's rate (it stopped)\n");
         memset(&g_ia, 0, sizeof(g_ia));
-        g_ia.rp0 = q.QuadPart;
+        g_ia.rp0 = t_rt ? g_rt_take.QuadPart : q.QuadPart;
         g_iadapt_seen = g_iadapt;
         return;
     }
@@ -3966,7 +4146,7 @@ static void ia_frame(const fslot_t *f)
         g_ia.t_ms = 1000.0 * g_fp.span / g_fp.slot_hz;
         g_ia.hold = IA_HOLD0;
         g_ia.last = q.QuadPart;
-        g_ia.rp0 = q.QuadPart;
+        g_ia.rp0 = t_rt ? g_rt_take.QuadPart : q.QuadPart;
         g_ia.changed = q.QuadPart;
         ia_mark();
         g_iadapt_seen = g_iadapt;
@@ -4007,13 +4187,15 @@ static void ia_frame(const fslot_t *f)
     since = (double)(q.QuadPart - g_ia.changed) / (double)g_qpf.QuadPart;
     if (g_ia.rose && g_ia.rose == g_ia.changed && since > IA_KEPT)
         g_ia.hold = IA_HOLD0;           /* the last rise held */
-    ia_add(&g_ia.w, dt, busy, cmds);
+    ia_add(&g_ia.w, dt, busy, cmds, game_ms, replay_ms);
     g_ia.wi += used > 1 || paired;
     if (g_ia.w.n >= IA_WIN) {
         double mdt = g_ia.w.dt / g_ia.w.n, mb = g_ia.w.busy / g_ia.w.n, mc = g_ia.w.cmds / g_ia.w.n;
-        kn = ia_next(cur, 0, mb, mc);
+        kn = ia_next(cur, 0, &g_ia.w, mc);
+        /* the work dropped saves at least half the overrun (step 79: of the larger side's: none when the
+         * game side is the slower, whose time no sub-frame count changes) */
         if (kn != cur && mdt > g_ia.t_ms * IA_LATE && 2 * g_ia.wi >= g_ia.w.n && mb > g_ia.t_ms * IA_BUSY &&
-            -ia_cost(cur, kn, mc) >= 0.5 * (mdt - g_ia.t_ms)) {
+            (g_ia_thr ? mb - ia_busy(&g_ia.w, ia_cost(cur, kn, mc)) : -ia_cost(cur, kn, mc)) >= 0.5 * (mdt - g_ia.t_ms)) {
             int failed = g_ia.rose && g_ia.rose == g_ia.changed && since < IA_FAIL;
             if (failed)
                 g_ia.hold = g_ia.hold * 2 > IA_HOLD_MAX ? IA_HOLD_MAX : g_ia.hold * 2;
@@ -4028,11 +4210,11 @@ static void ia_frame(const fslot_t *f)
         g_ia.wi = 0;
     }
     if (cur > 0) {
-        ia_add(&g_ia.u, dt, busy, cmds);
+        ia_add(&g_ia.u, dt, busy, cmds, game_ms, replay_ms);
         if (g_ia.u.n >= IA_UP) {
             double mdt = g_ia.u.dt / g_ia.u.n, mb = g_ia.u.busy / g_ia.u.n, mc = g_ia.u.cmds / g_ia.u.n, want;
-            kn = ia_next(cur, 1, mb, mc);
-            want = mb + ia_cost(cur, kn, mc) * IA_PASS_X;
+            kn = ia_next(cur, 1, &g_ia.u, mc);
+            want = ia_busy(&g_ia.u, ia_cost(cur, kn, mc) * IA_PASS_X);
             if (kn != cur && since >= g_ia.hold && mdt <= g_ia.t_ms * 1.01) {
                 snprintf(why, sizeof(why), "room for them, %.2f ms busy a frame over the last %u, ~%.2f with %.4g"
                          " more (%.0f commands, an interpolated pass %.2f ms) of %.2f", mb, g_ia.u.n, want,
@@ -5279,7 +5461,11 @@ static void ic_draw(const rcmd_t *c)
 static void ic_end(void)
 {
     REPLAY_SIDE();
+    if (t_rt)                           /* step 79: the game picks its next set by it (present_thread) */
+        EnterCriticalSection(&g_ho);
     g_ip = g_ic;
+    if (t_rt)
+        LeaveCriticalSection(&g_ho);
     g_iprev_ok = 1;
 }
 
@@ -5292,10 +5478,16 @@ static void ic_clear(int i)
     g_ibone_n[i] = 0;
 }
 
+/* Frames recorded for interpolation is what the setting asks for now. */
+static int ic_want(void)
+{
+    return g_interp_want && !g_replay_check && g_replay <= 1;
+}
+
 /* At a frame's end, with nothing recorded: the setting, taken. */
 static void ic_apply(void)
 {
-    int want = g_interp_want && !g_replay_check && g_replay <= 1;
+    int want = ic_want();
 
     GAME_SIDE();
     if (want == g_interp)
@@ -5314,15 +5506,14 @@ static void ic_apply(void)
  * with g_lock held. */
 static LARGE_INTEGER g_game_t0;         /* step 78, game side: its last Swap returned (0: none yet) */
 
-static void slot_handover(double t_s, unsigned swap_no)
+/* What a frame handed over carries for the replay side (step 79: with the
+ * render thread, the game side's settings it was recorded under too, and
+ * whether the overlay holds the game at it). */
+static void slot_fill(fslot_t *f, double t_s, unsigned swap_no)
 {
-    fslot_t *f = g_rs;
     LARGE_INTEGER q;
 
     GAME_SIDE();
-    if (g_ps)                           /* never on one thread: the slot before is replayed in its own Swap */
-        fprintf(stderr, "[D3DB] host frame slots: slot %d (frame %u) not replayed before the next\n",
-                (int)(g_ps - g_slot), g_ps->seq);
     QueryPerformanceCounter(&q);
     f->seq = ++g_slot_seq;
     f->it = g_ir;
@@ -5332,6 +5523,27 @@ static void slot_handover(double t_s, unsigned swap_no)
     f->interp = g_interp;
     f->game_ms = g_game_t0.QuadPart ? (double)(q.QuadPart - g_game_t0.QuadPart) * 1000.0 / (double)g_qpf.QuadPart : 0;
     f->set_gen = g_sq.side[0].gen;
+    f->hold = 0;
+    if (g_thr) {
+        if (f->set_gen && f->set_copy != f->set_gen) {
+            AcquireSRWLockShared(&g_sq.lock);
+            f->set = g_sq.side[0].was;  /* what the game side applied last (sq_drain) */
+            ReleaseSRWLockShared(&g_sq.lock);
+            f->set_copy = f->set_gen;
+        }
+        f->hold = g_ovl_open && g_ovl_pauses;
+    }
+}
+
+static void slot_handover(double t_s, unsigned swap_no)
+{
+    fslot_t *f = g_rs;
+
+    GAME_SIDE();
+    if (g_ps)                           /* never on one thread: the slot before is replayed in its own Swap */
+        fprintf(stderr, "[D3DB] host frame slots: slot %d (frame %u) not replayed before the next\n",
+                (int)(g_ps - g_slot), g_ps->seq);
+    slot_fill(f, t_s, swap_no);
     if (g_sq.side[1].gen < f->set_gen)  /* never on one thread: the host side drains first */
         fprintf(stderr, "[D3DB] host frame slots: frame %u recorded under settings %u, the host side's at %u\n",
                 f->seq, f->set_gen, g_sq.side[1].gen);
@@ -5355,6 +5567,11 @@ static void slot_handover(double t_s, unsigned swap_no)
 void d3dh_set_interp_adaptive(int on)
 {
     InterlockedExchange(&g_iadapt, on ? 1 : 0);
+}
+
+void d3dh_set_render_thread(int mode)
+{
+    InterlockedExchange(&g_rt_mode, mode == TWOC_RT_ON || mode == TWOC_RT_AUTO ? mode : TWOC_RT_OFF);
 }
 
 void d3dh_set_framerate(int display)
@@ -6923,8 +7140,14 @@ static void overlay_apply(twoc_settings_t *was, const twoc_settings_t *s)
         twoc_audio_set_kind(0, s->effects);
     if (s->hrtf != was->hrtf)
         twoc_audio_set_hrtf(s->hrtf);
-    if (s->pause != was->pause)
+    if (s->pause != was->pause) {
+        InterlockedExchange(&g_ovl_pauses, s->pause);   /* step 79: the game side looks at its Swap */
         fprintf(stderr, "[OVL] pause the game while open: %s\n", s->pause ? "on" : "off");
+    }
+    if (s->render_thread != was->render_thread) {   /* step 79: at the game's next Swap */
+        d3dh_set_render_thread(s->render_thread);
+        fprintf(stderr, "[OVL] render thread: %s\n", twoc_rt_name(s->render_thread));
+    }
     if (s->controller_input != was->controller_input) {
         pads_set_mode(s->controller_input);     /* step 70: SDL started or stopped */
         fprintf(stderr, "[OVL] controller input: %s\n", s->controller_input == PADS_SDL ? "SDL (all pads)" : "XInput only");
@@ -6973,6 +7196,7 @@ static int ovl_begin(void)
     g_ovs.fs_seen = g_fs;
     g_ovs.s.fullscreen = g_ovs.fs_seen;
     g_ovs.was = g_ovs.s;
+    InterlockedExchange(&g_ovl_pauses, g_ovs.s.pause);     /* step 79 */
     g_ovs.dirty = 0;
     g_ovs.frames = 0;
     QueryPerformanceFrequency(&g_ovs.freq);
@@ -7107,6 +7331,7 @@ static void overlay_pause(void)
     twoc_audio_mute(1);                 /* the APU plays looped voices on: silence while held */
     g_ovs.muted = 1;
     aa_seen = g_aa;
+    wd_rt(WD_R_OVERLAY, 0);
     while (g_ovl_open && g_ready && g_ovs.s.pause) {
         ID3D11Texture2D *dst = NULL;
         int r = 0;
@@ -7336,11 +7561,13 @@ static int present_one(double t_s, unsigned swap_no, unsigned interval, unsigned
     REPLAY_SIDE();
     {
         LARGE_INTEGER p0, p1;
+        wd_rt(WD_R_PACE, swap_no);
         QueryPerformanceCounter(&p0);
         pace(mid, slots);
         QueryPerformanceCounter(&p1);
         g_ia.pace_ms += (double)(p1.QuadPart - p0.QuadPart) * 1000.0 / (double)g_qpf.QuadPart;   /* step 74 */
     }
+    wd_rt(WD_R_PRESENT, swap_no);
     EnterCriticalSection(&g_lock);
     src = frame_tex();                  /* step 58: resolved, and through FXAA or SMAA if one is on */
     now = GetTickCount64();
@@ -7551,6 +7778,7 @@ static int replay_frame(fslot_t *f)
     REPLAY_SIDE();
     fr.n = 0;
     if (f->rec || g_ia.gen || g_fp.on) {    /* step 60: the frame's recorded commands, drawn now */
+        wd_rt(WD_R_PASS, swap_no);
         EnterCriticalSection(&g_lock);
         slot_prepare(f, 0);             /* step 78: its textures uploaded and pinned */
         ic_queue(f->interp && ic_possible());       /* step 61 */
@@ -7559,7 +7787,11 @@ static int replay_frame(fslot_t *f)
         if (fp_active())                /* step 77: this game frame's presents on the plan's clock */
             fp_frame(&fr, f->interp && ic_possible() ? ia_k() : g_fp.nsteps - 1);
         if (f->interp) {
-            int held = g_ovl_open && (!g_ovs.active || g_ovs.s.pause);
+            /* Step 79: on the render thread the overlay holds only the frames the game stopped after (it
+             * looked at its Swap); one handed over before Esc goes on interpolated, the overlay not yet
+             * drawn, unless it is the one that opens the overlay. */
+            int held = !t_rt ? g_ovl_open && (!g_ovs.active || g_ovs.s.pause)
+                             : f->hold ? g_ovl_open : g_ovl_open && !g_ovs.active;
             interp = ic_begin(swap_no, held, fr.n && fr.interp);    /* step 61 */
             if (!held && ic_possible()) {
                 g_ia.kused = interp ? fr.n : 1;     /* step 74: this frame is measured at the next present */
@@ -7590,6 +7822,7 @@ static int replay_frame(fslot_t *f)
     if (interp) {                       /* step 61: the presents, the game held in its Swap */
         for (sub = 1; sub <= fr.n; sub++) {
             if (sub > 1) {
+                wd_rt(WD_R_PASS, swap_no);
                 EnterCriticalSection(&g_lock);
                 if (fr.t[sub - 1] < 1) {
                     ic_sub(g_interp_t0 ? fr.t0[sub - 1] : fr.t[sub - 1]);
@@ -7616,8 +7849,9 @@ static int replay_frame(fslot_t *f)
                 ovl_begin();
             ReleaseSRWLockExclusive(&g_pause_lock);
         }
-        if (g_ovl_open && g_ovs.active && g_ovs.s.pause)
+        if (g_ovl_open && g_ovs.active && g_ovs.s.pause && (!t_rt || f->hold))
             overlay_pause();            /* this frame waits under the overlay */
+        rt_let_go(f);                   /* step 79: the game waited in its Swap meanwhile */
         if (fr.n) {                     /* step 77: one present to the game frame's last slot */
             double slots = 0;
             for (sub = 0; sub < fr.n; sub++)
@@ -7633,14 +7867,18 @@ static int replay_frame(fslot_t *f)
         if (g_ia.rp0)
             g_ia.replay_ms = (double)(q.QuadPart - g_ia.rp0) * 1000.0 / (double)g_qpf.QuadPart - g_ia.pace_ms;
     }
+    rt_let_go(f);
     return ovl_r;
 }
 
 /* After the frame's presents, the replay side's: a new plan if the display
- * asked for one, the overlay's frame applied, the host side's settings. */
+ * asked for one, the overlay's frame applied, the host side's settings
+ * (step 79: on the render thread, those of the next frame before it is
+ * replayed instead, sq_apply_slot). */
 static void replay_tail(int ovl_r)
 {
     REPLAY_SIDE();
+    wd_rt(WD_R_TAIL, 0);
     if (g_fp.on && (InterlockedExchange(&g_fp_replan, 0) || (g_fp.needs_vrr && g_fp.fs != (g_fs ? 1 : 0)))) {
         unsigned iv;                    /* step 77: variable refresh measured, the display's mode changed, or a */
         double hz;                      /* plan that counts on variable refresh in the other window mode */
@@ -7657,7 +7895,455 @@ static void replay_tail(int ovl_r)
         }
         ReleaseSRWLockExclusive(&g_pause_lock);
     }
-    sq_drain(1);                        /* step 78: the frame's boundary: settings queued, the host side's */
+    if (!t_rt)
+        sq_drain(1);                    /* step 78: the frame's boundary: settings queued, the host side's */
+}
+
+/* The sub-frame trigger file (RECOMP_D3D_BRIDGE_SUBDUMP=@FILE, test aids):
+ * N sub-frame dumps, "framerate 0|1" and "adaptive 0|1" as the overlay
+ * changes them, and (step 78) "set KEY VALUE" lines applied as the
+ * overlay's at the frame's end. The replay side's (step 79: the render
+ * thread's, with it; the switches are then queued like any change). */
+static void trigger_file(unsigned swap_no)
+{
+    FILE *f = fopen(g_subdump_trigger, "r");
+    unsigned n = 0;
+    int fr = -1, ad = -1, set = 0;
+    twoc_settings_t ts;
+
+    REPLAY_SIDE();
+    if (!g_ovs.have) {
+        twoc_settings_current(&g_ovs.s);
+        g_ovs.s.fullscreen = g_fs;
+        g_ovs.was = g_ovs.s;
+        g_ovs.have = 1;
+    }
+    ts = g_ovs.s;
+    if (f) {
+        char line[64] = "";
+        if (fgets(line, sizeof(line), f) && sscanf(line, "framerate %d", &fr) != 1 &&
+            sscanf(line, "adaptive %d", &ad) != 1 && sscanf(line, "%u", &n) != 1)
+            n = 0;                      /* "framerate 0|1", "adaptive 0|1" (step 75): test aids, the settings as */
+        do {                            /* the overlay changes them; step 78: "set KEY VALUE" lines too, */
+            char k[16], v[40];          /* applied as the overlay's at the frame's end (a live change) */
+            if (sscanf(line, "set %15s %39s", k, v) != 2)
+                continue;
+            set = 1;
+            if (strcmp(k, "aspect") == 0) {
+                ts.widescreen = sscanf(v, "%lf:%lf", &ts.wide_w, &ts.wide_h) == 2;
+            } else if (strcmp(k, "render") == 0) {
+                snprintf(ts.render_size, sizeof(ts.render_size), "%s", strcmp(v, "0") == 0 ? "" : v);
+            } else if (strcmp(k, "aa") == 0) {
+                ts.antialiasing = twoc_aa_parse(v);
+            } else if (strcmp(k, "aniso") == 0) {
+                ts.anisotropy = atoi(v);
+            } else if (strcmp(k, "distance") == 0) {
+                ts.draw_distance = atof(v);
+            } else if (strcmp(k, "framerate") == 0) {
+                ts.framerate = twoc_framerate_parse(v);
+            } else if (strcmp(k, "adaptive") == 0) {
+                ts.adaptive = atoi(v) != 0;
+            } else if (strcmp(k, "fullscreen") == 0) {
+                ts.fullscreen = atoi(v) != 0;
+            } else if (strcmp(k, "pacing") == 0) {
+                ts.pacing = twoc_pacing_parse(v);
+            } else if (strcmp(k, "pause") == 0) {           /* step 79 */
+                ts.pause = atoi(v) != 0;
+            } else if (strcmp(k, "rthread") == 0) {         /* step 79 (st.py turns '_' into spaces) */
+                ts.render_thread = twoc_rt_parse(v);
+            } else {
+                fprintf(stderr, "[D3DB] trigger file: set %s: not a setting here\n", k);
+            }
+        } while (fgets(line, sizeof(line), f));
+        fclose(f);
+    }
+    DeleteFileA(g_subdump_trigger);
+    if (fr >= 0 || ad >= 0) {           /* step 63: through overlay_apply, as the overlay does */
+        if (fr >= 0)
+            g_ovs.s.framerate = fr;
+        if (ad >= 0)
+            g_ovs.s.adaptive = ad != 0;
+        overlay_apply(&g_ovs.was, &g_ovs.s);
+        if (!t_rt) {
+            sq_drain(1);                /* step 78: at once, as before */
+            sq_drain(0);
+        }
+    } else if (set) {                   /* step 78: queued, at this present's end */
+        fprintf(stderr, "[D3DB] trigger file: settings changed at guest swap %u\n", swap_no);
+        g_ovs.s = ts;
+        overlay_apply(&g_ovs.was, &g_ovs.s);
+    }
+    n = fr >= 0 || ad >= 0 || set ? 0 : n ? n : 8;
+    if (n) {
+        g_subdump_from = swap_no;
+        g_subdump_to = swap_no + n - 1;
+        fprintf(stderr, "[D3DB] host sub-frame dumps: guest swaps %u-%u\n", g_subdump_from, g_subdump_to);
+    }
+}
+
+/* ── Step 79: the render thread's loop (notes 18.82) ─────────────────
+ *
+ * The game thread, at the guest's Swap (present_thread): once the render
+ * thread has taken the frame handed over before, the frame it recorded is
+ * handed over (its slot SL_PEND, g_pend) and the render thread woken; then
+ * it waits until the slot it records into next is free (the render thread
+ * has replayed the frame before: hand-over depth 1), until the
+ * overlay lets it go if it stopped at this frame (f->hold: Esc with "Pause
+ * the game" on, seen at its Swap), and in the sync check until this frame is
+ * done too; then it takes the interpolation table set neither frame uses,
+ * applies the game side's settings and goes on. The render thread (rt_main)
+ * takes each frame handed over, applies the host side's part of the
+ * settings it was recorded under (sq_apply_slot: the game side's apply at
+ * its Swap, so a frame is always replayed under the settings it was recorded
+ * for), and replays it as one thread did inside the Swap: uploads and pins,
+ * the plan, the pairing, the passes and the presents, the overlay and its
+ * hold (presenting overlay frames while the game waits), the plan made again,
+ * the overlay's end. A slot is free once its last pass is drawn, before the
+ * last present's wait, so the game records its next frame meanwhile.
+ *
+ * The frame-rate switch, and the setting turning the thread off, happen at
+ * the game's Swap with the thread drained (rt_leave: nothing handed over, its
+ * last frame done); then the game thread replays again as before. With the
+ * thread on and the setting allowing it the game thread hands over from its
+ * next Swap (rt_engage). Frame rate: Game (60) never starts it.
+ *
+ * Deadlock watchdog (rt_watchdog): if the game thread waits in its Swap, or
+ * the render thread stays in one stage, for longer than
+ * RECOMP_D3D_BRIDGE_RT_WATCHDOG seconds (5; 0 off), neither held by the
+ * overlay, a [D3DB] render thread watchdog block says where each thread is
+ * (stage, guest swap, how long, its instruction pointer and the code
+ * addresses on top of its stack, as module+offset). It only logs. */
+static HANDLE g_rt_th, g_wd_th;
+
+/* What the render thread says it is doing (`what`), its instruction pointer
+ * and the code addresses near the top of its stack, into `buf`. The thread is
+ * suspended only while its context and stack are copied (nothing that could
+ * wait on a lock it holds); the modules are looked up after. */
+static void wd_where(DWORD tid, char *buf, size_t cap)
+{
+    HANDLE h = OpenThread(THREAD_SUSPEND_RESUME | THREAD_GET_CONTEXT | THREAD_QUERY_INFORMATION, FALSE, tid);
+    CONTEXT c;
+    DWORD64 stack[64], pc[9];
+    unsigned i, n = 0, k;
+    size_t len = 0;
+    SIZE_T got = 0;
+
+    buf[0] = 0;
+    if (!h) {
+        snprintf(buf, cap, "(thread %lu not opened: %lu)", tid, GetLastError());
+        return;
+    }
+    memset(&c, 0, sizeof(c));
+    c.ContextFlags = CONTEXT_CONTROL | CONTEXT_INTEGER;
+    if (SuspendThread(h) == (DWORD)-1) {
+        CloseHandle(h);
+        snprintf(buf, cap, "(thread %lu not suspended)", tid);
+        return;
+    }
+    if (GetThreadContext(h, &c))
+        ReadProcessMemory(GetCurrentProcess(), (LPCVOID)c.Rsp, stack, sizeof(stack), &got);
+    ResumeThread(h);
+    CloseHandle(h);
+    pc[n++] = c.Rip;
+    for (i = 0; i < got / 8 && n < 9; i++) {    /* return addresses: words that point into a loaded module's code */
+        HMODULE m;
+        if (stack[i] > 0x10000 &&
+            GetModuleHandleExA(GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS | GET_MODULE_HANDLE_EX_FLAG_UNCHANGED_REFCOUNT,
+                               (LPCSTR)stack[i], &m))
+            pc[n++] = stack[i];
+    }
+    for (k = 0; k < n && len + 64 < cap; k++) {
+        HMODULE m = NULL;
+        char name[MAX_PATH] = "?", *b;
+        if (GetModuleHandleExA(GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS | GET_MODULE_HANDLE_EX_FLAG_UNCHANGED_REFCOUNT,
+                               (LPCSTR)pc[k], &m))
+            GetModuleFileNameA(m, name, sizeof(name));
+        b = strrchr(name, '\\');
+        len += (size_t)snprintf(buf + len, cap - len, "%s%s+0x%llX", k ? (k == 1 ? "; stack " : " ") : "rip ",
+                                b ? b + 1 : name, m ? (unsigned long long)(pc[k] - (DWORD64)m) : (unsigned long long)pc[k]);
+    }
+}
+
+static DWORD WINAPI rt_watchdog(LPVOID p)
+{
+    LONG64 tripped[2] = { 0, 0 };
+
+    (void)p;
+    for (;;) {
+        LARGE_INTEGER q;
+        int who, trip = -1;
+        Sleep(500);
+        QueryPerformanceCounter(&q);
+        for (who = 0; who < 2 && trip < 0; who++) {
+            LONG what = g_wd[who].what;
+            LONG64 since = g_wd[who].since;
+            int waiting = who == 0 ? what != WD_G_RUN && !(what == WD_G_HOLD && g_ovl_open)
+                                   : what != WD_R_IDLE && what != WD_R_OVERLAY;
+            if (waiting && since && since != tripped[who] &&
+                (double)(q.QuadPart - since) / (double)g_qpf.QuadPart > g_wd_secs)
+                trip = who;
+        }
+        if (trip >= 0) {
+            char where[2][768];
+            tripped[trip] = g_wd[trip].since;
+            for (who = 0; who < 2; who++)
+                wd_where(g_wd[who].tid, where[who], sizeof(where[who]));
+            fprintf(stderr, "[D3DB] render thread watchdog: the %s thread has been %s for %.1f s (guest swap %ld)\n"
+                    "[D3DB] render thread watchdog: game thread %lu: %s for %.1f s, guest swap %ld; %s\n"
+                    "[D3DB] render thread watchdog: render thread %lu: %s for %.1f s, guest swap %ld; %s\n"
+                    "[D3DB] render thread watchdog: handed over %s, render thread %s, overlay %s\n",
+                    trip ? "render" : "game", g_wd_what[g_wd[trip].what],
+                    (double)(q.QuadPart - g_wd[trip].since) / (double)g_qpf.QuadPart, (long)g_wd[trip].swap,
+                    g_wd[0].tid, g_wd_what[g_wd[0].what], (double)(q.QuadPart - g_wd[0].since) / (double)g_qpf.QuadPart,
+                    (long)g_wd[0].swap, where[0],
+                    g_wd[1].tid, g_wd_what[g_wd[1].what], (double)(q.QuadPart - g_wd[1].since) / (double)g_qpf.QuadPart,
+                    (long)g_wd[1].swap, where[1], g_pend ? "a frame" : "nothing", g_rt_busy ? "busy" : "idle",
+                    g_ovl_open ? "open" : "closed");
+            fflush(stderr);
+        }
+    }
+    return 0;
+}
+
+/* The game may go on after frame f (rt_let_go): it waited in its Swap while
+ * the overlay held the game at f. */
+static void rt_let_go(const fslot_t *f)
+{
+    if (!t_rt || g_hold_done >= f->seq)
+        return;
+    EnterCriticalSection(&g_ho);
+    g_hold_done = f->seq;
+    LeaveCriticalSection(&g_ho);
+    WakeAllConditionVariable(&g_ho_game);
+}
+
+/* The host side's part of the settings frame f was recorded under, applied
+ * before it is replayed, if not yet. */
+static void sq_apply_slot(const fslot_t *f)
+{
+    twoc_settings_t was;
+
+    if (!f->set_gen || f->set_gen <= g_sq.side[1].gen)
+        return;
+    AcquireSRWLockExclusive(&g_sq.lock);
+    was = g_sq.side[1].was;
+    g_sq.side[1].was = f->set;
+    g_sq.side[1].gen = f->set_gen;
+    ReleaseSRWLockExclusive(&g_sq.lock);
+    sq_apply_host(&was, &f->set);
+}
+
+static DWORD WINAPI rt_main(LPVOID p)
+{
+    (void)p;
+    t_rt = 1;
+    side_set(SIDE_REPLAY);
+    for (;;) {
+        fslot_t *f;
+        int ovl_r;
+        EnterCriticalSection(&g_ho);
+        g_rt_busy = 0;
+        WakeAllConditionVariable(&g_ho_game);
+        wd_rt(WD_R_IDLE, 0);
+        if (!g_pend) {
+            LARGE_INTEGER i0, i1;
+            QueryPerformanceCounter(&i0);
+            while (!g_pend)
+                SleepConditionVariableCS(&g_ho_rt, &g_ho, INFINITE);
+            QueryPerformanceCounter(&i1);
+            g_st.rt_idle_ms += (double)(i1.QuadPart - i0.QuadPart) * 1000.0 / (double)g_qpf.QuadPart;
+        }
+        f = g_pend;
+        g_pend = NULL;
+        f->state = SL_REPLAY;
+        g_rt_busy = 1;
+        LeaveCriticalSection(&g_ho);
+        WakeAllConditionVariable(&g_ho_game);  /* the game may hand over its next frame */
+        QueryPerformanceCounter(&g_rt_take);
+        wd_rt(WD_R_TAKE, f->swap_no);
+        g_st.rt_frames++;
+        if (!g_ready) {                 /* the swap chain couldn't be made again (recreate_flip): dropped */
+            EnterCriticalSection(&g_lock);
+            g_ps = f;
+            f->rc_n = f->up_n = 0;
+            f->ra_cur = NULL;
+            f->ra_bytes = 0;
+            slot_free(f);
+            LeaveCriticalSection(&g_lock);
+            rt_let_go(f);
+            continue;
+        }
+        if (g_subdump_trigger[0] && GetFileAttributesA(g_subdump_trigger) != INVALID_FILE_ATTRIBUTES)
+            trigger_file(f->swap_no);
+        sq_apply_slot(f);
+        g_ps = f;
+        g_ic = f->it;
+        ovl_r = replay_frame(f);
+        rt_let_go(f);
+        replay_tail(ovl_r);
+    }
+    return 0;
+}
+
+/* The setting (and the CPU, for Auto) wants the render thread for frames
+ * recorded as now: Frame rate: Display (the sync check: any recorded frame). */
+static int rt_should(void)
+{
+    LONG m = g_rt_mode;
+
+    if (m == TWOC_RT_OFF || (m == TWOC_RT_AUTO && g_rt_cores < RT_AUTO_CORES))
+        return 0;
+    return g_rt_sync ? REC_ON() && g_replay <= 1 : g_interp;
+}
+
+/* The render thread and its watchdog, made the first time. Returns 1 if
+ * they run. */
+static int rt_start(void)
+{
+    static int tried;
+    typedef HRESULT(WINAPI * desc_t)(HANDLE, PCWSTR);
+    desc_t desc;
+
+    if (g_rt_th || tried)
+        return g_rt_th != NULL;
+    tried = 1;
+    InitializeCriticalSection(&g_ho);
+    InitializeConditionVariable(&g_ho_rt);
+    InitializeConditionVariable(&g_ho_game);
+    g_rt_th = CreateThread(NULL, 0, rt_main, NULL, 0, NULL);
+    if (!g_rt_th) {
+        fprintf(stderr, "[D3DB] host render thread not created (%lu): the game thread replays, as before\n",
+                GetLastError());
+        return 0;
+    }
+    desc = (desc_t)GetProcAddress(GetModuleHandleA("kernel32.dll"), "SetThreadDescription");
+    if (desc)
+        desc(g_rt_th, L"twoc render thread");
+    if (g_wd_secs > 0) {
+        g_wd_th = CreateThread(NULL, 0, rt_watchdog, NULL, 0, NULL);
+        if (g_wd_th && desc)
+            desc(g_wd_th, L"twoc render thread watchdog");
+    }
+    return 1;
+}
+
+/* At the end of a Swap on one thread, nothing recorded: the frames go to the
+ * render thread from the next Swap on, if they should. */
+static void rt_engage(unsigned swap_no)
+{
+    fslot_t *o;
+
+    if (!rt_should())
+        return;
+    rec_lock(0);
+    if (!g_thr && !g_rs->rc_n && !g_ps && rt_should() && rt_start()) {
+        o = &g_slot[(g_rs - g_slot + 1) % FSLOTS];
+        g_rs->state = SL_REC;
+        o->state = SL_FREE;
+        g_rprev = NULL;
+        g_thr = 1;
+        InterlockedExchange(&g_thr_v, 1);
+        g_stg.rt_on = 1;
+        fprintf(stderr, "[D3DB] host render thread: on from guest swap %u (%s%s; %u cores, %u logical)\n", swap_no + 1,
+                g_rt_mode == TWOC_RT_AUTO ? "Auto" : "On", g_rt_sync ? ", sync: the game waits for each frame" : "",
+                g_rt_cores, g_rt_logical);
+    }
+    rec_unlock();
+}
+
+/* At the game's Swap with the render thread on, after the hand-over: the
+ * thread drained, and the frames back on the game thread, which takes the
+ * frame-rate setting there (with g_rec held). */
+static void rt_leave(unsigned swap_no, const char *why)
+{
+    EnterCriticalSection(&g_ho);
+    while (g_pend || g_rt_busy) {
+        wd_set(0, WD_G_DRAIN, swap_no);
+        SleepConditionVariableCS(&g_ho_game, &g_ho, INFINITE);
+    }
+    LeaveCriticalSection(&g_ho);
+    wd_set(0, WD_G_RUN, 0);
+    g_thr = 0;
+    InterlockedExchange(&g_thr_v, 0);
+    g_stg.rt_on = 0;
+    if (g_rprev) {                      /* the render thread left them for rc_maybe_target */
+        g_rprev->targets_n = 0;
+        g_rprev->overflow = 0;
+        g_rprev = NULL;
+    }
+    sq_drain(1);                        /* the host side's part of what the game side just applied (the frames */
+    EnterCriticalSection(&g_lock);      /* carried it to the render thread), as one thread does between frames */
+    side_set(SIDE_GAME);
+    if (ic_want() != g_interp && !g_rs->rc_n)
+        ic_apply();
+    side_set(SIDE_REPLAY);
+    if (!g_interp)
+        ic_queue(0);
+    side_set(SIDE_GAME);
+    LeaveCriticalSection(&g_lock);
+    fprintf(stderr, "[D3DB] host render thread: off from guest swap %u (%s)\n", swap_no + 1, why);
+}
+
+/* The game thread's Swap with the render thread on: the frame handed over,
+ * the wait for its next slot (and the overlay, and in the sync check the
+ * frame itself), its next table set, the game side's settings. */
+static void present_thread(double t_s, unsigned swap_no)
+{
+    fslot_t *f, *next;
+    LARGE_INTEGER w0, w1;
+    int side, s;
+
+    EnterCriticalSection(&g_rec);
+    side = side_set(SIDE_GAME);
+    f = g_rs;
+    next = &g_slot[(f - g_slot + 1) % FSLOTS];
+    slot_fill(f, t_s, swap_no);
+    QueryPerformanceCounter(&w0);
+    EnterCriticalSection(&g_ho);
+    while (g_pend) {                    /* depth 1: the frame handed over before is taken first (its slot is free */
+        wd_set(0, WD_G_SLOT, swap_no);  /* once its last pass is drawn, before its last present and the take) */
+        SleepConditionVariableCS(&g_ho_game, &g_ho, INFINITE);
+    }
+    f->state = SL_PEND;
+    g_pend = f;
+    WakeConditionVariable(&g_ho_rt);
+    for (;;) {
+        int what = next->state != SL_FREE ? WD_G_SLOT : f->hold && g_hold_done < f->seq ? WD_G_HOLD
+                 : g_rt_sync && (g_pend || g_rt_busy) ? WD_G_SYNC : WD_G_RUN;
+        if (what == WD_G_RUN)
+            break;
+        wd_set(0, what, swap_no);
+        SleepConditionVariableCS(&g_ho_game, &g_ho, INFINITE);
+    }
+    for (s = 0; s < ITABS; s++)         /* the set neither the frame handed over nor the render thread's frame */
+        if (s != f->it && s != g_ip)    /* before holds (g_ip, set under g_ho) */
+            break;
+    g_ir = s;
+    next->state = SL_REC;
+    g_rprev = f;
+    LeaveCriticalSection(&g_ho);
+    wd_set(0, WD_G_RUN, 0);
+    QueryPerformanceCounter(&w1);
+    g_stg.rt_wait_ms += (double)(w1.QuadPart - w0.QuadPart) * 1000.0 / (double)g_qpf.QuadPart;
+    AcquireSRWLockExclusive(&g_pool_lock);  /* the command array the last replay gave back */
+    {
+        rcmd_t *rc = next->rc;
+        unsigned cap = next->rc_cap;
+        next->rc = g_rc_pool;
+        next->rc_cap = g_rc_pool_cap;
+        g_rc_pool = rc;
+        g_rc_pool_cap = cap;
+    }
+    ReleaseSRWLockExclusive(&g_pool_lock);
+    next->targets_n = 0;
+    next->overflow = 0;
+    g_rs = next;
+    ic_clear(g_ir);
+    sq_drain(0);                        /* the game side's settings (those changed while the overlay held it) */
+    if (!rt_should() || ic_want() != g_interp)
+        rt_leave(swap_no, ic_want() != g_interp ? "the frame rate setting" : "the render thread setting");
+    side_set(side);
+    LeaveCriticalSection(&g_rec);
 }
 
 void d3dh_present(double t_s, unsigned swap_no)
@@ -7666,75 +8352,15 @@ void d3dh_present(double t_s, unsigned swap_no)
 
     if (!g_ready)
         return;
-    side = side_set(SIDE_REPLAY);       /* step 78: the trigger file's test aids are the replay side's */
-    if (g_subdump_trigger[0] && GetFileAttributesA(g_subdump_trigger) != INVALID_FILE_ATTRIBUTES) {
-        FILE *f = fopen(g_subdump_trigger, "r");
-        unsigned n = 0;
-        int fr = -1, ad = -1, set = 0;
-        twoc_settings_t ts;
-        if (!g_ovs.have) {
-            twoc_settings_current(&g_ovs.s);
-            g_ovs.s.fullscreen = g_fs;
-            g_ovs.was = g_ovs.s;
-            g_ovs.have = 1;
-        }
-        ts = g_ovs.s;
-        if (f) {
-            char line[64] = "";
-            if (fgets(line, sizeof(line), f) && sscanf(line, "framerate %d", &fr) != 1 &&
-                sscanf(line, "adaptive %d", &ad) != 1 && sscanf(line, "%u", &n) != 1)
-                n = 0;                  /* "framerate 0|1", "adaptive 0|1" (step 75): test aids, the settings as */
-            do {                        /* the overlay changes them; step 78: "set KEY VALUE" lines too, */
-                char k[16], v[40];      /* applied as the overlay's at the frame's end (a live change) */
-                if (sscanf(line, "set %15s %39s", k, v) != 2)
-                    continue;
-                set = 1;
-                if (strcmp(k, "aspect") == 0) {
-                    ts.widescreen = sscanf(v, "%lf:%lf", &ts.wide_w, &ts.wide_h) == 2;
-                } else if (strcmp(k, "render") == 0) {
-                    snprintf(ts.render_size, sizeof(ts.render_size), "%s", strcmp(v, "0") == 0 ? "" : v);
-                } else if (strcmp(k, "aa") == 0) {
-                    ts.antialiasing = twoc_aa_parse(v);
-                } else if (strcmp(k, "aniso") == 0) {
-                    ts.anisotropy = atoi(v);
-                } else if (strcmp(k, "distance") == 0) {
-                    ts.draw_distance = atof(v);
-                } else if (strcmp(k, "framerate") == 0) {
-                    ts.framerate = twoc_framerate_parse(v);
-                } else if (strcmp(k, "adaptive") == 0) {
-                    ts.adaptive = atoi(v) != 0;
-                } else if (strcmp(k, "fullscreen") == 0) {
-                    ts.fullscreen = atoi(v) != 0;
-                } else if (strcmp(k, "pacing") == 0) {
-                    ts.pacing = twoc_pacing_parse(v);
-                } else {
-                    fprintf(stderr, "[D3DB] trigger file: set %s: not a setting here\n", k);
-                }
-            } while (fgets(line, sizeof(line), f));
-            fclose(f);
-        }
-        DeleteFileA(g_subdump_trigger);
-        if (fr >= 0 || ad >= 0) {       /* step 63: through overlay_apply, as the overlay does */
-            if (fr >= 0)
-                g_ovs.s.framerate = fr;
-            if (ad >= 0)
-                g_ovs.s.adaptive = ad != 0;
-            overlay_apply(&g_ovs.was, &g_ovs.s);
-            sq_drain(1);                /* step 78: at once, as before */
-            sq_drain(0);
-        } else if (set) {               /* step 78: queued, at this present's end */
-            fprintf(stderr, "[D3DB] trigger file: settings changed at guest swap %u\n", swap_no);
-            g_ovs.s = ts;
-            overlay_apply(&g_ovs.was, &g_ovs.s);
-        }
-        n = fr >= 0 || ad >= 0 || set ? 0 : n ? n : 8;
-        if (n) {
-            g_subdump_from = swap_no;
-            g_subdump_to = swap_no + n - 1;
-            fprintf(stderr, "[D3DB] host sub-frame dumps: guest swaps %u-%u\n", g_subdump_from, g_subdump_to);
-        }
+    if (g_thr) {                        /* step 79: the render thread replays it */
+        present_thread(t_s, swap_no);
+        QueryPerformanceCounter(&g_game_t0);
+        return;
     }
-    rec_lock(0);      /* step 78: the frame recorded, to the replay side */
+    side = side_set(SIDE_REPLAY);       /* step 78: the trigger file's test aids are the replay side's */
+    if (g_subdump_trigger[0] && GetFileAttributesA(g_subdump_trigger) != INVALID_FILE_ATTRIBUTES)
+        trigger_file(swap_no);
+    rec_lock(0);                        /* step 78: the frame recorded, to the replay side */
     side_set(SIDE_GAME);
     slot_handover(t_s, swap_no);
     side_set(SIDE_REPLAY);
@@ -7754,6 +8380,7 @@ void d3dh_present(double t_s, unsigned swap_no)
     replay_tail(ovl_r);
     sq_drain(0);                        /* step 78: then the game side's */
     side_set(side);
+    rt_engage(swap_no);                 /* step 79 */
     QueryPerformanceCounter(&g_game_t0);
 }
 
@@ -8016,4 +8643,6 @@ void d3dh_stats(d3dh_stats_t *out)
     out->hud_right += g->hud_right;
     out->hud_mid += g->hud_mid;
     out->hud_passes += g->hud_passes;
+    out->rt_on = g->rt_on;              /* step 79 */
+    out->rt_wait_ms += g->rt_wait_ms;
 }
