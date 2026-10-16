@@ -122,9 +122,13 @@ Put-Text (Join-Path $files 'tools\collect_logs.ps1') (Join-Path $Out 'tools\coll
 
 # PACKAGE.txt: what this is built from.
 function Git1([string]$dir, [string[]]$a) { try { (& git -C $dir @a 2>$null | Select-Object -First 1) } catch { '' } }
-$head = Git1 $repo @('log', '-1', '--format=%h %ad %s', '--date=iso')
-$dirty = if (Git1 $repo @('status', '--porcelain', '--untracked-files=no')) { ' (with uncommitted changes)' } else { '' }
-$xr = Git1 (Join-Path $repo 'xboxrecomp') @('log', '-1', '--format=%h %ad', '--date=iso')
+# The commits the exe's sources come from (twoc's src and build files; xboxrecomp), and whether
+# those had changes not committed (which the exe may then hold).
+$xrDir = Join-Path $repo 'xboxrecomp'
+$head = Git1 $repo @('log', '-1', '--format=%h %ad %s', '--date=iso', '--', 'twoc/src', 'twoc/CMakeLists.txt', 'twoc/seed_functions.json')
+$dirty = if (Git1 $repo @('status', '--porcelain', '--untracked-files=no', '--', 'twoc/src', 'twoc/CMakeLists.txt', 'twoc/seed_functions.json')) { ' (with uncommitted changes)' } else { '' }
+$xr = Git1 $xrDir @('log', '-1', '--format=%h %ad', '--date=iso')
+if (Git1 $xrDir @('status', '--porcelain', '--untracked-files=no')) { $xr += ' (with uncommitted changes)' }
 $hash = (Get-FileHash -Algorithm SHA256 (Join-Path $Out 'crash_twoc.exe')).Hash
 $gf = Get-ChildItem -Recurse -File (Join-Path $Out 'game_files')
 $pkg = @(
