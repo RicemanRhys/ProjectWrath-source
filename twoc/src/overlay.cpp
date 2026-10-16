@@ -668,6 +668,33 @@ static int tab_display(twoc_settings_t *s, const ovl_info_t *in)
                  "Off: always a frame at every refresh; in the heaviest places the game itself then runs "
                  "slower than it should. Applied at once.");
         }
+        if (s->framerate) {             /* step 79 */
+            static const char *const rt_names[3] = { "Auto", "On", "Off" };
+            static const int rt_vals[3] = { TWOC_RT_AUTO, TWOC_RT_ON, TWOC_RT_OFF };
+            int cur = 2;
+            for (i = 0; i < 3; i++)
+                if (rt_vals[i] == s->render_thread)
+                    cur = i;
+            ImGui::SetNextItemWidth(ImGui::GetFontSize() * 12);
+            if (ImGui::Combo("Render thread", &cur, rt_names, 3) && rt_vals[cur] != s->render_thread) {
+                s->render_thread = rt_vals[cur];
+                r |= OVL_CHANGED;
+            }
+            more("On: the frames shown between game frames are drawn on a thread of their own, beside the game's, "
+                 "so heavy places keep the full frame rate (one thread had to do both). Auto: on when this PC "
+                 "has enough processor cores for the game's thread, this one and the emulated hardware's. Off: "
+                 "everything on the game's thread, as before. From the next frame.");
+            if (s->render_thread == TWOC_RT_OFF)
+                snprintf(line, sizeof(line), "Now: off, the game's thread draws every frame.");
+            else if (in->rt_on)
+                snprintf(line, sizeof(line), "Now: on, beside the game's thread (this PC: %u cores).", in->rt_cores);
+            else if (s->render_thread == TWOC_RT_AUTO && in->rt_cores < in->rt_auto_cores)
+                snprintf(line, sizeof(line), "Now: off: Auto needs %u processor cores, this PC has %u.",
+                         in->rt_auto_cores, in->rt_cores);
+            else
+                snprintf(line, sizeof(line), "Now: on from the next frame.");
+            help(line);
+        }
     }
 
     ImGui::SeparatorText("Textures");

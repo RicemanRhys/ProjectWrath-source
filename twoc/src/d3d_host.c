@@ -7264,6 +7264,9 @@ static int ovl_draw(ID3D11Texture2D *dst, int running)
         in.interp_now = fp_step_fps(ia_k());        /* step 74 */
     }
     in.interp_note = g_fp.on ? g_fp.note : NULL;    /* step 77 */
+    in.rt_on = g_thr_v != 0;            /* step 79 */
+    in.rt_cores = g_rt_cores;
+    in.rt_auto_cores = RT_AUTO_CORES;
     in.interp_on = g_interp && in.interp_fps > 0;
     if (in.interp_fps <= 0) {           /* step 63 */
         static char why[256];

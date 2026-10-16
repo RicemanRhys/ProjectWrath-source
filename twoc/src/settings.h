@@ -17,6 +17,7 @@
  *   framerate   = 60 | display | N            RECOMP_FRAMERATE (unset: 60; step 77: N a rate in Hz)
  *   adaptive_framerate = 0 | 1                RECOMP_FRAMERATE_ADAPTIVE (unset: on; step 75. The old
  *                                             name RECOMP_D3D_BRIDGE_INTERP_ADAPT still reads)
+ *   render_thread = off | on | auto           RECOMP_RENDER_THREAD (unset: off for now; step 79)
  *   hud         = centre | edges              RECOMP_HUD (unset: centre)
  *   hud_margin  = 0-10                        RECOMP_HUD_MARGIN (percent of the width; unset: 0)
  *   draw_distance = 1 | 1.5 | 2 | 3           RECOMP_DRAW_DISTANCE (unset: 1, the game's)
@@ -59,6 +60,12 @@
  * 18.77) while that lasts; adaptive_framerate 0 draws them all whatever the
  * cost, and in the heaviest places the game then runs slower than 59.94
  * updates a second. Applied at once.
+ *
+ * Step 79: the render thread (notes 18.82). With the frame rate above 60,
+ * on draws the frames between game frames (and presents them) on a thread
+ * of its own beside the game's; auto is on when the PC has 4 or more
+ * processor cores; off keeps everything on the game's thread. At the next
+ * frame.
  *
  * Step 65: the HUD position (notes 18.68). In a picture wider than 4:3 the
  * game's HUD counters sit in the middle 4:3; edges moves those on the left

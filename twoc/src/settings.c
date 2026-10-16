@@ -28,6 +28,9 @@ static const key_t_ g_fixed[] = {
       " 180, 240: interpolated, shown evenly where the display can)" },
     { "adaptive_framerate", "RECOMP_FRAMERATE_ADAPTIVE",
       "1: fewer interpolated frames while game frames run late, 0: always the display's count" },
+    { "render_thread", "RECOMP_RENDER_THREAD",
+      "auto (on with 4 or more processor cores), on or off: the frames between game frames drawn on a thread of"
+      " their own, with a frame rate above 60" },
     { "hud", "RECOMP_HUD", "centre (the game's 4:3 places) or edges: the HUD counters at the screen's edges, wider than 4:3" },
     { "hud_margin", "RECOMP_HUD_MARGIN", "0-10: percent of the screen's width the HUD at the edges keeps in from them" },
     { "draw_distance", "RECOMP_DRAW_DISTANCE", "1 (the game's), 1.5, 2 or 3: the level's far plane and fog times this" },
@@ -379,6 +382,8 @@ static void key_text(const twoc_settings_t *s, size_t i, char *buf, size_t cap)
         twoc_framerate_text(s->framerate, buf, cap);
     else if (strcmp(k, "adaptive_framerate") == 0)
         snprintf(buf, cap, "%d", s->adaptive ? 1 : 0);
+    else if (strcmp(k, "render_thread") == 0 && s->render_thread != TWOC_RT_OFF)
+        snprintf(buf, cap, "%s", twoc_rt_name(s->render_thread));      /* off, the default for now: unwritten */
     else if (strcmp(k, "hud") == 0)
         snprintf(buf, cap, "%s", s->hud ? "edges" : "centre");
     else if (strcmp(k, "hud_margin") == 0)
