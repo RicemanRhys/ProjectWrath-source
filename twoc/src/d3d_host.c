@@ -362,14 +362,11 @@ static unsigned g_rt_clock;
 /* Step 78: g_rt's Data (0: none) for the game side, which decides at record
  * time whether a texture may be a render target (rc_maybe_target); kept by
  * the replay side as it makes and releases them (gt_set). */
-static uint32_t g_gt_data[RT_SLOTS];
-static SRWLOCK g_gt_lock = SRWLOCK_INIT;
+static volatile LONG g_gt_data[RT_SLOTS];
 
 static void gt_set(int i, uint32_t data)
 {
-    AcquireSRWLockExclusive(&g_gt_lock);
-    g_gt_data[i] = data;
-    ReleaseSRWLockExclusive(&g_gt_lock);
+    InterlockedExchange(&g_gt_data[i], (LONG)data);
 }
 static int g_cur_target = -1;           /* -1 the back buffer, else a g_rt index; -2 unknown */
 
@@ -1359,6 +1356,17 @@ static fslot_t g_slot[FSLOTS];
 static fslot_t *g_rs = &g_slot[0];      /* the game side records into this one */
 static fslot_t *g_ps;                   /* the replay side draws this one (NULL: none handed over) */
 static unsigned g_slot_seq;             /* handovers so far */
+/* The slots share their memory: a slot whose frame has been replayed gives
+ * its arena chunks and its command array back (slot_free), and the slot
+ * recorded into next takes them first. On one thread every frame is then
+ * recorded into the memory the replay before it just read, as it was with
+ * one arena: with two arenas used in turn, each frame recorded into memory
+ * last touched two frames before, and recording and the first pass cost
+ * 0.25 ms more each in cast_bug (cache misses over ~18 MB). */
+static ra_chunk_t *g_ra_pool;           /* free chunks, the last replayed frame's first */
+static rcmd_t *g_rc_pool;               /* a free command array */
+static unsigned g_rc_pool_cap;
+static SRWLOCK g_pool_lock = SRWLOCK_INIT;
 
 static void clear_exec(const d3dh_target_t *target, uint32_t xdk_flags, uint32_t color, float z, uint32_t stencil);
 static int copy_exec(const d3dh_target_t *dst, const int32_t *rects, const int32_t *points, unsigned n);
@@ -1389,10 +1397,21 @@ static void *ra_alloc(size_t n)
         c->used = 0;
     } else {
         size_t cap = n > RA_CHUNK ? n : RA_CHUNK;
-        ra_chunk_t *nc = (ra_chunk_t *)malloc(sizeof(ra_chunk_t) + cap);
-        if (!nc)
-            return NULL;
-        nc->cap = cap;
+        ra_chunk_t *nc = NULL, **pp;
+        AcquireSRWLockExclusive(&g_pool_lock);  /* step 78: a chunk the last replay gave back */
+        for (pp = &g_ra_pool; *pp; pp = &(*pp)->next)
+            if ((*pp)->cap >= n) {
+                nc = *pp;
+                *pp = nc->next;
+                break;
+            }
+        ReleaseSRWLockExclusive(&g_pool_lock);
+        if (!nc) {
+            nc = (ra_chunk_t *)malloc(sizeof(ra_chunk_t) + cap);
+            if (!nc)
+                return NULL;
+            nc->cap = cap;
+        }
         nc->used = 0;
         if (c) {
             nc->next = c->next;
@@ -1470,10 +1489,8 @@ static int rc_maybe_target(uint32_t data)
     GAME_SIDE();
     if (f->overflow)
         return 1;
-    AcquireSRWLockShared(&g_gt_lock);
     for (i = 0; i < RT_SLOTS && !r; i++)
-        r = g_gt_data[i] == data;
-    ReleaseSRWLockShared(&g_gt_lock);
+        r = (uint32_t)g_gt_data[i] == data;
     if (r)
         return 1;
     for (i = 0; i < f->targets_n; i++)
@@ -2525,6 +2542,34 @@ static void replay_pass(int interp)
     g_rp_n[interp != 0]++;
 }
 
+/* Step 78: slot f's frame replayed: its chunks and command array given back
+ * for the slot recorded next, the slot free. */
+static void slot_free(fslot_t *f)
+{
+    rcmd_t *rc;
+    unsigned cap;
+
+    REPLAY_SIDE();
+    AcquireSRWLockExclusive(&g_pool_lock);
+    if (f->ra_head) {
+        ra_chunk_t *t = f->ra_head;
+        while (t->next)
+            t = t->next;
+        t->next = g_ra_pool;
+        g_ra_pool = f->ra_head;
+        f->ra_head = f->ra_cur = NULL;
+    }
+    rc = f->rc;
+    cap = f->rc_cap;
+    f->rc = g_rc_pool;
+    f->rc_cap = g_rc_pool_cap;
+    g_rc_pool = rc;
+    g_rc_pool_cap = cap;
+    ReleaseSRWLockExclusive(&g_pool_lock);
+    if (g_ps == f)
+        g_ps = NULL;
+}
+
 /* The frame's commands are done with: release what they held, forget them. */
 static void replay_done(void)
 {
@@ -2545,7 +2590,7 @@ static void replay_done(void)
     g_ps->targets_n = 0;
     g_ps->overflow = 0;
     g_ps->up_n = 0;
-    g_ps = NULL;                        /* step 78: the slot free for the game side again */
+    slot_free(g_ps);                    /* step 78: the slot free for the game side again */
 }
 
 /* Run this frame's commands `g_replay` times (once when only interpolation
@@ -2558,7 +2603,7 @@ static void replay_run(void)
     if (!g_ps)
         return;
     if (!g_ps->rc_n && !g_ps->ra_bytes) {
-        g_ps = NULL;
+        slot_free(g_ps);
         return;
     }
     for (p = 0; p < (g_replay > 1 ? g_replay : 1); p++)
@@ -5262,6 +5307,16 @@ static void slot_handover(double t_s, unsigned swap_no)
                 f->seq, f->set_gen, g_sq.side[1].gen);
     g_ps = f;
     g_rs = &g_slot[(f - g_slot + 1) % FSLOTS];
+    AcquireSRWLockExclusive(&g_pool_lock);  /* the command array the last replay gave back */
+    {
+        rcmd_t *rc = g_rs->rc;
+        unsigned cap = g_rs->rc_cap;
+        g_rs->rc = g_rc_pool;
+        g_rs->rc_cap = g_rc_pool_cap;
+        g_rc_pool = rc;
+        g_rc_pool_cap = cap;
+    }
+    ReleaseSRWLockExclusive(&g_pool_lock);
     g_ic = g_ir;
     g_ir = 3 - g_ic - g_ip;             /* the set that is neither: the frame before last's, done with */
     ic_clear(g_ir);
@@ -7499,8 +7554,8 @@ static int replay_frame(fslot_t *f)
                 ic_end();
         }
         LeaveCriticalSection(&g_lock);
-    } else {
-        g_ps = NULL;                    /* step 78: nothing recorded: the slot free again */
+    } else if (g_ps) {
+        slot_free(g_ps);                /* step 78: nothing recorded: the slot free again */
     }
     if (interp) {                       /* step 61: the presents, the game held in its Swap */
         for (sub = 1; sub <= fr.n; sub++) {
