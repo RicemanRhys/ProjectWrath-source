@@ -89,6 +89,7 @@
 static int g_dev_fast_title;
 static int g_dev_autostart;
 static const char *g_dev_input_file;
+static const char *g_dev_xi_file;   /* step 82: RECOMP_DEV_XINPUT_FILE, XInput user 0's stand-in (test only) */
 static ULONGLONG g_dev_start_ms;
 static ULONGLONG g_dev_menu_ms;     /* when the main menu opened; 0 = not yet */
 
@@ -117,6 +118,11 @@ void twoc_dev_options_init(void)
         g_dev_input_file = NULL;
     if (g_dev_input_file)
         fprintf(stderr, "[DEV] input file: port 0 also reads %s\n", g_dev_input_file);
+    g_dev_xi_file = getenv("RECOMP_DEV_XINPUT_FILE");
+    if (g_dev_xi_file && !*g_dev_xi_file)
+        g_dev_xi_file = NULL;
+    if (g_dev_xi_file)
+        fprintf(stderr, "[DEV] XInput stand-in: user 0 reads %s in place of XInput\n", g_dev_xi_file);
 }
 
 /* Step 57: port 0 is the keyboard's too, in the bridge's window, with no
@@ -132,26 +138,36 @@ static int kb_port(DWORD port)
 static int dev_port_connected(DWORD port)
 {
     return xbox_InputIsConnected(port)
-        || ((g_dev_autostart || g_dev_input_file) && port == 0)
+        || ((g_dev_autostart || g_dev_input_file || g_dev_xi_file) && port == 0)
         || kb_port(port)
         || (port == 0 && pads_others());
 }
 
-/* The input file's pad, reread at most every 50 ms. Returns 1 if it changed
- * since the last call, so the caller can advance the packet number. */
-static int dev_input_file_read(XBOX_GAMEPAD *pad)
+/* A pad file's reader: its pad as last read (step 82: one per file and
+ * reader, the poll's and the overlay's apart). */
+typedef struct {
+    XBOX_GAMEPAD cur;
+    ULONGLONG last_ms;
+    char last_line[256];
+    unsigned changes;
+} dev_pad_file_t;
+
+/* A pad file (the input file; step 82: the XInput stand-in too), reread at
+ * most every 50 ms. Returns 1 if it changed since the last call, so the
+ * caller can advance the packet number; `what` names it in the log (NULL:
+ * not logged). */
+static int dev_pad_file_read(const char *path, dev_pad_file_t *d, const char *what, XBOX_GAMEPAD *pad)
 {
     static const char *const analog[8] = { "a", "b", "x", "y", "black", "white", "lt", "rt" };
-    static XBOX_GAMEPAD cur;
-    static ULONGLONG last_ms;
-    static char last_line[256];
+    XBOX_GAMEPAD cur = d->cur;
+    char *last_line = d->last_line;
     ULONGLONG now = GetTickCount64();
     char line[256] = "";
     int changed = 0;
 
-    if (now - last_ms >= 50) {
-        FILE *f = fopen(g_dev_input_file, "r");
-        last_ms = now;
+    if (now - d->last_ms >= 50) {
+        FILE *f = fopen(path, "r");
+        d->last_ms = now;
         if (f) {
             if (!fgets(line, sizeof(line), f))
                 line[0] = '\0';
@@ -181,14 +197,38 @@ static int dev_input_file_read(XBOX_GAMEPAD *pad)
                         if (!strcmp(tok, analog[i]))
                             cur.bAnalogButtons[i] = (BYTE)v;
             }
-            fprintf(stderr, "[DEV] input file (+%.1f s): \"%s\"\n",
-                    (now - g_dev_start_ms) / 1000.0, line);
+            if (what)
+                fprintf(stderr, "[DEV] %s (+%.1f s): \"%s\"\n", what, (now - g_dev_start_ms) / 1000.0, line);
             changed = 1;
+            d->changes++;
         }
     }
+    d->cur = cur;
     *pad = cur;
     return changed;
 }
+
+static int dev_input_file_read(XBOX_GAMEPAD *pad)
+{
+    static dev_pad_file_t d;
+    return dev_pad_file_read(g_dev_input_file, &d, "input file", pad);
+}
+
+/* Step 82: XInput user 0's state, from the stand-in file (as the runtime's
+ * xbox_InputGetState gives an Xbox pad: buttons=<digital>, a b x y black
+ * white lt rt 0-255, sticks) when RECOMP_DEV_XINPUT_FILE is set; `d` the
+ * reader's own. Unset: xbox_InputGetState. */
+static DWORD xi_get(DWORD port, XBOX_INPUT_STATE *s, dev_pad_file_t *d, const char *what)
+{
+    if (port == 0 && g_dev_xi_file) {
+        memset(s, 0, sizeof(*s));
+        dev_pad_file_read(g_dev_xi_file, d, what, &s->Gamepad);
+        s->dwPacketNumber = d->changes;
+        return ERROR_SUCCESS;
+    }
+    return xbox_InputGetState(port, s);
+}
+static dev_pad_file_t g_xi_poll;        /* the poll's reader of the stand-in */
 
 /* Autostart's part of the poll: stand in a neutral virtual pad if port 0 has
  * no real one, then hold A for 500 ms at +5 s and +20 s after the menu. */
@@ -3608,6 +3648,162 @@ static void overlay_gate(DWORD port, XBOX_INPUT_STATE *s)
         }
 }
 
+/*
+ * Step 82 (notes 18.85): the controller chord. View + Menu (Back + Start,
+ * as the game's pad has them after the controller map) held together
+ * CHORD_MS opens the settings overlay, and again closes it, so a handheld
+ * needs no keyboard. While the overlay is closed the game's poll sees it
+ * (chord_game): with View held, Start is held back from the game, so the
+ * chord doesn't open the game's pause menu too; Start released before the
+ * chord completes reaches the game then as a press of CHORD_TAP_MS, and View
+ * let go first lets the Start still held through. Start alone (View up)
+ * goes through at once, as before. While the overlay is open the game is
+ * held (no poll) or gets an idle pad, so the overlay's frames read the pad
+ * themselves (twoc_pad_overlay): the chord again closes it, and the D-pad
+ * or the left stick, A, B, LB and RB drive it (overlay.cpp). After the
+ * chord acts, View and Start count again only once both are up. No pad, or
+ * no chord: the state reaches the game as before.
+ */
+#define CHORD_MS 700
+#define CHORD_TAP_MS 100
+extern void d3dh_overlay_pad_open(void);
+static volatile LONG g_chord_release;   /* the chord acted: both up before it counts again */
+
+static void chord_game(XBOX_GAMEPAD *g)
+{
+    static ULONGLONG both_since, tap_until;
+    static int held_back, start_seen;
+    ULONGLONG now = GetTickCount64();
+    int v = (g->wButtons & XBOX_GAMEPAD_BACK) != 0, s = (g->wButtons & XBOX_GAMEPAD_START) != 0;
+    unsigned closes;
+
+    if (!d3db_host_on || d3dh_overlay_input(&closes)) {
+        both_since = 0;                 /* no overlay here, or it is open: the game's pad is idle meanwhile */
+        held_back = 0;
+        tap_until = 0;
+        start_seen = s;
+        if (!v && !s)
+            InterlockedExchange(&g_chord_release, 0);
+        return;
+    }
+    if (g_chord_release) {
+        if (!v && !s)
+            InterlockedExchange(&g_chord_release, 0);
+        both_since = 0;
+        held_back = 0;
+        start_seen = s;
+        return;
+    }
+    if (v && s) {
+        if (!both_since) {
+            both_since = now ? now : 1;
+            held_back = !start_seen;    /* Start came while View was down: the game hasn't had it */
+        }
+        if (now - both_since >= CHORD_MS) {
+            fprintf(stderr, "[XPP] View + Menu held %u ms: the settings overlay opens%s\n", CHORD_MS,
+                    held_back ? " (Start held back from the game)" : "");
+            InterlockedExchange(&g_chord_release, 1);
+            both_since = 0;
+            d3dh_overlay_pad_open();
+        }
+    } else if (both_since) {
+        if (held_back && !s)            /* Start let go before the chord: the game gets its press now */
+            tap_until = now + CHORD_TAP_MS;
+        both_since = 0;
+        held_back = 0;
+    }
+    if (held_back && s)
+        g->wButtons &= (WORD)~XBOX_GAMEPAD_START;
+    if (now < tap_until)
+        g->wButtons |= XBOX_GAMEPAD_START;
+    start_seen = s && !(held_back && v);
+}
+
+/* Step 82: port 0's pad for the open overlay's frame (any thread): XInput
+ * user 0 (or its stand-in), every other pad (SDL mode), the controller map
+ * and the input file, as the poll joins them, without the keyboard (it
+ * reaches the overlay as keys). *nav gets OVL_PAD_* bits (pads present:
+ * OVL_PAD_ON), *lx, *ly the left stick. Returns 1 when the chord asks the
+ * overlay to close. */
+int twoc_pad_overlay(unsigned *nav, short *lx, short *ly)
+{
+    static ULONGLONG xi_retry, both_since;
+    static dev_pad_file_t xi_d, in_d;
+    XBOX_INPUT_STATE st;
+    pads_src_t others;
+    unsigned pk;
+    int n = 0, have = 0, v, s, close = 0;
+    DWORD r = ERROR_DEVICE_NOT_CONNECTED;
+    ULONGLONG now = GetTickCount64();
+
+    *nav = 0;
+    *lx = *ly = 0;
+    memset(&st, 0, sizeof(st));
+    if (g_dev_xi_file)
+        r = xi_get(0, &st, &xi_d, NULL);
+    else if (pads_mode() == PADS_SDL ? pads_xinput_present(0) != 0 : now >= xi_retry) {
+        r = xbox_InputGetState(0, &st);
+        if (pads_mode() != PADS_SDL)
+            xi_retry = r == ERROR_SUCCESS ? 0 : now + 1000;     /* XInput is slow to say none is there */
+    }
+    if (r != ERROR_SUCCESS)
+        memset(&st, 0, sizeof(st));
+    have = r == ERROR_SUCCESS;
+    if (pads_mode() == PADS_SDL) {
+        n = pads_read(&others, &pk);
+        if (have && pads_skip_xinput0())
+            memset(&st.Gamepad, 0, sizeof(st.Gamepad));
+        have |= n > 0;
+    }
+    if (have)
+        controls_apply_pad(&st.Gamepad, n ? &others : NULL);
+    if (g_dev_input_file) {
+        XBOX_GAMEPAD f;
+        int i;
+        dev_pad_file_read(g_dev_input_file, &in_d, NULL, &f);
+        st.Gamepad.wButtons |= f.wButtons;
+        for (i = 0; i < 8; i++)
+            if (f.bAnalogButtons[i] > st.Gamepad.bAnalogButtons[i])
+                st.Gamepad.bAnalogButtons[i] = f.bAnalogButtons[i];
+        if (f.sThumbLX) st.Gamepad.sThumbLX = f.sThumbLX;
+        if (f.sThumbLY) st.Gamepad.sThumbLY = f.sThumbLY;
+        have = 1;
+    }
+    if (!have)
+        return 0;
+    *nav = OVL_PAD_ON;
+    if (st.Gamepad.wButtons & XBOX_GAMEPAD_DPAD_UP) *nav |= OVL_PAD_UP;
+    if (st.Gamepad.wButtons & XBOX_GAMEPAD_DPAD_DOWN) *nav |= OVL_PAD_DOWN;
+    if (st.Gamepad.wButtons & XBOX_GAMEPAD_DPAD_LEFT) *nav |= OVL_PAD_LEFT;
+    if (st.Gamepad.wButtons & XBOX_GAMEPAD_DPAD_RIGHT) *nav |= OVL_PAD_RIGHT;
+    if (st.Gamepad.bAnalogButtons[XBOX_BUTTON_A] >= XBOX_ANALOG_BUTTON_THRESHOLD) *nav |= OVL_PAD_A;
+    if (st.Gamepad.bAnalogButtons[XBOX_BUTTON_B] >= XBOX_ANALOG_BUTTON_THRESHOLD) *nav |= OVL_PAD_B;
+    if (st.Gamepad.bAnalogButtons[XBOX_BUTTON_BLACK] >= XBOX_ANALOG_BUTTON_THRESHOLD) *nav |= OVL_PAD_LB;
+    if (st.Gamepad.bAnalogButtons[XBOX_BUTTON_WHITE] >= XBOX_ANALOG_BUTTON_THRESHOLD) *nav |= OVL_PAD_RB;
+    v = (st.Gamepad.wButtons & XBOX_GAMEPAD_BACK) != 0;
+    s = (st.Gamepad.wButtons & XBOX_GAMEPAD_START) != 0;
+    if (v) *nav |= OVL_PAD_VIEW;
+    if (s) *nav |= OVL_PAD_MENU;
+    *lx = st.Gamepad.sThumbLX;
+    *ly = st.Gamepad.sThumbLY;
+    if (g_chord_release) {
+        if (!v && !s)
+            InterlockedExchange(&g_chord_release, 0);
+        both_since = 0;
+    } else if (v && s) {
+        if (!both_since)
+            both_since = now ? now : 1;
+        if (now - both_since >= CHORD_MS) {
+            fprintf(stderr, "[XPP] View + Menu held %u ms: the settings overlay closes\n", CHORD_MS);
+            InterlockedExchange(&g_chord_release, 1);
+            both_since = 0;
+            close = 1;
+        }
+    } else
+        both_since = 0;
+    return close;
+}
+
 void sub_001542AB(void)
 {
     static uint64_t hits;
@@ -3630,18 +3826,18 @@ void sub_001542AB(void)
         ULONGLONG now = GetTickCount64();
         result = ERROR_DEVICE_NOT_CONNECTED;
         if (now >= retry_ms) {
-            result = xbox_InputGetState(port, &state);
+            result = xi_get(port, &state, &g_xi_poll, "XInput stand-in");
             retry_ms = result == ERROR_SUCCESS ? 0 : now + 1000;
         }
         if (result != ERROR_SUCCESS) {
             memset(&state, 0, sizeof(state));
             result = ERROR_SUCCESS;
         }
-    } else if (port == 0 && pads_xinput_present(0) == 0) {
+    } else if (port == 0 && pads_xinput_present(0) == 0 && !g_dev_xi_file) {
         memset(&state, 0, sizeof(state));   /* step 70: the pads thread saw no XInput user 0: not asked */
         result = ERROR_DEVICE_NOT_CONNECTED;
     } else
-        result = xbox_InputGetState(port, &state);
+        result = xi_get(port, &state, &g_xi_poll, "XInput stand-in");
     /* Step 70: every other pad joins port 0 (pads.h): SDL's, and XInput users
      * 1-3, by position, under the same map. Steam Input's virtual pad on user
      * 0 is left out while the pad behind it is read directly. None: as before. */
@@ -3665,6 +3861,8 @@ void sub_001542AB(void)
         state.dwPacketNumber += kb_packets + others_packets;
     }
     dev_autostart_poll(port, &state, &result);
+    if (result == ERROR_SUCCESS && port == 0)
+        chord_game(&state.Gamepad);     /* step 82: View + Menu opens the overlay; Start held back meanwhile */
     if (result == ERROR_SUCCESS)
         overlay_gate(port, &state);     /* step 54 */
     if (result == ERROR_SUCCESS) {

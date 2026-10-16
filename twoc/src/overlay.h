@@ -42,6 +42,8 @@ typedef struct {
     unsigned rt_cores, rt_auto_cores;   /* ... this PC's processor cores, and the most Auto needs */
     int meas_ok;                        /* step 82: the rates below measured (over the last second) */
     double game_ups, shown_fps;         /* ... the game's updates (guest swaps) and the frames presented a second */
+    unsigned pad;                       /* step 82: port 0's pad (OVL_PAD_*, pads.h; 0: none), for navigation */
+    short pad_lx, pad_ly;               /* ... its left stick */
 } ovl_info_t;
 
 enum { OVL_CHANGED = 1, OVL_CLOSE = 2 };

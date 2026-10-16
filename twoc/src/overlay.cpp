@@ -45,11 +45,69 @@ static ImGuiStyle g_style_base;
 enum { CAP_NONE, CAP_PAD, CAP_KEY };
 static int g_cap, g_cap_idx, g_cap_slot;
 
+/* Step 82: the controller drives the overlay (pads.h's OVL_PAD_* bits from
+ * the frame's info): the D-pad or the left stick move, A chooses, B closes a
+ * list or the overlay, LB and RB change tabs. A button held when the
+ * overlay opens or a binding ends counts once it is let go. Under g_cs. */
+static unsigned g_pad_mask, g_pad_last;
+static int g_pad_fresh = 1;
+static int g_tab_cur, g_tab_want = -1;
+
 static void capture_end(void)
 {
     g_cap = CAP_NONE;
+    g_pad_fresh = 1;                    /* step 82: the button just bound navigates once let go */
     if (g_ready)
         ImGui::GetIO().ClearInputKeys();    /* the keys held meanwhile never reached ImGui */
+}
+
+/* Step 82: the frame's pad into ImGui's gamepad navigation. Returns
+ * OVL_CLOSE when B asks to close (no list open). */
+static int pad_nav(const ovl_info_t *in)
+{
+    ImGuiIO &io = ImGui::GetIO();
+    unsigned pad = in->pad, nav = 0, press;
+    float x = in->pad_lx / 32767.0f, y = in->pad_ly / 32767.0f;
+    const float dz = 0.35f;
+    int r = 0;
+
+    if (pad)
+        io.BackendFlags |= ImGuiBackendFlags_HasGamepad;
+    else
+        io.BackendFlags &= ~ImGuiBackendFlags_HasGamepad;
+    if (pad && g_cap == CAP_NONE) {
+        if (g_pad_fresh) {
+            g_pad_mask = pad;
+            g_pad_fresh = 0;
+        }
+        g_pad_mask &= pad;              /* let go: no longer masked */
+        nav = pad & ~g_pad_mask;
+    } else {
+        x = y = 0.0f;
+    }
+    press = nav & ~g_pad_last;
+    g_pad_last = nav;
+    io.AddKeyEvent(ImGuiKey_GamepadDpadUp, (nav & OVL_PAD_UP) != 0);
+    io.AddKeyEvent(ImGuiKey_GamepadDpadDown, (nav & OVL_PAD_DOWN) != 0);
+    io.AddKeyEvent(ImGuiKey_GamepadDpadLeft, (nav & OVL_PAD_LEFT) != 0);
+    io.AddKeyEvent(ImGuiKey_GamepadDpadRight, (nav & OVL_PAD_RIGHT) != 0);
+    io.AddKeyAnalogEvent(ImGuiKey_GamepadLStickLeft, x < -dz, x < -dz ? -x : 0.0f);
+    io.AddKeyAnalogEvent(ImGuiKey_GamepadLStickRight, x > dz, x > dz ? x : 0.0f);
+    io.AddKeyAnalogEvent(ImGuiKey_GamepadLStickUp, y > dz, y > dz ? y : 0.0f);
+    io.AddKeyAnalogEvent(ImGuiKey_GamepadLStickDown, y < -dz, y < -dz ? -y : 0.0f);
+    io.AddKeyEvent(ImGuiKey_GamepadFaceDown, (nav & OVL_PAD_A) != 0);
+    if (ImGui::IsPopupOpen("", ImGuiPopupFlags_AnyPopupId | ImGuiPopupFlags_AnyPopupLevel))
+        io.AddKeyEvent(ImGuiKey_GamepadFaceRight, (nav & OVL_PAD_B) != 0);     /* closes the list */
+    else {
+        io.AddKeyEvent(ImGuiKey_GamepadFaceRight, false);
+        if (press & OVL_PAD_B)
+            r |= OVL_CLOSE;
+    }
+    if (press & OVL_PAD_LB)
+        g_tab_want = (g_tab_cur + 2) % 3;
+    if (press & OVL_PAD_RB)
+        g_tab_want = (g_tab_cur + 1) % 3;
+    return r;
 }
 
 static ImGuiKey vk_key(WPARAM vk)
@@ -136,6 +194,7 @@ extern "C" void ovl_opened(void)
         return;
     EnterCriticalSection(&g_cs);
     g_cap = CAP_NONE;
+    g_pad_fresh = 1;                    /* step 82: buttons held now (the chord's) count once let go */
     if (g_ready) {
         ImGui::GetIO().ClearInputKeys();
         ImGui::GetIO().ClearInputMouse();
@@ -174,7 +233,8 @@ extern "C" int ovl_init(ID3D11Device *dev, ID3D11DeviceContext *ctx)
     ImGuiIO &io = ImGui::GetIO();
     io.IniFilename = NULL;              /* no imgui.ini in the game's folder */
     io.LogFilename = NULL;
-    io.ConfigFlags |= ImGuiConfigFlags_NavEnableKeyboard | ImGuiConfigFlags_NoMouseCursorChange;
+    io.ConfigFlags |= ImGuiConfigFlags_NavEnableKeyboard | ImGuiConfigFlags_NavEnableGamepad |   /* step 82 */
+                      ImGuiConfigFlags_NoMouseCursorChange;
     for (i = 0; i < sizeof(fonts) / sizeof(fonts[0]); i++)
         if (GetFileAttributesA(fonts[i]) != INVALID_FILE_ATTRIBUTES && io.Fonts->AddFontFromFileTTF(fonts[i], 18.0f))
             break;
@@ -896,28 +956,38 @@ static int build(twoc_settings_t *s, const ovl_info_t *in, float room)
              "a button still held then counts only once it is let go.");
     }
     if (ImGui::BeginTabBar("##tabs")) {
-        if (ImGui::BeginTabItem("Display")) {
+        /* step 82: LB and RB pick the tab before or after */
+#define TAB_FLAGS(i) (g_tab_want == (i) ? ImGuiTabItemFlags_SetSelected : ImGuiTabItemFlags_None)
+        if (ImGui::BeginTabItem("Display", NULL, TAB_FLAGS(0))) {
+            g_tab_cur = 0;
             r |= tab_display(s, in);
             ImGui::EndTabItem();
         }
-        if (ImGui::BeginTabItem("Audio")) {
+        if (ImGui::BeginTabItem("Audio", NULL, TAB_FLAGS(1))) {
+            g_tab_cur = 1;
             r |= tab_audio(s);
             ImGui::EndTabItem();
         }
-        if (ImGui::BeginTabItem("Controls")) {
+        if (ImGui::BeginTabItem("Controls", NULL, TAB_FLAGS(2))) {
+            g_tab_cur = 2;
             r |= tab_controls(s, room);
             ImGui::EndTabItem();
         }
+#undef TAB_FLAGS
+        g_tab_want = -1;
         ImGui::EndTabBar();
     }
 
     ImGui::Spacing();
-    if (ImGui::Button("Resume  (Esc)"))
+    if (ImGui::Button(in->pad ? "Resume  (Esc, B)" : "Resume  (Esc)"))
         r |= OVL_CLOSE;
     if (in->save_note) {
         ImGui::SameLine();
         ImGui::TextDisabled("%s", in->save_note);
     }
+    if (in->pad)                        /* step 82 */
+        help("Controller: D-pad or left stick to move, A to choose, B to close, LB / RB for the tabs. "
+             "View + Menu held opens and closes this menu.");
     return r;
 }
 
@@ -954,6 +1024,7 @@ extern "C" int ovl_frame(ID3D11RenderTargetView *rtv, unsigned w, unsigned h, fl
         st.FontScaleDpi = scale * fit;
         g_scale = scale * fit;
     }
+    r = pad_nav(info);                  /* step 82 */
     ImGui_ImplDX11_NewFrame();
     ImGui::NewFrame();
     if (info->running)                  /* step 57: the running game at the left, undimmed, to watch a change */
@@ -970,7 +1041,7 @@ extern "C" int ovl_frame(ID3D11RenderTargetView *rtv, unsigned w, unsigned h, fl
                                : "Crash TWOC - settings (paused)###settings", NULL,
                  ImGuiWindowFlags_NoResize | ImGuiWindowFlags_NoMove | ImGuiWindowFlags_NoCollapse |
                      ImGuiWindowFlags_NoSavedSettings);
-    r = build(s, info, (float)h * 0.96f);
+    r |= build(s, info, (float)h * 0.96f);
     {
         float wh = ImGui::GetWindowSize().y, room = (float)h * 0.96f;
         if (wh > room && fit > 0.4f)

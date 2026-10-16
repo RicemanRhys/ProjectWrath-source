@@ -108,6 +108,13 @@ const char *pads_sdl_version(void);     /* "3.4.18 (...)", or "" before SDL star
 const char *pads_src_label(int src, int style);
 const char *pads_style_name(int style); /* "PlayStation" */
 
+/* Step 82: port 0's pad as the open overlay reads it (recomp_manual.c, beside
+ * the poll; the controller chord): OVL_PAD_* bits, the left stick; returns 1
+ * when View + Menu held asks it to close. */
+enum { OVL_PAD_ON = 1, OVL_PAD_UP = 2, OVL_PAD_DOWN = 4, OVL_PAD_LEFT = 8, OVL_PAD_RIGHT = 16, OVL_PAD_A = 32,
+       OVL_PAD_B = 64, OVL_PAD_LB = 128, OVL_PAD_RB = 256, OVL_PAD_VIEW = 512, OVL_PAD_MENU = 1024 };
+int twoc_pad_overlay(unsigned *nav, short *lx, short *ly);
+
 #ifdef __cplusplus
 }
 #endif

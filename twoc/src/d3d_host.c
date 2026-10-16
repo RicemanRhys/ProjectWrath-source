@@ -6806,6 +6806,16 @@ void d3dh_record_wide(double wide)
 static volatile LONG g_ovl_closes;      /* times the overlay has closed (the controller gate) */
 static volatile LONG g_ovl_session;     /* from the overlay's first frame until it has closed */
 
+/* Step 82: the controller chord opens the overlay, as Esc does (the game's
+ * poll; recomp_manual.c). */
+void d3dh_overlay_pad_open(void)
+{
+    if (!g_ready || g_ovl_open)
+        return;
+    ovl_opened();
+    InterlockedExchange(&g_ovl_open, 1);
+}
+
 /* Step 57: idle from Esc until the overlay's session has ended, held or
  * running; the close count is read after, so a close is never missed. */
 int d3dh_overlay_input(unsigned *closes)
@@ -7318,7 +7328,7 @@ static int ovl_draw(ID3D11Texture2D *dst, int running)
     ID3D11RenderTargetView *rtv = NULL;
     LARGE_INTEGER now;
     ovl_info_t in;
-    int r = 0;
+    int r = 0, chord_close;
 
     REPLAY_SIDE();
     QueryPerformanceCounter(&now);
@@ -7352,6 +7362,7 @@ static int ovl_draw(ID3D11Texture2D *dst, int running)
     in.meas_ok = g_meas.ok;             /* step 82 */
     in.game_ups = g_meas.game;
     in.shown_fps = g_meas.shown;
+    chord_close = twoc_pad_overlay(&in.pad, &in.pad_lx, &in.pad_ly);    /* step 82: the pad, and the chord */
     if (in.interp_fps <= 0) {           /* step 63 */
         static char why[256];
         ic_why(why, sizeof(why));
@@ -7366,7 +7377,7 @@ static int ovl_draw(ID3D11Texture2D *dst, int running)
         ID3D11RenderTargetView_Release(rtv);
     g_ovs.last = now;
     g_ovs.frames++;
-    return r;
+    return chord_close ? r | OVL_CLOSE : r;
 }
 
 /* Step 82: the frame-rate counter over the picture in `dst` (the visible
