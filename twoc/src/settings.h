@@ -18,6 +18,8 @@
  *   adaptive_framerate = 0 | 1                RECOMP_FRAMERATE_ADAPTIVE (unset: on; step 75. The old
  *                                             name RECOMP_D3D_BRIDGE_INTERP_ADAPT still reads)
  *   render_thread = off | on | auto           RECOMP_RENDER_THREAD (unset: off for now; step 79)
+ *   show_fps    = 0 | 1                       RECOMP_SHOW_FPS (unset: off; step 82: the game's updates and
+ *                                             the frames shown a second in the picture's corner)
  *   hud         = centre | edges              RECOMP_HUD (unset: centre)
  *   hud_margin  = 0-10                        RECOMP_HUD_MARGIN (percent of the width; unset: 0)
  *   draw_distance = 1 | 1.5 | 2 | 3           RECOMP_DRAW_DISTANCE (unset: 1, the game's)
@@ -112,6 +114,7 @@ typedef struct {
     int framerate;                      /* step 61: 0 the game's 60, 1 the display's (interpolated); step 77: N Hz */
     int adaptive;                       /* step 75: 1 fewer sub-frames while late (also when unset), 0 always all */
     int render_thread;                  /* step 79: TWOC_RT_* (unset: off) */
+    int show_fps;                       /* step 82: 1 the measured rates in a corner, 0 not (also unset) */
     int hud, hud_margin;                /* step 65: 0 the HUD in the middle 4:3, 1 at the edges; 0-10 percent in */
     double draw_distance;               /* step 69: the far plane and fog times this; 1 the game's (also unset) */
     int volume;                         /* 0-100; -1: never set (Windows' own level) */

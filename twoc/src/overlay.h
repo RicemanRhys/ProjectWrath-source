@@ -40,6 +40,8 @@ typedef struct {
     const char *interp_note;            /* step 77: the plan: the rate it shows and whether evenly, and why */
     int rt_on;                          /* step 79: the render thread draws the frames now */
     unsigned rt_cores, rt_auto_cores;   /* ... this PC's processor cores, and the most Auto needs */
+    int meas_ok;                        /* step 82: the rates below measured (over the last second) */
+    double game_ups, shown_fps;         /* ... the game's updates (guest swaps) and the frames presented a second */
 } ovl_info_t;
 
 enum { OVL_CHANGED = 1, OVL_CLOSE = 2 };
@@ -59,6 +61,11 @@ int ovl_cancel_capture(void);
  * they asked to resume. */
 int ovl_frame(ID3D11RenderTargetView *rtv, unsigned w, unsigned h, float scale, float dt, twoc_settings_t *s,
               const ovl_info_t *info);
+/* Step 82: the frame-rate counter ("Show frame rate"), `lines` in the top
+ * left corner of `rtv`, over the game's picture, with the overlay closed. */
+void ovl_counter(ID3D11RenderTargetView *rtv, unsigned w, unsigned h, float scale, const char *lines);
+/* Step 82: the measured rates as the overlay and the counter word them. */
+void ovl_rates_text(int ok, double game_ups, double shown_fps, int brief, char *buf, size_t cap);
 
 #ifdef __cplusplus
 }

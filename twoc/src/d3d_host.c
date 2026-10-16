@@ -444,6 +444,7 @@ static int g_aa;                        /* step 58, RECOMP_ANTIALIASING: TWOC_AA
 static unsigned g_msaa = 1;             /* step 58: the samples a pixel MSAA asks for, 1 without */
 static volatile LONG g_ovl_open;        /* Esc: the next present runs the overlay */
 static volatile LONG g_ovl_pauses = 1;  /* step 79: "Pause the game while this menu is open", for the game side */
+static volatile LONG g_show_fps;        /* step 82: "Show frame rate" (RECOMP_SHOW_FPS): the counter in the corner */
 static SRWLOCK g_pause_lock = SRWLOCK_INIT;
 static d3dh_apply_fn g_apply_game, g_apply_host;   /* step 78: the bridge's parts of a settings change */
 static double g_rwide;                  /* step 78: g_wide as the game side records under it (d3dh_record_wide) */
@@ -867,6 +868,9 @@ int d3dh_create(unsigned width, unsigned height, unsigned host_w, unsigned host_
         if (w && *w)
             g_wd_secs = atof(w);
         g_ovl_pauses = !(getenv("RECOMP_OVERLAY_PAUSE") && strcmp(getenv("RECOMP_OVERLAY_PAUSE"), "0") == 0);
+        g_show_fps = getenv("RECOMP_SHOW_FPS") && *getenv("RECOMP_SHOW_FPS") && strcmp(getenv("RECOMP_SHOW_FPS"), "0") != 0;
+        if (g_show_fps)
+            fprintf(stderr, "[D3DB] host frame-rate counter: on (show_fps)\n");
         fprintf(stderr, "[D3DB] host render thread: %s%s; this CPU has %u cores, %u logical processors%s\n",
                 twoc_rt_name(g_rt_mode), g_rt_sync ? " (sync: the game waits for each frame, a check)" : "",
                 g_rt_cores, g_rt_logical,
@@ -7171,6 +7175,10 @@ static void overlay_apply(twoc_settings_t *was, const twoc_settings_t *s)
         InterlockedExchange(&g_ovl_pauses, s->pause);   /* step 79: the game side looks at its Swap */
         fprintf(stderr, "[OVL] pause the game while open: %s\n", s->pause ? "on" : "off");
     }
+    if (s->show_fps != was->show_fps) {     /* step 82: from the next present */
+        InterlockedExchange(&g_show_fps, s->show_fps);
+        fprintf(stderr, "[OVL] frame-rate counter: %s\n", s->show_fps ? "on" : "off");
+    }
     if (s->render_thread != was->render_thread) {   /* step 79: at the game's next Swap */
         d3dh_set_render_thread(s->render_thread);
         fprintf(stderr, "[OVL] render thread: %s\n", twoc_rt_name(s->render_thread));
@@ -7202,6 +7210,52 @@ static struct {
     LARGE_INTEGER freq, t0, last;
     unsigned frames;
 } g_ovs;
+
+/* Step 82: what is measured, for the overlay's Frame rate line and the
+ * counter: the game's updates (guest swaps) and the frames presented a
+ * second, over the last second, from a sample at every MEAS_STEP s of
+ * presents (replay side). A gap (the overlay held the game, a load) starts
+ * it again. */
+#define MEAS_STEP 0.5
+#define MEAS_N 3                        /* samples kept: the rates span (MEAS_N - 1) * MEAS_STEP s */
+static struct {
+    LONGLONG t[MEAS_N];                 /* QPC */
+    unsigned swap[MEAS_N], pres[MEAS_N];
+    unsigned n;                         /* samples taken since the start or a gap */
+    int ok;
+    double game, shown;
+} g_meas;
+
+static void meas_present(unsigned swap_no)
+{
+    LARGE_INTEGER q;
+    double since;
+    unsigned i;
+
+    QueryPerformanceCounter(&q);
+    since = g_meas.n ? (double)(q.QuadPart - g_meas.t[0]) / (double)g_qpf.QuadPart : MEAS_STEP;
+    if (since < MEAS_STEP)
+        return;
+    if (since > 3 * MEAS_STEP) {        /* a gap: from here */
+        g_meas.n = 0;
+        g_meas.ok = 0;
+    }
+    for (i = MEAS_N - 1; i > 0; i--) {
+        g_meas.t[i] = g_meas.t[i - 1];
+        g_meas.swap[i] = g_meas.swap[i - 1];
+        g_meas.pres[i] = g_meas.pres[i - 1];
+    }
+    g_meas.t[0] = q.QuadPart;
+    g_meas.swap[0] = swap_no;
+    g_meas.pres[0] = g_st.presents;
+    if (++g_meas.n >= MEAS_N) {
+        double dt = (double)(g_meas.t[0] - g_meas.t[MEAS_N - 1]) / (double)g_qpf.QuadPart;
+        g_meas.n = MEAS_N;
+        g_meas.game = (double)(g_meas.swap[0] - g_meas.swap[MEAS_N - 1]) / dt;
+        g_meas.shown = (double)(g_meas.pres[0] - g_meas.pres[MEAS_N - 1]) / dt;
+        g_meas.ok = 1;
+    }
+}
 
 /* The present after Esc: the overlay's first frame. No lock held. */
 static int ovl_begin(void)
@@ -7295,6 +7349,9 @@ static int ovl_draw(ID3D11Texture2D *dst, int running)
     in.rt_cores = g_rt_cores;
     in.rt_auto_cores = RT_AUTO_CORES;
     in.interp_on = g_interp && in.interp_fps > 0;
+    in.meas_ok = g_meas.ok;             /* step 82 */
+    in.game_ups = g_meas.game;
+    in.shown_fps = g_meas.shown;
     if (in.interp_fps <= 0) {           /* step 63 */
         static char why[256];
         ic_why(why, sizeof(why));
@@ -7310,6 +7367,28 @@ static int ovl_draw(ID3D11Texture2D *dst, int running)
     g_ovs.last = now;
     g_ovs.frames++;
     return r;
+}
+
+/* Step 82: the frame-rate counter over the picture in `dst` (the visible
+ * swap chain's buffer), the overlay closed. With g_lock held. */
+static void counter_draw(ID3D11Texture2D *dst)
+{
+    ID3D11RenderTargetView *rtv = NULL;
+    char lines[96];
+
+    REPLAY_SIDE();
+    if (!g_ovs.ready) {
+        g_ovs.ready = ovl_init(d3d8_GetD3D11Device(), d3d8_GetD3D11Context()) == 0 && blit_init() == 0 ? 1 : -1;
+        if (g_ovs.ready < 0)
+            fprintf(stderr, "[OVL] the frame-rate counter can't be drawn here\n");
+    }
+    if (g_ovs.ready < 0)
+        return;
+    ovl_rates_text(g_meas.ok, g_meas.game, g_meas.shown, 1, lines, sizeof(lines));
+    if (SUCCEEDED(ID3D11Device_CreateRenderTargetView(d3d8_GetD3D11Device(), (ID3D11Resource *)dst, NULL, &rtv))) {
+        ovl_counter(rtv, g_buf_w, g_buf_h, overlay_scale() * 0.8f, lines);
+        ID3D11RenderTargetView_Release(rtv);
+    }
 }
 
 /* What the frame asked for, with no lock held. */
@@ -7631,6 +7710,8 @@ static int present_one(double t_s, unsigned swap_no, unsigned interval, unsigned
                 copy_unscaled(dst, src);
             if (g_ovl_open && g_ovs.active && !g_ovs.s.pause)
                 ovl_r = ovl_draw(dst, 1);   /* step 57: the overlay over the running game */
+            else if (g_show_fps)
+                counter_draw(dst);      /* step 82: on the window's picture only, never in a dump */
         }
         if (src)
             ID3D11Texture2D_Release(src);
@@ -7639,6 +7720,7 @@ static int present_one(double t_s, unsigned swap_no, unsigned interval, unsigned
     }
     hr = IDXGISwapChain1_Present(g_flip, interval, 0);
     g_st.presents++;
+    meas_present(swap_no);              /* step 82 */
     {   /* How many DWM compositions apart consecutive presents land: the
          * index of the first one after each present, from DWM's timing (its
          * last vblank, its count, the period). DWM composes on demand, so
@@ -7984,6 +8066,8 @@ static void trigger_file(unsigned swap_no)
                 ts.pause = atoi(v) != 0;
             } else if (strcmp(k, "rthread") == 0) {         /* step 79 (st.py turns '_' into spaces) */
                 ts.render_thread = twoc_rt_parse(v);
+            } else if (strcmp(k, "showfps") == 0) {         /* step 82 */
+                ts.show_fps = atoi(v) != 0;
             } else {
                 fprintf(stderr, "[D3DB] trigger file: set %s: not a setting here\n", k);
             }

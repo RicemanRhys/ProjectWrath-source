@@ -476,6 +476,71 @@ static int tab_controls(twoc_settings_t *s, float room)
     return r;
 }
 
+/* Step 82: the game runs slow under this many updates a second (its own
+ * rate is 59.94). */
+#define GAME_SLOW_UPS 57.0
+
+extern "C" void ovl_rates_text(int ok, double game_ups, double shown_fps, int brief, char *buf, size_t cap)
+{
+    int slow = game_ups < GAME_SLOW_UPS;
+
+    if (brief)                          /* the corner counter */
+        snprintf(buf, cap, ok ? "Game %.0f/s%s\nShown %.0f/s" : "Game -/s\nShown -/s", game_ups,
+                 slow ? " (slow)" : "", shown_fps);
+    else if (!ok)
+        snprintf(buf, cap, "Measured: not yet (the game hasn't run a second since).");
+    else
+        snprintf(buf, cap, "Measured: the game %.0f updates a second%s; %.0f frames shown a second.", game_ups,
+                 slow ? ": slow" : " (full speed)", shown_fps);
+}
+
+extern "C" void ovl_counter(ID3D11RenderTargetView *rtv, unsigned w, unsigned h, float scale, const char *lines)
+{
+    ID3D11DeviceContext *ctx = NULL;
+    ID3D11RenderTargetView *old_rtv = NULL;
+    ID3D11DepthStencilView *old_dsv = NULL;
+
+    if (!g_ready)
+        return;
+    EnterCriticalSection(&g_cs);
+    ImGuiIO &io = ImGui::GetIO();
+    io.DisplaySize = ImVec2((float)w, (float)h);
+    io.DeltaTime = 1.0f / 60.0f;
+    if (scale != g_scale) {             /* the overlay's own scale is set again when it opens (ovl_frame) */
+        ImGuiStyle &st = ImGui::GetStyle();
+        st = g_style_base;
+        st.ScaleAllSizes(scale);
+        st.FontScaleDpi = scale;
+        g_scale = scale;
+    }
+    ImGui_ImplDX11_NewFrame();
+    ImGui::NewFrame();
+    ImGui::SetNextWindowPos(ImVec2(io.DisplaySize.x * 0.01f, io.DisplaySize.y * 0.01f), ImGuiCond_Always);
+    ImGui::SetNextWindowBgAlpha(0.55f);
+    ImGui::Begin("##fps", NULL, ImGuiWindowFlags_NoDecoration | ImGuiWindowFlags_NoInputs |
+                                    ImGuiWindowFlags_AlwaysAutoResize | ImGuiWindowFlags_NoNav |
+                                    ImGuiWindowFlags_NoFocusOnAppearing | ImGuiWindowFlags_NoSavedSettings);
+    ImGui::TextUnformatted(lines);
+    ImGui::End();
+    ImGui::Render();
+    {
+        ID3D11Device *dev = NULL;
+        rtv->GetDevice(&dev);
+        dev->GetImmediateContext(&ctx);
+        dev->Release();
+    }
+    ctx->OMGetRenderTargets(1, &old_rtv, &old_dsv);
+    ctx->OMSetRenderTargets(1, &rtv, NULL);
+    ImGui_ImplDX11_RenderDrawData(ImGui::GetDrawData());
+    ctx->OMSetRenderTargets(1, &old_rtv, old_dsv);
+    if (old_rtv)
+        old_rtv->Release();
+    if (old_dsv)
+        old_dsv->Release();
+    ctx->Release();
+    LeaveCriticalSection(&g_cs);
+}
+
 static int tab_display(twoc_settings_t *s, const ovl_info_t *in)
 {
     static const char *const pacing[TWOC_PACING_COUNT] = { "Auto", "Display (vsync)", "Limiter (59.94 Hz)",
@@ -655,6 +720,20 @@ static int tab_display(twoc_settings_t *s, const ovl_info_t *in)
         help(line);
         if (s->framerate && in->interp_note && in->interp_note[0])
             help(in->interp_note);      /* step 77: even or not on this display, and why */
+        ovl_rates_text(in->meas_ok, in->game_ups, in->shown_fps, 0, line, sizeof(line));
+        if (!in->running && in->meas_ok && strlen(line) > 1)    /* step 82: held, the rates from before it opened */
+            snprintf(line + strlen(line) - 1, sizeof(line) - strlen(line) + 1, ", before this menu opened.");
+        help(line);                     /* step 82: what is measured, beside the plan above */
+        {
+            bool f = s->show_fps != 0;
+            if (ImGui::Checkbox("Show frame rate", &f)) {
+                s->show_fps = f;
+                r |= OVL_CHANGED;
+            }
+            more("In the picture's top left corner while this menu is closed: the game's updates a second (59.94 "
+                 "is its full speed; under it the game itself runs slow) and the frames shown a second (with a "
+                 "frame rate above Game (60), the game's frames and those drawn in between). Applied at once.");
+        }
         if (s->framerate) {             /* step 75 */
             static const char *const ad_names[2] = { "On", "Off" };
             int cur = s->adaptive ? 0 : 1;
