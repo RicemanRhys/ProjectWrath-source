@@ -32,6 +32,11 @@ def summ(tag):
         "4 presents": "%.2f" % m(lambda r: sum(f(r, "copy%d" % i) + f(r, "pres%d" % i) + f(r, "post%d" % i)
                                               for i in range(1, 5))),
         "pace wait": "%.2f" % m(lambda r: sum(f(r, "pace%d" % i) for i in range(1, 5))),
+        # step 78: the new work (0 / "-" for a build before it): the recorded uploads and pins before the first
+        # pass, the guest bytes copied (inside the recording), the handover
+        "step 78: prepare (uploads, pins)": "%.3f" % m(lambda r: float(r.get("prep") or 0)) if "prep" in rows[0] else "-",
+        "step 78: copies (in recording)": "%.3f" % m(lambda r: float(r.get("snap") or 0)) if "snap" in rows[0] else "-",
+        "step 78: handover": "%.3f" % m(lambda r: float(r.get("hand") or 0)) if "hand" in rows[0] else "-",
         "frame (p90)": "%.2f (%.2f), %.1f fps" % (statistics.mean(wall), q(wall, .9), 1000 / statistics.mean(wall)),
         "busy (p90)": "%.2f (%.2f)" % (statistics.mean(busy), q(busy, .9)),
     }
