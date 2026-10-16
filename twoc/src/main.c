@@ -44,6 +44,7 @@
 #include "settings.h"
 #include "pads.h"
 #include "saves.h"
+#include "gamefiles.h"
 
 /*
  * If xboxrecomp.h is not an umbrella header in your setup, include
@@ -353,11 +354,15 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance,
     SymInitialize(GetCurrentProcess(), NULL, TRUE);
     AddVectoredExceptionHandler(1, veh_handler);
 
+    /* Step 83 (notes 18.86): default.xbe and Crashdat against the disc's,
+     * saying what is wrong and how to fix it (gamefiles.c). */
+    if (!twoc_game_files_check())
+        return 1;
+
     /* Step 1: Load XBE */
     if (!load_xbe(YOUR_GAME_XBE_PATH, &xbe_data, &xbe_size)) {
-        MessageBoxA(NULL, "Failed to load default.xbe.\n"
-                    "Place the game files in the 'game' subdirectory.",
-                    "Recomp", MB_ICONERROR);
+        MessageBoxA(NULL, "Failed to read game_files\\default.xbe (the log says why).",
+                    "Crash TWOC", MB_ICONERROR);
         return 1;
     }
     printf("XBE loaded: %zu bytes\n", xbe_size);

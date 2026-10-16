@@ -93,8 +93,9 @@ set(GAME_SOURCES
     src/host_audio.cpp
     # Anti-aliasing: FXAA and SMAA at the present (notes 18.61)
     src/aa.c
-    # The save's backups (notes 18.86)
+    # The save's backups and the game files' check at the start (notes 18.86)
     src/saves.c
+    src/gamefiles.c
     third_party/imgui/imgui.cpp
     third_party/imgui/imgui_draw.cpp
     third_party/imgui/imgui_tables.cpp
@@ -149,6 +150,8 @@ target_link_libraries(${PROJECT_NAME} PRIVATE
     dxguid
     xinput
     winmm
+    # SHA-256 of default.xbe in the game files' check (gamefiles.c)
+    bcrypt
     # Lets the fault handler resolve the host RIP back to the generated
     # function's symbol, i.e. to the guest function that faulted.
     dbghelp
