@@ -376,6 +376,7 @@ static unsigned g_rp_n[2];              /* step 74: those passes */
 static volatile LONG g_iadapt = 1;      /* step 74: 0 always the display's count; step 75: the setting (RECOMP_FRAMERATE_ADAPTIVE), live */
 static LONG g_iadapt_seen = 1;          /* step 75: g_iadapt as ia_frame last applied it */
 static unsigned g_ifixed;               /* step 74: RECOMP_D3D_BRIDGE_INTERP_FIXED=K, always K sub-frames (a measurement aid) */
+static double g_burn_ms, g_burn_j;      /* step 82: RECOMP_DEV_GAME_BURN_MS=N[,J], N (+-J) ms spun on the game side each Swap (a test aid) */
 /* Step 77: the frame-rate plan (fp_plan, notes 18.80). While it paces, game
  * frames are laid on a clock of slots: the display's refreshes under vsync,
  * or the frame limiter's ticks. A game frame spans `span` slots (2.4024 at
@@ -923,6 +924,15 @@ int d3dh_create(unsigned width, unsigned height, unsigned host_w, unsigned host_
         e = getenv("RECOMP_D3D_BRIDGE_INTERP_FIXED");      /* step 74: K sub-frames whatever the cost */
         if (e && *e)
             g_ifixed = (unsigned)atoi(e);
+        e = getenv("RECOMP_DEV_GAME_BURN_MS");    /* step 82: a slower game side, to show adaptive leaves it */
+        if (e && *e && atof(e) > 0) {
+            const char *j = strchr(e, ',');
+            g_burn_ms = atof(e);
+            g_burn_j = j ? fabs(atof(j + 1)) : 0;
+            g_burn_j = g_burn_j > g_burn_ms ? g_burn_ms : g_burn_j;
+            fprintf(stderr, "[D3DB] test aid: %.2f ms (+-%.2f) spun on the game side at each Swap"
+                    " (RECOMP_DEV_GAME_BURN_MS)\n", g_burn_ms, g_burn_j);
+        }
         if (!g_iadapt || g_ifixed)
             fprintf(stderr, "[D3DB] host interpolation: sub-frames not adaptive: %s\n",
                     g_ifixed ? "a fixed count (RECOMP_D3D_BRIDGE_INTERP_FIXED)" : "always the display's count"
@@ -3994,6 +4004,7 @@ static struct {
     ia_sum_t u;                         /* the up stretch */
     LONGLONG changed, rose;             /* QPC: the last change, the last rise (0: none) */
     double hold;                        /* seconds at a count before a rise */
+    double fps;                         /* step 82: the step's rate now, under its plan (for the restart's line) */
 } g_ia;
 static int g_ia_thr;                    /* step 79: measured on the render thread */
 
@@ -4065,6 +4076,7 @@ static void ia_change(unsigned k, LONGLONG q, unsigned swap_no, const char *why)
     if (k < g_ia.k)
         g_ia.rose = q;
     g_ia.k = k;
+    g_ia.fps = fp_step_fps(k);
     g_ia.changed = q;
     g_ia.settle = IA_SETTLE;
     memset(&g_ia.w, 0, sizeof(g_ia.w));
@@ -4143,12 +4155,16 @@ static void ia_frame(const fslot_t *f)
     }
     if (g_fp.gen != g_ia.gen) {         /* started, or another plan (display rate, setting) */
         double cp[2] = { g_ia.c_pass[0], g_ia.c_pass[1] }, cr = g_ia.c_pair;
+        if (g_ia.gen)                   /* step 82: a restart, logged (it was silent) */
+            fprintf(stderr, "[D3DB] host interpolation: a new frame-rate plan from guest swap %u: the adaptive rate"
+                    " starts again at %.2f fps (was %.2f)\n", swap_no, fp_step_fps(0), g_ia.fps);
         memset(&g_ia, 0, sizeof(g_ia));
         g_ia.c_pass[0] = cp[0];
         g_ia.c_pass[1] = cp[1];
         g_ia.c_pair = cr;
         g_ia.gen = g_fp.gen;
         g_ia.k = 0;
+        g_ia.fps = fp_step_fps(0);
         g_ia.t_ms = 1000.0 * g_fp.span / g_fp.slot_hz;
         g_ia.hold = IA_HOLD0;
         g_ia.last = q.QuadPart;
@@ -4199,9 +4215,14 @@ static void ia_frame(const fslot_t *f)
         double mdt = g_ia.w.dt / g_ia.w.n, mb = g_ia.w.busy / g_ia.w.n, mc = g_ia.w.cmds / g_ia.w.n;
         kn = ia_next(cur, 0, &g_ia.w, mc);
         /* the work dropped saves at least half the overrun (step 79: of the larger side's: none when the
-         * game side is the slower, whose time no sub-frame count changes) */
+         * game side is the slower, whose time no sub-frame count changes; step 82: the larger of the two
+         * means before against after, both from ia_busy: mb, the mean of each frame's larger side, is
+         * never below the larger mean, so noise passed for a saving) */
+        double save = g_ia_thr ? ia_busy(&g_ia.w, 0) - ia_busy(&g_ia.w, ia_cost(cur, kn, mc)) : -ia_cost(cur, kn, mc);
+        if (g_ia_thr && g_ia.w.game >= g_ia.w.replay)
+            save = 0;                   /* the game side the slower: nothing to save */
         if (kn != cur && mdt > g_ia.t_ms * IA_LATE && 2 * g_ia.wi >= g_ia.w.n && mb > g_ia.t_ms * IA_BUSY &&
-            (g_ia_thr ? mb - ia_busy(&g_ia.w, ia_cost(cur, kn, mc)) : -ia_cost(cur, kn, mc)) >= 0.5 * (mdt - g_ia.t_ms)) {
+            save >= 0.5 * (mdt - g_ia.t_ms)) {
             int failed = g_ia.rose && g_ia.rose == g_ia.changed && since < IA_FAIL;
             if (failed)
                 g_ia.hold = g_ia.hold * 2 > IA_HOLD_MAX ? IA_HOLD_MAX : g_ia.hold * 2;
@@ -8365,6 +8386,19 @@ void d3dh_present(double t_s, unsigned swap_no)
 
     if (!g_ready)
         return;
+    if (g_burn_ms > 0) {                /* step 82: the test aid, inside the game side's time (g_game_t0 to slot_fill) */
+        static uint32_t rnd = 1;
+        LARGE_INTEGER b0, b;
+        double ms = g_burn_ms;
+        if (g_burn_j > 0) {
+            rnd = rnd * 1664525u + 1013904223u;
+            ms += g_burn_j * ((double)(rnd >> 8) / 8388608.0 - 1.0);
+        }
+        QueryPerformanceCounter(&b0);
+        do
+            QueryPerformanceCounter(&b);
+        while ((double)(b.QuadPart - b0.QuadPart) * 1000.0 / (double)g_qpf.QuadPart < ms);
+    }
     if (g_thr) {                        /* step 79: the render thread replays it */
         present_thread(t_s, swap_no);
         QueryPerformanceCounter(&g_game_t0);
