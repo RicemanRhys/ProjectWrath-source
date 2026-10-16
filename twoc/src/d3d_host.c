@@ -7397,7 +7397,8 @@ static void counter_draw(ID3D11Texture2D *dst)
         return;
     ovl_rates_text(g_meas.ok, g_meas.game, g_meas.shown, 1, lines, sizeof(lines));
     if (SUCCEEDED(ID3D11Device_CreateRenderTargetView(d3d8_GetD3D11Device(), (ID3D11Resource *)dst, NULL, &rtv))) {
-        ovl_counter(rtv, g_buf_w, g_buf_h, overlay_scale() * 0.8f, lines);
+        /* sized by the picture, not the desktop's DPI: 22 px text at 800 lines */
+        ovl_counter(rtv, g_buf_w, g_buf_h, g_buf_h > 490 ? (float)g_buf_h / 650.0f : 0.75f, lines);
         ID3D11RenderTargetView_Release(rtv);
     }
 }

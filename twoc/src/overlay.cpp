@@ -577,11 +577,14 @@ extern "C" void ovl_counter(ID3D11RenderTargetView *rtv, unsigned w, unsigned h,
     ImGui::NewFrame();
     ImGui::SetNextWindowPos(ImVec2(io.DisplaySize.x * 0.01f, io.DisplaySize.y * 0.01f), ImGuiCond_Always);
     ImGui::SetNextWindowBgAlpha(0.55f);
+    ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding, ImVec2(8.0f * scale, 5.0f * scale));    /* a small box */
+    ImGui::PushStyleVar(ImGuiStyleVar_ItemSpacing, ImVec2(4.0f * scale, 2.0f * scale));
     ImGui::Begin("##fps", NULL, ImGuiWindowFlags_NoDecoration | ImGuiWindowFlags_NoInputs |
                                     ImGuiWindowFlags_AlwaysAutoResize | ImGuiWindowFlags_NoNav |
                                     ImGuiWindowFlags_NoFocusOnAppearing | ImGuiWindowFlags_NoSavedSettings);
     ImGui::TextUnformatted(lines);
     ImGui::End();
+    ImGui::PopStyleVar(2);
     ImGui::Render();
     {
         ID3D11Device *dev = NULL;
