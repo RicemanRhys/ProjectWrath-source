@@ -43,6 +43,7 @@
 
 #include "settings.h"
 #include "pads.h"
+#include "saves.h"
 
 /*
  * If xboxrecomp.h is not an umbrella header in your setup, include
@@ -506,6 +507,11 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance,
         extern void twoc_apu_irq_init(void);
         twoc_apu_irq_init();
     }
+
+    /* Step 83 (notes 18.86): the save's backups. A restore asked for in the
+     * last run and this start's backup, before the game opens its save
+     * folder; then a worker thread backs up after each save (saves.c). */
+    saves_startup();
 
     /* Step 7: Call the recompiled entry point */
     printf("\nStarting game...\n");

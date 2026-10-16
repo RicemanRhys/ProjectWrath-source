@@ -31,6 +31,7 @@
 
 #include "overlay.h"
 #include "pads.h"
+#include "saves.h"
 
 /* xboxrecomp apu.h: the output's channels (2 or 6) and the device's */
 extern "C" int mcpx_apu_output_channels(int *device_channels);
@@ -52,6 +53,8 @@ static int g_cap, g_cap_idx, g_cap_slot;
 static unsigned g_pad_mask, g_pad_last;
 static int g_pad_fresh = 1;
 static int g_tab_cur, g_tab_want = -1;
+#define N_TABS 4                        /* Display, Audio, Controls, Saves (step 83) */
+static int g_sv_shown;                  /* step 83: the Saves tab shown since the overlay opened */
 
 static void capture_end(void)
 {
@@ -104,9 +107,9 @@ static int pad_nav(const ovl_info_t *in)
             r |= OVL_CLOSE;
     }
     if (press & OVL_PAD_LB)
-        g_tab_want = (g_tab_cur + 2) % 3;
+        g_tab_want = (g_tab_cur + N_TABS - 1) % N_TABS;
     if (press & OVL_PAD_RB)
-        g_tab_want = (g_tab_cur + 1) % 3;
+        g_tab_want = (g_tab_cur + 1) % N_TABS;
     return r;
 }
 
@@ -195,6 +198,7 @@ extern "C" void ovl_opened(void)
     EnterCriticalSection(&g_cs);
     g_cap = CAP_NONE;
     g_pad_fresh = 1;                    /* step 82: buttons held now (the chord's) count once let go */
+    g_sv_shown = 0;                     /* step 83: the backups listed again */
     if (g_ready) {
         ImGui::GetIO().ClearInputKeys();
         ImGui::GetIO().ClearInputMouse();
@@ -944,6 +948,107 @@ static int tab_audio(twoc_settings_t *s)
     return r;
 }
 
+/* Step 83: the save's backups (saves.c). The list is saves.c's, read again
+ * on disk each time the tab opens. */
+static char g_sv_sel[32];
+
+static void tab_saves(void)
+{
+    static saves_entry_t list[64];
+    saves_state_t st;
+    int n, i, sel = -1;
+    float fs = ImGui::GetFontSize();
+    char lbl[96];
+
+    if (!g_sv_shown) {                  /* the tab just opened */
+        saves_refresh();
+        g_sv_shown = 1;
+    }
+    saves_state(&st);
+    n = saves_list(list, (int)(sizeof(list) / sizeof(list[0])));
+    for (i = 0; i < n; i++)
+        if (strcmp(list[i].name, g_sv_sel) == 0)
+            sel = i;
+    if (sel < 0 && n) {                 /* nothing chosen (or it went): the newest */
+        sel = 0;
+        snprintf(g_sv_sel, sizeof(g_sv_sel), "%s", list[0].name);
+    }
+
+    ImGui::SeparatorText("Save backups");
+    if (!st.on) {
+        help("Backups are off for this run (RECOMP_SAVE_BACKUPS=0, or the backups folder couldn't be used: the "
+             "log says why).");
+        return;
+    }
+    help("Copies of the game's save are taken at each start and a few seconds after the game saves, when "
+         "something changed. The newest 10 are kept, and the newest of each day for 14 days.");
+    more(st.dir);
+
+    /* No scrolling: a scrolling table is a window of its own, which the
+     * controller's navigation passes over. There are at most about 24 rows
+     * (the newest 10, then one a day for 14 days), and the panel shrinks to
+     * fit the picture. */
+    if (!n)
+        help("No backups yet: the game has no save (save at the hub's Load/Save console), or none was taken.");
+    else if (ImGui::BeginTable("##saves", 4, ImGuiTableFlags_RowBg | ImGuiTableFlags_SizingFixedFit)) {
+        ImGui::TableSetupColumn("Date", ImGuiTableColumnFlags_WidthFixed, fs * 6.2f);
+        ImGui::TableSetupColumn("Time", ImGuiTableColumnFlags_WidthFixed, fs * 4.4f);
+        ImGui::TableSetupColumn("Size", ImGuiTableColumnFlags_WidthFixed, fs * 4.4f);
+        ImGui::TableSetupColumn("Taken", ImGuiTableColumnFlags_WidthStretch);
+        ImGui::TableHeadersRow();
+        for (i = 0; i < n; i++) {
+            const saves_entry_t *e = &list[i];
+            ImGui::TableNextRow();
+            ImGui::TableNextColumn();
+            snprintf(lbl, sizeof(lbl), "%.10s##sv%d", e->when, i);
+            if (ImGui::Selectable(lbl, i == sel, ImGuiSelectableFlags_SpanAllColumns)) {
+                sel = i;
+                snprintf(g_sv_sel, sizeof(g_sv_sel), "%s", e->name);
+            }
+            ImGui::TableNextColumn();
+            ImGui::TextUnformatted(e->when + 11);
+            ImGui::TableNextColumn();
+            if (e->size)
+                ImGui::Text("%.1f KB", e->size / 1024.0);
+            else
+                ImGui::TextDisabled("no save");
+            ImGui::TableNextColumn();
+            if (strcmp(e->name, st.pending) == 0)
+                ImGui::TextColored(ImVec4(1.0f, 0.8f, 0.3f, 1.0f), "%s; restored at the next start", e->why);
+            else
+                ImGui::TextUnformatted(e->why);
+        }
+        ImGui::EndTable();
+    }
+
+    ImGui::BeginDisabled(st.busy != 0);
+    if (ImGui::Button("Back up now"))
+        saves_backup_now();
+    more("Copies the save as it is now (when it differs from the newest backup).");
+    ImGui::SameLine();
+    ImGui::BeginDisabled(sel < 0 || !list[sel >= 0 ? sel : 0].size);
+    if (ImGui::Button("Restore this one") && sel >= 0)
+        saves_restore_at_next_start(list[sel].name);
+    ImGui::EndDisabled();
+    more("The game has its save loaded while it runs, so the chosen backup replaces the save at the next start: "
+         "quit and start the game again, then load the game at the Load/Save console. The save in use now is "
+         "backed up first and kept.");
+    ImGui::SameLine();
+    if (ImGui::Button("Open backups folder"))
+        saves_open_folder();
+    ImGui::EndDisabled();
+
+    if (st.pending[0]) {
+        snprintf(lbl, sizeof(lbl), "At the next start the save becomes the backup of %.10s %.2s:%.2s:%.2s.",
+                 st.pending, st.pending + 11, st.pending + 14, st.pending + 17);
+        ImGui::TextColored(ImVec4(1.0f, 0.8f, 0.3f, 1.0f), "%s", lbl);
+        if (ImGui::Button("Cancel the restore"))
+            saves_cancel_restore();
+    }
+    if (st.status[0])
+        help(st.status);
+}
+
 static int build(twoc_settings_t *s, const ovl_info_t *in, float room)
 {
     int r = 0;
@@ -976,6 +1081,12 @@ static int build(twoc_settings_t *s, const ovl_info_t *in, float room)
             r |= tab_controls(s, room);
             ImGui::EndTabItem();
         }
+        if (ImGui::BeginTabItem("Saves", NULL, TAB_FLAGS(3))) {     /* step 83 */
+            g_tab_cur = 3;
+            tab_saves();
+            ImGui::EndTabItem();
+        } else
+            g_sv_shown = 0;
 #undef TAB_FLAGS
         g_tab_want = -1;
         ImGui::EndTabBar();

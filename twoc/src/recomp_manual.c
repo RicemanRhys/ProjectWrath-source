@@ -39,6 +39,7 @@
 #include "log_block.h"
 #include "controls.h"     /* step 57: the controller map and the keyboard */
 #include "pads.h"         /* step 70: every other pad, through SDL */
+#include "saves.h"        /* step 83: the save's backups */
 
 /* ── ICALL trace ring buffer ───────────────────────────────── */
 
@@ -2207,6 +2208,66 @@ static void hal_HalReturnToFirmware(void)
     coop_kernel_call();
 }
 
+/* ── Step 83: the game's save files, for their backups ─────── */
+
+/*
+ * saves.c copies the save a few seconds after the game closes a save file it
+ * wrote, and never while the game has one open. These taps tell it: each
+ * open in a save folder (UDATA\56550003\<save>\..., the path as the game
+ * passes it) and the close of a handle one returned. The calls themselves
+ * go to the kernel as before; a path elsewhere costs a string search.
+ */
+#define SV_NTCREATE_THUNK     0x0015AB34u      /* [thunk] = NtCreateFile (ordinal 190) */
+#define SV_NTOPEN_THUNK       0x0015AAE8u      /* [thunk] = NtOpenFile (ordinal 202) */
+#define SV_NTCLOSE_THUNK      0x0015AAB0u      /* [thunk] = NtClose (ordinal 187) */
+
+/* OBJECT_ATTRIBUTES { HANDLE RootDirectory; PSTRING ObjectName; ULONG Attributes }
+ * and STRING { USHORT Length, MaximumLength; PCHAR Buffer } */
+static int sv_open_begin(uint32_t oa, uint32_t access, uint32_t share, uint32_t disposition, uint32_t options)
+{
+    uint32_t name = oa ? MEM32(oa + 4) : 0;
+    uint32_t buf = name ? MEM32(name + 4) : 0;
+    return buf ? saves_guest_open_begin((const char *)XBOX_PTR(buf), MEM16(name), access, share, disposition, options)
+               : 0;
+}
+
+/* NTSTATUS NtCreateFile(PHANDLE, ACCESS_MASK, POBJECT_ATTRIBUTES, PIO_STATUS_BLOCK,
+ *                       PLARGE_INTEGER, ULONG FileAttributes, ULONG ShareAccess,
+ *                       ULONG CreateDisposition, ULONG CreateOptions); ret 36 */
+static void sv_NtCreateFile(void)
+{
+    uint32_t handle_va = MEM32(esp + 4);
+    int t = sv_open_begin(MEM32(esp + 12), MEM32(esp + 8), MEM32(esp + 28), MEM32(esp + 32), MEM32(esp + 36));
+
+    t_coop_kernel_va = MEM32(SV_NTCREATE_THUNK);
+    coop_kernel_call();
+    if (t)
+        saves_guest_open_end(t, eax == 0, handle_va ? MEM32(handle_va) : 0);
+}
+
+/* NTSTATUS NtOpenFile(PHANDLE, ACCESS_MASK, POBJECT_ATTRIBUTES, PIO_STATUS_BLOCK,
+ *                     ULONG ShareAccess, ULONG OpenOptions); ret 24 */
+static void sv_NtOpenFile(void)
+{
+    uint32_t handle_va = MEM32(esp + 4);
+    int t = sv_open_begin(MEM32(esp + 12), MEM32(esp + 8), MEM32(esp + 20), 1 /* FILE_OPEN */, MEM32(esp + 24));
+
+    t_coop_kernel_va = MEM32(SV_NTOPEN_THUNK);
+    coop_kernel_call();
+    if (t)
+        saves_guest_open_end(t, eax == 0, handle_va ? MEM32(handle_va) : 0);
+}
+
+/* NTSTATUS NtClose(HANDLE); ret 4 */
+static void sv_NtClose(void)
+{
+    int t = saves_guest_tracking() ? saves_guest_close_begin(MEM32(esp + 4)) : 0;
+
+    t_coop_kernel_va = MEM32(SV_NTCLOSE_THUNK);
+    coop_kernel_call();
+    saves_guest_close_end(t);
+}
+
 recomp_func_t recomp_lookup_manual(uint32_t xbox_va)
 {
     /* Guest kernel calls: cooperative suspension, see above. */
@@ -2226,6 +2287,9 @@ recomp_func_t recomp_lookup_manual(uint32_t xbox_va)
         if (xbox_va == MEM32(POOL_FREE_THUNK))      return pool_ExFreePool;
         if (xbox_va == MEM32(POOL_QSIZE_THUNK))     return pool_ExQueryPoolBlockSize;
         if (xbox_va == MEM32(HAL_RETURN_THUNK))     return hal_HalReturnToFirmware;
+        if (xbox_va == MEM32(SV_NTCREATE_THUNK))    return sv_NtCreateFile;
+        if (xbox_va == MEM32(SV_NTOPEN_THUNK))      return sv_NtOpenFile;
+        if (xbox_va == MEM32(SV_NTCLOSE_THUNK))     return sv_NtClose;
         if (recomp_lookup_kernel(xbox_va)) {
             t_coop_kernel_va = xbox_va;
             return coop_kernel_call;
