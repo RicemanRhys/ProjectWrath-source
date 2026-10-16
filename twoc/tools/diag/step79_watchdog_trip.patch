@@ -1,0 +1,29 @@
+diff --git a/twoc/src/d3d_host.c b/twoc/src/d3d_host.c
+index 5555ba9..f8e26f6 100644
+--- a/twoc/src/d3d_host.c
++++ b/twoc/src/d3d_host.c
+@@ -2701,6 +2701,13 @@ static void replay_pass(int interp)
+     unsigned i;
+ 
+     REPLAY_SIDE();
++    if (getenv("TMP_RT_STALL_PASS") && g_ps->swap_no == (unsigned)atoi(getenv("TMP_RT_STALL_PASS"))) {
++        static int once;
++        if (!once++) {
++            fprintf(stderr, "[TMP] render thread: stalling 7 s in a pass of guest swap %u\n", g_ps->swap_no);
++            Sleep(7000);
++        }
++    }
+     QueryPerformanceCounter(&t0);
+     for (i = 0; i < g_ps->rc_n; i++) {
+         const rcmd_t *c = &g_ps->rc[i];
+@@ -8175,6 +8182,10 @@ static DWORD WINAPI rt_main(LPVOID p)
+         QueryPerformanceCounter(&g_rt_take);
+         wd_rt(WD_R_TAKE, f->swap_no);
+         g_st.rt_frames++;
++        if (getenv("TMP_RT_STALL") && f->swap_no == (unsigned)atoi(getenv("TMP_RT_STALL"))) {
++            fprintf(stderr, "[TMP] render thread: stalling 7 s after taking guest swap %u\n", f->swap_no);
++            Sleep(7000);
++        }
+         if (!g_ready) {                 /* the swap chain couldn't be made again (recreate_flip): dropped */
+             EnterCriticalSection(&g_lock);
+             g_ps = f;

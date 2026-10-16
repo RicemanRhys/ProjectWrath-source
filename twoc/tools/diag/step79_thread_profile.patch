@@ -1,0 +1,69 @@
+diff --git a/twoc/src/d3d_host.c b/twoc/src/d3d_host.c
+index 5555ba9..6fec3af 100644
+--- a/twoc/src/d3d_host.c
++++ b/twoc/src/d3d_host.c
+@@ -1493,6 +1493,7 @@ typedef struct {
+     int hold;                           /* the overlay holds the game at this frame (the game waits in its Swap) */
+     twoc_settings_t set;                /* the game side's settings it was recorded under (set_gen), for the */
+     unsigned set_copy;                  /* host side's part: applied before it is replayed; the gen copied */
++    double wait_prev;                   /* TPROF: the game's wait in its Swap before it recorded this frame */
+ } fslot_t;
+ #define FSLOTS 2
+ static fslot_t g_slot[FSLOTS];
+@@ -4096,6 +4097,21 @@ static void ia_mark(void)
+ 
+ /* At each present while interpolating (and once after): the frame before
+  * measured, and the count for this one chosen. Called with g_lock held. */
++double g_tp_wait;                       /* TPROF */
++static FILE *g_tpf;
++static int g_tp_init;
++
++static FILE *tp_file(void)
++{
++    if (!g_tp_init) {
++        const char *e = getenv("RECOMP_D3D_BRIDGE_TPROF");
++        g_tp_init = 1;
++        if (e && *e && (g_tpf = fopen(e, "w")) != NULL)
++            fprintf(g_tpf, "swap,thread,presents,dt,busy,game,replay,pace,wait,step\n");
++    }
++    return g_tpf;
++}
++
+ static void ia_frame(const fslot_t *f)
+ {
+     LARGE_INTEGER q;
+@@ -4119,6 +4135,12 @@ static void ia_frame(const fslot_t *f)
+     busy = dt - g_ia.pace_ms;
+     if (t_rt)
+         busy = game_ms > replay_ms ? game_ms : replay_ms;
++    if (tp_file()) {
++        fprintf(g_tpf, "%u,%d,%u,%.3f,%.3f,%.3f,%.3f,%.3f,%.3f,%u\n", swap_no, t_rt, g_ia.kused, dt, busy, game_ms,
++                replay_ms, g_ia.pace_ms, f->wait_prev, g_ia.k);
++        if ((swap_no & 63) == 0)
++            fflush(g_tpf);
++    }
+     g_ia.rp0 = t_rt ? g_rt_take.QuadPart : q.QuadPart;
+     for (i = 0; i < 2; i++) {           /* ms a command, plain and interpolated passes */
+         unsigned n = g_rp_n[i] - g_ia.rp_n0[i];
+@@ -5530,6 +5552,10 @@ static void slot_fill(fslot_t *f, double t_s, unsigned swap_no)
+     f->game_ms = g_game_t0.QuadPart ? (double)(q.QuadPart - g_game_t0.QuadPart) * 1000.0 / (double)g_qpf.QuadPart : 0;
+     f->set_gen = g_sq.side[0].gen;
+     f->hold = 0;
++    {
++        extern double g_tp_wait;
++        f->wait_prev = g_thr ? g_tp_wait : 0;
++    }
+     if (g_thr) {
+         if (f->set_gen && f->set_copy != f->set_gen) {
+             AcquireSRWLockShared(&g_sq.lock);
+@@ -8338,6 +8364,10 @@ static void present_thread(double t_s, unsigned swap_no)
+     wd_set(0, WD_G_RUN, 0);
+     QueryPerformanceCounter(&w1);
+     g_stg.rt_wait_ms += (double)(w1.QuadPart - w0.QuadPart) * 1000.0 / (double)g_qpf.QuadPart;
++    {
++        extern double g_tp_wait;
++        g_tp_wait = (double)(w1.QuadPart - w0.QuadPart) * 1000.0 / (double)g_qpf.QuadPart;
++    }
+     AcquireSRWLockExclusive(&g_pool_lock);  /* the command array the last replay gave back */
+     {
+         rcmd_t *rc = next->rc;
