@@ -7846,9 +7846,12 @@ static int replay_frame(fslot_t *f)
                 LeaveCriticalSection(&g_lock);
             }
             /* step 77: a present held 3 refreshes or more (80 fps at 240 Hz) is held to mid-refresh too:
-             * sent the moment the queue had room, 13% were shown 2 or 4 refreshes after the one before */
+             * sent the moment the queue had room, 13% were shown 2 or 4 refreshes after the one before.
+             * Step 79: and every present on the render thread: its queue stays full (no game work pauses
+             * the presents now), so each went out just after a vblank, where DWM wavers (18.48): 1.6-2.0%
+             * shown off their gap upstairs in a 1280x720 window, 0.0-0.1% held, at no cost */
             ovl_r |= present_slots(t_s, swap_no, fr.slots[sub - 1], sub, fr.n,
-                                   fr.n == 1 || g_imid || (!g_fp.limiter && fr.slots[sub - 1] >= 3));
+                                   fr.n == 1 || g_imid || t_rt || (!g_fp.limiter && fr.slots[sub - 1] >= 3));
             g_st.interp_subs++;
         }
     } else {
