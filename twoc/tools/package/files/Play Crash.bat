@@ -33,6 +33,8 @@ if defined RECOMP_FRAMERATE echo Frame rate for this run: %RECOMP_FRAMERATE%
 rem By its full path: cmd doesn't look in the current folder when NoDefaultCurrentDirectoryInExePath is set.
 "%~dp0crash_twoc.exe" >run_twoc.out.log 2>run_twoc.err.log
 set code=%errorlevel%
+rem The log's last line: the exit code and when the process was gone (none: it never finished exiting).
+>>run_twoc.err.log echo [BAT] crash_twoc.exe ended with code %code% at %date% %time%
 if not "%code%"=="0" (
     echo.
     echo The game ended with code %code%. Its log is run_twoc.err.log in this folder;

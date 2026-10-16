@@ -9,10 +9,58 @@ $work  = Join-Path $env:TEMP "twoc_logs_$stamp"
 $zip   = Join-Path $pkg "LegionGo_logs_$stamp.zip"
 New-Item -ItemType Directory -Force -Path $work | Out-Null
 
-if (Get-Process crash_twoc -ErrorAction SilentlyContinue) {
-    Write-Host "Crash is still running. Close the game first (its log is only complete once it has ended),"
-    Write-Host "then run Collect logs again."
-    exit 1
+$sys = New-Object System.Collections.Generic.List[string]
+function Add([string]$s) { $sys.Add($s) }
+function Section([string]$s) { $sys.Add(''); $sys.Add("== $s ==") }
+Add "Collected $(Get-Date -Format 'yyyy-MM-dd HH:mm:ss zzz') on $env:COMPUTERNAME, package folder $pkg"
+
+# 0. The game's process. Closing its window ends it at once (TerminateProcess), and the log's last
+#    line then says "host window closed: ending the process". On the Legion Go (notes 18.84) a
+#    crash_twoc process was still listed after that, until Windows restarted, and this script
+#    refused to collect. So: a process left over from a run whose log has ended is described in
+#    system.txt and ended; one whose log hasn't ended is the game running (or stuck), ended only
+#    if the tester says so.
+$game = @(Get-Process crash_twoc -ErrorAction SilentlyContinue)
+if ($game.Count) {
+    $err = Join-Path $pkg 'run_twoc.err.log'
+    $last = if (Test-Path -LiteralPath $err) { "$(Get-Content -LiteralPath $err -Tail 1)" } else { '' }
+    $ended = $last -like '*ending the process*' -or $last -like '`[BAT`]*'
+    Section 'The game process at collection'
+    Add "run_twoc.err.log's last line: $last"
+    foreach ($p in $game) {
+        $l = "crash_twoc pid $($p.Id)"
+        try { $l += ", started $($p.StartTime.ToString('yyyy-MM-dd HH:mm:ss'))" } catch {}
+        try { $l += (", CPU {0:N1} s, {1:N0} MB, {2} handles" -f $p.CPU, ($p.WorkingSet64 / 1MB), $p.HandleCount) } catch {}
+        try { $l += ", window '$($p.MainWindowTitle)', responding $($p.Responding)" } catch {}
+        Add $l
+        try {
+            $states = $p.Threads | ForEach-Object {
+                $w = ''
+                try { if ("$($_.ThreadState)" -eq 'Wait') { $w = " ($($_.WaitReason))" } } catch {}
+                "$($_.ThreadState)$w"
+            }
+            Add ("  {0} threads: {1}" -f @($p.Threads).Count, (($states | Group-Object | ForEach-Object { "$($_.Count) $($_.Name)" }) -join ', '))
+        } catch { Add "  threads: $_" }
+    }
+    if ($ended) {
+        Write-Host "The game's log is complete, but a crash_twoc process is still there (it didn't finish"
+        Write-Host "exiting). Ending it; system.txt notes what was left."
+    } else {
+        Write-Host "Crash is still running (or stuck). Close the game window first, then run Collect logs again."
+        Write-Host "If it won't close: type Y and press Enter to end it and collect anyway."
+        $a = if ($env:TWOC_COLLECT_QUIET -eq '1') { '' } else { Read-Host 'End it? (Y/N)' }
+        if ($a -notmatch '^[Yy]') { Remove-Item -Recurse -Force $work; exit 1 }
+        Add 'the tester chose to end it'
+    }
+    $game | Stop-Process -Force -ErrorAction SilentlyContinue
+    $t0 = Get-Date
+    while (((Get-Date) - $t0).TotalSeconds -lt 10 -and (Get-Process -Id $game.Id -ErrorAction SilentlyContinue)) { Start-Sleep -Milliseconds 250 }
+    if (Get-Process -Id $game.Id -ErrorAction SilentlyContinue) {
+        Add 'Stop-Process: still listed 10 s later (stuck in Windows; a restart clears it)'
+        Write-Host "It is still there 10 s later; a restart clears it. Collecting anyway."
+    } else {
+        Add ("Stop-Process: gone after {0:N1} s" -f ((Get-Date) - $t0).TotalSeconds)
+    }
 }
 
 Write-Host "Collecting into $zip ..."
@@ -26,11 +74,7 @@ if (Test-Path (Join-Path $pkg 'logs')) {
     Copy-Item -Recurse -Path (Join-Path $pkg 'logs') -Destination (Join-Path $work 'logs')
 }
 
-# 2. A system summary.
-$sys = New-Object System.Collections.Generic.List[string]
-function Add([string]$s) { $sys.Add($s) }
-function Section([string]$s) { $sys.Add(''); $sys.Add("== $s ==") }
-Add "Collected $(Get-Date -Format 'yyyy-MM-dd HH:mm:ss zzz') on $env:COMPUTERNAME, package folder $pkg"
+# 2. A system summary (after section 0's notes on the game process, if any).
 try {
     $cs = Get-CimInstance Win32_ComputerSystem
     $bios = Get-CimInstance Win32_BIOS

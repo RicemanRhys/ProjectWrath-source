@@ -71,7 +71,10 @@ B. Start the game
       Adaptive frame rate . leave On
       Render thread ....... Auto / On / Off; the line under it says whether it is on
     Changes apply at once and are saved to crash_twoc.ini when you close the menu (Esc).
-5.  To stop: close the game window (or Alt+F4).
+5.  To stop: close the game window (or Alt+F4). The black console window should close with
+    it within a second or two. If it stays open (still saying "Crash is running"), the
+    game's process didn't finish exiting: note that in Test notes.txt, with whether
+    Task Manager > Details still lists crash_twoc.exe. "Collect logs.bat" ends it.
 
 
 C. The tests
@@ -80,7 +83,10 @@ For each test: get to the place, stand still for 30 seconds, then play normally 
 minute or two (run, turn the camera, jump). Then open Esc > Display and note the "Now:"
 line. Write down in "Test notes.txt":
   - the fps line (for example "Now: 144.00 fps" or "Now: 72.00 fps of 144.00 (fewer
-    while game frames run late)")
+    while game frames run late)"). It is the plan, not a measurement.
+  - Legion Space's FPS counter, if you use it: it counts frames shown. At 144 Hz each game
+    frame is shown 2.4 times, so the counter divided by 2.4 is the game's own speed: 144
+    is full speed (60), 100 is 42 and 80 is 33 (Crash in slow motion).
   - whether motion looks smooth, or stutters / judders (how often: every second, now and
     then, only when loading)
   - whether the game itself slows down (Crash moves in slow motion, music stays normal)
@@ -120,7 +126,9 @@ Then bring the logs back (part D).
 
 D. Bring the logs back
 ----------------------
-1.  Close the game.
+1.  Close the game. If Collect logs says Crash is still running though its window is gone,
+    it notes what is left of the process and ends it (or asks first, when the log says the
+    game hadn't ended).
 2.  Double-click "Collect logs.bat". It takes about 20 seconds; the screen turns grey
     with a moving white bar twice (that's vrrprobe testing how the display shows frames).
 3.  It makes LegionGo_logs_<date>_<time>.zip in this folder and opens Explorer on it.
