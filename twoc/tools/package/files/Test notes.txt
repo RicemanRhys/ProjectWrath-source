@@ -1,0 +1,40 @@
+Legion Go test notes (this file goes into the zip "Collect logs.bat" makes)
+==========================================================================
+
+Plugged in or battery:
+Legion Space thermal mode:
+Windows power mode:
+Screen refresh rate (Settings):
+Window or full screen:
+
+For each test: the fps line from Esc > Display ("Now: ..."), smooth or stutters (how
+often), does the game itself slow down, fan noise / warmth / CPU temperature.
+
+1. Match display
+   hub:
+   upstairs:
+   Arctic Antics:
+
+2. 144 fps
+   hub:
+   upstairs:
+   Arctic Antics:
+
+3. 72 fps ("Play Crash (72 fps test).bat")
+   hub:
+   upstairs:
+   Arctic Antics:
+
+4. 90 fps (what the line under Frame rate says):
+   hub:
+   upstairs:
+
+5. Render thread (upstairs, Match display)
+   Auto (what its line says):
+   Off:
+
+6. Full screen (Alt+Enter), Match display:
+
+7. Battery / Balanced (optional):
+
+Anything else (crashes, sound, controls, picture problems):

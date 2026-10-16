@@ -16,11 +16,13 @@
 // Default: borderless fullscreen on the primary monitor, DXGI interval 1.
 // --tear: the swap chain allows tearing and presents at interval 0 with
 // DXGI_PRESENT_ALLOW_TEARING (Microsoft's recipe for variable refresh in a
-// window). Esc ends early. Build with vrrprobe_build.bat.
+// window). Esc ends early. It also lists the display's modes (its sizes and
+// refresh rates), its rotation and scale. Build with vrrprobe_build.bat.
 #include <windows.h>
 #include <d3d11_1.h>
 #include <dxgi1_5.h>
 #include <dwmapi.h>
+#include <shellscalingapi.h>
 #include <cmath>
 #include <cstdio>
 #include <cstdlib>
@@ -33,6 +35,7 @@
 #pragma comment(lib, "user32.lib")
 #pragma comment(lib, "dwmapi.lib")
 #pragma comment(lib, "advapi32.lib")
+#pragma comment(lib, "shcore.lib")
 
 static volatile bool g_quit;
 
@@ -132,6 +135,51 @@ static void edid_print(const std::vector<unsigned char> &e)
     }
 }
 
+// The Legion Go package (twoc/tools/package): the primary monitor's current mode,
+// its rotation and scale, and every mode it offers (size and refresh), so a log
+// brought back from another PC says which rates it could have run.
+static void modes_print(void)
+{
+    MONITORINFOEXW mi = {};
+    mi.cbSize = sizeof(mi);
+    POINT o = { 0, 0 };
+    HMONITOR mon = MonitorFromPoint(o, MONITOR_DEFAULTTOPRIMARY);
+    GetMonitorInfoW(mon, &mi);
+    DEVMODEW dm = {};
+    dm.dmSize = sizeof(dm);
+    if (EnumDisplaySettingsExW(mi.szDevice, ENUM_CURRENT_SETTINGS, &dm, 0)) {
+        UINT dx = 0, dy = 0;
+        GetDpiForMonitor(mon, MDT_EFFECTIVE_DPI, &dx, &dy);
+        printf("current: %lux%lu at %lu Hz, %lu bits, rotated %lu degrees, scale %u%%\n", dm.dmPelsWidth, dm.dmPelsHeight,
+               dm.dmDisplayFrequency, dm.dmBitsPerPel, dm.dmDisplayOrientation * 90, dx * 100 / 96);
+    }
+    std::vector<std::pair<std::pair<DWORD, DWORD>, std::vector<DWORD>>> sizes;  // WxH -> rates
+    for (DWORD i = 0; EnumDisplaySettingsExW(mi.szDevice, i, &dm, 0); i++) {
+        if (dm.dmBitsPerPel != 32)
+            continue;
+        std::pair<DWORD, DWORD> wh(dm.dmPelsWidth, dm.dmPelsHeight);
+        size_t k = 0;
+        while (k < sizes.size() && sizes[k].first != wh)
+            k++;
+        if (k == sizes.size())
+            sizes.push_back({ wh, {} });
+        std::vector<DWORD> &r = sizes[k].second;
+        if (std::find(r.begin(), r.end(), dm.dmDisplayFrequency) == r.end())
+            r.push_back(dm.dmDisplayFrequency);
+    }
+    std::sort(sizes.begin(), sizes.end(), [](const auto &a, const auto &b) {
+        return a.first.first * a.first.second > b.first.first * b.first.second;
+    });
+    printf("modes (%zu sizes):\n", sizes.size());
+    for (auto &s : sizes) {
+        std::sort(s.second.begin(), s.second.end());
+        printf("  %lux%lu:", s.first.first, s.first.second);
+        for (DWORD hz : s.second)
+            printf(" %lu", hz);
+        printf(" Hz\n");
+    }
+}
+
 // NVIDIA only: what the driver says of variable refresh on the primary display
 // (NvAPI_Disp_GetVRRInfo, R525+; ids and layout from NVIDIA's MIT nvapi headers).
 static void nvapi_print(void)
@@ -194,6 +242,7 @@ int main(int argc, char **argv)
     std::vector<unsigned char> edid;
     double mode = monitor_info(edid);
     printf("mode: %.3f Hz\n", mode);
+    modes_print();
     edid_print(edid);
 
     IDXGIFactory5 *f5 = NULL;
