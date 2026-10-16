@@ -20,7 +20,8 @@ What's in the folder
   PACKAGE.txt                     which build this is
 
 The game also makes these when it runs: logs\ (earlier runs' logs), run_twoc.err.log (the
-last run's log), game_files\UDATA (saves) and game_files\TDATA, and, outside this folder,
+last run's log), game_files\UDATA (saves), game_files\UDATA_backups (copies of the save,
+part E) and game_files\TDATA, and, outside this folder,
 %LOCALAPPDATA%\xboxrecomp (the Xbox's empty hard-disk images: about 5 GB on paper, but
 "sparse" files that take only a few MB of real space).
 
@@ -164,12 +165,40 @@ D. Bring the logs back
     to Claude.
 
 
+E. Saves and their backups
+--------------------------
+The game keeps all its save slots in one file, game_files\UDATA\56550003\4D5C926D6357\
+crash.sav. The PC port copies it (with SaveMeta.xbx beside it) to
+game_files\UDATA_backups\<date>_<time>\ at every start and a few seconds after each save
+from the hub's Load/Save console, whenever it changed. It keeps the newest 10 copies and
+the newest of each day for 14 days, and deletes older ones by itself. The copying never
+holds the game up.
+In the settings menu (View + Menu, or Esc), the "Saves" tab lists the copies (date, time,
+size, and when each was taken) with three buttons:
+  Back up now ........... a copy of the save as it is now
+  Restore this one ...... the chosen copy replaces the save at the next start (the game
+                          has its save loaded while it runs). Close the game, start it
+                          again, then load at the Load/Save console. The save in use is
+                          copied first and kept in the list. "Cancel the restore" undoes it
+                          until then.
+  Open backups folder ... shows the copies in File Explorer
+If a save ever goes wrong (a slot shows the wrong progress, or the game won't load it):
+Restore a copy from before it went wrong, as above.
+To take your progress to another PC, copy game_files\UDATA (and UDATA_backups if you want
+the copies too) into the other folder's game_files\.
+
+
 If something goes wrong
 -----------------------
-- "Failed to load default.xbe": the folder was copied without game_files\, or the game
-  was started some other way than "Play Crash.bat". Use the .bat.
+- At the start, a "Crash TWOC - game files" message: the game checks game_files\ against
+  the disc before it starts (default.xbe's size and checksum, and Crashdat's 2,266 files;
+  2,267 with default.xbe) and says what is wrong: game_files\ or default.xbe missing,
+  default.xbe from another release, or Crashdat with files missing (or extra). Copy
+  game_files\ from the desktop again (all of it: about 930 MB, 2,267 files), or extract
+  the disc image into it, and start again. Started some other way than "Play Crash.bat",
+  the game looks for game_files\ in the wrong folder: use the .bat.
 - "Crash can't write to its save folder": copy the package somewhere you can write to
-  (not C:\Program Files), or delete game_files\UDATA.
+  (not C:\Program Files), or delete game_files\UDATA (the copies in UDATA_backups stay).
 - The game window opens and closes at once: run "Collect logs.bat" and bring the zip back.
 - A black screen or a crash at the start on the Legion Go only: the same; the log says
   which step failed.

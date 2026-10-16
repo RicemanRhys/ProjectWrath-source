@@ -7,8 +7,8 @@
 #   crash_twoc.exe and the Visual C++ runtime DLLs it imports (vcruntime140.dll, vcruntime140_1.dll,
 #     copied app-local from Visual Studio's redist folder); every other DLL it imports is part of
 #     Windows 10/11 (checked here with dumpbin /dependents; the list goes into PACKAGE.txt)
-#   game_files\ (default.xbe and Crashdat\ from -GameFiles; never UDATA (saves), TDATA or our
-#     analysis files; -Save DIR copies DIR in as game_files\UDATA, only when asked)
+#   game_files\ (default.xbe and Crashdat\ from -GameFiles; never UDATA (saves), UDATA_backups, TDATA
+#     or our analysis files; -Save DIR copies DIR in as game_files\UDATA, only when asked)
 #   tools\vrrprobe.exe (built from twoc\tools\diag\vrrprobe.cpp) and tools\collect_logs.ps1
 #   files\: Play Crash.bat, Play Crash (72 fps test).bat, Collect logs.bat, crash_twoc.ini (the
 #     Legion Go's settings), README.txt, Test notes.txt (text files written with CRLF line ends)
@@ -101,9 +101,10 @@ $cmd = "@echo off`r`ncall `"$vcvars`" >nul 2>nul`r`ncd /d `"$tmp`"`r`n" +
 if (-not (Test-Path "$Out\tools\vrrprobe.exe")) { Get-Content "$tmp\cl.log"; throw 'vrrprobe build failed' }
 Remove-Item -Recurse -Force $tmp
 
-# The disc files, without saves (UDATA), the title cache (TDATA) or our analysis output.
-& robocopy $GameFiles (Join-Path $Out 'game_files') /E /XD (Join-Path $GameFiles 'UDATA') (Join-Path $GameFiles 'TDATA') `
-    /XF crash_analysis.json /NFL /NDL /NJH /NJS /NP | Out-Null
+# The disc files, without saves (UDATA), their backups (UDATA_backups, notes 18.86), the title cache (TDATA) or our
+# analysis output.
+& robocopy $GameFiles (Join-Path $Out 'game_files') /E /XD (Join-Path $GameFiles 'UDATA') (Join-Path $GameFiles 'UDATA_backups') `
+    (Join-Path $GameFiles 'TDATA') /XF crash_analysis.json /NFL /NDL /NJH /NJS /NP | Out-Null
 if ($LASTEXITCODE -ge 8) { throw "robocopy failed ($LASTEXITCODE)" }
 if ($Save) {
     $Save = (Resolve-Path $Save).Path
