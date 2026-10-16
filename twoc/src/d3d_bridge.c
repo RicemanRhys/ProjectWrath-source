@@ -4496,6 +4496,28 @@ static void mirror_swap(void)
                     st.clears, st.clears_colour, st.clears_depth, st.clears_partial_colour,
                     (long)g_clears_other_rt, (long)g_nolock, (long)g_interleaved, (long)g_d3dx_draws,
                     st.dumps, st.present_fails, st.present_status);
+            {   /* step 82: plugged in or on battery (a handheld slows on battery, notes 18.84) */
+                SYSTEM_POWER_STATUS ps;
+                char pw[160];
+                int pn = 0;
+                if (!GetSystemPowerStatus(&ps))
+                    pn = snprintf(pw, sizeof(pw), "unknown (GetSystemPowerStatus failed)");
+                else {
+                    pn = snprintf(pw, sizeof(pw), "%s", ps.ACLineStatus == 1 ? "plugged in"
+                                                        : ps.ACLineStatus == 0 ? "on battery" : "power source unknown");
+                    if (ps.BatteryFlag & 128)
+                        pn += snprintf(pw + pn, sizeof(pw) - pn, ", no battery");
+                    else if (ps.BatteryLifePercent <= 100)
+                        pn += snprintf(pw + pn, sizeof(pw) - pn, ", battery %u%%%s", ps.BatteryLifePercent,
+                                       ps.BatteryFlag != 255 && (ps.BatteryFlag & 8) ? " (charging)" : "");
+                    if (ps.ACLineStatus == 0 && ps.BatteryLifeTime != (DWORD)-1)
+                        pn += snprintf(pw + pn, sizeof(pw) - pn, ", about %lu min left",
+                                       (unsigned long)(ps.BatteryLifeTime / 60));
+                    if (ps.SystemStatusFlag & 1)
+                        pn += snprintf(pw + pn, sizeof(pw) - pn, ", battery saver on");
+                }
+                log_block_printf(&lb, "[D3DB] host power: %s\n", pw);
+            }
             if (st.paced)       /* S7: the frame limiter */
                 log_block_printf(&lb, "[D3DB] host limiter: paced %u (+%u), late %u (+%u), waited %.0f ms this interval"
                         " (%.2f ms a frame)\n", st.paced, st.paced - last_paced, st.paced_late,
