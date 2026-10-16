@@ -17,6 +17,12 @@
  *     neither.
  *   - The window is shown without activation and doesn't steal focus. Alt+Enter
  *     and DXGI's window tracking are off. Closing it ends the process.
+ *   - Step 79 (notes 18.82): with Frame rate above 60 and the render thread
+ *     on, the replay side (every D3D11, DXGI and xbox_d3d8 call, the plan and
+ *     the presents, the overlay) runs on a render thread under g_lock, and
+ *     the game threads record under g_rec beside it, handing a frame over at
+ *     each Swap ("Step 79: the render thread's loop"). Otherwise one thread
+ *     does both in turn, as before, under both locks.
  *
  * Two swap chains: xbox_d3d8 creates a blt-model one (DXGI_SWAP_EFFECT_DISCARD)
  * and renders into its back buffer. On this machine a blt-model swap chain
@@ -8088,7 +8094,8 @@ static DWORD WINAPI rt_watchdog(LPVOID p)
         }
         if (trip >= 0) {
             char where[2][768];
-            tripped[trip] = g_wd[trip].since;
+            tripped[0] = g_wd[0].since;     /* one block an episode: neither thread trips again in these stages */
+            tripped[1] = g_wd[1].since;
             for (who = 0; who < 2; who++)
                 wd_where(g_wd[who].tid, where[who], sizeof(where[who]));
             fprintf(stderr, "[D3DB] render thread watchdog: the %s thread has been %s for %.1f s (guest swap %ld)\n"
