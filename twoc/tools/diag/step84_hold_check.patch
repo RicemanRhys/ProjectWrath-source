@@ -1,0 +1,36 @@
+diff --git a/twoc/src/d3d_host.c b/twoc/src/d3d_host.c
+index 1daf0b2..5cd4a1f 100644
+--- a/twoc/src/d3d_host.c
++++ b/twoc/src/d3d_host.c
+@@ -1645,10 +1645,14 @@ void *d3dh_rec_alloc(size_t n)
+     return p;
+ }
+ 
++static volatile LONG g_tmp_hold[3];     /* TMP step 84 hold check: checked, released before their replay, freed */
++
+ void d3dh_hold_release(d3dh_hold_t *h)
+ {
+-    if (h && InterlockedDecrement((volatile LONG *)&h->refs) == 0)
+-        free(h);
++    if (h && InterlockedDecrement((volatile LONG *)&h->refs) == 0) {
++        h->refs = -1000;                /* TMP: never freed, marked */
++        InterlockedIncrement(&g_tmp_hold[2]);
++    }
+ }
+ 
+ /* Step 84: commands [from, n) of slot f dropped: the vertex blocks their
+@@ -2548,6 +2552,14 @@ static int draw_exec(const d3dh_draw_t *d, IDirect3DBaseTexture8 *const *pin, co
+     LARGE_INTEGER t0, t1;
+ 
+     REPLAY_SIDE();
++    if (d->hold) {                      /* TMP step 84 hold check */
++        LONG n = InterlockedIncrement(&g_tmp_hold[0]);
++        if (d->hold->refs < 1 && InterlockedIncrement(&g_tmp_hold[1]) <= 5)
++            fprintf(stderr, "[TMP] hold check: a replayed draw's block was released (refs %ld)\n", (long)d->hold->refs);
++        if (n % 500000 == 0)
++            fprintf(stderr, "[TMP] hold check: %ld replayed draws from blocks, %ld released before, %ld blocks released\n",
++                    (long)n, (long)g_tmp_hold[1], (long)g_tmp_hold[2]);
++    }
+     if (d->hud_dx != 0.0f) {            /* step 65: a HUD element at its screen edge: x_clip += dx w */
+         static float k4[192 * 4];
+         d3dh_draw_t m = *d;

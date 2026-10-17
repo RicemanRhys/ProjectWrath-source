@@ -1,0 +1,165 @@
+diff --git a/twoc/src/d3d_host.c b/twoc/src/d3d_host.c
+index 5555ba9..6f3837c 100644
+--- a/twoc/src/d3d_host.c
++++ b/twoc/src/d3d_host.c
+@@ -1415,6 +1415,7 @@ typedef struct {
+             IDirect3DBaseTexture8 *pin[4];
+             uint8_t pinned[4];
+             int16_t tslot[4];           /* step 78: pinned stages' entries in the cache (g_tc), -1 none */
++            IDirect3DBaseTexture8 *refpin[4];   /* TMP step 78: the old path's */
+             uint8_t cam, cls;           /* step 61: its camera (IC_NO_CAM: none), IC_* */
+             uint8_t n_cpos, cpos[4];    /* step 61: program registers holding the camera's position */
+             int32_t obj;                /* step 62: its object (g_iobj), -1 none */
+@@ -2606,6 +2607,30 @@ static int draw_exec(const d3dh_draw_t *d, IDirect3DBaseTexture8 *const *pin, co
+     return FAILED(hr) ? -1 : 0;
+ }
+ 
++static int g_tmp_icheck = -1, g_tmp_ref;  /* TMP step 78 */
++static int tmp_icheck_on(void)
++{
++    if (g_tmp_icheck < 0) {
++        const char *e = getenv("TMP_ICHECK");
++        g_tmp_icheck = e && *e == '1';
++        if (g_tmp_icheck)
++            fprintf(stderr, "[TMP] icheck: every pass drawn with the old path's textures, then the new path's\n");
++    }
++    return g_tmp_icheck;
++}
++/* The old path's stages: those held from the recording (PIN_HELD) from refpin, the rest (step 79: PIN_TARGET with
++ * the render thread too) fetched at the replay, as one thread did, from the old path's own cache (g_tcc). */
++static const uint8_t *tmp_pinned(const rcmd_t *c)
++{
++    static uint8_t p[4];
++    int s;
++    for (s = 0; s < 4; s++)
++        p[s] = c->u.draw.pinned[s] == PIN_HELD;
++    return p;
++}
++#define PINS(c) (g_tmp_ref ? (c)->u.draw.refpin : (c)->u.draw.pin)
++#define PINNED(c) (g_tmp_ref ? tmp_pinned(c) : (c)->u.draw.pinned)
++
+ /* Record a draw. Called with g_lock held. Returns 0, or -1 (out of memory:
+  * the draw is lost, counted as a failure). */
+ static int rec_draw(const d3dh_draw_t *d)
+@@ -2680,6 +2705,13 @@ static int rec_draw(const d3dh_draw_t *d)
+         }
+         c->u.draw.tslot[s] = (int16_t)i;
+     }
++    if (tmp_icheck_on())                /* TMP step 78: the old path's, fetched from guest memory now and held */
++        for (s = 0; s < 4; s++)
++            if (c->u.draw.pinned[s] == PIN_HELD && o->tex[s]) {
++                c->u.draw.refpin[s] = tex_get(&g_tcc, o->tex[s]);
++                if (c->u.draw.refpin[s])
++                    c->u.draw.refpin[s]->lpVtbl->AddRef(c->u.draw.refpin[s]);
++            }
+     rc_target(d->target.data);
+     c->u.draw.cam = 0xFF;
+     c->u.draw.obj = -1;
+@@ -2709,7 +2741,7 @@ static void replay_pass(int interp)
+             if (interp)
+                 ic_draw(c);
+             else
+-                draw_exec(&c->u.draw.d, c->u.draw.pin, c->u.draw.pinned, (D3D8UpKept *)&c->u.draw.kept);
++                draw_exec(&c->u.draw.d, PINS(c), PINNED(c), (D3D8UpKept *)&c->u.draw.kept);
+             break;
+         case RC_CLEAR:
+             clear_exec(&c->u.clear.t, c->u.clear.flags, c->u.clear.color, c->u.clear.z, c->u.clear.stencil);
+@@ -2774,7 +2806,12 @@ static void replay_done(void)
+             for (s = 0; s < 4; s++)
+                 if (g_ps->rc[i].u.draw.pin[s])
+                     g_ps->rc[i].u.draw.pin[s]->lpVtbl->Release(g_ps->rc[i].u.draw.pin[s]);
++    for (i = 0; i < g_ps->rc_n; i++)    /* TMP step 78 */
++        if (g_ps->rc[i].kind == RC_DRAW)
++            for (s = 0; s < 4; s++)
++                if (g_ps->rc[i].u.draw.refpin[s])
++                    g_ps->rc[i].u.draw.refpin[s]->lpVtbl->Release(g_ps->rc[i].u.draw.refpin[s]);
+     rc_unhold(g_ps, 0, g_ps->rc_n);     /* step 84 */
+     g_st.replay_frames++;
+     g_st.replay_cmds += g_ps->rc_n;
+     g_st.replay_bytes += (double)g_ps->ra_bytes;
+@@ -5270,7 +5307,7 @@ static void ic_draw(const rcmd_t *c)
+     if (c->u.draw.cls != IC_NONE && c->u.draw.cam != g_imc) {
+         g_st.interp_kept++;             /* step 65: under another camera than the world's: as recorded */
+         g_st.interp_other_cam++;
+-        draw_exec(d, c->u.draw.pin, c->u.draw.pinned, (D3D8UpKept *)&c->u.draw.kept);
++        draw_exec(d, PINS(c), PINNED(c), (D3D8UpKept *)&c->u.draw.kept);
+         return;
+     }
+     cam_on = c->u.draw.cam < IC_CAMS && g_isub[c->u.draw.cam].on;
+@@ -5288,7 +5325,7 @@ static void ic_draw(const rcmd_t *c)
+     }
+     if (c->u.draw.cls == IC_NONE || (!cam_on && !w_move && !b_move)) {
+         g_st.interp_kept++;
+-        draw_exec(d, c->u.draw.pin, c->u.draw.pinned, (D3D8UpKept *)&c->u.draw.kept);
++        draw_exec(d, PINS(c), PINNED(c), (D3D8UpKept *)&c->u.draw.kept);
+         return;
+     }
+     if (w_move) {                       /* W(t), from the frame before's W and this one's */
+@@ -5453,7 +5490,7 @@ static void ic_draw(const rcmd_t *c)
+         m.ff = &ff;
+         g_st.interp_ff++;
+     }
+-    draw_exec(&m, c->u.draw.pin, c->u.draw.pinned, (D3D8UpKept *)&c->u.draw.kept);
++    draw_exec(&m, PINS(c), PINNED(c), (D3D8UpKept *)&c->u.draw.kept);
+     while (n_keep) {                    /* step 76: the recording as it was, for the next sub-frame */
+         n_keep--;
+         memcpy(&k4[4 * keep[n_keep].reg], keep[n_keep].v, 4 * sizeof(float));
+@@ -7555,6 +7592,24 @@ static void replay_check(int after, unsigned swap_no)
+     }
+ }
+ 
++/* TMP step 78: a pass, with TMP_ICHECK drawn with the old path's textures
++ * and with the new path's from the same targets, and compared. */
++static void tmp_pass(int interp, unsigned swap_no)
++{
++    if (!tmp_icheck_on()) {
++        replay_pass(interp);
++        return;
++    }
++    g_tmp_ref = 1;
++    g_tc_now = &g_tcc;
++    replay_pass(interp);
++    g_tc_now = &g_tc;
++    g_tmp_ref = 0;
++    replay_check(0, swap_no);           /* kept, the targets as the pass found them */
++    replay_pass(interp);
++    replay_check(1, swap_no);           /* compared; where the next one starts */
++}
++
+ /* One present: the back buffer (as drawn now) dumped when due and shown at
+  * DXGI `interval`, after its wait. Step 61: sub-frame `sub` of `k` (k 1: the
+  * frame itself; only the last of a frame is a frame's dump). Returns the
+@@ -7810,7 +7865,7 @@ static int replay_frame(fslot_t *f)
+         }
+         if (interp) {
+             ic_sub(g_interp_t0 ? fr.t0[0] : fr.t[0]);
+-            replay_pass(1);             /* the first sub-frame */
++            tmp_pass(1, swap_no);       /* the first sub-frame */
+             if (fr.n == 1) {
+                 replay_done();
+                 ic_end();
+@@ -7818,7 +7873,11 @@ static int replay_frame(fslot_t *f)
+         } else {
+             if (g_replay_check)
+                 replay_check(0, swap_no);
+-            replay_run();
++            if (tmp_icheck_on() && g_ps) {     /* TMP step 78: frames shown as recorded, checked too */
++                tmp_pass(0, swap_no);
++                replay_done();
++            } else
++                replay_run();
+             if (g_replay_check)
+                 replay_check(1, swap_no);
+             if (f->interp)
+@@ -7835,9 +7894,9 @@ static int replay_frame(fslot_t *f)
+                 EnterCriticalSection(&g_lock);
+                 if (fr.t[sub - 1] < 1) {
+                     ic_sub(g_interp_t0 ? fr.t0[sub - 1] : fr.t[sub - 1]);
+-                    replay_pass(1);
++                    tmp_pass(1, swap_no);
+                 } else {
+-                    replay_pass(0);     /* t = 1: the frame as recorded */
++                    tmp_pass(0, swap_no);   /* t = 1: the frame as recorded */
+                 }
+                 if (sub == fr.n) {
+                     replay_done();

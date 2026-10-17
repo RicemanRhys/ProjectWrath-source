@@ -1,0 +1,89 @@
+--- a/twoc/src/d3d_bridge.c
++++ b/twoc/src/d3d_bridge.c
+@@ -1769,6 +1769,68 @@
+     LONG swap;
+ } g_sig[SIG_SLOTS];
+ 
++/* Step 84 SIGCHECK (a check, not part of the game): the byte-wise FNV-1a
++ * content_sig was, beside the new one, for every signature made; per
++ * (header, Data, size, palette or not) the last of each, and whether the
++ * two agree on "changed since the last one". */
++static uint32_t content_sig_old(const uint8_t *p, uint32_t n)
++{
++    uint32_t h = 2166136261u, i;
++
++#define MIX(ptr, len) do { const uint8_t *q_ = (ptr); uint32_t k_; \
++        for (k_ = 0; k_ < (len); k_++) h = (h ^ q_[k_]) * 16777619u; } while (0)
++    if (n <= 256 * 1024) {
++        MIX(p, n);
++    } else {
++        MIX(p, 4096);
++        for (i = 0; i < 64; i++)
++            MIX(p + (uint64_t)(n - 64) * i / 64, 64);
++        MIX(p + n - 4096, 4096);
++    }
++#undef MIX
++    return h ? h : 1;
++}
++
++#define SC_SLOTS 65536
++static struct { uint32_t hdr, data, bytes, kind, old_sig, new_sig; } g_sc[SC_SLOTS];
++static unsigned g_sc_made, g_sc_changed, g_sc_disagree, g_sc_evict, g_sc_lines;
++static LONG g_sc_swap;
++
++static uint32_t sig_checked(uint32_t hdr, uint32_t data, const uint8_t *bits, uint32_t bytes, uint32_t kind)
++{
++    static int on = -1;
++    uint32_t nw = content_sig(bits, bytes), od, i;
++
++    if (on < 0)
++        on = getenv("RECOMP_D3D_BRIDGE_SIGCHECK") != NULL;
++    if (!on)
++        return nw;
++    od = content_sig_old(bits, bytes);
++    i = (((hdr >> 4) * 2654435761u) ^ (data * 40503u) ^ kind) & (SC_SLOTS - 1);
++    g_sc_made++;
++    if (g_sc[i].hdr == hdr && g_sc[i].data == data && g_sc[i].bytes == bytes && g_sc[i].kind == kind) {
++        int co = g_sc[i].old_sig != od, cn = g_sc[i].new_sig != nw;
++        g_sc_changed += co;
++        if (co != cn && ++g_sc_disagree <= 20)
++            fprintf(stderr, "[D3DB] sigcheck DISAGREE: header %08X data %08X %u bytes kind %u: old %08X -> %08X,"
++                    " new %08X -> %08X\n", hdr, data, bytes, kind, g_sc[i].old_sig, od, g_sc[i].new_sig, nw);
++    } else if (g_sc[i].hdr) {
++        g_sc_evict++;
++    }
++    g_sc[i].hdr = hdr;
++    g_sc[i].data = data;
++    g_sc[i].bytes = bytes;
++    g_sc[i].kind = kind;
++    g_sc[i].old_sig = od;
++    g_sc[i].new_sig = nw;
++    if (g_swaps - g_sc_swap >= 600) {
++        g_sc_swap = g_swaps;
++        fprintf(stderr, "[D3DB] sigcheck at swap %ld: %u signatures made, %u changed, %u disagree, %u slots reused\n",
++                (long)g_swaps, g_sc_made, g_sc_changed, g_sc_disagree, g_sc_evict);
++    }
++    return nw;
++}
++
+ static uint32_t texture_sig(uint32_t hdr, uint32_t data, const uint8_t *bits, uint32_t bytes)
+ {
+     uint32_t i = ((hdr >> 4) * 2654435761u) >> 23;      /* 9 bits: SIG_SLOTS */
+@@ -1779,7 +1841,7 @@
+     g_sig[i].data = data;
+     g_sig[i].bytes = bytes;
+     g_sig[i].swap = g_swaps;
+-    g_sig[i].sig = content_sig(bits, bytes);
++    g_sig[i].sig = sig_checked(hdr, data, bits, bytes, 0);
+     return g_sig[i].sig;
+ }
+ 
+@@ -1855,7 +1917,7 @@
+         common = MEM32(pal + RES_COMMON);
+         t->pal_entries = 256u >> ((common >> 30) & 3);
+         t->palette = (const uint32_t *)XBOX_PTR(phys_to_va(MEM32(pal + RES_DATA)));
+-        t->pal_sig = content_sig((const uint8_t *)t->palette, 4 * t->pal_entries);
++        t->pal_sig = sig_checked(pal, MEM32(pal + RES_DATA), (const uint8_t *)t->palette, 4 * t->pal_entries, 1);
+         event(&g_ev_pal, 6, "P8 texture %08X (%ux%u, %u levels) on stage %u: palette %08X, Common %08X (type %u),"
+               " %u entries, data %08X", hdr, t->width, t->height, t->levels, stage, pal, common,
+               (common >> 16) & 7, t->pal_entries, MEM32(pal + RES_DATA));

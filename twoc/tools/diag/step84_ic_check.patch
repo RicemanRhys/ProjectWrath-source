@@ -1,0 +1,68 @@
+diff --git a/twoc/src/d3d_host.c b/twoc/src/d3d_host.c
+index 1daf0b2..cad9d90 100644
+--- a/twoc/src/d3d_host.c
++++ b/twoc/src/d3d_host.c
+@@ -3223,6 +3223,8 @@ static void icam_prep(icam_t *c)
+     c->rot_ok = 1;
+ }
+ 
++static unsigned g_tmp_ic[4];            /* TMP step 84 ic check: scans, differ, keys, differ */
++
+ static uint32_t fnv(uint32_t h, uint32_t v)
+ {
+     int i;
+@@ -3334,6 +3336,7 @@ static void ic_obj(rcmd_t *c, uint32_t key, const double *w, const float *k4, co
+     lk = ic_key(d, 1);                  /* step 68: the loose key, through the same steps */
+     key = fnv(key, d->mesh);
+     lk = fnv(lk, d->mesh);
++    uint32_t tk = key, tl = lk;         /* TMP step 84 ic check */
+     for (i = 0; i < d->n_rs; i++)       /* a pass that only marks stencil is another object than the model's */
+         switch (d->rs[i].state) {       /* step 84: keep[]'s states, as a switch */
+         case 14: case 19: case 20: case 22: case 52: case 55: case 56: case 168:
+@@ -3341,6 +3344,18 @@ static void ic_obj(rcmd_t *c, uint32_t key, const double *w, const float *k4, co
+             lk = fnv(fnv(lk, d->rs[i].state), d->rs[i].value);
+             break;
+         }
++    {   /* TMP step 84 ic check: the old nested loop */
++        static const uint32_t keep[] = { 14, 19, 20, 22, 52, 55, 56, 168 };
++        for (i = 0; i < d->n_rs; i++)
++            for (j = 0; j < sizeof(keep) / sizeof(keep[0]); j++)
++                if (d->rs[i].state == keep[j]) {
++                    tk = fnv(fnv(tk, d->rs[i].state), d->rs[i].value);
++                    tl = fnv(fnv(tl, d->rs[i].state), d->rs[i].value);
++                }
++        g_tmp_ic[2]++;
++        if (tk != key || tl != lk)
++            g_tmp_ic[3]++;
++    }
+     /* Step 63: the handedness of W and of the first bone. A reflection (the
+      * hub floor's Crash) draws the same mesh with mirrored bones, and its
+      * first bone sits a few hundredths of a unit from the model's: by
+@@ -3480,6 +3495,27 @@ static void ic_record(rcmd_t *c)
+                     c->u.draw.cpos[c->u.draw.n_cpos++] = (uint8_t)r;
+             }
+         }
++        {   /* TMP step 84 ic check: the old scan of all 192 */
++            uint8_t oc[4];
++            unsigned on = 0;
++            int rr, kk;
++            for (rr = 0; rr < 192 && on < 4; rr++) {
++                if ((!(g_vs[slot].cmask[rr >> 5] >> (rr & 31) & 1) && (g_vs[slot].rel_base < 0 || rr < g_vs[slot].rel_base)) ||
++                    (rr >= 96 && rr < 100))
++                    continue;
++                for (kk = 0; kk < 3; kk++)
++                    if (fabs((double)k4[4 * rr + kk] - cam->m[12 + kk]) > 1e-3 * (1.0 + fabs(cam->m[12 + kk])))
++                        break;
++                if (kk == 3)
++                    oc[on++] = (uint8_t)rr;
++            }
++            g_tmp_ic[0]++;
++            if (on != c->u.draw.n_cpos || memcmp(oc, c->u.draw.cpos, on) != 0)
++                g_tmp_ic[1]++;
++            if (g_tmp_ic[0] % 200000 == 0)
++                fprintf(stderr, "[TMP] ic check: %u scans, %u differ; %u keys, %u differ\n", g_tmp_ic[0], g_tmp_ic[1],
++                        g_tmp_ic[2], g_tmp_ic[3]);
++        }
+         cam->draws++;
+         ic_obj(c, key, w, g_vs[slot].rel_bones ? k4 : NULL, g_vs[slot].cmask, d->vprog->fresh);  /* step 62 */
+     } else if (d->ff && (d->fvf & D3DFVF_POSITION_MASK) != D3DFVF_XYZRHW) {

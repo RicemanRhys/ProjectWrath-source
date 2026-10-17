@@ -1,0 +1,152 @@
+diff --git a/twoc/src/d3d_bridge.c b/twoc/src/d3d_bridge.c
+index be1d786..2546b50 100644
+--- a/twoc/src/d3d_bridge.c
++++ b/twoc/src/d3d_bridge.c
+@@ -5467,2 +5467,12 @@ void d3db_enter(int id, d3db_args_t *a)
+ 
++extern volatile int twoc_fp_phase;     /* step 84 GPROF */
++void d3db_gprof(LONG64 *t, LONG *vp, LONG *draws)
++{
++    int i;
++    for (i = 0; i < 4; i++)
++        t[i] = g_mirror_ticks[i];
++    *vp = g_mirrored_vp;
++    *draws = g_mirrored_draws;
++}
++
+ void d3db_leave(int id, d3db_args_t *a)
+@@ -5471,3 +5481,6 @@ void d3db_leave(int id, d3db_args_t *a)
+         LARGE_INTEGER t0, t1;
++        int ph0 = twoc_fp_phase;
+         QueryPerformanceCounter(&t0);
++        if (id != D3DB_SWAP)
++            twoc_fp_phase = 7;
+         switch (id) {
+@@ -5482,2 +5495,4 @@ void d3db_leave(int id, d3db_args_t *a)
+         }
++        if (id != D3DB_SWAP)
++            twoc_fp_phase = ph0;
+         QueryPerformanceCounter(&t1);
+diff --git a/twoc/src/d3d_host.c b/twoc/src/d3d_host.c
+index 7b368e2..cb1c129 100644
+--- a/twoc/src/d3d_host.c
++++ b/twoc/src/d3d_host.c
+@@ -1509,2 +1509,3 @@ typedef struct {
+     unsigned set_copy;                  /* host side's part: applied before it is replayed; the gen copied */
++    double wait_prev;                   /* TPROF: the game's wait in its Swap before it recorded this frame */
+ } fslot_t;
+@@ -4114,2 +4115,17 @@ static void ia_mark(void)
+  * measured, and the count for this one chosen. Called with g_lock held. */
++double g_tp_wait;                       /* TPROF */
++static FILE *g_tpf;
++static int g_tp_init;
++
++static FILE *tp_file(void)
++{
++    if (!g_tp_init) {
++        const char *e = getenv("RECOMP_D3D_BRIDGE_TPROF");
++        g_tp_init = 1;
++        if (e && *e && (g_tpf = fopen(e, "w")) != NULL)
++            fprintf(g_tpf, "swap,thread,presents,dt,busy,game,replay,pace,wait,step\n");
++    }
++    return g_tpf;
++}
++
+ static void ia_frame(const fslot_t *f)
+@@ -4137,2 +4153,8 @@ static void ia_frame(const fslot_t *f)
+         busy = game_ms > replay_ms ? game_ms : replay_ms;
++    if (tp_file()) {
++        fprintf(g_tpf, "%u,%d,%u,%.3f,%.3f,%.3f,%.3f,%.3f,%.3f,%u\n", swap_no, t_rt, g_ia.kused, dt, busy, game_ms,
++                replay_ms, g_ia.pace_ms, f->wait_prev, g_ia.k);
++        if ((swap_no & 63) == 0)
++            fflush(g_tpf);
++    }
+     g_ia.rp0 = t_rt ? g_rt_take.QuadPart : q.QuadPart;
+@@ -5557,2 +5579,6 @@ static void slot_fill(fslot_t *f, double t_s, unsigned swap_no)
+     f->hold = 0;
++    {
++        extern double g_tp_wait;
++        f->wait_prev = g_thr ? g_tp_wait : 0;
++    }
+     if (g_thr) {
+@@ -5632,4 +5658,8 @@ int d3dh_draw_up(const d3dh_draw_t *d)
+         LARGE_INTEGER t0, t1;
++        extern volatile int twoc_fp_phase;
++        int ph0 = twoc_fp_phase;
+         QueryPerformanceCounter(&t0);
++        twoc_fp_phase = 1;
+         r = rec_draw(d);
++        twoc_fp_phase = ph0;
+         QueryPerformanceCounter(&t1);
+@@ -8419,2 +8449,49 @@ static void rt_leave(unsigned swap_no, const char *why)
+  * frame itself), its next table set, the game side's settings. */
++/* Step 84 GPROF (measurement only): RECOMP_D3D_BRIDGE_GPROF=FILE, one CSV line a
++ * game frame from the game thread with the render thread on: the game side's
++ * ms (its Swap's return to this hand-over), the mirror's draws, immediate
++ * draws, swaps and the rest, the recording, the wait, draws and program
++ * draws recorded. twoc_fp_phase says what the game thread does, for hs84.py:
++ * 0 guest code, 1 recording, 7 mirror translation, 8 waiting in its Swap,
++ * 9 the rest of its Swap. */
++volatile int twoc_fp_phase;
++void d3db_gprof(LONG64 *t, LONG *vp, LONG *draws);
++static FILE *g_gpf;
++static int g_gp_init;
++static LONG64 g_gp_t[4];
++static LONG g_gp_vp, g_gp_dr;
++static double g_gp_rec;
++static unsigned g_gp_rd;
++
++static void gp_line(unsigned swap_no, double game_ms, double wait_ms)
++{
++    LONG64 t[4];
++    LONG vp, dr;
++    int i;
++    double ms[4];
++
++    if (!g_gp_init) {
++        const char *e = getenv("RECOMP_D3D_BRIDGE_GPROF");
++        g_gp_init = 1;
++        if (e && *e && (g_gpf = fopen(e, "w")) != NULL)
++            fprintf(g_gpf, "swap,game,mirror_draw,mirror_imm,mirror_swap,mirror_other,rec,wait,rec_draws,vp_draws,"
++                    "mirrored\n");
++    }
++    if (!g_gpf)
++        return;
++    d3db_gprof(t, &vp, &dr);
++    for (i = 0; i < 4; i++)
++        ms[i] = (double)(t[i] - g_gp_t[i]) * 1000.0 / (double)g_qpf.QuadPart;
++    fprintf(g_gpf, "%u,%.3f,%.3f,%.3f,%.3f,%.3f,%.3f,%.3f,%u,%ld,%ld\n", swap_no, game_ms, ms[0], ms[3], ms[1], ms[2],
++            g_stg.rec_ms - g_gp_rec, wait_ms, g_stg.rec_draws - g_gp_rd, (long)(vp - g_gp_vp), (long)(dr - g_gp_dr));
++    if ((swap_no & 63) == 0)
++        fflush(g_gpf);
++    for (i = 0; i < 4; i++)
++        g_gp_t[i] = t[i];
++    g_gp_vp = vp;
++    g_gp_dr = dr;
++    g_gp_rec = g_stg.rec_ms;
++    g_gp_rd = g_stg.rec_draws;
++}
++
+ static void present_thread(double t_s, unsigned swap_no)
+@@ -8425,2 +8502,3 @@ static void present_thread(double t_s, unsigned swap_no)
+ 
++    twoc_fp_phase = 9;
+     EnterCriticalSection(&g_rec);
+@@ -8430,2 +8508,3 @@ static void present_thread(double t_s, unsigned swap_no)
+     slot_fill(f, t_s, swap_no);
++    twoc_fp_phase = 8;
+     QueryPerformanceCounter(&w0);
+@@ -8456,3 +8535,9 @@ static void present_thread(double t_s, unsigned swap_no)
+     QueryPerformanceCounter(&w1);
++    twoc_fp_phase = 9;
+     g_stg.rt_wait_ms += (double)(w1.QuadPart - w0.QuadPart) * 1000.0 / (double)g_qpf.QuadPart;
++    gp_line(swap_no, f->game_ms, (double)(w1.QuadPart - w0.QuadPart) * 1000.0 / (double)g_qpf.QuadPart);
++    {
++        extern double g_tp_wait;
++        g_tp_wait = (double)(w1.QuadPart - w0.QuadPart) * 1000.0 / (double)g_qpf.QuadPart;
++    }
+     AcquireSRWLockExclusive(&g_pool_lock);  /* the command array the last replay gave back */
+@@ -8499,2 +8584,3 @@ void d3dh_present(double t_s, unsigned swap_no)
+         present_thread(t_s, swap_no);
++        twoc_fp_phase = 0;
+         QueryPerformanceCounter(&g_game_t0);
