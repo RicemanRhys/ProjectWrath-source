@@ -1612,6 +1612,55 @@ static void *ra_dup(const void *p, size_t n)
     return q;
 }
 
+/* Step 84 (notes 18.87): blocks d3dh_rec_alloc gave the bridge for its next
+ * draw (a program draw's constants and vertices, built in the arena), which
+ * the recording keeps where they are (ra_keep) instead of copying them.
+ * Forgotten at each draw recorded and whenever the arena starts again. */
+#define RK_MAX 4
+static void *g_rk_p[RK_MAX];
+static size_t g_rk_n[RK_MAX];
+static unsigned g_rk_next;
+
+static void rk_forget(void)
+{
+    memset(g_rk_p, 0, sizeof(g_rk_p));
+}
+
+void *d3dh_rec_alloc(size_t n)
+{
+    void *p = NULL;
+    int side;
+
+    if (!g_ready || !n)
+        return NULL;
+    rec_lock(0);
+    side = side_set(SIDE_GAME);
+    if (REC_ON() && (p = ra_alloc(n)) != NULL) {
+        g_rk_p[g_rk_next % RK_MAX] = p;
+        g_rk_n[g_rk_next % RK_MAX] = n;
+        g_rk_next++;
+    }
+    side_set(side);
+    rec_unlock();
+    return p;
+}
+
+/* `p` as the recording keeps it: a block d3dh_rec_alloc gave for this draw
+ * as it is, anything else copied into the arena (ra_dup). */
+static void *ra_keep(const void *p, size_t n)
+{
+    unsigned k;
+
+    if (!p || !n)
+        return NULL;
+    for (k = 0; k < RK_MAX; k++)
+        if (g_rk_p[k] == p && n <= g_rk_n[k]) {
+            g_rk_p[k] = NULL;
+            return (void *)p;
+        }
+    return ra_dup(p, n);
+}
+
 static rcmd_t *rc_push(int kind)
 {
     fslot_t *f = g_rs;
@@ -2636,7 +2685,7 @@ static int rec_draw(const d3dh_draw_t *d)
     }
     o = &c->u.draw.d;
     *o = *d;
-    o->verts = ra_dup(d->verts, (size_t)d->vert_count * d->stride);
+    o->verts = ra_keep(d->verts, (size_t)d->vert_count * d->stride);     /* step 84: ra_keep */
     bad |= d->verts && d->vert_count && d->stride && !o->verts;
     o->indices = (const uint16_t *)ra_dup(d->indices, (size_t)d->index_count * sizeof(uint16_t));
     bad |= d->indices && d->index_count && !o->indices;
@@ -2649,7 +2698,7 @@ static int rec_draw(const d3dh_draw_t *d)
         d3dh_vprog_t *v = (d3dh_vprog_t *)ra_dup(d->vprog, sizeof(d3dh_vprog_t));
         if (v) {
             v->code = (const uint32_t *)ra_dup(d->vprog->code, (size_t)d->vprog->n_insns * 16);
-            v->consts = (const float *)ra_dup(d->vprog->consts, 192 * 16);
+            v->consts = (const float *)ra_keep(d->vprog->consts, 192 * 16);
         }
         o->vprog = v;
         bad |= !v || !v->code || !v->consts;
@@ -2661,6 +2710,7 @@ static int rec_draw(const d3dh_draw_t *d)
         bad |= !o->tex[s];
     }
     bad |= (d->ff && !o->ff) || (d->ps && !o->ps) || (d->n_rs && !o->rs);
+    rk_forget();                        /* step 84: this draw's blocks are its own now */
     if (bad) {
         g_rs->rc_n--;
         g_stg.draw_fails++;
@@ -3149,13 +3199,41 @@ static uint32_t fnv(uint32_t h, uint32_t v)
  * (step 68: a flipbook's frames are a texture each). */
 static uint32_t ic_key(const d3dh_draw_t *d, int loose)
 {
+    /* Step 84 (notes 18.87): the pixel shader's part, up to 56 states byte
+     * by byte (~0.3 us a draw, twice a draw), kept for the last two shaders
+     * met with the hash before them: the same value, from memory. Game side
+     * only. */
+    static struct {
+        int ok;
+        uint32_t h0, h1;
+        unsigned n;
+        d3dh_state_t rs[56];
+    } memo[2];
+    static unsigned next;
     uint32_t h = 2166136261u;
     unsigned s, i;
 
+    GAME_SIDE();
     h = fnv(h, d->vprog ? d->vprog->key : d->fvf | 0x80000000u);
-    if (d->ps && d->ps->token)
-        for (i = 0; i < d->ps->n_rs; i++)
-            h = fnv(fnv(h, d->ps->rs[i].state), d->ps->rs[i].value);
+    if (d->ps && d->ps->token) {
+        unsigned n = d->ps->n_rs < 56 ? d->ps->n_rs : 56, k;
+        for (k = 0; k < 2; k++)
+            if (memo[k].ok && memo[k].h0 == h && memo[k].n == d->ps->n_rs &&
+                memcmp(memo[k].rs, d->ps->rs, n * sizeof(d3dh_state_t)) == 0)
+                break;
+        if (k < 2) {
+            h = memo[k].h1;
+        } else {
+            k = next++ & 1;
+            memo[k].ok = d->ps->n_rs <= 56;
+            memo[k].h0 = h;
+            memo[k].n = d->ps->n_rs;
+            memcpy(memo[k].rs, d->ps->rs, n * sizeof(d3dh_state_t));
+            for (i = 0; i < d->ps->n_rs; i++)
+                h = fnv(fnv(h, d->ps->rs[i].state), d->ps->rs[i].value);
+            memo[k].h1 = h;
+        }
+    }
     for (s = 0; s < 4; s++)
         if (!loose || !d->tex[s])
             h = fnv(h, d->tex[s] ? d->tex[s]->key : 0);
@@ -5580,6 +5658,7 @@ static void slot_handover(double t_s, unsigned swap_no)
                 f->seq, f->set_gen, g_sq.side[1].gen);
     g_ps = f;
     g_rs = &g_slot[(f - g_slot + 1) % FSLOTS];
+    rk_forget();                        /* step 84 */
     AcquireSRWLockExclusive(&g_pool_lock);  /* the command array the last replay gave back */
     {
         rcmd_t *rc = g_rs->rc;
@@ -5886,6 +5965,7 @@ static void rc_forget(unsigned first)
     unsigned i, s;
 
     REPLAY_SIDE();
+    rk_forget();                        /* step 84 */
     for (i = first; i < g_rs->rc_n; i++)
         if (g_rs->rc[i].kind == RC_DRAW)
             for (s = 0; s < 4; s++)
@@ -8468,6 +8548,7 @@ static void present_thread(double t_s, unsigned swap_no)
     next->targets_n = 0;
     next->overflow = 0;
     g_rs = next;
+    rk_forget();                        /* step 84 */
     ic_clear(g_ir);
     sq_drain(0);                        /* the game side's settings (those changed while the overlay held it) */
     if (!rt_should() || ic_want() != g_interp)

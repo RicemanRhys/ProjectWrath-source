@@ -2685,9 +2685,23 @@ typedef struct {
 
 /* The current vertex shader's program and declaration. Returns 0, or -1 if
  * it has no program or its upload can't be read. */
+/* Step 84 (notes 18.87): what the last walk of each object's upload made
+ * (its microcode, count and hash), with the dwords the walk read: a draw
+ * whose object's count, word count and those dwords are unchanged takes
+ * them again instead of walking and hashing (~0.3 ms a frame in cast_bug).
+ * One thread draws (as the rest of the mirror's state assumes). */
+#define VPM_SLOTS 32
+#define VPM_READ_MAX 1024
+static struct {
+    uint32_t obj, count, words, nread, n_insns, hash;
+    uint32_t read[VPM_READ_MAX];
+    uint32_t code[VS_MAX_INSNS * 4];
+} g_vpm[VPM_SLOTS];
+
 static int describe_vprog(vprog_t *p)
 {
-    uint32_t obj = MEM32(dev() + DEV_VS_OBJECT), words, i, n = 0, h = 2166136261u;
+    uint32_t obj = MEM32(dev() + DEV_VS_OBJECT), words, i, n = 0, h = 2166136261u, top = 0, count;
+    unsigned slot;
 
     memset(p, 0, sizeof(*p));
     if (!obj)
@@ -2697,23 +2711,48 @@ static int describe_vprog(vprog_t *p)
     if (!(p->flags & 0x10))
         return -1;
     words = MEM32(obj + VSO_WORDS);
-    for (i = 0; i < words && n < VS_MAX_INSNS * 4;) {
-        uint32_t hd = MEM32(obj + VSO_UPLOAD + 4 * i), m = hd & 0x1FFC, c = (hd >> 18) & 0x7FF, k;
-        if (!hd || !c)
-            break;
-        if (m >= 0xB00 && m < 0xB80)
-            for (k = 0; k < c && n < VS_MAX_INSNS * 4; k++)
-                p->code[n++] = MEM32(obj + VSO_UPLOAD + 4 * (i + 1 + k));
-        i += 1 + c;
+    count = MEM32(obj + VSO_COUNT);
+    slot = (obj >> 4) % VPM_SLOTS;
+    if (g_vpm[slot].obj == obj && g_vpm[slot].count == count && g_vpm[slot].words == words &&
+        memcmp(g_vpm[slot].read, (const void *)XBOX_PTR(obj + VSO_UPLOAD), 4 * (size_t)g_vpm[slot].nread) == 0) {
+        p->n_insns = g_vpm[slot].n_insns;
+        memcpy(p->code, g_vpm[slot].code, 16 * (size_t)p->n_insns);
+        p->hash = g_vpm[slot].hash;
+    } else {
+        g_vpm[slot].obj = 0;
+        for (i = 0; i < words && n < VS_MAX_INSNS * 4;) {
+            uint32_t hd = MEM32(obj + VSO_UPLOAD + 4 * i), m = hd & 0x1FFC, c = (hd >> 18) & 0x7FF, k;
+            if (i + 1 > top)
+                top = i + 1;
+            if (!hd || !c)
+                break;
+            if (m >= 0xB00 && m < 0xB80)
+                for (k = 0; k < c && n < VS_MAX_INSNS * 4; k++) {
+                    p->code[n++] = MEM32(obj + VSO_UPLOAD + 4 * (i + 1 + k));
+                    if (i + 2 + k > top)
+                        top = i + 2 + k;
+                }
+            i += 1 + c;
+        }
+        p->n_insns = n / 4;
+        if (p->n_insns > count)
+            p->n_insns = count;
+        if (!p->n_insns)
+            return -1;
+        for (i = 0; i < p->n_insns * 4; i++)
+            h = (h ^ p->code[i]) * 16777619u;
+        p->hash = h ? h : 1;
+        if (top <= VPM_READ_MAX) {      /* the dwords this walk read: [0, top) of the upload */
+            memcpy(g_vpm[slot].read, (const void *)XBOX_PTR(obj + VSO_UPLOAD), 4 * (size_t)top);
+            g_vpm[slot].nread = top;
+            g_vpm[slot].count = count;
+            g_vpm[slot].words = words;
+            g_vpm[slot].n_insns = p->n_insns;
+            g_vpm[slot].hash = p->hash;
+            memcpy(g_vpm[slot].code, p->code, 16 * (size_t)p->n_insns);
+            g_vpm[slot].obj = obj;
+        }
     }
-    p->n_insns = n / 4;
-    if (p->n_insns > MEM32(obj + VSO_COUNT))
-        p->n_insns = MEM32(obj + VSO_COUNT);
-    if (!p->n_insns)
-        return -1;
-    for (i = 0; i < p->n_insns * 4; i++)
-        h = (h ^ p->code[i]) * 16777619u;
-    p->hash = h ? h : 1;
     for (i = 0; i < 16; i++) {
         uint32_t r = MEM8(VS_ATTR_MAP + (p->flags & 0x10) + i) & 15, d = obj + VSO_DECL + 16 * r;
         p->attr[i].reg = r;
@@ -3308,9 +3347,29 @@ static int vc_reserve(void **buf, size_t *cap, size_t n)
     return 0;
 }
 
+/* Step 84: grow-only scratch for a draw's own arrays (its vertices without
+ * the cache, its index list) instead of a malloc and a free at each draw
+ * (~0.2 ms a frame in cast_bug, the larger ones from fresh pages); valid
+ * until the next draw that takes the same buffer. NULL if out of memory. */
+static void *g_vbuf, *g_lbuf;
+static size_t g_vbuf_cap, g_lbuf_cap;
+
+static void *scratch(void **buf, size_t *cap, size_t n)
+{
+    if (n > *cap) {
+        void *b = malloc(n + n / 2);
+        if (!b)
+            return NULL;
+        free(*buf);
+        *buf = b;
+        *cap = n + n / 2;
+    }
+    return *buf;
+}
+
 /* vp_vertices_ref's vertices, through the cache when it is on. *owned: the
- * caller frees the result (else it is the cache's, valid until the next
- * program draw). */
+ * caller frees the result (else it is the cache's or the scratch's, valid
+ * until the next program draw). */
 static float *vp_vertices(const vprog_t *p, uint16_t inputs, const uint32_t base[16], const uint32_t stride[16],
                           uint32_t lo, uint32_t n, uint32_t *vstride, int *owned)
 {
@@ -3408,15 +3467,16 @@ static float *vp_vertices(const vprog_t *p, uint16_t inputs, const uint32_t base
         }
         *owned = 0;
     } else {                            /* no cache: from guest memory, as vp_vertices_ref reads it */
-        out = (float *)malloc((size_t)n * l.nr * 16 + 16);
+        out = (float *)d3dh_rec_alloc((size_t)n * l.nr * 16 + 16);  /* where the recording keeps it, */
+        if (!out)                                                   /* else the scratch */
+            out = (float *)scratch(&g_vbuf, &g_vbuf_cap, (size_t)n * l.nr * 16 + 16);
         if (!out)
             return NULL;
         for (k = 0; k < l.nr; k++)
             src[k] = l.k[k].def ? NULL : (const uint8_t *)XBOX_PTR(l.k[k].va);
-        if (vl_convert(&l, src, out, &g) != 0) {
-            free(out);
+        if (vl_convert(&l, src, out, &g) != 0)
             return vp_vertices_ref(p, inputs, base, stride, lo, n, vstride);
-        }
+        *owned = 0;
     }
     for (i = 0; i < g.n; i++)
         vpgap(g.kind[i], p->hash, g.v[i]);
@@ -3487,6 +3547,13 @@ static int texel_patch(vprog_t *p, float *consts)
     uint32_t touch[VS_MAX_INSNS];       /* the temps each instruction reads or writes (step 49) */
     int rel_lo = VS_CONSTS;
 
+    for (s = 0; s < 4; s++) {           /* step 84: no linear texture on any stage, nothing to scan for */
+        uint32_t hdr = MEM32(dev() + DEV_TEXTURES + 4 * s);
+        if (hdr && MEM32(hdr + RES_SIZE))
+            break;
+    }
+    if (s == 4)
+        return 0;
     for (i = 0; i < p->n_insns; i++) {
         const uint32_t *w = p->code + 4 * i;
         uint32_t mac = VF(w[1], 21, 4), ilu = VF(w[1], 25, 3), cm = VF(w[3], 28, 2);
@@ -3860,10 +3927,17 @@ static int host_draw(d3dh_draw_t *dr)
     return d3dh_draw_up(dr);
 }
 
+/* Step 84: a draw's index list, unless it is the scratch's. */
+static void list_free(uint16_t *list)
+{
+    if (list != (uint16_t *)g_lbuf)
+        free(list);
+}
+
 static void mirror_draw_vp(const char *path, uint32_t xdk_prim, uint32_t n, const uint16_t *idx,
                            const uint32_t base[16], const uint32_t stride[16])
 {
-    float consts[VS_CONSTS * 4], *verts;
+    float consts_own[VS_CONSTS * 4], *consts, *verts;
     vprog_t p;
     d3dh_vprog_t hv;
     d3dh_state_t rs[64], tss[4][16];
@@ -3880,6 +3954,9 @@ static void mirror_draw_vp(const char *path, uint32_t xdk_prim, uint32_t n, cons
         skip(SKIP_VS_PROGRAM, MEM32(dev() + DEV_VS_HANDLE));
         return;
     }
+    consts = (float *)d3dh_rec_alloc(VS_CONSTS * 16);      /* step 84: built where the recording keeps it */
+    if (!consts)
+        consts = consts_own;
     vp_constants(consts);
     if (g_vsdump) {
         vs_dump_once(path, &p, consts, base, stride, idx, n, -1);
@@ -3913,7 +3990,7 @@ static void mirror_draw_vp(const char *path, uint32_t xdk_prim, uint32_t n, cons
             if (idx[i] > hi)
                 hi = idx[i];
         }
-        list = (uint16_t *)malloc((3 * (size_t)n + 6) * sizeof(uint16_t));
+        list = (uint16_t *)scratch(&g_lbuf, &g_lbuf_cap, (3 * (size_t)n + 6) * sizeof(uint16_t));
         if (!list)
             return;
         k = index_list(xdk_prim, idx, n, lo, list, &prim, &count);
@@ -3924,12 +4001,12 @@ static void mirror_draw_vp(const char *path, uint32_t xdk_prim, uint32_t n, cons
     }
     if (!prim || !count || (idx && !k)) {
         skip(SKIP_PRIM, xdk_prim);
-        free(list);
+        list_free(list);
         return;
     }
     verts = vp_vertices(&p, vc >= 0 ? inputs & ~(1u << vc) : inputs, base, stride, lo, nv, &vstride, &owned);
     if (!verts) {
-        free(list);
+        list_free(list);
         return;
     }
     if (vc >= 0) {                      /* each point a quad, vC in its register's column */
@@ -3966,7 +4043,7 @@ static void mirror_draw_vp(const char *path, uint32_t xdk_prim, uint32_t n, cons
                     "skipped: vertex program sampling a CopyRects copy");
         if (owned)
             free(verts);
-        free(list);
+        list_free(list);
         return;
     }
     memset(tex, 0, sizeof(tex));
@@ -3974,7 +4051,7 @@ static void mirror_draw_vp(const char *path, uint32_t xdk_prim, uint32_t n, cons
     if (setup_draw(&dr, 0, tex, rs, tss, &ps, NULL) < 0) {
         if (owned)
             free(verts);
-        free(list);
+        list_free(list);
         return;
     }
     dr.prim = prim;
@@ -4035,7 +4112,7 @@ static void mirror_draw_vp(const char *path, uint32_t xdk_prim, uint32_t n, cons
     }
     if (owned)
         free(verts);
-    free(list);
+    list_free(list);
 }
 
 /* DrawVerticesUP(PrimitiveType, VertexCount, pVertexStreamZeroData,
@@ -4236,20 +4313,20 @@ static void mirror_draw_indexed(const d3db_args_t *a)
         if (idx[i] > hi)
             hi = idx[i];
     }
-    list = (uint16_t *)malloc((3 * (size_t)n + 6) * sizeof(uint16_t));
+    list = (uint16_t *)scratch(&g_lbuf, &g_lbuf_cap, (3 * (size_t)n + 6) * sizeof(uint16_t));
     if (!list)
         return;
     k = index_list(a->arg[0], idx, n, lo, list, &prim, &count);
     if (!k || !prim || !count) {
         skip(SKIP_PRIM, a->arg[0]);
-        free(list);
+        list_free(list);
         return;
     }
     memset(tex, 0, sizeof(tex));
     memset(&dr, 0, sizeof(dr));
     cpu = setup_draw(&dr, vs, tex, rs, tss, &ps, &ff);
     if (cpu < 0) {
-        free(list);
+        list_free(list);
         return;
     }
     va = phys_to_va(MEM32(vb + RES_DATA)) + MEM32(D3D_STREAMS + 4) + (MEM32(d + DEV_BASE_VERTEX) + lo) * stride;
@@ -4318,7 +4395,7 @@ static void mirror_draw_indexed(const d3db_args_t *a)
     if (host_draw(&dr) == 0)
         count_mirrored(&dr);
     free(lit);
-    free(list);
+    list_free(list);
 }
 
 /* ── Immediate mode (S4 part 2): Begin, SetVertexData2f/4f, End ── */
@@ -5467,7 +5544,11 @@ void d3db_enter(int id, d3db_args_t *a)
 
 void d3db_leave(int id, d3db_args_t *a)
 {
-    if (d3db_host_on && id != D3DB_DATA2F && id != D3DB_DATA4F) {  /* those: d3db_vertex_data */
+    /* Step 84: timed only where the mirror does something (two clock reads
+     * on every wrapped call, SetVertexShaderConstant's and the texture fast
+     * path's too, were ~0.4 ms a frame of the game thread in cast_bug). */
+    if (d3db_host_on && (id == D3DB_CREATE_DEVICE || id == D3DB_CLEAR || id == D3DB_SWAP || id == D3DB_DRAW_UP ||
+                         id == D3DB_DRAW_INDEXED || id == D3DB_END || id == D3DB_DRAW || id == D3DB_COPYRECTS)) {
         LARGE_INTEGER t0, t1;
         QueryPerformanceCounter(&t0);
         switch (id) {

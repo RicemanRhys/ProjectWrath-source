@@ -232,6 +232,13 @@ int d3dh_format_supported(uint32_t format);
  * `indices` is set. Returns 0 on success. */
 int d3dh_draw_up(const d3dh_draw_t *d);
 
+/* Step 84: `n` bytes (16-aligned) in the frame being recorded, for data the
+ * bridge builds for its next draw (a program draw's constants, vertices)
+ * so that the recording keeps them there instead of copying them; NULL
+ * when that draw won't be recorded (the bridge's own memory then). Game
+ * side; for the next draw only. */
+void *d3dh_rec_alloc(size_t n);
+
 /* Step 65: the game's overlay pass begins (1) or ends (0); its draws come
  * in between, with `overlay` set. */
 void d3dh_overlay_pass(int begin);
