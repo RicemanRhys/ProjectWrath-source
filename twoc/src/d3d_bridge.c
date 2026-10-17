@@ -2943,8 +2943,12 @@ static const char *const g_vpgap_name[VPGAP_COUNT] = {
     "undeclared register", "stream without a buffer", "array type", "tessellator register", "NORESERVEDCONSTANTS",
 };
 
+static int g_vpgap_mute;               /* step 84: the vertex cache's check converting again: not counted twice */
+
 static void vpgap(int kind, uint32_t hash, uint32_t v)
 {
+    if (g_vpgap_mute)
+        return;
     InterlockedIncrement(&g_vpgap[kind]);
     event(&g_ev_vpgap, 20, "vertex program %08X: %s (%X)", hash, g_vpgap_name[kind], v);
 }
@@ -2995,9 +2999,11 @@ static void vp_constants(float *c)
  * and expanded as the NV2A does (vs_fetch). A register the declaration
  * leaves out reads what SetVertexShader leaves in it: white for the
  * diffuse registers 3 and 7, 0 for the speculars 4 and 8 (0x102940), and
- * (0, 0, 0, 1) for the rest (counted). Freed by the caller. */
-static float *vp_vertices(const vprog_t *p, uint16_t inputs, const uint32_t base[16], const uint32_t stride[16],
-                          uint32_t lo, uint32_t n, uint32_t *vstride)
+ * (0, 0, 0, 1) for the rest (counted). Freed by the caller. Step 84: the
+ * reference vp_vertices and vc_vertices match byte for byte (their check),
+ * and what they fall back to for an array type vs_fetch doesn't know. */
+static float *vp_vertices_ref(const vprog_t *p, uint16_t inputs, const uint32_t base[16], const uint32_t stride[16],
+                              uint32_t lo, uint32_t n, uint32_t *vstride)
 {
     uint32_t regs[16], nr = 0, r, i, k;
     float *out;
@@ -3034,6 +3040,401 @@ static float *vp_vertices(const vprog_t *p, uint16_t inputs, const uint32_t base
                 vpgap(VPGAP_FORMAT, p->hash, fmt);
                 break;
             }
+    }
+    return out;
+}
+
+/* ── Step 84 (notes 18.87): program draws' vertices, cheaper ──
+ *
+ * vs_fetch's expansion for a run of `n` vertices of one register: the first
+ * one's attribute at `src`, each next one `step` bytes on, into out[i *
+ * ostep]. The same arithmetic, its type decided once for the run instead of
+ * at each vertex, and plain loads instead of MEM*'s volatile ones (~2.4 ms a
+ * frame of the game thread at cast_bug's start went to vs_fetch and
+ * vp_vertices). Returns 0, or -1 for a type vs_fetch doesn't know (nothing
+ * written). */
+static int vs_fetch_run(const uint8_t *src, uint32_t step, uint32_t format, uint32_t n, float *out, uint32_t ostep)
+{
+    uint32_t type = format & 15, size = format >> 4, m = size < 4 ? size : 4, i, k;
+
+    switch (type) {
+    case 0:                             /* UB_D3D */
+        if (size == 4) {
+            for (i = 0; i < n; i++, src += step, out += ostep) {
+                uint32_t c;
+                memcpy(&c, src, 4);
+                out[0] = ((c >> 16) & 255) / 255.0f;
+                out[1] = ((c >> 8) & 255) / 255.0f;
+                out[2] = (c & 255) / 255.0f;
+                out[3] = (c >> 24) / 255.0f;
+            }
+            return 0;
+        }
+        /* fall through: its other sizes are the bytes in order, as UB_OGL */
+    case 4:                             /* UB_OGL */
+        for (i = 0; i < n; i++, src += step, out += ostep) {
+            out[0] = out[1] = out[2] = 0.0f;
+            out[3] = 1.0f;
+            for (k = 0; k < m; k++)
+                out[k] = src[k] / 255.0f;
+        }
+        return 0;
+    case 1:                             /* S1 */
+        for (i = 0; i < n; i++, src += step, out += ostep) {
+            out[0] = out[1] = out[2] = 0.0f;
+            out[3] = 1.0f;
+            for (k = 0; k < m; k++) {
+                int16_t v;
+                memcpy(&v, src + 2 * k, 2);
+                out[k] = (2.0f * (float)v + 1.0f) / 65535.0f;
+            }
+        }
+        return 0;
+    case 5:                             /* S32K */
+        for (i = 0; i < n; i++, src += step, out += ostep) {
+            out[0] = out[1] = out[2] = 0.0f;
+            out[3] = 1.0f;
+            for (k = 0; k < m; k++) {
+                int16_t v;
+                memcpy(&v, src + 2 * k, 2);
+                out[k] = (float)v;
+            }
+        }
+        return 0;
+    case 2:                             /* F */
+        if (size == 7) {
+            for (i = 0; i < n; i++, src += step, out += ostep) {
+                memcpy(&out[0], src, 8);
+                out[2] = 0.0f;
+                memcpy(&out[3], src + 8, 4);
+            }
+            return 0;
+        }
+        for (i = 0; i < n; i++, src += step, out += ostep) {
+            out[0] = out[1] = out[2] = 0.0f;
+            out[3] = 1.0f;
+            memcpy(out, src, 4 * (size_t)m);
+        }
+        return 0;
+    case 6:                             /* CMP */
+        for (i = 0; i < n; i++, src += step, out += ostep) {
+            uint32_t c;
+            memcpy(&c, src, 4);
+            out[0] = (float)((int32_t)(c << 21) >> 21) / 1023.0f;
+            out[1] = (float)((int32_t)(c << 10) >> 21) / 1023.0f;
+            out[2] = (float)((int32_t)c >> 22) / 511.0f;
+            out[3] = 1.0f;
+        }
+        return 0;
+    }
+    return -1;
+}
+
+/* The bytes of a vertex that vs_fetch reads for `format`, 0 for a type it
+ * doesn't know. */
+static uint32_t vs_fetch_bytes(uint32_t format)
+{
+    uint32_t type = format & 15, size = format >> 4, m = size < 4 ? size : 4;
+
+    switch (type) {
+    case 0: return size == 4 ? 4 : m;
+    case 4: return m;
+    case 1: case 5: return 2 * m;
+    case 2: return size == 7 ? 12 : 4 * m;
+    case 6: return 4;
+    }
+    return 0;
+}
+
+/* The gaps a conversion counts, in the order vp_vertices_ref counts them,
+ * so a cached conversion counts them again at each use. */
+typedef struct {
+    uint32_t n;
+    uint8_t kind[32];
+    uint32_t v[32];
+} vgaps_t;
+
+static void vgap_add(vgaps_t *g, int kind, uint32_t v)
+{
+    if (g->n < 32) {
+        g->kind[g->n] = (uint8_t)kind;
+        g->v[g->n++] = v;
+    }
+}
+
+/* A program draw's vertex layout: the registers it reads (`inputs`,
+ * ascending), each one's declaration, and its stream's address (vertex lo
+ * of the draw) and stride; `def` for a register read as its default (no
+ * declaration, the tessellator, or no buffer: vp_vertices_ref's rule).
+ * Zeroed first, so two of them compare with memcmp. */
+typedef struct {
+    uint32_t nr, n;
+    struct {
+        uint32_t reg, format, stream, offset, tess, def, va, stride;
+    } k[16];
+} vlayout_t;
+
+static void vl_make(vlayout_t *l, const vprog_t *p, uint16_t inputs, const uint32_t base[16],
+                    const uint32_t stride[16], uint32_t lo, uint32_t n)
+{
+    uint32_t r;
+
+    memset(l, 0, sizeof(*l));
+    l->n = n;
+    for (r = 0; r < 16; r++) {
+        uint32_t s, k;
+        if (!(inputs & (1u << r)))
+            continue;
+        k = l->nr++;
+        s = p->attr[r].stream & 15;
+        l->k[k].reg = r;
+        l->k[k].format = p->attr[r].format;
+        l->k[k].stream = s;
+        l->k[k].offset = p->attr[r].offset;
+        l->k[k].tess = p->attr[r].tess;
+        l->k[k].def = p->attr[r].format == VS_FMT_DISABLED || p->attr[r].tess || !base[s];
+        if (!l->k[k].def) {
+            l->k[k].va = base[s] + p->attr[r].offset + lo * stride[s];  /* as vp_vertices_ref's va */
+            l->k[k].stride = stride[s];
+        }
+    }
+}
+
+/* Convert layout `l` into `out` (n * nr float4s), register k's vertex 0
+ * read at src[k] (NULL for a default one), its gaps into `g`. Returns 0,
+ * or -1 for an array type vs_fetch doesn't know. */
+static int vl_convert(const vlayout_t *l, const uint8_t *const src[16], float *out, vgaps_t *g)
+{
+    uint32_t k, i, nr = l->nr;
+
+    g->n = 0;
+    for (k = 0; k < nr; k++) {
+        uint32_t r = l->k[k].reg;
+        if (l->k[k].def) {
+            float def[4] = { 0.0f, 0.0f, 0.0f, 1.0f };
+            if (r == 3 || r == 7)
+                def[0] = def[1] = def[2] = 1.0f;
+            else if (r == 4 || r == 8)
+                def[3] = 0.0f;
+            else
+                vgap_add(g, VPGAP_UNDECLARED, r);
+            if (l->k[k].tess)
+                vgap_add(g, VPGAP_TESS, r);
+            else if (l->k[k].format != VS_FMT_DISABLED)
+                vgap_add(g, VPGAP_STREAM, l->k[k].stream);
+            for (i = 0; i < l->n; i++)
+                memcpy(out + ((size_t)i * nr + k) * 4, def, 16);
+            continue;
+        }
+        if (vs_fetch_run(src[k], l->k[k].stride, l->k[k].format, l->n, out + 4 * (size_t)k, 4 * nr) != 0)
+            return -1;
+    }
+    return 0;
+}
+
+/* The vertex cache (RECOMP_D3D_BRIDGE_VCACHE=1, off by default; =check
+ * also converts every draw the old way, vp_vertices_ref, and compares;
+ * =check0 that without the cache).
+ * What a program draw's conversion gives depends only on its layout and on
+ * the guest bytes it reads: an entry keeps the layout as its key and a copy
+ * of those bytes, each stream's span from vertex lo's lowest attribute byte
+ * to the last vertex's highest, and its vertices converted from that copy.
+ * A lookup compares the layout, then each span with guest memory now: a
+ * guest write is found by that comparison, byte for byte. Nothing cheaper
+ * would see every write: guest memory is mapped views (no write watch),
+ * reachable through aliases, written by the recompiled code without any
+ * hook and by the kernel's file reads. A hit gives exactly what converting
+ * the guest's bytes now gives. Entries live in a direct-mapped table by the
+ * layout's hash; past VC_MAX_BYTES of copies the table is emptied. */
+#define VC_SLOTS 8192
+#define VC_MAX_BYTES (192u << 20)
+#define VC_MAX_SPAN (4u << 20)
+typedef struct {
+    vlayout_t l;
+    uint32_t hash, valid, nspan;
+    uint32_t span_va[16], span_len[16], span_at[16];    /* by stream: its bytes at src + span_at */
+    uint8_t *src;
+    float *out;
+    size_t src_cap, out_cap;
+    vgaps_t gaps;
+} vcache_t;
+static vcache_t *g_vc;
+static int g_vc_on = -1;                /* 0 off, 1 on, 2 check */
+static size_t g_vc_bytes;
+static volatile LONG g_vc_n[8];         /* lookups, hits, new, changed, unusable, flushes, checked, check differs */
+static volatile LONG g_ev_vc;
+
+static int vc_mode(void)
+{
+    if (g_vc_on < 0) {
+        const char *e = getenv("RECOMP_D3D_BRIDGE_VCACHE");
+        g_vc_on = !e || !*e || *e == '0' ? 0 : _stricmp(e, "check") == 0 ? 2 : _stricmp(e, "check0") == 0 ? 3 : 1;
+        if (g_vc_on)
+            fprintf(stderr, "[D3DB] host vertex cache %s (RECOMP_D3D_BRIDGE_VCACHE)\n", g_vc_on == 1 ? "on" :
+                    g_vc_on == 2 ? "on, every draw checked against the old conversion" :
+                    "off, every draw checked against the old conversion");
+    }
+    return g_vc_on;
+}
+
+static void vc_flush(void)
+{
+    unsigned i;
+
+    for (i = 0; g_vc && i < VC_SLOTS; i++) {
+        free(g_vc[i].src);
+        free(g_vc[i].out);
+        g_vc[i].src = NULL;
+        g_vc[i].out = NULL;
+        g_vc[i].src_cap = g_vc[i].out_cap = 0;
+        g_vc[i].valid = 0;
+    }
+    g_vc_bytes = 0;
+}
+
+/* Grow *buf to n bytes, kept in g_vc_bytes. */
+static int vc_reserve(void **buf, size_t *cap, size_t n)
+{
+    void *b;
+
+    if (*cap >= n)
+        return 0;
+    b = realloc(*buf, n);
+    if (!b)
+        return -1;
+    g_vc_bytes += n - *cap;
+    *buf = b;
+    *cap = n;
+    return 0;
+}
+
+/* vp_vertices_ref's vertices, through the cache when it is on. *owned: the
+ * caller frees the result (else it is the cache's, valid until the next
+ * program draw). */
+static float *vp_vertices(const vprog_t *p, uint16_t inputs, const uint32_t base[16], const uint32_t stride[16],
+                          uint32_t lo, uint32_t n, uint32_t *vstride, int *owned)
+{
+    vlayout_t l;
+    vcache_t *e = NULL;
+    const uint8_t *src[16];
+    uint32_t k, s, lob[16], hib[16], used = 0, h = 2166136261u, i;
+    size_t total = 0;
+    float *out = NULL;
+    vgaps_t g;
+    int mode = vc_mode(), cache = mode == 1 || mode == 2, hit = 0;
+
+    vl_make(&l, p, inputs, base, stride, lo, n);
+    *vstride = 16 * l.nr;
+    *owned = 1;
+    for (k = 0; k < l.nr; k++) {        /* each stream's span */
+        uint32_t b = vs_fetch_bytes(l.k[k].format);
+        if (l.k[k].def)
+            continue;
+        if (!b)
+            return vp_vertices_ref(p, inputs, base, stride, lo, n, vstride);    /* a type vs_fetch doesn't know */
+        s = l.k[k].stream;
+        if (!(used & (1u << s))) {
+            used |= 1u << s;
+            lob[s] = l.k[k].offset;
+            hib[s] = l.k[k].offset + b;
+        }
+        if (l.k[k].offset < lob[s])
+            lob[s] = l.k[k].offset;
+        if (l.k[k].offset + b > hib[s])
+            hib[s] = l.k[k].offset + b;
+    }
+    if (cache) {
+        if (!g_vc && (g_vc = (vcache_t *)calloc(VC_SLOTS, sizeof(vcache_t))) == NULL)
+            cache = 0;
+        for (s = 0; cache && s < 16; s++)
+            if (used & (1u << s)) {
+                uint64_t len = (uint64_t)(n - 1) * stride[s] + hib[s] - lob[s];
+                total += len;
+                if (len > VC_MAX_SPAN || total > VC_MAX_SPAN)
+                    cache = 0;
+            }
+        if (!cache)
+            InterlockedIncrement(&g_vc_n[4]);
+    }
+    if (cache) {
+        const uint32_t *w = (const uint32_t *)&l;
+        InterlockedIncrement(&g_vc_n[0]);
+        for (i = 0; i < sizeof(l) / 4; i++)
+            h = (h ^ w[i]) * 16777619u;
+        e = &g_vc[(h ^ (h >> 13)) & (VC_SLOTS - 1)];
+        if (e->valid && e->hash == h && memcmp(&e->l, &l, sizeof(l)) == 0) {
+            for (s = 0; s < 16; s++)
+                if ((used & (1u << s)) && memcmp(e->src + e->span_at[s], (const void *)XBOX_PTR(e->span_va[s]),
+                                                  e->span_len[s]) != 0)
+                    break;
+            if (s == 16) {
+                InterlockedIncrement(&g_vc_n[1]);
+                hit = 1;
+                out = e->out;
+                g = e->gaps;
+            } else {
+                InterlockedIncrement(&g_vc_n[3]);
+            }
+        } else {
+            InterlockedIncrement(&g_vc_n[2]);
+        }
+        if (!out) {                     /* the bytes copied, then converted from the copy */
+            size_t at = 0;
+            e->valid = 0;
+            if (g_vc_bytes + total + (size_t)n * l.nr * 16 > VC_MAX_BYTES) {
+                vc_flush();
+                InterlockedIncrement(&g_vc_n[5]);
+            }
+            if (vc_reserve((void **)&e->src, &e->src_cap, total ? total : 1) != 0 ||
+                vc_reserve((void **)&e->out, &e->out_cap, (size_t)n * l.nr * 16 + 16) != 0)
+                return vp_vertices_ref(p, inputs, base, stride, lo, n, vstride);
+            for (s = 0; s < 16; s++)
+                if (used & (1u << s)) {
+                    e->span_va[s] = base[s] + lo * stride[s] + lob[s];
+                    e->span_len[s] = (n - 1) * stride[s] + hib[s] - lob[s];
+                    e->span_at[s] = (uint32_t)at;
+                    memcpy(e->src + at, (const void *)XBOX_PTR(e->span_va[s]), e->span_len[s]);
+                    at += e->span_len[s];
+                }
+            for (k = 0; k < l.nr; k++)
+                src[k] = l.k[k].def ? NULL : e->src + e->span_at[l.k[k].stream] + (l.k[k].offset - lob[l.k[k].stream]);
+            if (vl_convert(&l, src, e->out, &e->gaps) != 0)
+                return vp_vertices_ref(p, inputs, base, stride, lo, n, vstride);
+            e->l = l;
+            e->hash = h;
+            e->valid = 1;
+            out = e->out;
+            g = e->gaps;
+        }
+        *owned = 0;
+    } else {                            /* no cache: from guest memory, as vp_vertices_ref reads it */
+        out = (float *)malloc((size_t)n * l.nr * 16 + 16);
+        if (!out)
+            return NULL;
+        for (k = 0; k < l.nr; k++)
+            src[k] = l.k[k].def ? NULL : (const uint8_t *)XBOX_PTR(l.k[k].va);
+        if (vl_convert(&l, src, out, &g) != 0) {
+            free(out);
+            return vp_vertices_ref(p, inputs, base, stride, lo, n, vstride);
+        }
+    }
+    for (i = 0; i < g.n; i++)
+        vpgap(g.kind[i], p->hash, g.v[i]);
+    if (mode >= 2) {                    /* the check: the old conversion, compared byte for byte */
+        uint32_t vs2;
+        float *ref;
+        g_vpgap_mute = 1;
+        ref = vp_vertices_ref(p, inputs, base, stride, lo, n, &vs2);
+        g_vpgap_mute = 0;
+        if (ref) {
+            InterlockedIncrement(&g_vc_n[6]);
+            if (vs2 != *vstride || memcmp(ref, out, (size_t)n * vs2) != 0) {
+                InterlockedIncrement(&g_vc_n[7]);
+                event(&g_ev_vc, 20, "vertex cache CHECK: program %08X, %u vertices from %u, %u registers differ from"
+                      " the old conversion (%s)", p->hash, n, lo, l.nr, hit ? "a hit" : "converted now");
+            }
+            free(ref);
+        }
     }
     return out;
 }
@@ -3471,7 +3872,7 @@ static void mirror_draw_vp(const char *path, uint32_t xdk_prim, uint32_t n, cons
     d3dh_draw_t dr;
     uint16_t inputs, *list = NULL;
     uint32_t lo = 0, hi = 0, nv, prim = 0, count = 0, k = 0, i, vstride;
-    int texel, vc = -1;
+    int texel, vc = -1, owned = 1;
 
     memcpy(hv.fresh, g_vsc_fresh, sizeof(hv.fresh));     /* step 67: this draw's own constants */
     memset(g_vsc_fresh, 0, sizeof(g_vsc_fresh));
@@ -3526,7 +3927,7 @@ static void mirror_draw_vp(const char *path, uint32_t xdk_prim, uint32_t n, cons
         free(list);
         return;
     }
-    verts = vp_vertices(&p, vc >= 0 ? inputs & ~(1u << vc) : inputs, base, stride, lo, nv, &vstride);
+    verts = vp_vertices(&p, vc >= 0 ? inputs & ~(1u << vc) : inputs, base, stride, lo, nv, &vstride, &owned);
     if (!verts) {
         free(list);
         return;
@@ -3537,7 +3938,9 @@ static void mirror_draw_vp(const char *path, uint32_t xdk_prim, uint32_t n, cons
         for (r = 0; r < (uint32_t)vc; r++)
             col += (inputs >> r) & 1;
         quads = sprite_vertices(verts, nv, nr, col, &list);
-        free(verts);
+        if (owned)
+            free(verts);
+        owned = 1;
         if (!quads)
             return;
         verts = quads;
@@ -3561,14 +3964,16 @@ static void mirror_draw_vp(const char *path, uint32_t xdk_prim, uint32_t n, cons
         if (drawlog_on())
             drawlog(path, xdk_prim, n, MEM32(dev() + DEV_VS_HANDLE), NULL, 0, 0,
                     "skipped: vertex program sampling a CopyRects copy");
-        free(verts);
+        if (owned)
+            free(verts);
         free(list);
         return;
     }
     memset(tex, 0, sizeof(tex));
     memset(&dr, 0, sizeof(dr));
     if (setup_draw(&dr, 0, tex, rs, tss, &ps, NULL) < 0) {
-        free(verts);
+        if (owned)
+            free(verts);
         free(list);
         return;
     }
@@ -3628,7 +4033,8 @@ static void mirror_draw_vp(const char *path, uint32_t xdk_prim, uint32_t n, cons
         count_mirrored(&dr);
         InterlockedIncrement(&g_mirrored_vp);
     }
-    free(verts);
+    if (owned)
+        free(verts);
     free(list);
 }
 
@@ -4633,6 +5039,11 @@ static void mirror_swap(void)
                     (long)g_texel_draws, (long)g_texel_fails, (long)g_sprite_draws, (long)g_sprite_fails,
                     (long)g_skip[SKIP_VP_COPY], (long)g_vpgap[VPGAP_UNDECLARED], (long)g_vpgap[VPGAP_STREAM],
                     (long)g_vpgap[VPGAP_FORMAT], (long)g_vpgap[VPGAP_TESS], (long)g_vpgap[VPGAP_NORESERVED]);
+            if (g_vc_on > 0)            /* step 84 */
+                log_block_printf(&lb, "[D3DB] host vertex cache: %ld lookups, %ld hits, %ld new, %ld changed, %ld too"
+                        " large, %ld emptied, %.1f MB held; checked %ld, %ld differ\n", (long)g_vc_n[0],
+                        (long)g_vc_n[1], (long)g_vc_n[2], (long)g_vc_n[3], (long)g_vc_n[4], (long)g_vc_n[5],
+                        (double)g_vc_bytes / 1048576.0, (long)g_vc_n[6], (long)g_vc_n[7]);
             log_block_printf(&lb, "[D3DB] host copies: CopyRects back buffer -> texture %ld (host %u, fails %u), not"
                     " mirrored %ld; draws sampling a copy: mirrored %ld, vertex program %ld\n", (long)g_copies,
                     st.copies, st.copy_fails, (long)g_copies_skipped, (long)g_copy_sampled, (long)g_copy_sampled_vp);
