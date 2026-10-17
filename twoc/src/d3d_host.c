@@ -2779,7 +2779,8 @@ static int draw_exec(const d3dh_draw_t *d, IDirect3DBaseTexture8 *const *pin, co
  * pixel block) and its vertex and index ranges (notes 18.90). */
 typedef struct {
     D3D8Baked b;
-    uint8_t moved;                      /* its fixed-function matrices were moved when it was captured */
+    uint8_t moved;                      /* its constants or matrices were moved when it was captured (a */
+                                        /* sub-frame before t = 1): a pass at others gives them again */
 } bake_t;
 static bake_t *g_bk;                    /* replay side: the frame's, by command */
 static unsigned g_bk_cap;
@@ -2832,6 +2833,8 @@ static int draw_baked(const rcmd_t *c, const d3dh_draw_t *d, int moved)
             k = k4;
             moved = 1;
         }
+        if (bk->moved)                  /* the ring's block holds the first sub-frame's registers */
+            moved = 1;
     } else if (d->ff && (moved || bk->moved)) {
         ff = *d->ff;
         if (d->hud_dx != 0.0f)
@@ -2874,7 +2877,7 @@ static int draw_cmd(const rcmd_t *c, const d3dh_draw_t *d, int moved)
         return draw_baked(c, d, moved);
     if (g_bk_mode == BK_OFF)
         return draw_exec(d, c->u.draw.pin, c->u.draw.pinned, (D3D8UpKept *)&c->u.draw.kept);
-    g_bk[c - g_ps->rc].moved = (uint8_t)(moved && d->ff);
+    g_bk[c - g_ps->rc].moved = (uint8_t)moved;
     d3d8_BakeCapture(&g_bk[c - g_ps->rc].b);
     r = draw_exec(d, c->u.draw.pin, c->u.draw.pinned, (D3D8UpKept *)&c->u.draw.kept);
     d3d8_BakeCapture(NULL);

@@ -1,0 +1,82 @@
+diff --git a/twoc/src/d3d_host.c b/twoc/src/d3d_host.c
+index f77025f..41a6a7b 100644
+--- a/twoc/src/d3d_host.c
++++ b/twoc/src/d3d_host.c
+@@ -2786,6 +2786,7 @@ static unsigned g_bk_cap;
+ enum { BK_OFF, BK_CAPTURE, BK_BAKED };
+ static int g_bk_mode;                   /* this pass's */
+ static unsigned g_bk_plan, g_bk_pass;   /* the frame's passes, those done */
++static int g_tmp_plain;                 /* TMP step 87: a pass drawn the ordinary way, for the check */
+ 
+ /* A recorded draw drawn from its capture: `d` as this pass has it (a copy
+  * with moved matrices or constants when `moved`). Called with g_lock held. */
+@@ -2991,7 +2992,7 @@ static void replay_pass(int interp)
+     REPLAY_SIDE();
+     QueryPerformanceCounter(&t0);
+     g_bk_mode = BK_OFF;                 /* step 87: the first of passes captured, the rest drawn from that */
+-    if (g_bake && g_bk_plan > 1) {
++    if (g_bake && g_bk_plan > 1 && !g_tmp_plain) {
+         if (g_bk_pass == 0) {
+             if (g_bk_cap < g_ps->rc_n) {
+                 bake_t *n = (bake_t *)realloc(g_bk, (size_t)g_ps->rc_n * sizeof(bake_t));
+@@ -8053,6 +8054,39 @@ static void replay_check(int after, unsigned swap_no)
+     }
+ }
+ 
++/* TMP step 87: with TMP_ICHECK=1 a pass drawn from the captures is drawn
++ * the ordinary way first, from the targets as they are, then from the
++ * captures from the same targets, and the back buffers compared. */
++static int g_tmp_icheck = -1;
++static void tmp_pass(int interp, unsigned swap_no)
++{
++    ID3D11Texture2D *bb;
++
++    if (g_tmp_icheck < 0) {
++        const char *e = getenv("TMP_ICHECK");
++        g_tmp_icheck = e && *e == '1';
++        if (g_tmp_icheck)
++            fprintf(stderr, "[TMP] bake check: each pass after a frame's first drawn the ordinary way, then from"
++                    " its captures, compared\n");
++    }
++    if (!g_tmp_icheck || !g_bake || g_bk_plan <= 1 || g_bk_pass == 0) {
++        replay_pass(interp);
++        return;
++    }
++    bb = back_tex();                    /* where both start */
++    if (bb) {
++        replay_check_snap(0, bb);
++        ID3D11Texture2D_Release(bb);
++    }
++    g_tmp_plain = 1;
++    replay_pass(interp);
++    g_tmp_plain = 0;
++    g_bk_pass--;                        /* the pass again */
++    replay_check(0, swap_no);           /* kept, the targets put back */
++    replay_pass(interp);
++    replay_check(1, swap_no);           /* compared */
++}
++
+ /* One present: the back buffer (as drawn now) dumped when due and shown at
+  * DXGI `interval`, after its wait. Step 61: sub-frame `sub` of `k` (k 1: the
+  * frame itself; only the last of a frame is a frame's dump). Returns the
+@@ -8316,7 +8350,7 @@ static int replay_frame(fslot_t *f)
+         g_bk_plan = interp ? fr.n : (unsigned)(g_replay > 1 ? g_replay : 1);
+         if (interp) {
+             ic_sub(g_interp_t0 ? fr.t0[0] : fr.t[0]);
+-            replay_pass(1);             /* the first sub-frame */
++            tmp_pass(1, swap_no);       /* the first sub-frame */
+             if (fr.n == 1) {
+                 replay_done();
+                 ic_end();
+@@ -8341,9 +8375,9 @@ static int replay_frame(fslot_t *f)
+                 EnterCriticalSection(&g_lock);
+                 if (fr.t[sub - 1] < 1) {
+                     ic_sub(g_interp_t0 ? fr.t0[sub - 1] : fr.t[sub - 1]);
+-                    replay_pass(1);
++                    tmp_pass(1, swap_no);
+                 } else {
+-                    replay_pass(0);     /* t = 1: the frame as recorded */
++                    tmp_pass(0, swap_no);   /* t = 1: the frame as recorded */
+                 }
+                 if (sub == fr.n) {
+                     replay_done();
