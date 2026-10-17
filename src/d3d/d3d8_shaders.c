@@ -530,6 +530,7 @@ static ID3D11PixelShader *ff_ps_get_shader(UINT sig)
     if (g_ff_ps_cache_count >= FF_PS_CACHE_SIZE) {
         /* Evict the oldest entry */
         ID3D11PixelShader_Release(g_ff_ps_cache[0].ps);
+        d3d8_bake_gen++;                /* a baked draw may hold it (twoc notes 18.90) */
         memmove(&g_ff_ps_cache[0], &g_ff_ps_cache[1],
                 (FF_PS_CACHE_SIZE - 1) * sizeof(FfPsCacheEntry));
         g_ff_ps_cache_count--;
@@ -616,6 +617,18 @@ typedef struct {
  * draw's constants differ). */
 static PSConstants g_ps_held;
 static ID3D11Buffer *g_ps_held_by;
+
+/* Twoc notes 18.90, baked draws: the fixed-function constants the last draw
+ * uploaded (built here, then copied into the buffers), whether its vertex
+ * shader was a program and its pixel shader the combiners', the blocks the
+ * frame's last capture made, and the baked blocks each buffer holds (NULL:
+ * not one). */
+static VSTransformConstants g_ff_xf;
+static VSLightingConstants g_ff_lt;
+static BOOL g_prep_vsh, g_prep_comb;
+static BOOL g_ff_ok;                    /* both fixed-function buffers filled from them */
+static const void *g_xf_captured, *g_lt_captured, *g_ps_captured;
+static const void *g_xf_baked_last, *g_lt_baked_last, *g_ps_baked_last;
 
 /* ================================================================
  * Input layout cache (FVF → ID3D11InputLayout)
@@ -904,6 +917,47 @@ void d3d8_shaders_shutdown(void)
  * Pre-draw binding
  * ================================================================ */
 
+/* The transform constants' matrices and eye position from world, view and
+ * projection (ff_vs_prepare_draw's, and twoc notes 18.90's baked draws with
+ * their matrices given again). */
+static void ff_xf_matrices(VSTransformConstants *cb, const D3DMATRIX *world, const D3DMATRIX *view,
+                           const D3DMATRIX *proj)
+{
+    float wv[16], wvp[16], wvp_t[16], world_t[16];
+    float world_inv[16], world_inv_t[16];
+    float wv_t[16], wv_inv[16], wv_inv_t[16];
+
+    mat4_mul(wv, (const float *)world, (const float *)view);
+    mat4_mul(wvp, wv, (const float *)proj);
+    mat4_transpose(wvp_t, wvp);
+    memcpy(cb->wvp, wvp_t, sizeof(wvp_t));
+
+    mat4_transpose(world_t, (const float *)world);
+    memcpy(cb->world, world_t, sizeof(world_t));
+
+    /* WorldInvTranspose = transpose(inverse(world)) */
+    mat4_inverse(world_inv, (const float *)world);
+    mat4_transpose(world_inv_t, world_inv);
+    memcpy(cb->world_inv_transpose, world_inv_t, sizeof(world_inv_t));
+
+    /* WorldView (camera space) and its inverse-transpose */
+    mat4_transpose(wv_t, wv);
+    memcpy(cb->world_view, wv_t, sizeof(wv_t));
+    mat4_inverse(wv_inv, wv);
+    mat4_transpose(wv_inv_t, wv_inv);
+    memcpy(cb->world_view_inv_transpose, wv_inv_t, sizeof(wv_inv_t));
+
+    /* Compute eye position from inverse view matrix */
+    {
+        float view_inv[16];
+        mat4_inverse(view_inv, (const float *)view);
+        cb->eye_pos[0] = view_inv[12];
+        cb->eye_pos[1] = view_inv[13];
+        cb->eye_pos[2] = view_inv[14];
+        cb->eye_pos[3] = 1.0f;
+    }
+}
+
 static void ff_vs_prepare_draw(DWORD fvf)
 {
     ID3D11DeviceContext *ctx = d3d8_GetD3D11Context();
@@ -929,7 +983,7 @@ static void ff_vs_prepare_draw(DWORD fvf)
     /* ---- VS Transform CB (b0) ---- */
     hr = ID3D11DeviceContext_Map(ctx, (ID3D11Resource *)g_vs_cb, 0, D3D11_MAP_WRITE_DISCARD, 0, &mapped);
     if (SUCCEEDED(hr)) {
-        VSTransformConstants *cb = (VSTransformConstants *)mapped.pData;
+        VSTransformConstants *cb = &g_ff_xf;   /* built here, then copied (18.90) */
         UINT i;
         memset(cb, 0, sizeof(*cb));
 
@@ -944,47 +998,14 @@ static void ff_vs_prepare_draw(DWORD fvf)
             cb->screen_h = (float)d3d8_GetBackbufferHeight();
             cb->flags = 0x01; /* pre-transformed */
         } else {
-            float wv[16], wvp[16], wvp_t[16], world_t[16];
-            float world_inv[16], world_inv_t[16];
-            float wv_t[16], wv_inv[16], wv_inv_t[16];
-
             world = d3d8_GetTransform(D3DTS_WORLD);
             view  = d3d8_GetTransform(D3DTS_VIEW);
             proj  = d3d8_GetTransform(D3DTS_PROJECTION);
-
-            mat4_mul(wv, (const float *)world, (const float *)view);
-            mat4_mul(wvp, wv, (const float *)proj);
-            mat4_transpose(wvp_t, wvp);
-            memcpy(cb->wvp, wvp_t, sizeof(wvp_t));
-
-            mat4_transpose(world_t, (const float *)world);
-            memcpy(cb->world, world_t, sizeof(world_t));
-
-            /* WorldInvTranspose = transpose(inverse(world)) */
-            mat4_inverse(world_inv, (const float *)world);
-            mat4_transpose(world_inv_t, world_inv);
-            memcpy(cb->world_inv_transpose, world_inv_t, sizeof(world_inv_t));
-
-            /* WorldView (camera space) and its inverse-transpose */
-            mat4_transpose(wv_t, wv);
-            memcpy(cb->world_view, wv_t, sizeof(wv_t));
-            mat4_inverse(wv_inv, wv);
-            mat4_transpose(wv_inv_t, wv_inv);
-            memcpy(cb->world_view_inv_transpose, wv_inv_t, sizeof(wv_inv_t));
+            ff_xf_matrices(cb, world, view, proj);
 
             cb->screen_w = (float)d3d8_GetBackbufferWidth();
             cb->screen_h = (float)d3d8_GetBackbufferHeight();
             cb->flags = 0;
-
-            /* Compute eye position from inverse view matrix */
-            {
-                float view_inv[16];
-                mat4_inverse(view_inv, (const float *)view);
-                cb->eye_pos[0] = view_inv[12];
-                cb->eye_pos[1] = view_inv[13];
-                cb->eye_pos[2] = view_inv[14];
-                cb->eye_pos[3] = 1.0f;
-            }
         }
 
         if (fvf & D3DFVF_DIFFUSE) cb->flags |= 0x02;
@@ -1024,13 +1045,16 @@ static void ff_vs_prepare_draw(DWORD fvf)
             cb->texcoord_index[i] = ts ? ts[D3DTSS_TEXCOORDINDEX] : (UINT)i;
         }
 
+        memcpy(mapped.pData, cb, sizeof(*cb));
         ID3D11DeviceContext_Unmap(ctx, (ID3D11Resource *)g_vs_cb, 0);
+        g_xf_baked_last = NULL;
+        g_ff_ok = TRUE;
     }
 
     /* ---- VS Lighting CB (b1) ---- */
     hr = ID3D11DeviceContext_Map(ctx, (ID3D11Resource *)g_vs_light_cb, 0, D3D11_MAP_WRITE_DISCARD, 0, &mapped);
     if (SUCCEEDED(hr)) {
-        VSLightingConstants *lb = (VSLightingConstants *)mapped.pData;
+        VSLightingConstants *lb = &g_ff_lt;    /* built here, then copied (18.90) */
         const D3DMATERIAL8 *mat = d3d8_GetMaterial();
         UINT i, active_count = 0;
         memset(lb, 0, sizeof(*lb));
@@ -1089,7 +1113,11 @@ static void ff_vs_prepare_draw(DWORD fvf)
         }
         lb->num_lights = active_count;
 
+        memcpy(mapped.pData, lb, sizeof(*lb));
         ID3D11DeviceContext_Unmap(ctx, (ID3D11Resource *)g_vs_light_cb, 0);
+        g_lt_baked_last = NULL;
+    } else {
+        g_ff_ok = FALSE;
     }
 
     d3d8_bind_vs_cb(ctx, 0, g_vs_cb);
@@ -1192,6 +1220,7 @@ static void ff_ps_prepare_draw(ID3D11DeviceContext *ctx)
                 ID3D11DeviceContext_Unmap(ctx, (ID3D11Resource *)g_ps_cb, 0);
                 g_ps_held = *pc;
                 g_ps_held_by = g_ps_cb;
+                g_ps_baked_last = NULL;
             }
         }
     }
@@ -1204,13 +1233,115 @@ void d3d8_shaders_prepare_draw(DWORD handle)
     ID3D11DeviceContext *ctx = d3d8_GetD3D11Context();
 
     if (!ctx) return;
-    if (!d3d8_vsh_prepare_draw(handle))
+    g_ff_ok = FALSE;
+    g_prep_vsh = d3d8_vsh_prepare_draw(handle);
+    if (!g_prep_vsh)
         ff_vs_prepare_draw(handle);
 
     /* Pixel state is independent of whether the vertex shader is
      * programmable: the combiners' shader when one is set and it has one,
      * else the fixed-function one (18.79: that was built and bound at every
      * draw, then replaced by the combiners'). */
-    if (!d3d8_combiners_prepare_draw())
+    g_prep_comb = d3d8_combiners_prepare_draw();
+    if (!g_prep_comb)
         ff_ps_prepare_draw(ctx);
+}
+
+/* Twoc notes 18.90: `n` bytes of the bake's memory holding `p`, or `last`
+ * (the block the capture before made) when it holds the same. */
+static const void *bake_block(const void *p, size_t n, const void **last)
+{
+    void *q;
+
+    if (*last && memcmp(*last, p, n) == 0)
+        return *last;
+    if ((q = d3d8_bake_alloc(n)) == NULL)
+        return NULL;
+    memcpy(q, p, n);
+    *last = q;
+    return q;
+}
+
+/* A draw captured (d3d8_device.c, after its preparation): whether its vertex
+ * shader is a program, the fixed-function constants it uploaded, its pixel
+ * constants. b->gen is left 0 when they aren't all known. */
+void d3d8_shaders_bake(D3D8Baked *b)
+{
+    b->vsh = g_prep_vsh;
+    b->ff_xf = b->ff_lt = NULL;
+    if (!g_prep_vsh) {
+        if (!g_ff_ok)
+            return;
+        b->ff_xf = bake_block(&g_ff_xf, sizeof(g_ff_xf), &g_xf_captured);
+        b->ff_lt = bake_block(&g_ff_lt, sizeof(g_ff_lt), &g_lt_captured);
+        if (!b->ff_xf || !b->ff_lt)
+            return;
+    }
+    if (g_prep_comb) {
+        b->ps_consts = d3d8_combiners_bake(&b->ps_bytes);
+    } else {
+        b->ps_bytes = sizeof(PSConstants);
+        b->ps_consts = g_ps_held_by == g_ps_cb ? bake_block(&g_ps_held, sizeof(g_ps_held), &g_ps_captured) : NULL;
+    }
+    if (!b->ps_consts)
+        return;
+    b->gen = d3d8_bake_gen;
+}
+
+/* One constant buffer filled with `n` bytes from `p`. */
+static void cb_fill(ID3D11Buffer *cb, const void *p, size_t n)
+{
+    ID3D11DeviceContext *ctx = d3d8_GetD3D11Context();
+    D3D11_MAPPED_SUBRESOURCE mapped;
+
+    if (SUCCEEDED(ID3D11DeviceContext_Map(ctx, (ID3D11Resource *)cb, 0, D3D11_MAP_WRITE_DISCARD, 0, &mapped))) {
+        memcpy(mapped.pData, p, n);
+        ID3D11DeviceContext_Unmap(ctx, (ID3D11Resource *)cb, 0);
+    }
+}
+
+/* A baked draw's fixed-function and pixel constants into their buffers,
+ * those a buffer holds already left (a block's address is the capture's:
+ * the same address, the same constants). `ff_m` (world, view, projection)
+ * gives the transform's matrices again, the rest as captured. */
+void d3d8_shaders_baked_upload(const D3D8Baked *b, const D3DMATRIX *const ff_m[3])
+{
+    if (!b->vsh) {
+        const VSTransformConstants *xf = (const VSTransformConstants *)b->ff_xf;
+        if (ff_m && !(xf->flags & 0x01)) {
+            VSTransformConstants x = *xf;
+            ff_xf_matrices(&x, ff_m[0], ff_m[1], ff_m[2]);
+            cb_fill(g_vs_cb, &x, sizeof(x));
+            g_xf_baked_last = NULL;
+        } else if (b->ff_xf != g_xf_baked_last) {
+            cb_fill(g_vs_cb, b->ff_xf, sizeof(VSTransformConstants));
+            g_xf_baked_last = b->ff_xf;
+        }
+        if (b->ff_lt != g_lt_baked_last) {
+            cb_fill(g_vs_light_cb, b->ff_lt, sizeof(VSLightingConstants));
+            g_lt_baked_last = b->ff_lt;
+        }
+    }
+    if (b->ps_cb == g_ps_cb) {
+        if (b->ps_consts != g_ps_baked_last) {
+            if (g_ps_held_by != g_ps_cb || memcmp(&g_ps_held, b->ps_consts, sizeof(g_ps_held)) != 0) {
+                cb_fill(g_ps_cb, b->ps_consts, sizeof(g_ps_held));
+                memcpy(&g_ps_held, b->ps_consts, sizeof(g_ps_held));
+                g_ps_held_by = g_ps_cb;
+            }
+            g_ps_baked_last = b->ps_consts;
+        }
+    } else {
+        d3d8_combiners_baked_upload(b->ps_consts);
+    }
+}
+
+/* The frame's captures begin again (d3d8_BakeReset): blocks are made anew,
+ * perhaps where last frame's were. */
+void d3d8_shaders_bake_reset(void)
+{
+    g_xf_captured = g_lt_captured = g_ps_captured = NULL;
+    g_xf_baked_last = g_lt_baked_last = g_ps_baked_last = NULL;
+    d3d8_combiners_bake_reset();
+    d3d8_vsh_bake_reset();
 }

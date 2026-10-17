@@ -18,6 +18,8 @@
 #include "d3d8_internal.h"
 #include <stdio.h>
 #include <string.h>
+#include <stdlib.h>
+#include <stdint.h>
 
 /* ================================================================
  * Internal device state
@@ -778,6 +780,10 @@ static UINT          g_ib_ring_offset = 0;
  * D3D8UpKept). */
 static UINT          g_ring_gen = 1;
 
+/* Bytes put into each ring since the last d3d8_BakeReset, and in the frame
+ * before it (twoc notes 18.90). */
+static UINT          g_up_frame_bytes, g_ib_frame_bytes;
+
 static HRESULT up_ring_init(void)
 {
     D3D11_BUFFER_DESC bd;
@@ -839,6 +845,7 @@ static UINT up_ring_upload(const void *data, UINT size, UINT stride)
         (ID3D11Resource *)g_up_ring_buffer, 0);
 
     g_up_ring_offset = offset + size;
+    g_up_frame_bytes += size + stride;
     return offset;
 }
 
@@ -874,6 +881,7 @@ static UINT ib_ring_upload(const void *data, UINT size)
     memcpy((BYTE *)mapped.pData + offset, data, size);
     ID3D11DeviceContext_Unmap(g_device_state.d3d11_context, (ID3D11Resource *)g_ib_ring_buffer, 0);
     g_ib_ring_offset = (offset + size + 15) & ~15;
+    g_ib_frame_bytes += size + 16;
     return offset;
 }
 
@@ -931,6 +939,59 @@ static HRESULT __stdcall dev_DrawIndexedPrimitive(IDirect3DDevice8 *self, D3DPRI
     return S_OK;
 }
 
+/* Baked draws (twoc notes 18.90, d3d8_internal.h): the draw being captured,
+ * NULL none. */
+static D3D8Baked *g_bake_cap;
+
+/* The UP draw about to be made, with everything bound, captured into `b`. */
+static void bake_fill(D3D8Baked *b, D3D11_PRIMITIVE_TOPOLOGY topology, UINT stride, DXGI_FORMAT ib_format,
+                      UINT count, UINT start, INT base)
+{
+    const D3D8Bound *k = &g_d3d8_bound;
+    const D3DVIEWPORT8 *v = &g_device_state.viewport;
+    void *none;
+    int i;
+
+    memset(&none, 0xFF, sizeof(none));  /* d3d8_bound_reset's: nothing bound yet */
+    g_bake_cap = NULL;
+    b->gen = 0;
+    b->vs = k->vs;
+    b->il = k->il;
+    b->ps = k->ps;
+    b->bs = k->bs;
+    b->dss = k->dss;
+    b->rs = k->rs;
+    b->stencil_ref = k->stencil_ref;
+    for (i = 0; i < 4; i++)
+        b->samp[i] = k->samp[i];
+    b->vs_cb[0] = k->vs_cb[0];
+    b->vs_cb[1] = k->vs_cb[1];
+    b->ps_cb = k->ps_cb;
+    if ((void *)b->vs == none || (void *)b->il == none || (void *)b->ps == none || (void *)b->bs == none ||
+        (void *)b->dss == none || (void *)b->rs == none || (void *)b->vs_cb[1] == none || (void *)b->ps_cb == none)
+        return;
+    for (i = 0; i < 4; i++)
+        if ((void *)b->samp[i] == none)
+            return;
+    b->vp.TopLeftX = (FLOAT)v->X;       /* as dev_SetViewport bound it */
+    b->vp.TopLeftY = (FLOAT)v->Y;
+    b->vp.Width = (FLOAT)v->Width;
+    b->vp.Height = (FLOAT)v->Height;
+    b->vp.MinDepth = v->MinZ;
+    b->vp.MaxDepth = v->MaxZ;
+    b->topology = topology;
+    b->stride = stride;
+    b->ib_format = ib_format;
+    b->count = count;
+    b->start = start;
+    b->base = base;
+    b->ring_gen = g_ring_gen;
+    d3d8_shaders_bake(b);               /* sets gen when the constants are known */
+    d3d8_vsh_bake(b);                   /* where the ring holds a program's */
+    if (b->gen && !b->vsh && (void *)b->vs_cb[0] == none)
+        b->gen = 0;
+}
+
 /* DrawPrimitiveUP; with `kept` (18.79, D3D8UpKept) the vertices a draw
  * uploaded before, while the ring still holds them. */
 static HRESULT draw_primitive_up(D3DPRIMITIVETYPE PrimitiveType, UINT PrimitiveCount, const void *pVertexData,
@@ -981,6 +1042,9 @@ static HRESULT draw_primitive_up(D3DPRIMITIVETYPE PrimitiveType, UINT PrimitiveC
     d3d8_states_apply();
 
     d3d8_bind_topology(g_device_state.d3d11_context, topology);
+    if (g_bake_cap)
+        bake_fill(g_bake_cap, topology, VertexStreamZeroStride, DXGI_FORMAT_UNKNOWN, vertex_count,
+                  ring_offset / VertexStreamZeroStride, 0);
     ID3D11DeviceContext_Draw(g_device_state.d3d11_context, vertex_count, ring_offset / VertexStreamZeroStride);
     return S_OK;
 }
@@ -1048,6 +1112,9 @@ static HRESULT draw_indexed_primitive_up(D3DPRIMITIVETYPE PrimitiveType, UINT Nu
     d3d8_states_apply();
 
     d3d8_bind_topology(g_device_state.d3d11_context, topology);
+    if (g_bake_cap)
+        bake_fill(g_bake_cap, topology, VertexStreamZeroStride, ib_fmt, index_count, ib_offset / idx_bytes,
+                  (INT)(vb_offset / VertexStreamZeroStride));
     ID3D11DeviceContext_DrawIndexed(g_device_state.d3d11_context, index_count, ib_offset / idx_bytes,
                                     (INT)(vb_offset / VertexStreamZeroStride));
     return S_OK;
@@ -1066,6 +1133,131 @@ HRESULT d3d8_DrawIndexedPrimitiveUPKept(D3DPRIMITIVETYPE PrimitiveType, UINT Num
 {
     return draw_indexed_primitive_up(PrimitiveType, NumVertices, PrimitiveCount, pIndexData, IndexDataFormat,
                                      pVertexData, VertexStreamZeroStride, kept);
+}
+
+/* The bake's memory: chunks kept from frame to frame, emptied at
+ * d3d8_BakeReset. */
+typedef struct bake_chunk {
+    struct bake_chunk *next;
+    size_t used, cap;
+    double data[1];
+} bake_chunk;
+#define BAKE_CHUNK (256u * 1024u)
+static bake_chunk *g_bake_head, *g_bake_cur;
+
+void *d3d8_bake_alloc(size_t n)
+{
+    bake_chunk *c = g_bake_cur;
+    void *p;
+
+    n = (n + 15) & ~(size_t)15;
+    while (c && c->used + n > c->cap)
+        c = c->next;                    /* emptied ones after it, from frames before */
+    if (!c) {
+        size_t cap = n > BAKE_CHUNK ? n : BAKE_CHUNK;
+        c = (bake_chunk *)malloc(sizeof(bake_chunk) + cap);
+        if (!c)
+            return NULL;
+        c->used = 0;
+        c->cap = cap;
+        c->next = NULL;
+        if (g_bake_cur) {
+            c->next = g_bake_cur->next;
+            g_bake_cur->next = c;
+        } else {
+            c->next = g_bake_head;
+            g_bake_head = c;
+        }
+    }
+    g_bake_cur = c;
+    p = (uint8_t *)c->data + c->used;
+    c->used += n;
+    return p;
+}
+
+void d3d8_BakeReset(void)
+{
+    bake_chunk *c;
+
+    /* A ring that started over in the middle of a frame took every capture
+     * before it with it, for the frame's later passes (~6% of their draws in
+     * cast_bug): one that may not hold this frame's uploads after the last
+     * frame's (with a quarter more and 1 MB) starts over at its next upload,
+     * here at the frame's start. */
+    if ((UINT64)g_up_ring_offset + g_up_frame_bytes + g_up_frame_bytes / 4 + (1u << 20) > UP_RING_BUFFER_SIZE)
+        g_up_ring_offset = UP_RING_BUFFER_SIZE;
+    if ((UINT64)g_ib_ring_offset + g_ib_frame_bytes + g_ib_frame_bytes / 4 + (1u << 20) > IB_RING_BUFFER_SIZE)
+        g_ib_ring_offset = IB_RING_BUFFER_SIZE;
+    g_up_frame_bytes = g_ib_frame_bytes = 0;
+    for (c = g_bake_head; c; c = c->next)
+        c->used = 0;
+    g_bake_cur = g_bake_head;
+    g_bake_cap = NULL;
+    d3d8_shaders_bake_reset();
+}
+
+BOOL d3d8_bake_capturing(void)
+{
+    return g_bake_cap != NULL;
+}
+
+void d3d8_BakeCapture(D3D8Baked *b)
+{
+    if (b)
+        b->gen = 0;
+    g_bake_cap = b;
+}
+
+HRESULT d3d8_DrawBaked(const D3D8Baked *b, ID3D11ShaderResourceView *const srv[4], const float *vs_consts, BOOL fresh,
+                       const D3DMATRIX *const ff_m[3])
+{
+    ID3D11DeviceContext *ctx = g_device_state.d3d11_context;
+    static const float blend_factor[4] = { 1, 1, 1, 1 };
+    DWORD s;
+
+    if (!b->gen || b->gen != d3d8_bake_gen || b->ring_gen != g_ring_gen || (b->vsh && !vs_consts))
+        return S_FALSE;
+    g_d3d_draw_count++;
+    d3d8_bind_vs(ctx, b->vs);
+    d3d8_bind_layout(ctx, b->il);
+    if (b->vsh) {
+        d3d8_vsh_baked_consts(b, vs_consts, fresh);     /* and b1 bound */
+    } else {
+        d3d8_bind_vs_cb(ctx, 0, b->vs_cb[0]);
+        d3d8_bind_vs_cb(ctx, 1, b->vs_cb[1]);
+    }
+    d3d8_shaders_baked_upload(b, ff_m); /* the fixed-function and pixel constants */
+    d3d8_bind_ps(ctx, b->ps);
+    d3d8_bind_ps_cb(ctx, b->ps_cb);
+    if (g_d3d8_bound.bs != b->bs) {     /* as d3d8_states_apply binds them */
+        g_d3d8_bound.bs = b->bs;
+        ID3D11DeviceContext_OMSetBlendState(ctx, b->bs, blend_factor, 0xFFFFFFFF);
+    }
+    if (g_d3d8_bound.dss != b->dss || g_d3d8_bound.stencil_ref != b->stencil_ref) {
+        g_d3d8_bound.dss = b->dss;
+        g_d3d8_bound.stencil_ref = b->stencil_ref;
+        ID3D11DeviceContext_OMSetDepthStencilState(ctx, b->dss, b->stencil_ref);
+    }
+    if (g_d3d8_bound.rs != b->rs) {
+        g_d3d8_bound.rs = b->rs;
+        ID3D11DeviceContext_RSSetState(ctx, b->rs);
+    }
+    for (s = 0; s < 4; s++)
+        if (g_d3d8_bound.samp[s] != b->samp[s]) {
+            g_d3d8_bound.samp[s] = b->samp[s];
+            ID3D11DeviceContext_PSSetSamplers(ctx, s, 1, &b->samp[s]);
+        }
+    ID3D11DeviceContext_PSSetShaderResources(ctx, 0, 4, srv);  /* as dev_SetTexture, every stage */
+    ID3D11DeviceContext_RSSetViewports(ctx, 1, &b->vp);         /* as dev_SetViewport, every draw */
+    d3d8_bind_vb(ctx, g_up_ring_buffer, b->stride, 0);
+    if (b->ib_format != DXGI_FORMAT_UNKNOWN)
+        d3d8_bind_ib(ctx, g_ib_ring_buffer, b->ib_format, 0);
+    d3d8_bind_topology(ctx, b->topology);
+    if (b->ib_format != DXGI_FORMAT_UNKNOWN)
+        ID3D11DeviceContext_DrawIndexed(ctx, b->count, b->start, b->base);
+    else
+        ID3D11DeviceContext_Draw(ctx, b->count, b->start);
+    return S_OK;
 }
 
 static HRESULT __stdcall dev_CreateTexture(IDirect3DDevice8 *self, UINT Width, UINT Height, UINT Levels, DWORD Usage, D3DFORMAT Format, D3DPOOL Pool, IDirect3DTexture8 **ppTexture)

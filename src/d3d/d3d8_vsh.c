@@ -24,6 +24,7 @@
  */
 
 #include "d3d8_internal.h"
+#include <d3d11_1.h>
 #include "d3d8_vsh.h"
 #include <d3dcompiler.h>
 #include <string.h>
@@ -97,6 +98,27 @@ static BOOL g_vsh_constants_dirty = TRUE;
 
 /* D3D11 constant buffer for VS constants */
 static ID3D11Buffer *g_vsh_cb = NULL;
+
+/* The block a baked draw uploaded into it last, while it still holds it
+ * (twoc notes 18.90; NULL: something else since). */
+static const float *g_vsh_baked_last;
+
+/* The constants ring (local perf change, twoc notes 18.90): with D3D11.1's
+ * constant-buffer offsets, a frame's captured draws (and the baked draws
+ * whose constants moved) put their 192 registers into one large buffer,
+ * each at its own offset, bound at it; a baked draw whose constants are as
+ * captured binds the capture's block and copies nothing. The ring starts
+ * over (DISCARD) when full, and every block in it goes (g_kring_gen); one
+ * that may not hold the next frame starts over at the frame's first capture.
+ * Without D3D11.1's offsets (or a buffer): g_vsh_cb as before. */
+#define KRING_SIZE (32u << 20)
+#define VSH_REGS_BYTES ((UINT)sizeof(NV2AVSConstants))
+static ID3D11DeviceContext1 *g_ctx1;
+static ID3D11Buffer *g_kring;
+static int g_kring_state;               /* 0 not tried, 1 ready, -1 not there */
+static UINT g_kring_off = KRING_SIZE, g_kring_gen = 1, g_kring_frame_bytes;
+static BOOL g_kring_cur_ok;             /* g_vsh_constants is at g_kring_cur in the ring now */
+static UINT g_kring_cur, g_kring_cur_gen;
 
 /* Shader cache: maps microcode hash to compiled shader + input layout */
 typedef struct {
@@ -660,6 +682,8 @@ static VshCacheEntry *cache_insert(uint32_t hash)
         VshCacheEntry *evict = &g_vsh_cache[idx];
         int j;
 
+        d3d8_bake_gen++;                /* a baked draw may hold its shader or layouts (18.90) */
+
         if (evict->vs)
             ID3D11VertexShader_Release(evict->vs);
         if (evict->vs_blob)
@@ -793,6 +817,7 @@ HRESULT d3d8_vsh_init(void)
     memset(&g_vsh_constants, 0, sizeof(g_vsh_constants));
     g_vsh_slot_count = 0;
     g_vsh_constants_dirty = TRUE;
+    g_vsh_baked_last = NULL;
 
     /* Create the constant buffer for VS constants (192 * float4 = 3072 bytes) */
     memset(&cbd, 0, sizeof(cbd));
@@ -832,6 +857,17 @@ void d3d8_vsh_shutdown(void)
         ID3D11Buffer_Release(g_vsh_cb);
         g_vsh_cb = NULL;
     }
+    if (g_kring) {
+        ID3D11Buffer_Release(g_kring);
+        g_kring = NULL;
+    }
+    if (g_ctx1) {
+        ID3D11DeviceContext1_Release(g_ctx1);
+        g_ctx1 = NULL;
+    }
+    g_kring_state = 0;
+    g_kring_cur_ok = FALSE;
+    g_kring_gen++;
 
     memset(g_vsh_slots, 0, sizeof(g_vsh_slots));
     g_vsh_slot_count = 0;
@@ -919,11 +955,80 @@ void d3d8_vsh_set_constant(int start_reg, const float *data, int count)
     }
 
     g_vsh_constants_dirty = TRUE;
+    g_kring_cur_ok = FALSE;
 }
 
 BOOL d3d8_vsh_is_programmable(DWORD handle)
 {
     return (handle >= 0x10000) ? TRUE : FALSE;
+}
+
+/* The constants ring there, made the first time (FALSE: not on this device). */
+static BOOL kring_ready(void)
+{
+    ID3D11DeviceContext *ctx = d3d8_GetD3D11Context();
+    D3D11_FEATURE_DATA_D3D11_OPTIONS o;
+    D3D11_BUFFER_DESC bd;
+
+    if (g_kring_state)
+        return g_kring_state > 0;
+    g_kring_state = -1;
+    memset(&o, 0, sizeof(o));
+    if (FAILED(ID3D11Device_CheckFeatureSupport(d3d8_GetD3D11Device(), D3D11_FEATURE_D3D11_OPTIONS, &o, sizeof(o))) ||
+        !o.ConstantBufferOffsetting ||
+        FAILED(ID3D11DeviceContext_QueryInterface(ctx, &IID_ID3D11DeviceContext1, (void **)&g_ctx1))) {
+        fprintf(stderr, "D3D8 VSH: no constant-buffer offsets (D3D11.1): baked draws upload their constants\n");
+        return FALSE;
+    }
+    memset(&bd, 0, sizeof(bd));
+    bd.ByteWidth = KRING_SIZE;
+    bd.Usage = D3D11_USAGE_DYNAMIC;
+    bd.BindFlags = D3D11_BIND_CONSTANT_BUFFER;
+    bd.CPUAccessFlags = D3D11_CPU_ACCESS_WRITE;
+    if (FAILED(ID3D11Device_CreateBuffer(d3d8_GetD3D11Device(), &bd, NULL, &g_kring))) {
+        ID3D11DeviceContext1_Release(g_ctx1);
+        g_ctx1 = NULL;
+        fprintf(stderr, "D3D8 VSH: the constants ring wasn't made: baked draws upload their constants\n");
+        return FALSE;
+    }
+    g_kring_state = 1;
+    fprintf(stderr, "D3D8 VSH: constants ring %u MB (D3D11.1 offsets) for baked draws\n", KRING_SIZE >> 20);
+    return TRUE;
+}
+
+/* 192 registers from `p` into the ring; returns their offset, (UINT)-1 if
+ * the map failed. */
+static UINT kring_write(const void *p)
+{
+    ID3D11DeviceContext *ctx = d3d8_GetD3D11Context();
+    D3D11_MAPPED_SUBRESOURCE mapped;
+    D3D11_MAP mt = D3D11_MAP_WRITE_NO_OVERWRITE;
+    UINT off = g_kring_off;
+
+    if (off + VSH_REGS_BYTES > KRING_SIZE) {
+        off = 0;
+        mt = D3D11_MAP_WRITE_DISCARD;
+        g_kring_gen++;
+    }
+    if (FAILED(ID3D11DeviceContext_Map(ctx, (ID3D11Resource *)g_kring, 0, mt, 0, &mapped)))
+        return (UINT)-1;
+    memcpy((BYTE *)mapped.pData + off, p, VSH_REGS_BYTES);
+    ID3D11DeviceContext_Unmap(ctx, (ID3D11Resource *)g_kring, 0);
+    g_kring_off = off + VSH_REGS_BYTES;     /* 3072 bytes: 256-byte (16-constant) steps */
+    g_kring_frame_bytes += VSH_REGS_BYTES;
+    return off;
+}
+
+/* Slot b1 bound to the ring's block at `off`. */
+static void kring_bind(UINT off)
+{
+    UINT first = off / 16, num = VSH_REGS_BYTES / 16;
+
+    if (g_d3d8_bound.vs_cb[1] != g_kring || g_d3d8_bound.vs_cb1_first != first) {
+        g_d3d8_bound.vs_cb[1] = g_kring;
+        g_d3d8_bound.vs_cb1_first = first;
+        ID3D11DeviceContext1_VSSetConstantBuffers1(g_ctx1, 1, 1, &g_kring, &first, &num);
+    }
 }
 
 BOOL d3d8_vsh_prepare_draw(DWORD handle)
@@ -973,6 +1078,26 @@ BOOL d3d8_vsh_prepare_draw(DWORD handle)
     if (layout)
         d3d8_bind_layout(ctx, layout);
 
+    /* A captured draw (twoc notes 18.90): its constants in the ring, where
+     * the baked draws after it find them (the block before when they haven't
+     * changed since); g_vsh_cb is uploaded again at the next draw that isn't. */
+    if (d3d8_bake_capturing() && kring_ready()) {
+        if (!g_kring_cur_ok || g_kring_cur_gen != g_kring_gen) {
+            UINT off = kring_write(&g_vsh_constants);
+            if (off != (UINT)-1) {
+                g_kring_cur = off;
+                g_kring_cur_gen = g_kring_gen;
+                g_kring_cur_ok = TRUE;
+            }
+        }
+        if (g_kring_cur_ok && g_kring_cur_gen == g_kring_gen) {
+            kring_bind(g_kring_cur);
+            g_vsh_constants_dirty = TRUE;
+            g_vsh_baked_last = NULL;
+            return TRUE;
+        }
+    }
+
     /* Update constant buffer if dirty */
     if (g_vsh_constants_dirty) {
         hr = ID3D11DeviceContext_Map(ctx, (ID3D11Resource *)g_vsh_cb,
@@ -982,10 +1107,68 @@ BOOL d3d8_vsh_prepare_draw(DWORD handle)
             ID3D11DeviceContext_Unmap(ctx, (ID3D11Resource *)g_vsh_cb, 0);
         }
         g_vsh_constants_dirty = FALSE;
+        g_vsh_baked_last = NULL;
     }
 
     /* Bind constant buffer to slot b1 */
     d3d8_bind_vs_cb(ctx, 1, g_vsh_cb);
 
     return TRUE;
+}
+
+/* The captured draw's place in the ring (k_gen 0: not there). */
+void d3d8_vsh_bake(D3D8Baked *b)
+{
+    b->k_gen = 0;
+    if (b->vsh && g_kring_state > 0 && g_d3d8_bound.vs_cb[1] == g_kring && g_kring_cur_ok &&
+        g_kring_cur_gen == g_kring_gen) {
+        b->k_gen = g_kring_gen;
+        b->k_first = g_kring_cur;
+    }
+}
+
+/* A baked draw's program constants (twoc notes 18.90), bound in b1: the
+ * capture's block in the ring when they are as captured (not `fresh`) and it
+ * still holds it, else `consts` (all 192) put in the ring, or (no ring)
+ * uploaded into g_vsh_cb unless it is the block uploaded by the baked draw
+ * before and not `fresh`. g_vsh_constants is left as it is, so the next
+ * ordinary draw uploads it again. */
+void d3d8_vsh_baked_consts(const D3D8Baked *b, const float *consts, BOOL fresh)
+{
+    ID3D11DeviceContext *ctx = d3d8_GetD3D11Context();
+    D3D11_MAPPED_SUBRESOURCE mapped;
+
+    if (g_kring_state > 0) {
+        UINT off;
+        if (!fresh && b->k_gen && b->k_gen == g_kring_gen) {
+            kring_bind(b->k_first);
+            return;
+        }
+        if ((off = kring_write(consts)) != (UINT)-1) {
+            kring_bind(off);
+            g_vsh_constants_dirty = TRUE;
+            return;
+        }
+    }
+    d3d8_bind_vs_cb(ctx, 1, g_vsh_cb);
+    if (!fresh && consts == g_vsh_baked_last)
+        return;
+    if (SUCCEEDED(ID3D11DeviceContext_Map(ctx, (ID3D11Resource *)g_vsh_cb, 0, D3D11_MAP_WRITE_DISCARD, 0, &mapped))) {
+        memcpy(mapped.pData, consts, sizeof(g_vsh_constants));
+        ID3D11DeviceContext_Unmap(ctx, (ID3D11Resource *)g_vsh_cb, 0);
+    }
+    g_vsh_constants_dirty = TRUE;
+    g_vsh_baked_last = fresh ? NULL : consts;
+}
+
+/* The frame's captures begin again (d3d8_BakeReset): a block given before
+ * may be at the same address with other constants now. */
+void d3d8_vsh_bake_reset(void)
+{
+    g_vsh_baked_last = NULL;
+    /* The ring starts over now if the frame may not fit (a quarter more than
+     * the last frame put in it, and 1 MB). */
+    if ((UINT64)g_kring_off + g_kring_frame_bytes + g_kring_frame_bytes / 4 + (1u << 20) > KRING_SIZE)
+        g_kring_off = KRING_SIZE;
+    g_kring_frame_bytes = 0;
 }

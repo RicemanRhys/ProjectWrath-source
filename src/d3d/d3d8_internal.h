@@ -336,6 +336,7 @@ typedef struct {
     ID3D11RasterizerState   *rs;
     ID3D11SamplerState      *samp[4];
     ID3D11Buffer            *vs_cb[2];
+    UINT                     vs_cb1_first;  /* slot 1's first constant (twoc notes 18.90: the constants ring) */
     ID3D11Buffer            *ps_cb;
     ID3D11Buffer            *vb;        /* IA slot 0 */
     UINT                     vb_stride, vb_offset;
@@ -374,8 +375,10 @@ static __inline void d3d8_bind_layout(ID3D11DeviceContext *ctx, ID3D11InputLayou
 
 static __inline void d3d8_bind_vs_cb(ID3D11DeviceContext *ctx, UINT slot, ID3D11Buffer *cb)
 {
-    if (g_d3d8_bound.vs_cb[slot] != cb) {
+    if (g_d3d8_bound.vs_cb[slot] != cb || (slot == 1 && g_d3d8_bound.vs_cb1_first)) {
         g_d3d8_bound.vs_cb[slot] = cb;
+        if (slot == 1)
+            g_d3d8_bound.vs_cb1_first = 0;
         ID3D11DeviceContext_VSSetConstantBuffers(ctx, slot, 1, &cb);
     }
 }
@@ -436,6 +439,79 @@ HRESULT d3d8_DrawPrimitiveUPKept(D3DPRIMITIVETYPE PrimitiveType, UINT PrimitiveC
 HRESULT d3d8_DrawIndexedPrimitiveUPKept(D3DPRIMITIVETYPE PrimitiveType, UINT NumVertices, UINT PrimitiveCount,
                                         const void *pIndexData, D3DFORMAT IndexDataFormat,
                                         const void *pVertexData, UINT VertexStreamZeroStride, D3D8UpKept *kept);
+
+/* ================================================================
+ * Baked draws (d3d8_device.c)
+ *
+ * Local perf change (twoc notes 18.90): a caller that draws the same UP
+ * draw several times (twoc's sub-frames) has the first draw captured: what
+ * it bound on the D3D11 context once its render states, stage states,
+ * shaders and constants were translated (the pipeline objects, samplers,
+ * viewport, the fixed-function and pixel constants as uploaded, where the
+ * rings hold its vertices). d3d8_DrawBaked draws it again from that, binding
+ * what differs from what is bound, with only the vertex program's
+ * constants (or the fixed-function matrices) given again; nothing is
+ * translated and xbox_d3d8's own D3D8 state is left as it was. With D3D11.1's
+ * constant-buffer offsets a captured program's registers go into a ring
+ * (d3d8_vsh.c), where a baked draw with them unchanged binds them again; and
+ * d3d8_BakeReset starts the rings over when the frame may not fit. The objects
+ * a capture points to stay alive while d3d8_bake_gen is unchanged: every
+ * cache that releases one bumps it (and a bake from before is refused).
+ * ================================================================ */
+
+typedef struct {
+    UINT gen;                           /* d3d8_bake_gen when captured, 0: not captured */
+    UINT ring_gen;                      /* the rings' generation then */
+    ID3D11VertexShader      *vs;
+    ID3D11InputLayout       *il;
+    ID3D11PixelShader       *ps;
+    ID3D11BlendState        *bs;
+    ID3D11DepthStencilState *dss;
+    ID3D11RasterizerState   *rs;
+    ID3D11SamplerState      *samp[4];
+    ID3D11Buffer            *vs_cb[2], *ps_cb;
+    UINT                     stencil_ref;
+    D3D11_VIEWPORT           vp;
+    D3D11_PRIMITIVE_TOPOLOGY topology;
+    UINT                     stride;
+    DXGI_FORMAT              ib_format;         /* DXGI_FORMAT_UNKNOWN: not indexed */
+    UINT                     count, start;      /* vertices or indices, the first */
+    INT                      base;              /* the base vertex (indexed) */
+    BOOL                     vsh;               /* a vertex program (its constants in b1) */
+    UINT                     k_gen, k_first;    /* where the constants ring holds them (k_gen 0: not there) */
+    const void              *ff_xf, *ff_lt;     /* fixed-function: its transform and lighting constants */
+    const void              *ps_consts;         /* the pixel constants, as in ps_cb */
+    UINT                     ps_bytes;
+} D3D8Baked;
+
+extern UINT d3d8_bake_gen;
+
+/* The captures of a new frame begin: the memory the last frame's held is
+ * reused. */
+void d3d8_BakeReset(void);
+/* The next UP draw is captured into `b` (gen set when it is); NULL: none. */
+void d3d8_BakeCapture(D3D8Baked *b);
+/* `b` drawn again with stage s sampling srv[s]. A vertex program's
+ * constants are `vs_consts` (192 float4s); `fresh` says they are not the
+ * block given at the last baked draw unchanged (or `ff_m` world, view and
+ * projection replace a fixed-function draw's matrices, NULL: as captured).
+ * Returns S_FALSE without drawing when the capture no longer holds (draw it
+ * the ordinary way). */
+HRESULT d3d8_DrawBaked(const D3D8Baked *b, ID3D11ShaderResourceView *const srv[4], const float *vs_consts, BOOL fresh,
+                       const D3DMATRIX *const ff_m[3]);
+
+/* The modules' parts (d3d8_shaders.c, d3d8_combiners.c, d3d8_vsh.c) */
+void *d3d8_bake_alloc(size_t n);
+void d3d8_shaders_bake(D3D8Baked *b);
+void d3d8_shaders_baked_upload(const D3D8Baked *b, const D3DMATRIX *const ff_m[3]);
+void d3d8_shaders_bake_reset(void);
+const void *d3d8_combiners_bake(UINT *bytes);
+void d3d8_combiners_baked_upload(const void *consts);
+void d3d8_combiners_bake_reset(void);
+void d3d8_vsh_baked_consts(const D3D8Baked *b, const float *consts, BOOL fresh);
+void d3d8_vsh_bake_reset(void);
+void d3d8_vsh_bake(D3D8Baked *b);
+BOOL d3d8_bake_capturing(void);
 
 #endif /* _WIN32 -- end of D3D11 backend section */
 

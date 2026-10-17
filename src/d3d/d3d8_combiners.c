@@ -1021,6 +1021,7 @@ ID3D11PixelShader *d3d8_combiners_get_shader(const NV2ACombinerState *state)
         entry = &g_cache[lru_slot];
         if (entry->shader) {
             ID3D11PixelShader_Release(entry->shader);
+            d3d8_bake_gen++;            /* a baked draw may hold it (twoc notes 18.90) */
         }
 
         ps = compile_combiner_shader(state);
@@ -1043,6 +1044,8 @@ ID3D11PixelShader *d3d8_combiners_get_shader(const NV2ACombinerState *state)
  * when a draw's constants differ). */
 static NV2APSConstants g_cb_held;
 static ID3D11Buffer *g_cb_held_by;
+static const void *g_cb_baked_last;     /* 18.90: the baked block it holds, NULL: not one */
+static const void *g_cb_captured;       /* 18.90: the frame's last captured block */
 
 HRESULT d3d8_combiners_init(void)
 {
@@ -1055,6 +1058,7 @@ HRESULT d3d8_combiners_init(void)
     g_dirty = TRUE;
     g_frame_counter = 0;
     g_cb_held_by = NULL;
+    d3d8_combiners_bake_reset();
 
     /* Create the PS constant buffer for combiner shaders.
      * Size must match NV2APSConstants, rounded up to 16-byte alignment. */
@@ -1206,6 +1210,7 @@ BOOL d3d8_combiners_prepare_draw(void)
                 ID3D11DeviceContext_Unmap(ctx, (ID3D11Resource *)g_combiner_cb, 0);
                 g_cb_held = *cb;
                 g_cb_held_by = g_combiner_cb;
+                g_cb_baked_last = NULL;
             }
         }
     }
@@ -1217,4 +1222,55 @@ BOOL d3d8_combiners_prepare_draw(void)
     g_frame_counter++;
 
     return TRUE;
+}
+
+/* Twoc notes 18.90, a draw captured: the constants its combiner shader has
+ * (what the buffer holds after d3d8_combiners_prepare_draw), in the bake's
+ * memory; the block captured before when they are the same. NULL if the
+ * buffer doesn't hold them. */
+const void *d3d8_combiners_bake(UINT *bytes)
+{
+    void *p;
+
+    *bytes = sizeof(NV2APSConstants);
+    if (g_cb_held_by != g_combiner_cb)
+        return NULL;
+    if (g_cb_captured && memcmp(g_cb_captured, &g_cb_held, sizeof(g_cb_held)) == 0)
+        return g_cb_captured;
+    p = d3d8_bake_alloc(sizeof(g_cb_held));
+    if (p) {
+        memcpy(p, &g_cb_held, sizeof(g_cb_held));
+        g_cb_captured = p;
+    }
+    return p;
+}
+
+/* A baked draw's combiner constants into the buffer, unless it holds them. */
+void d3d8_combiners_baked_upload(const void *consts)
+{
+    ID3D11DeviceContext *ctx = d3d8_GetD3D11Context();
+    D3D11_MAPPED_SUBRESOURCE mapped;
+
+    if (consts == g_cb_baked_last)
+        return;
+    if (g_cb_held_by != g_combiner_cb || memcmp(&g_cb_held, consts, sizeof(g_cb_held)) != 0) {
+        if (FAILED(ID3D11DeviceContext_Map(ctx, (ID3D11Resource *)g_combiner_cb, 0, D3D11_MAP_WRITE_DISCARD, 0,
+                                           &mapped))) {
+            g_cb_held_by = NULL;
+            g_cb_baked_last = NULL;
+            return;
+        }
+        memcpy(mapped.pData, consts, sizeof(g_cb_held));
+        ID3D11DeviceContext_Unmap(ctx, (ID3D11Resource *)g_combiner_cb, 0);
+        memcpy(&g_cb_held, consts, sizeof(g_cb_held));
+        g_cb_held_by = g_combiner_cb;
+    }
+    g_cb_baked_last = consts;
+}
+
+/* The frame's captures begin again (d3d8_BakeReset). */
+void d3d8_combiners_bake_reset(void)
+{
+    g_cb_captured = NULL;
+    g_cb_baked_last = NULL;
 }

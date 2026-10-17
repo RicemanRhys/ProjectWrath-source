@@ -33,6 +33,13 @@ UINT d3d8_GetNumLights(void) { return 0; }
 /* What the draws last bound (d3d8_states.c, not linked here). */
 D3D8Bound g_d3d8_bound;
 
+/* Baked draws' parts from d3d8_states.c, d3d8_device.c and d3d8_vsh.c
+ * (twoc notes 18.90), not linked here. */
+UINT d3d8_bake_gen = 1;
+void *d3d8_bake_alloc(size_t n) { (void)n; return NULL; }
+void d3d8_vsh_bake_reset(void) { }
+BOOL d3d8_bake_capturing(void) { return FALSE; }
+
 /* Model successful programmable-VS preparation without Xbox microcode.
  * Bind real D3D11 vertex state so pixel preparation must preserve it
  * (through the bind record, as d3d8_vsh.c does). */
