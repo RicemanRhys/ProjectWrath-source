@@ -1645,6 +1645,25 @@ void *d3dh_rec_alloc(size_t n)
     return p;
 }
 
+void d3dh_hold_release(d3dh_hold_t *h)
+{
+    if (h && InterlockedDecrement((volatile LONG *)&h->refs) == 0)
+        free(h);
+}
+
+/* Step 84: commands [from, n) of slot f dropped: the vertex blocks their
+ * draws hold, released. */
+static void rc_unhold(fslot_t *f, unsigned from, unsigned n)
+{
+    unsigned i;
+
+    for (i = from; i < n; i++)
+        if (f->rc[i].kind == RC_DRAW && f->rc[i].u.draw.d.hold) {
+            d3dh_hold_release(f->rc[i].u.draw.d.hold);
+            f->rc[i].u.draw.d.hold = NULL;
+        }
+}
+
 /* `p` as the recording keeps it: a block d3dh_rec_alloc gave for this draw
  * as it is, anything else copied into the arena (ra_dup). */
 static void *ra_keep(const void *p, size_t n)
@@ -2685,7 +2704,11 @@ static int rec_draw(const d3dh_draw_t *d)
     }
     o = &c->u.draw.d;
     *o = *d;
-    o->verts = ra_keep(d->verts, (size_t)d->vert_count * d->stride);     /* step 84: ra_keep */
+    o->hold = NULL;
+    if (d->hold && d->verts)            /* step 84: the bridge's cached vertices, by reference */
+        o->verts = d->verts;
+    else
+        o->verts = ra_keep(d->verts, (size_t)d->vert_count * d->stride);     /* step 84: ra_keep */
     bad |= d->verts && d->vert_count && d->stride && !o->verts;
     o->indices = (const uint16_t *)ra_dup(d->indices, (size_t)d->index_count * sizeof(uint16_t));
     bad |= d->indices && d->index_count && !o->indices;
@@ -2715,6 +2738,10 @@ static int rec_draw(const d3dh_draw_t *d)
         g_rs->rc_n--;
         g_stg.draw_fails++;
         return -1;
+    }
+    if (d->hold && d->verts) {
+        InterlockedIncrement((volatile LONG *)&d->hold->refs);
+        o->hold = d->hold;
     }
     /* The textures as they are now; those that may be render targets at the
      * replay are fetched there. Step 78: looked up in the game side's table
@@ -2838,6 +2865,7 @@ static void replay_done(void)
             for (s = 0; s < 4; s++)
                 if (g_ps->rc[i].u.draw.pin[s])
                     g_ps->rc[i].u.draw.pin[s]->lpVtbl->Release(g_ps->rc[i].u.draw.pin[s]);
+    rc_unhold(g_ps, 0, g_ps->rc_n);     /* step 84 */
     g_st.replay_frames++;
     g_st.replay_cmds += g_ps->rc_n;
     g_st.replay_bytes += (double)g_ps->ra_bytes;
@@ -5966,6 +5994,7 @@ static void rc_forget(unsigned first)
 
     REPLAY_SIDE();
     rk_forget();                        /* step 84 */
+    rc_unhold(g_rs, first, g_rs->rc_n);
     for (i = first; i < g_rs->rc_n; i++)
         if (g_rs->rc[i].kind == RC_DRAW)
             for (s = 0; s < 4; s++)
@@ -8375,6 +8404,7 @@ static DWORD WINAPI rt_main(LPVOID p)
         if (!g_ready) {                 /* the swap chain couldn't be made again (recreate_flip): dropped */
             EnterCriticalSection(&g_lock);
             g_ps = f;
+            rc_unhold(f, 0, f->rc_n);   /* step 84 */
             f->rc_n = f->up_n = 0;
             f->ra_cur = NULL;
             f->ra_bytes = 0;

@@ -201,7 +201,21 @@ typedef struct {
     /* Set by the host (step 65, HUD at the screen edges): the clip-space x
      * offset, in units of w, that moves the draw's element to its edge. */
     float hud_dx;
+    /* Step 84: `verts` lie in this block (the bridge's vertex cache): a
+     * recording keeps them there with a reference instead of a copy. NULL:
+     * copied as before. */
+    struct d3dh_hold *hold;
 } d3dh_draw_t;
+
+/* Step 84: a reference-counted block of memory the bridge shares with the
+ * recordings (a cached program draw's vertices, after this header). Made by
+ * the bridge with malloc and refs 1; freed by d3dh_hold_release at the last
+ * reference, on whichever thread drops it. */
+typedef struct d3dh_hold {
+    volatile long refs;
+    uint32_t pad[3];
+} d3dh_hold_t;
+void d3dh_hold_release(d3dh_hold_t *h);
 
 /* S5: the registers a program reads (bit n = vn), 0 if it reads none or
  * can't be parsed. */

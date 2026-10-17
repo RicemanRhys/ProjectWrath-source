@@ -3283,22 +3283,29 @@ static int vl_convert(const vlayout_t *l, const uint8_t *const src[16], float *o
  * would see every write: guest memory is mapped views (no write watch),
  * reachable through aliases, written by the recompiled code without any
  * hook and by the kernel's file reads. A hit gives exactly what converting
- * the guest's bytes now gives. Entries live in a direct-mapped table by the
- * layout's hash; past VC_MAX_BYTES of copies the table is emptied. */
-#define VC_SLOTS 8192
+ * the guest's bytes now gives. Entries live in sets of VC_WAYS by the
+ * layout's hash, the least recently used of a set replaced; past
+ * VC_MAX_BYTES the table is emptied. An entry's vertices are in a block
+ * the recordings share (d3dh_hold_t): a draw recorded from it holds a
+ * reference instead of copying them, and an entry converted again while a
+ * recording still holds its block takes a new one. */
+#define VC_SETS 4096
+#define VC_WAYS 4
 #define VC_MAX_BYTES (192u << 20)
 #define VC_MAX_SPAN (4u << 20)
+#define VC_HDR 16                       /* sizeof(d3dh_hold_t): the vertices follow it */
 typedef struct {
     vlayout_t l;
-    uint32_t hash, valid, nspan;
+    uint32_t hash, valid, use;
     uint32_t span_va[16], span_len[16], span_at[16];    /* by stream: its bytes at src + span_at */
     uint8_t *src;
-    float *out;
+    d3dh_hold_t *blk;
     size_t src_cap, out_cap;
     vgaps_t gaps;
 } vcache_t;
 static vcache_t *g_vc;
-static int g_vc_on = -1;                /* 0 off, 1 on, 2 check */
+static uint32_t g_vc_clock;
+static int g_vc_on = -1;                /* 0 off, 1 on, 2 check, 3 check without the cache */
 static size_t g_vc_bytes;
 static volatile LONG g_vc_n[8];         /* lookups, hits, new, changed, unusable, flushes, checked, check differs */
 static volatile LONG g_ev_vc;
@@ -3320,15 +3327,40 @@ static void vc_flush(void)
 {
     unsigned i;
 
-    for (i = 0; g_vc && i < VC_SLOTS; i++) {
+    for (i = 0; g_vc && i < VC_SETS * VC_WAYS; i++) {
         free(g_vc[i].src);
-        free(g_vc[i].out);
+        d3dh_hold_release(g_vc[i].blk);     /* freed now, or by the last recording holding it */
         g_vc[i].src = NULL;
-        g_vc[i].out = NULL;
+        g_vc[i].blk = NULL;
         g_vc[i].src_cap = g_vc[i].out_cap = 0;
         g_vc[i].valid = 0;
     }
     g_vc_bytes = 0;
+}
+
+/* Entry e's vertex block for n bytes: its own while no recording holds it
+ * and it is large enough, else a new one (the old one is the recordings'). */
+static int vc_block(vcache_t *e, size_t n)
+{
+    d3dh_hold_t *b;
+
+    if (e->blk && e->blk->refs == 1 && e->out_cap >= n)
+        return 0;
+    if (e->blk) {
+        g_vc_bytes -= e->out_cap;
+        d3dh_hold_release(e->blk);
+        e->blk = NULL;
+        e->out_cap = 0;
+    }
+    n += n / 4;
+    b = (d3dh_hold_t *)malloc(VC_HDR + n);
+    if (!b)
+        return -1;
+    b->refs = 1;
+    e->blk = b;
+    e->out_cap = n;
+    g_vc_bytes += n;
+    return 0;
 }
 
 /* Grow *buf to n bytes, kept in g_vc_bytes. */
@@ -3369,22 +3401,24 @@ static void *scratch(void **buf, size_t *cap, size_t n)
 
 /* vp_vertices_ref's vertices, through the cache when it is on. *owned: the
  * caller frees the result (else it is the cache's or the scratch's, valid
- * until the next program draw). */
+ * until the next program draw); *hold: the cache's block it lies in. */
 static float *vp_vertices(const vprog_t *p, uint16_t inputs, const uint32_t base[16], const uint32_t stride[16],
-                          uint32_t lo, uint32_t n, uint32_t *vstride, int *owned)
+                          uint32_t lo, uint32_t n, uint32_t *vstride, int *owned, d3dh_hold_t **hold)
 {
     vlayout_t l;
     vcache_t *e = NULL;
     const uint8_t *src[16];
-    uint32_t k, s, lob[16], hib[16], used = 0, h = 2166136261u, i;
-    size_t total = 0;
+    uint32_t k, s, lob[16], hib[16], used = 0, h, i;
+    size_t total = 0, lsz;
     float *out = NULL;
     vgaps_t g;
     int mode = vc_mode(), cache = mode == 1 || mode == 2, hit = 0;
 
     vl_make(&l, p, inputs, base, stride, lo, n);
+    lsz = offsetof(vlayout_t, k) + l.nr * sizeof(l.k[0]);  /* the rest is zero */
     *vstride = 16 * l.nr;
     *owned = 1;
+    *hold = NULL;
     for (k = 0; k < l.nr; k++) {        /* each stream's span */
         uint32_t b = vs_fetch_bytes(l.k[k].format);
         if (l.k[k].def)
@@ -3403,7 +3437,7 @@ static float *vp_vertices(const vprog_t *p, uint16_t inputs, const uint32_t base
             hib[s] = l.k[k].offset + b;
     }
     if (cache) {
-        if (!g_vc && (g_vc = (vcache_t *)calloc(VC_SLOTS, sizeof(vcache_t))) == NULL)
+        if (!g_vc && (g_vc = (vcache_t *)calloc(VC_SETS * VC_WAYS, sizeof(vcache_t))) == NULL)
             cache = 0;
         for (s = 0; cache && s < 16; s++)
             if (used & (1u << s)) {
@@ -3416,12 +3450,25 @@ static float *vp_vertices(const vprog_t *p, uint16_t inputs, const uint32_t base
             InterlockedIncrement(&g_vc_n[4]);
     }
     if (cache) {
-        const uint32_t *w = (const uint32_t *)&l;
+        vcache_t *set;
         InterlockedIncrement(&g_vc_n[0]);
-        for (i = 0; i < sizeof(l) / 4; i++)
-            h = (h ^ w[i]) * 16777619u;
-        e = &g_vc[(h ^ (h >> 13)) & (VC_SLOTS - 1)];
-        if (e->valid && e->hash == h && memcmp(&e->l, &l, sizeof(l)) == 0) {
+        h = (uint32_t)sig_span((const uint8_t *)&l, (uint32_t)lsz, 0);
+        set = &g_vc[(h & (VC_SETS - 1)) * VC_WAYS];
+        for (i = 0; i < VC_WAYS; i++)
+            if (set[i].valid && set[i].hash == h && memcmp(&set[i].l, &l, lsz) == 0)
+                break;
+        if (i < VC_WAYS) {
+            e = &set[i];
+        } else {                        /* an empty way, else the least recently used */
+            e = &set[0];
+            for (i = 0; i < VC_WAYS && set[i].valid; i++)
+                if (set[i].use < e->use)
+                    e = &set[i];
+            if (i < VC_WAYS)
+                e = &set[i];
+        }
+        e->use = ++g_vc_clock;
+        if (e->valid && e->hash == h && memcmp(&e->l, &l, lsz) == 0) {
             for (s = 0; s < 16; s++)
                 if ((used & (1u << s)) && memcmp(e->src + e->span_at[s], (const void *)XBOX_PTR(e->span_va[s]),
                                                   e->span_len[s]) != 0)
@@ -3429,7 +3476,7 @@ static float *vp_vertices(const vprog_t *p, uint16_t inputs, const uint32_t base
             if (s == 16) {
                 InterlockedIncrement(&g_vc_n[1]);
                 hit = 1;
-                out = e->out;
+                out = (float *)((uint8_t *)e->blk + VC_HDR);
                 g = e->gaps;
             } else {
                 InterlockedIncrement(&g_vc_n[3]);
@@ -3445,7 +3492,7 @@ static float *vp_vertices(const vprog_t *p, uint16_t inputs, const uint32_t base
                 InterlockedIncrement(&g_vc_n[5]);
             }
             if (vc_reserve((void **)&e->src, &e->src_cap, total ? total : 1) != 0 ||
-                vc_reserve((void **)&e->out, &e->out_cap, (size_t)n * l.nr * 16 + 16) != 0)
+                vc_block(e, (size_t)n * l.nr * 16 + 16) != 0)
                 return vp_vertices_ref(p, inputs, base, stride, lo, n, vstride);
             for (s = 0; s < 16; s++)
                 if (used & (1u << s)) {
@@ -3457,15 +3504,16 @@ static float *vp_vertices(const vprog_t *p, uint16_t inputs, const uint32_t base
                 }
             for (k = 0; k < l.nr; k++)
                 src[k] = l.k[k].def ? NULL : e->src + e->span_at[l.k[k].stream] + (l.k[k].offset - lob[l.k[k].stream]);
-            if (vl_convert(&l, src, e->out, &e->gaps) != 0)
+            out = (float *)((uint8_t *)e->blk + VC_HDR);
+            if (vl_convert(&l, src, out, &e->gaps) != 0)
                 return vp_vertices_ref(p, inputs, base, stride, lo, n, vstride);
             e->l = l;
             e->hash = h;
             e->valid = 1;
-            out = e->out;
             g = e->gaps;
         }
         *owned = 0;
+        *hold = e->blk;
     } else {                            /* no cache: from guest memory, as vp_vertices_ref reads it */
         out = (float *)d3dh_rec_alloc((size_t)n * l.nr * 16 + 16);  /* where the recording keeps it, */
         if (!out)                                                   /* else the scratch */
@@ -3947,6 +3995,7 @@ static void mirror_draw_vp(const char *path, uint32_t xdk_prim, uint32_t n, cons
     uint16_t inputs, *list = NULL;
     uint32_t lo = 0, hi = 0, nv, prim = 0, count = 0, k = 0, i, vstride;
     int texel, vc = -1, owned = 1;
+    d3dh_hold_t *hold = NULL;
 
     memcpy(hv.fresh, g_vsc_fresh, sizeof(hv.fresh));     /* step 67: this draw's own constants */
     memset(g_vsc_fresh, 0, sizeof(g_vsc_fresh));
@@ -4004,7 +4053,7 @@ static void mirror_draw_vp(const char *path, uint32_t xdk_prim, uint32_t n, cons
         list_free(list);
         return;
     }
-    verts = vp_vertices(&p, vc >= 0 ? inputs & ~(1u << vc) : inputs, base, stride, lo, nv, &vstride, &owned);
+    verts = vp_vertices(&p, vc >= 0 ? inputs & ~(1u << vc) : inputs, base, stride, lo, nv, &vstride, &owned, &hold);
     if (!verts) {
         list_free(list);
         return;
@@ -4018,6 +4067,7 @@ static void mirror_draw_vp(const char *path, uint32_t xdk_prim, uint32_t n, cons
         if (owned)
             free(verts);
         owned = 1;
+        hold = NULL;
         if (!quads)
             return;
         verts = quads;
@@ -4062,6 +4112,7 @@ static void mirror_draw_vp(const char *path, uint32_t xdk_prim, uint32_t n, cons
     dr.indices = list;
     dr.index_count = k;
     dr.vprog = &hv;
+    dr.hold = hold;                     /* step 84: recorded by reference */
     if (vc >= 0) {                      /* a sprite faces the viewer: never culled */
         for (i = 0; i < dr.n_rs; i++)
             if (rs[i].state == PRS_CULLMODE)
