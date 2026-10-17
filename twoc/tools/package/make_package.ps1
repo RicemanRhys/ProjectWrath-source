@@ -10,9 +10,11 @@
 #   game_files\ (default.xbe and Crashdat\ from -GameFiles; never UDATA (saves), UDATA_backups, TDATA
 #     or our analysis files; -Save DIR copies DIR in as game_files\UDATA, only when asked)
 #   tools\vrrprobe.exe (built from twoc\tools\diag\vrrprobe.cpp) and tools\collect_logs.ps1
-#   files\: Play Crash.bat, Play Crash (72 fps test).bat, Collect logs.bat, crash_twoc.ini (the
-#     Legion Go's settings), README.txt, Test notes.txt (text files written with CRLF line ends)
-#   PACKAGE.txt: the build (commits, exe hash), the imported DLLs and where each comes from
+#   files\: Play Crash.bat, Play Crash (72 fps test).bat, Play Crash (ack wait test).bat,
+#     Collect logs.bat, crash_twoc.ini (the Legion Go's settings), README.txt, Test notes.txt
+#     (text files written with CRLF line ends)
+#   PACKAGE.txt: the build (commits, exe hash, link-time code generation), the imported DLLs and
+#     where each comes from
 #
 # The exe finds game_files\ in its working directory (Play Crash.bat sets it to its own folder)
 # and crash_twoc.ini next to itself, so the folder runs from anywhere. An existing DIR is
@@ -60,6 +62,7 @@ $windows = @{
     'ole32.dll' = 'Windows'; 'oleaut32.dll' = 'Windows'; 'advapi32.dll' = 'Windows'; 'setupapi.dll' = 'Windows';
     'shell32.dll' = 'Windows'; 'dwmapi.dll' = 'Windows'; 'winmm.dll' = 'Windows'; 'dbghelp.dll' = 'Windows';
     'version.dll' = 'Windows'; 'shcore.dll' = 'Windows'; 'hid.dll' = 'Windows'; 'cfgmgr32.dll' = 'Windows';
+    'bcrypt.dll' = 'Windows (CNG; the game-files check''s SHA-256, notes 18.86)';
     'd3d11.dll' = 'Windows (DirectX 11)'; 'dxgi.dll' = 'Windows (DirectX 11)';
     'd3dcompiler_47.dll' = 'Windows 8.1+ (the HLSL compiler)';
     'xinput1_4.dll' = 'Windows 8+ (XInput)'; 'xaudio2_9.dll' = 'Windows 10+ (XAudio2)';
@@ -131,6 +134,11 @@ $dirty = if (Git1 $repo @('status', '--porcelain', '--untracked-files=no', '--',
 $xr = Git1 $xrDir @('log', '-1', '--format=%h %ad', '--date=iso')
 if (Git1 $xrDir @('status', '--porcelain', '--untracked-files=no')) { $xr += ' (with uncommitted changes)' }
 $hash = (Get-FileHash -Algorithm SHA256 (Join-Path $Out 'crash_twoc.exe')).Hash
+# Link-time code generation (notes 18.87): the exe's build folder's CMakeCache.txt (build\Release\..).
+$cache = Join-Path (Split-Path -Parent (Split-Path -Parent $Exe)) 'CMakeCache.txt'
+$ltcg = if (-not (Test-Path $cache)) { "unknown (no CMakeCache.txt beside the exe's folder)" }
+        elseif (Select-String -Quiet -Pattern '^TWOC_LTCG:BOOL=ON' $cache) { 'on (TWOC_LTCG=ON)' }
+        else { 'off (TWOC_LTCG=OFF)' }
 $gf = Get-ChildItem -Recurse -File (Join-Path $Out 'game_files')
 $pkg = @(
     "Crash TWOC, Legion Go package, made $(Get-Date -Format 'yyyy-MM-dd HH:mm:ss zzz') by twoc\tools\package\make_package.ps1",
@@ -138,6 +146,7 @@ $pkg = @(
     "Build: twoc $head$dirty",
     "       xboxrecomp $xr",
     "crash_twoc.exe: $((Get-Item $Exe).Length) bytes, built $($exeTime.ToString('yyyy-MM-dd HH:mm:ss')), SHA-256 $hash",
+    "                link-time code generation: $ltcg",
     ("game_files: {0} files, {1:N0} MB{2}" -f $gf.Count, (($gf | Measure-Object Length -Sum).Sum / 1MB), $(if ($Save) { ", with a save copied in from $Save" } else { ', no saves' })),
     "",
     "DLLs the exe imports (dumpbin /dependents) and where they come from:"

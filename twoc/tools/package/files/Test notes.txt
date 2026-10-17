@@ -6,25 +6,51 @@ Windows power mode:
 Screen refresh rate (Settings):
 Window or full screen:
 
-First test: cast_bug's start, standing still 30 s each. Write the counter's two numbers
-(Game N/s, Shown N/s), and anything you see (stutter, slow motion).
+First test: cast_bug's start, standing still 30 s each (README part C). For each: the
+counter's two numbers, the settings menu's "Measured:" line copied as it is, and anything
+you saw (stutter, slow motion).
 
-  Plugged in:
-   a. Match display:
-   b. 90 fps (shown as 72):
-   c. Match display, Render thread Off:
-   d. Game (60):
+  Round 1, plugged in:
+   a. Match display ("Play Crash.bat")
+      Game:        /s    Shown:        /s
+      Measured:
+      Seen:
+   b. 72 fps ("Play Crash (72 fps test).bat")
+      Game:        /s    Shown:        /s
+      Measured:
+      Seen:
+   c. Render thread Off ("Play Crash.bat", then Off in the menu)
+      Game:        /s    Shown:        /s
+      Measured:
+      Seen:
+   d. Ack wait ("Play Crash (ack wait test).bat"; optional)
+      Game:        /s    Shown:        /s
+      Measured:
+      Seen:
 
-  On battery (when you unplugged: the time, or "before b"):
-   a. Match display:
-   b. 90 fps (shown as 72):
-   c. Match display, Render thread Off:
-   d. Game (60):
+  Round 2, on battery. The time you unplugged:
+   a. Match display ("Play Crash.bat")
+      Game:        /s    Shown:        /s
+      Measured:
+      Seen:
+   b. 72 fps ("Play Crash (72 fps test).bat")
+      Game:        /s    Shown:        /s
+      Measured:
+      Seen:
+   c. Render thread Off ("Play Crash.bat", then Off in the menu)
+      Game:        /s    Shown:        /s
+      Measured:
+      Seen:
+   d. Ack wait ("Play Crash (ack wait test).bat"; optional)
+      Game:        /s    Shown:        /s
+      Measured:
+      Seen:
+   Battery percentage at the end:
 
 Did View + Menu open and close the settings menu? Did the controller move around in it?
 Did Menu alone still open the game's pause menu at once?
 
-For each test below: the counter's numbers (or the "Measured:" line), smooth or stutters
+The other tests (if there's time). For each: the counter's numbers (or the "Measured:" line), smooth or stutters
 (how often), does the game itself slow down, fan noise / warmth / CPU temperature, plugged
 in or battery.
 

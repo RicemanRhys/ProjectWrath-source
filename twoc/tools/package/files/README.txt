@@ -10,7 +10,9 @@ which opens every warp room (all crystals), so every level in the tests can be r
 What's in the folder
 --------------------
   Play Crash.bat                  starts the game
-  Play Crash (72 fps test).bat    starts the game at 72 fps (test 3 below)
+  Play Crash (72 fps test).bat    starts the game at 72 fps (the first test's b, and test 3)
+  Play Crash (ack wait test).bat  an optional test: starts the game with the "ack wait"
+                                  switch on (the first test's d; part C says what it is)
   Collect logs.bat                zips the logs and a PC summary to bring back
   crash_twoc.ini                  the game's settings, already set up for the Legion Go
   Test notes.txt                  write what you see here; it goes into the zip
@@ -28,16 +30,18 @@ part E) and game_files\TDATA, and, outside this folder,
 
 A. Set up the Legion Go (once)
 ------------------------------
-1.  Copy the whole LegionGoPackage folder to the Legion Go, for example to
-    C:\Games\LegionGoPackage. Any folder works, spaces in the name too. It needs about
-    1 GB. A USB stick or a USB-C drive is quickest.
+1.  Copy the whole LegionGoPackage folder from the desktop to the Legion Go, for example
+    to C:\Games\LegionGoPackage. Any folder works, spaces in the name too. It needs about
+    1 GB. A USB stick or a USB-C drive is quickest. An older LegionGoPackage already on
+    the Legion Go: delete it (after "Collect logs.bat" if it has runs you haven't brought
+    back); this one replaces it. Steps 2-8 are on the Legion Go.
 2.  Set the screen to 144 Hz: Settings > System > Display > Advanced display >
     "Choose a refresh rate" > 144 Hz (Legion Space's quick settings have the same switch).
     If the list offers "Dynamic", pick 144 instead.
 3.  Leave the screen at its full resolution (2560 x 1600). The game draws at 1280 x 800
     itself.
 4.  Plug the charger in for the first round of tests, so the numbers don't depend on the
-    battery. (A second round on battery is useful later: test 7.)
+    battery. (The first test's second round is on battery.)
 5.  Power: press the Legion L button to open Legion Space and set the thermal mode to
     Performance. Then Settings > System > Power & battery > Power mode: Best performance.
 6.  In AMD Software (Adrenalin), Gaming > Graphics, make sure these are off (they change
@@ -89,22 +93,46 @@ B. Start the game
 
 C. The tests
 ------------
-First test (the one that matters most): cast_bug's start, standing still.
-  Get there: in the hub, walk Crash onto the round lift in the middle; it takes him up to
-  the bonus warp room. Go through its gate to the first pad; the level is cast_bug. When it
-  has loaded, don't touch the controller: Crash stands at the start. Stand there 30 seconds
-  with each of these, one after the other (open the settings menu, change it, close it,
-  wait 30 seconds):
-    a. Frame rate: Match display (what the package starts with)
-    b. Frame rate: 90 fps (this 144 Hz screen can't show 90 evenly, so it shows 72: the
-       line under Frame rate says so)
-    c. Frame rate: Match display again, and Render thread: Off
-    d. Frame rate: Game (60) (then set Render thread back to Auto)
-  Plugged in, with Legion Space on Performance. For each, write down the counter's two
-  numbers (Game and Shown) in Test notes.txt.
-  Then the same a-d on battery: unplug the charger, write down when you did (the time, or
-  "before b"), and go through a-d again. The log notes every 10 seconds whether it is
-  plugged in and the battery's percentage.
+First test (the one that matters most): cast_bug's start, standing still 30 seconds, in
+four runs of the game. All of it is on the Legion Go. Round 1 plugged in, round 2 on
+battery.
+
+Getting to cast_bug (every run): start a new game named WOMBAT and press Start to skip
+the intro. In the hub, walk Crash onto the round lift in the middle; it takes him up to
+the bonus warp room. Go through its gate to the first pad; the level is cast_bug. When it
+has loaded, put the controller down: Crash stands at the start.
+
+What to write down in Test notes.txt after the 30 seconds, each time:
+  - the counter's two numbers in the top left corner: "Game N/s" and "Shown N/s"
+  - the Measured line: open the settings menu (View + Menu), and on the Display tab copy
+    the line that starts "Measured:" as it is. Then close the menu.
+  - anything you saw: stutter, Crash in slow motion
+
+Round 1, plugged in (charger in, Legion Space on Performance):
+  a. Match display: start "Play Crash.bat". Go to cast_bug, stand 30 s, write it down.
+     Close the game.
+  b. 72 fps: start "Play Crash (72 fps test).bat" (the settings menu says "72 fps"). Go to
+     cast_bug, stand 30 s, write it down. Close the game.
+  c. Render thread Off: start "Play Crash.bat". Go to cast_bug. Open the settings menu,
+     Display tab, Render thread: Off, and close the menu. Stand 30 s, write it down.
+     Then open the menu again, set Render thread back to Auto, close the menu (that
+     saves it), and close the game.
+  d. Ack wait (optional, see below): start "Play Crash (ack wait test).bat". Go to
+     cast_bug, stand 30 s, write it down. Close the game.
+
+Round 2, on battery: unplug the charger and write down the time you did. Then a, b, c and
+d again, the same way. (The log also notes every 10 seconds whether it is plugged in and
+the battery's percentage.)
+
+What the ack wait test is: one of the game's helper threads (the one that answers the
+game's graphics commands) keeps a CPU core busy all the time, waiting for the next one.
+"Play Crash (ack wait test).bat" makes it rest between commands instead, which gives back
+about half a core. On the desktop that made the game itself a little slower (0.3-0.6 ms
+a frame). On the Legion Go the CPU and the graphics share one power budget, so the
+freed half core might make the rest faster: that is what d finds out. It is only a test;
+play with "Play Crash.bat".
+
+Then, if there's time, the other tests below (also on the Legion Go).
 
 The other tests: for each, get to the place, stand still for 30 seconds, then play
 normally for a minute or two (run, turn the camera, jump). Write down in "Test notes.txt":
@@ -152,6 +180,7 @@ Then bring the logs back (part D).
 
 D. Bring the logs back
 ----------------------
+Steps 1-3 on the Legion Go, step 4 on the desktop.
 1.  Close the game. If Collect logs says Crash is still running though its window is gone,
     it notes what is left of the process and ends it (or asks first, when the log says the
     game hadn't ended).
