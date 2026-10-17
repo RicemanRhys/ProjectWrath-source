@@ -172,6 +172,7 @@
 #include "overlay.h"
 #include "aa.h"
 #include "pads.h"
+#include "vk_probe.h"
 
 #define WIN_CLASS          "TwocD3DBridge"
 #define WIN_TITLE           "Crash TWOC - D3D bridge (host)"
@@ -1071,6 +1072,20 @@ int d3dh_create(unsigned width, unsigned height, unsigned host_w, unsigned host_
             g_w, g_h, (void *)g_hwnd, g_interval, g_latency ? " (vsync paced)" : "",
             g_frame_hz > 0 ? "" : "off, ", g_frame_hz,
             g_dump_prefix[0] ? ", dumps " : "", g_dump_prefix[0] ? g_dump_prefix : "");
+    if (getenv("RECOMP_VULKAN")) {      /* step 86: the Vulkan probe (vk_probe.h), on the D3D11 device's GPU */
+        IDXGIDevice *dd = NULL;
+        IDXGIAdapter *ad = NULL;
+        DXGI_ADAPTER_DESC desc;
+        int have = 0;
+        if (SUCCEEDED(ID3D11Device_QueryInterface(d3d8_GetD3D11Device(), &IID_IDXGIDevice, (void **)&dd))) {
+            if (SUCCEEDED(IDXGIDevice_GetAdapter(dd, &ad))) {
+                have = SUCCEEDED(IDXGIAdapter_GetDesc(ad, &desc));
+                IDXGIAdapter_Release(ad);
+            }
+            IDXGIDevice_Release(dd);
+        }
+        vkp_start(have ? &desc.AdapterLuid : NULL);
+    }
     return 0;
 }
 

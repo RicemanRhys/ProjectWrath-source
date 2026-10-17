@@ -106,6 +106,10 @@ set(GAME_SOURCES
     # The save's backups and the game files' check at the start (notes 18.86)
     src/saves.c
     src/gamefiles.c
+    # Vulkan, stage 1: a probe behind RECOMP_VULKAN=probe (notes 18.89); volk loads
+    # vulkan-1.dll at run time, so the exe imports nothing new
+    src/vk_probe.c
+    third_party/volk/volk.c
     third_party/imgui/imgui.cpp
     third_party/imgui/imgui_draw.cpp
     third_party/imgui/imgui_tables.cpp
@@ -150,8 +154,12 @@ target_include_directories(${PROJECT_NAME} PRIVATE
     ${CMAKE_CURRENT_SOURCE_DIR}/third_party/imgui
     ${CMAKE_CURRENT_SOURCE_DIR}/third_party/imgui/backends
     ${CMAKE_CURRENT_SOURCE_DIR}/third_party/smaa
+    ${CMAKE_CURRENT_SOURCE_DIR}/third_party/vulkan/include
+    ${CMAKE_CURRENT_SOURCE_DIR}/third_party/volk
     ${TWOC_GENERATED_DIR}
 )
+set_source_files_properties(src/vk_probe.c third_party/volk/volk.c PROPERTIES
+    COMPILE_DEFINITIONS VK_USE_PLATFORM_WIN32_KHR)
 
 # Windows SDK libraries needed at link time
 target_link_libraries(${PROJECT_NAME} PRIVATE
