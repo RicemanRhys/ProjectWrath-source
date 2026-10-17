@@ -2313,6 +2313,7 @@ static struct {
     uint32_t cmask[6];                  /* step 60: constant registers read directly, bit n = cn */
     int rel_base;                       /* lowest base read relative to a0.x, -1 none */
     int rel_bones;                      /* step 62: reads relative to a0.x from c124 (XDK c28): bones */
+    uint8_t cpos_n, cpos[192];          /* step 84: ic_record's candidates for the camera's position */
 } g_vs[VS_SLOTS];                       /* game side; an entry is fixed once counted in g_vs_n */
 static volatile LONG g_vs_n;
 static struct {
@@ -2392,6 +2393,14 @@ static int vs_slot(const d3dh_vprog_t *p)
     d3d8_vsh_parse((const DWORD *)p->code, (int)p->n_insns, &parsed);
     g_vs[i].inputs = parsed.inputs_read;
     vs_const_reads(&parsed, g_vs[i].cmask, &g_vs[i].rel_base, &g_vs[i].rel_bones);
+    {                                   /* step 84: the registers it reads, in order, but the transform c96-c99 */
+        int r;
+        g_vs[i].cpos_n = 0;
+        for (r = 0; r < 192; r++)
+            if (((g_vs[i].cmask[r >> 5] >> (r & 31) & 1) || (g_vs[i].rel_base >= 0 && r >= g_vs[i].rel_base)) &&
+                !(r >= 96 && r < 100))
+                g_vs[i].cpos[g_vs[i].cpos_n++] = (uint8_t)r;
+    }
     {
         int k, n = 0, lo = -1, hi = -1;
         for (k = 0; k < 192; k++)
@@ -3293,7 +3302,8 @@ static int ic_hand(const double *m)
 static void ic_obj(rcmd_t *c, uint32_t key, const double *w, const float *k4, const uint32_t *cmask,
                    const uint32_t *fresh)
 {
-    static const uint32_t keep[] = { 14, 19, 20, 22, 52, 55, 56, 168 };  /* ZWRITE, blend, CULL, STENCIL*, COLORWRITE */
+    /* The render states kept in the key (below): 14, 19, 20, 22, 52, 55, 56, 168 (ZWRITE, blend, CULL, STENCIL*,
+     * COLORWRITE). */
     const d3dh_draw_t *d = &c->u.draw.d;
     unsigned cur = (unsigned)g_ir, i, j;
     uint32_t lk;
@@ -3325,11 +3335,12 @@ static void ic_obj(rcmd_t *c, uint32_t key, const double *w, const float *k4, co
     key = fnv(key, d->mesh);
     lk = fnv(lk, d->mesh);
     for (i = 0; i < d->n_rs; i++)       /* a pass that only marks stencil is another object than the model's */
-        for (j = 0; j < sizeof(keep) / sizeof(keep[0]); j++)
-            if (d->rs[i].state == keep[j]) {
-                key = fnv(fnv(key, d->rs[i].state), d->rs[i].value);
-                lk = fnv(fnv(lk, d->rs[i].state), d->rs[i].value);
-            }
+        switch (d->rs[i].state) {       /* step 84: keep[]'s states, as a switch */
+        case 14: case 19: case 20: case 22: case 52: case 55: case 56: case 168:
+            key = fnv(fnv(key, d->rs[i].state), d->rs[i].value);
+            lk = fnv(fnv(lk, d->rs[i].state), d->rs[i].value);
+            break;
+        }
     /* Step 63: the handedness of W and of the first bone. A reflection (the
      * hub floor's Crash) draws the same mesh with mirrored bones, and its
      * first bone sits a few hundredths of a unit from the model's: by
@@ -3452,15 +3463,22 @@ static void ic_record(rcmd_t *c)
                 return;                 /* not made with this camera */
         }
         c->u.draw.cls = IC_VP;
-        for (r = 0; r < 192 && c->u.draw.n_cpos < 4; r++) {
-            if ((!(g_vs[slot].cmask[r >> 5] >> (r & 31) & 1) && (g_vs[slot].rel_base < 0 || r < g_vs[slot].rel_base)) ||
-                (r >= 96 && r < 100))
-                continue;
-            for (k = 0; k < 3; k++)
-                if (fabs((double)k4[4 * r + k] - cam->m[12 + k]) > 1e-3 * (1.0 + fabs(cam->m[12 + k])))
-                    break;
-            if (k == 3)
-                c->u.draw.cpos[c->u.draw.n_cpos++] = (uint8_t)r;
+        {   /* Step 84: the registers it reads (the slot's list, as the old scan of all 192 took them) and the
+             * camera's position with its tolerance once a draw, not at each register. */
+            double cx[3], thr[3];
+            unsigned j;
+            for (k = 0; k < 3; k++) {
+                cx[k] = cam->m[12 + k];
+                thr[k] = 1e-3 * (1.0 + fabs(cam->m[12 + k]));
+            }
+            for (j = 0; j < g_vs[slot].cpos_n && c->u.draw.n_cpos < 4; j++) {
+                r = g_vs[slot].cpos[j];
+                for (k = 0; k < 3; k++)
+                    if (fabs((double)k4[4 * r + k] - cx[k]) > thr[k])
+                        break;
+                if (k == 3)
+                    c->u.draw.cpos[c->u.draw.n_cpos++] = (uint8_t)r;
+            }
         }
         cam->draws++;
         ic_obj(c, key, w, g_vs[slot].rel_bones ? k4 : NULL, g_vs[slot].cmask, d->vprog->fresh);  /* step 62 */
