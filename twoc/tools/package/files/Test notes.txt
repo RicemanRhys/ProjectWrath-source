@@ -47,8 +47,11 @@ you saw (stutter, slow motion).
       Seen:
    Battery percentage at the end:
 
-Did View + Menu open and close the settings menu? Did the controller move around in it?
-Did Menu alone still open the game's pause menu at once?
+Did holding Menu about a second open and close the settings menu? Did View + Menu? Did the
+controller move around in it? Did a short press of Menu still open the game's pause menu (when
+you let go), and did holding it open only the settings menu, not the pause menu too?
+Did the line "Press F1 to open the settings menu (or hold Start on the controller)" show at the
+bottom for the first seconds, and could you read it?
 
 The other tests (if there's time). For each: the counter's numbers (or the "Measured:" line), smooth or stutters
 (how often), does the game itself slow down, fan noise / warmth / CPU temperature, plugged

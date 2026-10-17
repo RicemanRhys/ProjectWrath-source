@@ -37,8 +37,8 @@
 #                over its monitor, the picture letterboxed at its own aspect. Alt+Enter on the window switches
 #                between that and the window at any time
 #
-# Settings (notes 18.57): Esc on the bridge window opens the settings overlay and holds the game until Esc
-# again (fullscreen, aspect ratio, render size, frame pacing, anisotropic filtering, volume; applied at once).
+# Settings (notes 18.57): F1 on the bridge window (Esc before step 86; a controller's Start held about a
+# second) opens the settings overlay and holds the game until F1 again (fullscreen, aspect ratio, render size, frame pacing, anisotropic filtering, volume; applied at once).
 # They are saved to twoc\build\Release\crash_twoc.ini, which the next start reads. A switch given here wins
 # over that file for this run: -Widescreen, -Fullscreen, -RenderSize WxH | native | game, and to switch one
 # off -Widescreen:$false or -Fullscreen:$false. Without the file, and with no switch, everything is as before.

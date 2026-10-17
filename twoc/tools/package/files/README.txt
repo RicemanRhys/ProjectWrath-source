@@ -48,12 +48,16 @@ A. Set up the Legion Go (once)
     the frame rate behind the game's back): Radeon Chill, Frame Rate Target Control,
     AMD Fluid Motion Frames, Radeon Boost, Radeon Super Resolution, Enhanced Sync.
     If you don't have AMD Software installed, skip this step.
-7.  The game's settings menu opens from the controller: hold View (the button with two
-    squares) and Menu (the button with three lines) together for about a second. Hold
-    them again to close it. Press View first, or both at once: Menu then doesn't open the
-    game's own pause menu too. In the settings menu the D-pad or the left stick moves, A
-    chooses, B closes a list or the menu, LB and RB change tabs. Esc on a keyboard also
-    opens and closes it, and the touch screen works as a mouse there.
+7.  The game's settings menu opens from the controller: hold Menu (the button with three
+    lines; Start, or Options on a PlayStation pad) for about a second. Hold it again to
+    close it. A short press of Menu still opens the game's own pause menu, when you let
+    go of the button. Holding View (the button with two squares) and Menu together for
+    about a second also opens and closes it. In the settings menu the D-pad or the left
+    stick moves, A chooses, B closes a list or the menu, LB and RB change tabs. On a
+    keyboard F1 opens and closes it (Esc closes it too), and the touch screen works as a
+    mouse there. For the first 8 seconds after the game starts, a line at the bottom of
+    the picture says so ("Press F1 to open the settings menu (or hold Start on the
+    controller)"); "Show the startup message" on the Display tab turns it off.
 8.  Close other games and launchers (Steam, Xbox app, Epic...), and let Windows Update
     finish first. Nothing else should be running while you test.
 
@@ -75,7 +79,8 @@ B. Start the game
       Game 60/s ........... the game's own speed: 60 is full speed; under that the game
                             itself runs slow (it says "slow" under 57)
       Shown 144/s ......... frames shown a second (2.4 for each game frame at 144 Hz)
-5.  View + Menu held (or Esc) opens the settings menu; the game keeps running behind it.
+5.  Menu held about a second (or View + Menu held, or F1) opens the settings menu; the
+    game keeps running behind it.
     The "Display" tab has everything for these tests:
       Frame rate .......... Game (60) / Match display / 90 fps / 144 fps / ...
       the lines under it .. "Now: 144.00 fps, 2.4 frames each game frame." (the plan) and
@@ -104,7 +109,7 @@ has loaded, put the controller down: Crash stands at the start.
 
 What to write down in Test notes.txt after the 30 seconds, each time:
   - the counter's two numbers in the top left corner: "Game N/s" and "Shown N/s"
-  - the Measured line: open the settings menu (View + Menu), and on the Display tab copy
+  - the Measured line: open the settings menu (hold Menu), and on the Display tab copy
     the line that starts "Measured:" as it is. Then close the menu.
   - anything you saw: stutter, Crash in slow motion
 
@@ -202,7 +207,7 @@ game_files\UDATA_backups\<date>_<time>\ at every start and a few seconds after e
 from the hub's Load/Save console, whenever it changed. It keeps the newest 10 copies and
 the newest of each day for 14 days, and deletes older ones by itself. The copying never
 holds the game up.
-In the settings menu (View + Menu, or Esc), the "Saves" tab lists the copies (date, time,
+In the settings menu (Menu held, or F1), the "Saves" tab lists the copies (date, time,
 size, and when each was taken) with three buttons:
   Back up now ........... a copy of the save as it is now
   Restore this one ...... the chosen copy replaces the save at the next start (the game
