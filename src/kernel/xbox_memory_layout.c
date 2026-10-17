@@ -528,8 +528,10 @@ int xbox_Nv2aMirrorCounter(uint32_t device_ptr_va,
     return 0;
 }
 
-static void counter_mirrors_tick(void)
+static int counter_mirrors_tick(void)
 {
+    int changed = 0;
+
     for (int i = 0; i < g_counter_mirror_count; i++) {
         uint32_t dev;
 
@@ -547,10 +549,13 @@ static void counter_mirrors_tick(void)
             uint32_t src =
                 *(volatile uint32_t *)((uintptr_t)(dev + g_counter_mirrors[i].src_off)
                                        + g_memory_offset);
-            if (*dst != src)
+            if (*dst != src) {
                 *dst = src;
+                changed = 1;
+            }
         }
     }
+    return changed;
 }
 
 /*
@@ -656,8 +661,10 @@ static void frame_counters_tick(void)
     }
 }
 
-static void fence_mirrors_tick(void)
+static int fence_mirrors_tick(void)
 {
+    int changed = 0;
+
     for (int i = 0; i < g_fence_mirror_count; i++) {
         uint32_t dev, get_ptr;
 
@@ -678,10 +685,13 @@ static void fence_mirrors_tick(void)
             uint32_t put =
                 *(volatile uint32_t *)((uintptr_t)(dev + g_fence_mirrors[i].put_off)
                                        + g_memory_offset);
-            if (*fence != put)
+            if (*fence != put) {
                 *fence = put;
+                changed = 1;
+            }
         }
     }
+    return changed;
 }
 
 static int s_nv2a_trace = 0;
@@ -747,15 +757,45 @@ static void framebuffer_probe_tick(void)
     fflush(stderr);
 }
 
+/*
+ * Local (perf only, step 84 of the Crash project): RECOMP_NV2A_ACK_WAIT=N
+ * (microseconds, 0 or unset: off, the loop below spins with Sleep(0) and
+ * keeps a core busy). On: the loop spins as before while it has work (an
+ * acknowledgement, GET catching up with PUT, a fence or counter mirror
+ * moving) and for RECOMP_NV2A_ACK_SPIN microseconds after the last (default
+ * 2000); past that each pass first waits N microseconds on a high-resolution
+ * timer, so a title kicking once in a while is acknowledged at most ~N us
+ * late. Counted in a line every 10 s while on.
+ */
 static DWORD WINAPI nv2a_ack_thread(LPVOID param)
 {
     volatile uint32_t *regs = (volatile uint32_t *)param;
+    const char *we = getenv("RECOMP_NV2A_ACK_WAIT"), *se = getenv("RECOMP_NV2A_ACK_SPIN");
+    long wait_us = we ? atol(we) : 0, spin_us = se ? atol(se) : 2000;
+    HANDLE timer = NULL;
+    LARGE_INTEGER qpf, now, last_work, last_log;
+    unsigned long long loops = 0, worked = 0, waits = 0;
+
+    if (wait_us > 0) {
+        timer = CreateWaitableTimerExW(NULL, NULL, CREATE_WAITABLE_TIMER_HIGH_RESOLUTION, TIMER_ALL_ACCESS);
+        if (!timer)
+            timer = CreateWaitableTimerExW(NULL, NULL, 0, TIMER_ALL_ACCESS);
+        fprintf(stderr, "  NV2A ack thread: spins %ld us after work, then waits %ld us a pass (%s timer)\n",
+                spin_us, wait_us, timer ? "a high-resolution" : "no");
+        if (!timer)
+            wait_us = 0;
+    }
+    QueryPerformanceFrequency(&qpf);
+    QueryPerformanceCounter(&last_work);
+    last_log = last_work;
     while (!InterlockedCompareExchange(&g_nv2a_ack_stop, 0, 0)) {
+        int work = 0;
         for (size_t i = 0; i < sizeof(NV2A_ACK) / sizeof(NV2A_ACK[0]); i++) {
             volatile uint32_t *r =
                 (volatile uint32_t *)((char *)regs + NV2A_ACK[i].offset);
             if (*r & NV2A_ACK[i].busy_mask) {
                 *r &= ~NV2A_ACK[i].busy_mask;
+                work = 1;
             }
         }
         for (size_t i = 0; i < sizeof(NV2A_IDLE) / sizeof(NV2A_IDLE[0]); i++) {
@@ -763,6 +803,7 @@ static DWORD WINAPI nv2a_ack_thread(LPVOID param)
                 (volatile uint32_t *)((char *)regs + NV2A_IDLE[i].offset);
             if ((*r & NV2A_IDLE[i].idle_mask) != NV2A_IDLE[i].idle_mask) {
                 *r |= NV2A_IDLE[i].idle_mask;
+                work = 1;
             }
         }
         {
@@ -772,10 +813,11 @@ static DWORD WINAPI nv2a_ack_thread(LPVOID param)
                 (volatile uint32_t *)((char *)regs + NV2A_USER_DMA_GET);
             if (*get != *put) {
                 *get = *put;
+                work = 1;
             }
         }
-        fence_mirrors_tick();
-        counter_mirrors_tick();
+        work |= fence_mirrors_tick();
+        work |= counter_mirrors_tick();
         frame_counters_tick();
         framebuffer_probe_tick();
 
@@ -887,8 +929,33 @@ static DWORD WINAPI nv2a_ack_thread(LPVOID param)
         *(volatile uint32_t *)((uintptr_t)(XBOX_KERNEL_DATA_BASE + KDATA_TICK_COUNT)
                                + g_memory_offset) = GetTickCount();
 
+        loops++;
+        if (wait_us > 0) {
+            QueryPerformanceCounter(&now);
+            if (work) {
+                last_work = now;
+                worked++;
+            }
+            if (now.QuadPart - last_log.QuadPart >= 10 * qpf.QuadPart) {
+                fprintf(stderr, "  [NV2A] ack thread: %llu passes, %llu with work, %llu waits in 10 s\n",
+                        loops, worked, waits);
+                loops = worked = waits = 0;
+                last_log = now;
+            }
+            if (!work && (now.QuadPart - last_work.QuadPart) * 1000000 / qpf.QuadPart >= spin_us) {
+                LARGE_INTEGER due;
+                due.QuadPart = -(LONGLONG)wait_us * 10;     /* relative, 100 ns units */
+                if (SetWaitableTimerEx(timer, &due, 0, NULL, NULL, NULL, 0)) {
+                    WaitForSingleObject(timer, INFINITE);
+                    waits++;
+                    continue;
+                }
+            }
+        }
         Sleep(0);  /* yield; the waiter is spinning on another core */
     }
+    if (timer)
+        CloseHandle(timer);
     return 0;
 }
 
