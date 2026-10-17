@@ -3271,9 +3271,10 @@ static int vl_convert(const vlayout_t *l, const uint8_t *const src[16], float *o
     return 0;
 }
 
-/* The vertex cache (RECOMP_D3D_BRIDGE_VCACHE=1, off by default; =check
- * also converts every draw the old way, vp_vertices_ref, and compares;
- * =check0 that without the cache).
+/* The vertex cache (on by default since step 84's checks and 25-level
+ * sweep, notes 18.87; RECOMP_D3D_BRIDGE_VCACHE=0 off; =check also converts
+ * every draw the old way, vp_vertices_ref, and compares; =check0 that
+ * without the cache).
  * What a program draw's conversion gives depends only on its layout and on
  * the guest bytes it reads: an entry keeps the layout as its key and a copy
  * of those bytes, each stream's span from vertex lo's lowest attribute byte
@@ -3285,13 +3286,14 @@ static int vl_convert(const vlayout_t *l, const uint8_t *const src[16], float *o
  * hook and by the kernel's file reads. A hit gives exactly what converting
  * the guest's bytes now gives. Entries live in sets of VC_WAYS by the
  * layout's hash, the least recently used of a set replaced; past
- * VC_MAX_BYTES the table is emptied. An entry's vertices are in a block
+ * VC_MAX_BYTES (cast_bug holds ~27 MB; RECOMP_DEV_VCACHE_MB, a test aid,
+ * sets another) the table is emptied. An entry's vertices are in a block
  * the recordings share (d3dh_hold_t): a draw recorded from it holds a
  * reference instead of copying them, and an entry converted again while a
  * recording still holds its block takes a new one. */
 #define VC_SETS 4096
 #define VC_WAYS 4
-#define VC_MAX_BYTES (192u << 20)
+#define VC_MAX_BYTES (96u << 20)
 #define VC_MAX_SPAN (4u << 20)
 #define VC_HDR 16                       /* sizeof(d3dh_hold_t): the vertices follow it */
 typedef struct {
@@ -3306,19 +3308,22 @@ typedef struct {
 static vcache_t *g_vc;
 static uint32_t g_vc_clock;
 static int g_vc_on = -1;                /* 0 off, 1 on, 2 check, 3 check without the cache */
-static size_t g_vc_bytes;
+static size_t g_vc_bytes, g_vc_max = VC_MAX_BYTES;
 static volatile LONG g_vc_n[8];         /* lookups, hits, new, changed, unusable, flushes, checked, check differs */
 static volatile LONG g_ev_vc;
 
 static int vc_mode(void)
 {
     if (g_vc_on < 0) {
-        const char *e = getenv("RECOMP_D3D_BRIDGE_VCACHE");
-        g_vc_on = !e || !*e || *e == '0' ? 0 : _stricmp(e, "check") == 0 ? 2 : _stricmp(e, "check0") == 0 ? 3 : 1;
-        if (g_vc_on)
-            fprintf(stderr, "[D3DB] host vertex cache %s (RECOMP_D3D_BRIDGE_VCACHE)\n", g_vc_on == 1 ? "on" :
+        const char *e = getenv("RECOMP_D3D_BRIDGE_VCACHE"), *mb = getenv("RECOMP_DEV_VCACHE_MB");
+        g_vc_on = !e || !*e ? 1 : *e == '0' ? 0 : _stricmp(e, "check") == 0 ? 2 : _stricmp(e, "check0") == 0 ? 3 : 1;
+        if (mb && atoi(mb) > 0)
+            g_vc_max = (size_t)atoi(mb) << 20;
+        if (g_vc_on != 1 || g_vc_max != VC_MAX_BYTES)
+            fprintf(stderr, "[D3DB] host vertex cache %s (RECOMP_D3D_BRIDGE_VCACHE), emptied past %u MB\n",
+                    g_vc_on == 0 ? "off" : g_vc_on == 1 ? "on" :
                     g_vc_on == 2 ? "on, every draw checked against the old conversion" :
-                    "off, every draw checked against the old conversion");
+                    "off, every draw checked against the old conversion", (unsigned)(g_vc_max >> 20));
     }
     return g_vc_on;
 }
@@ -3487,7 +3492,7 @@ static float *vp_vertices(const vprog_t *p, uint16_t inputs, const uint32_t base
         if (!out) {                     /* the bytes copied, then converted from the copy */
             size_t at = 0;
             e->valid = 0;
-            if (g_vc_bytes + total + (size_t)n * l.nr * 16 > VC_MAX_BYTES) {
+            if (g_vc_bytes + total + (size_t)n * l.nr * 16 > g_vc_max) {
                 vc_flush();
                 InterlockedIncrement(&g_vc_n[5]);
             }
