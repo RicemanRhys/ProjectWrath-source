@@ -1665,24 +1665,59 @@ static uint32_t phys_to_va(uint32_t p)
     return p < xbox_ContiguousAllocatedBytes() ? 0x80000000u + p : p;
 }
 
-/* FNV-1a over the whole texture when it is up to 256 KB, else over 64
- * 64-byte samples spread across it plus the first and last 4 KB. */
+/* Step 84 (notes 18.87): a span's hash, four 64-bit lanes over 32-byte
+ * blocks (xxHash64's round and avalanche), the tail a byte at a time, and
+ * `seed` the spans before. Every byte reaches the 64-bit result through
+ * bijective steps (a change to any one 8-byte word always changes it); the
+ * 32 bits kept collide as rarely as the 32-bit FNV-1a's did. */
+#define SIG_P1 0x9E3779B185EBCA87ull
+#define SIG_P2 0xC2B2AE3D27D4EB4Full
+#define SIG_ROT(x, r) (((x) << (r)) | ((x) >> (64 - (r))))
+
+static uint64_t sig_span(const uint8_t *p, uint32_t n, uint64_t seed)
+{
+    uint64_t a = seed + SIG_P1 + SIG_P2, b = seed + SIG_P2, c = seed, d = seed - SIG_P1, h, w;
+    uint32_t i = 0;
+
+    for (; i + 32 <= n; i += 32) {
+        memcpy(&w, p + i, 8);
+        a = SIG_ROT(a + w * SIG_P2, 31) * SIG_P1;
+        memcpy(&w, p + i + 8, 8);
+        b = SIG_ROT(b + w * SIG_P2, 31) * SIG_P1;
+        memcpy(&w, p + i + 16, 8);
+        c = SIG_ROT(c + w * SIG_P2, 31) * SIG_P1;
+        memcpy(&w, p + i + 24, 8);
+        d = SIG_ROT(d + w * SIG_P2, 31) * SIG_P1;
+    }
+    h = SIG_ROT(a, 1) + SIG_ROT(b, 7) + SIG_ROT(c, 12) + SIG_ROT(d, 18) + n;
+    for (; i < n; i++)
+        h = (h ^ p[i]) * 0x100000001B3ull;
+    h ^= h >> 33;
+    h *= SIG_P2;
+    h ^= h >> 29;
+    h *= SIG_P1;
+    return h ^ (h >> 32);
+}
+
+/* The whole texture when it is up to 256 KB, else 64 64-byte samples
+ * spread across it plus the first and last 4 KB. Step 84: the same bytes
+ * as the byte-wise FNV-1a this was (~1.1 ms a frame of the game thread at
+ * cast_bug's start), ~10x faster; a signature is only ever compared with
+ * the one before. */
 static uint32_t content_sig(const uint8_t *p, uint32_t n)
 {
-    uint32_t h = 2166136261u, i;
+    uint64_t h;
+    uint32_t i;
 
-#define MIX(ptr, len) do { const uint8_t *q_ = (ptr); uint32_t k_; \
-        for (k_ = 0; k_ < (len); k_++) h = (h ^ q_[k_]) * 16777619u; } while (0)
     if (n <= 256 * 1024) {
-        MIX(p, n);
+        h = sig_span(p, n, 0);
     } else {
-        MIX(p, 4096);
+        h = sig_span(p, 4096, 0);
         for (i = 0; i < 64; i++)
-            MIX(p + (uint64_t)(n - 64) * i / 64, 64);
-        MIX(p + n - 4096, 4096);
+            h = sig_span(p + (uint64_t)(n - 64) * i / 64, 64, h);
+        h = sig_span(p + n - 4096, 4096, h);
     }
-#undef MIX
-    return h ? h : 1;
+    return (uint32_t)h ? (uint32_t)h : 1;
 }
 
 /* Why a draw wasn't mirrored. Every draw path is counted, so the [D3DB] host
