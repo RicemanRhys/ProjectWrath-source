@@ -50,6 +50,8 @@ typedef struct {
     double replay_ms, rec_ms, replay_bytes;
     double pair_ms;                 /* step 68: time pairing objects (ic_pair) */
     unsigned replay_checked, replay_check_diff;     /* step 60: RECOMP_D3D_BRIDGE_REPLAY_CHECK */
+    unsigned bake_captured, baked_draws, bake_plain;    /* step 87: first passes' captures, draws drawn from */
+                                                        /* them, later passes' draws drawn the ordinary way */
     /* Step 61: frame interpolation. Frames drawn as sub-frames (`interp_k`
      * each, the last), and those held instead: a camera step or turn over the
      * limit, too few draws matched, no frame before, or another reason (the

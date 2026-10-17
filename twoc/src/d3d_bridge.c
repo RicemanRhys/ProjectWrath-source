@@ -5235,6 +5235,15 @@ static void mirror_swap(void)
                 if (st.replay_checked)
                     log_block_printf(&lb, "[D3DB] host replay check: %u frames compared, %u differ\n",
                                      st.replay_checked, st.replay_check_diff);
+                if (st.bake_captured || st.bake_plain) {    /* step 87 */
+                    static unsigned lbc, lbd, lbp;
+                    log_block_printf(&lb, "[D3DB] host baked draws: %u captured at first passes, %u drawn from their"
+                                     " capture, %u drawn the ordinary way in later passes\n", st.bake_captured - lbc,
+                                     st.baked_draws - lbd, st.bake_plain - lbp);
+                    lbc = st.bake_captured;
+                    lbd = st.baked_draws;
+                    lbp = st.bake_plain;
+                }
                 lf = st.replay_frames;
                 lc = st.replay_cmds;
                 lp = st.replay_pins;

@@ -354,6 +354,7 @@ static d3dh_stats_t g_st, g_stg;
 static LARGE_INTEGER g_qpf;                 /* step 60: QueryPerformanceFrequency */
 static int g_replay;                    /* step 60, RECOMP_D3D_BRIDGE_REPLAY: passes at each present, 0 off */
 static int g_replay_check;              /* RECOMP_D3D_BRIDGE_REPLAY_CHECK: drawn at once too, and compared */
+static int g_bake = 0;                  /* step 87, RECOMP_D3D_BRIDGE_BAKE: baked draws ("Step 87: baked draws") */
 static volatile LONG g_interp_want;     /* step 61: RECOMP_FRAMERATE=display / the overlay, taken at a frame's end */
 static int g_interp;                    /* step 61: frames recorded and drawn as interpolated sub-frames */
 static unsigned g_subdump_from, g_subdump_to;   /* RECOMP_D3D_BRIDGE_SUBDUMP=A-B: each sub-frame of those swaps */
@@ -904,7 +905,7 @@ int d3dh_create(unsigned width, unsigned height, unsigned host_w, unsigned host_
         e = getenv("RECOMP_D3D_BRIDGE_REPLAY_CHECK");
         g_replay_check = e && *e && strcmp(e, "0") != 0;
         if (g_replay_check) {
-            g_replay = 1;
+            g_replay = g_replay > 1 ? g_replay : 1;     /* step 87: N passes, each from the frame's start */
             fprintf(stderr, "[D3DB] host replay check: each frame drawn at once and again from its recording, the"
                     " two back buffers compared\n");
         }
@@ -912,6 +913,12 @@ int d3dh_create(unsigned width, unsigned height, unsigned host_w, unsigned host_
             fprintf(stderr, "[D3DB] host record and replay: each frame's host draws recorded and drawn at its present"
                     "%s (%d pass%s)\n", g_replay > 1 ? ", again and again as a cost check" : "", g_replay,
                     g_replay > 1 ? "es" : "");
+        e = getenv("RECOMP_D3D_BRIDGE_BAKE");           /* step 87: baked draws, 0 | 1 */
+        if (e && *e)
+            g_bake = strcmp(e, "0") != 0;
+        fprintf(stderr, "[D3DB] host baked draws: %s (RECOMP_D3D_BRIDGE_BAKE%s)\n",
+                g_bake ? "on: a frame drawn more than once is translated at its first pass, its other passes drawn"
+                         " from that" : "off: every pass translated", e && *e ? "" : " unset");
         e = getenv("RECOMP_FRAMERATE");                 /* step 61; step 77: display or N Hz */
         if (twoc_framerate_parse(e))
             d3dh_set_framerate(twoc_framerate_parse(e));
@@ -2731,6 +2738,151 @@ static int draw_exec(const d3dh_draw_t *d, IDirect3DBaseTexture8 *const *pin, co
     return FAILED(hr) ? -1 : 0;
 }
 
+/* ── Step 87: baked draws (notes 18.90) ───────────────────────
+ *
+ * A frame drawn more than once (its sub-frames with Frame rate above 60, or
+ * RECOMP_D3D_BRIDGE_REPLAY=N) had every pass translate every draw again: its
+ * render and stage states, the fixed-function matrices and lights, the pixel
+ * shader and its constants set one by one through xbox_d3d8, which then
+ * worked out the D3D11 objects, samplers and constants from them at the draw
+ * (combiner state parsed and looked up, blend / depth / raster and sampler
+ * descriptions built and compared, the fixed-function constants built). Now
+ * the first pass draws as before and each draw is captured as it is made
+ * (xbox_d3d8's D3D8Baked: the shaders, input layout, blend, depth-stencil and
+ * rasterizer objects, the stencil reference, the samplers, the viewport, the
+ * constant buffers bound and the fixed-function and pixel constants as
+ * uploaded, where the rings hold its vertices and indices), and the passes
+ * after it draw from the capture: the target bound and the textures fetched
+ * as before (a render target is made, resolved and bound by its draw), the
+ * program's constants given as the pass has them (camera, world, bones
+ * interpolated; the rest as recorded), a fixed-function draw's matrices given
+ * again when the pass moves them (or the capture was made at moved ones),
+ * and only the objects that differ from what is bound set. xbox_d3d8 puts a
+ * captured program's 192 registers into a ring of their own (D3D11.1
+ * constant-buffer offsets), so a later pass binds the capture's block where
+ * the registers weren't moved and writes only the draws whose were; and its
+ * vertex, index and constant rings start over at a capturing frame's start
+ * when the frame may not fit (one that started over in the middle took the
+ * frame's captures before it with it: ~6% of later passes' draws in
+ * cast_bug drawn the ordinary way). A draw whose
+ * capture no longer holds (a cache let an object go, a ring started over,
+ * nothing captured) is drawn the ordinary way. The same pixels: every bound
+ * object and constant the shaders read is the one the ordinary way gives.
+ * RECOMP_D3D_BRIDGE_BAKE=0 off, 1 on.
+ *
+ * The baked form is what a second backend would take too: a pipeline (its
+ * key: vertex shader, input layout, pixel shader, blend, depth-stencil and
+ * rasterizer descriptions, topology, the target's format) with its dynamic
+ * state (viewport, stencil reference), its resources (four textures and
+ * samplers), its constants (the program's 192 registers, which the
+ * interpolation rewrites in part, or the fixed-function blocks, and the
+ * pixel block) and its vertex and index ranges (notes 18.90). */
+typedef struct {
+    D3D8Baked b;
+    uint8_t moved;                      /* its fixed-function matrices were moved when it was captured */
+} bake_t;
+static bake_t *g_bk;                    /* replay side: the frame's, by command */
+static unsigned g_bk_cap;
+enum { BK_OFF, BK_CAPTURE, BK_BAKED };
+static int g_bk_mode;                   /* this pass's */
+static unsigned g_bk_plan, g_bk_pass;   /* the frame's passes, those done */
+
+/* A recorded draw drawn from its capture: `d` as this pass has it (a copy
+ * with moved matrices or constants when `moved`). Called with g_lock held. */
+static int draw_baked(const rcmd_t *c, const d3dh_draw_t *d, int moved)
+{
+    static float k4[192 * 4];
+    const bake_t *bk = &g_bk[c - g_ps->rc];
+    const uint8_t *pinned = c->u.draw.pinned;
+    IDirect3DBaseTexture8 *const *pin = c->u.draw.pin;
+    ID3D11ShaderResourceView *srv[4];
+    const D3DMATRIX *m3[3], *const *ffm = NULL;
+    const float *k = NULL;
+    d3dh_ff_t ff;
+    LARGE_INTEGER t0, t1;
+    unsigned s;
+    int r;
+
+    REPLAY_SIDE();
+    if (!bk->b.gen)
+        goto plain;
+    QueryPerformanceCounter(&t0);
+    if (bind_target(&d->target) != 0)
+        return -1;
+    for (s = 0; s < 4; s++) {           /* as draw_exec fetches them */
+        IDirect3DBaseTexture8 *t;
+        if (!d->tex[s])
+            t = NULL;
+        else if (pinned[s] == PIN_TARGET) {
+            t = tex_target(d->tex[s]);
+            if (!t)
+                t = pin[s];
+        } else
+            t = pinned[s] ? pin[s] : tex_get(g_tc_now, d->tex[s]);
+        srv[s] = t ? d3d8_base_srv(t) : NULL;
+        if (t && !srv[s])               /* SetTexture leaves the stage's view as it was: not baked */
+            goto plain;
+    }
+    if (d->vprog) {
+        k = d->vprog->consts;
+        if (d->hud_dx != 0.0f) {        /* step 65: as draw_exec moves it */
+            memcpy(k4, k, sizeof(k4));
+            for (s = 0; s < 4; s++)
+                k4[4 * 96 + s] += d->hud_dx * k4[4 * 99 + s];
+            k = k4;
+            moved = 1;
+        }
+    } else if (d->ff && (moved || bk->moved)) {
+        ff = *d->ff;
+        if (d->hud_dx != 0.0f)
+            for (s = 0; s < 4; s++)
+                ff.proj[4 * s] += d->hud_dx * ff.proj[4 * s + 3];
+        m3[0] = (const D3DMATRIX *)ff.world;
+        m3[1] = (const D3DMATRIX *)ff.view;
+        m3[2] = (const D3DMATRIX *)ff.proj;
+        ffm = m3;
+    }
+    if (d3d8_DrawBaked(&bk->b, srv, k, moved, ffm) != S_OK)
+        goto plain;
+    target_drawn();
+    g_st.draws++;
+    g_st.baked_draws++;
+    if (d->indices)
+        g_st.indexed_draws++;
+    if (d->vprog)
+        g_st.vp_draws++;
+    if (d->target.data)
+        g_st.rt_draws++;
+    g_frame_work = 1;
+    QueryPerformanceCounter(&t1);
+    g_st.draw_ms += (double)(t1.QuadPart - t0.QuadPart) * 1000.0 / (double)g_qpf.QuadPart;
+    return 0;
+plain:
+    g_st.bake_plain++;
+    r = draw_exec(d, pin, pinned, (D3D8UpKept *)&c->u.draw.kept);
+    return r;
+}
+
+/* A recorded draw in this pass: drawn the ordinary way (captured, at a
+ * frame's first pass) or from its capture. `moved`: `d` is a copy whose
+ * matrices or constants the pass moved. */
+static int draw_cmd(const rcmd_t *c, const d3dh_draw_t *d, int moved)
+{
+    int r;
+
+    if (g_bk_mode == BK_BAKED)
+        return draw_baked(c, d, moved);
+    if (g_bk_mode == BK_OFF)
+        return draw_exec(d, c->u.draw.pin, c->u.draw.pinned, (D3D8UpKept *)&c->u.draw.kept);
+    g_bk[c - g_ps->rc].moved = (uint8_t)(moved && d->ff);
+    d3d8_BakeCapture(&g_bk[c - g_ps->rc].b);
+    r = draw_exec(d, c->u.draw.pin, c->u.draw.pinned, (D3D8UpKept *)&c->u.draw.kept);
+    d3d8_BakeCapture(NULL);
+    if (g_bk[c - g_ps->rc].b.gen)
+        g_st.bake_captured++;
+    return r;
+}
+
 /* Record a draw. Called with g_lock held. Returns 0, or -1 (out of memory:
  * the draw is lost, counted as a failure). */
 static int rec_draw(const d3dh_draw_t *d)
@@ -2825,6 +2977,8 @@ static int rec_draw(const d3dh_draw_t *d)
 }
 
 static void ic_draw(const rcmd_t *c);   /* step 61 */
+static ID3D11Texture2D *back_tex(void); /* step 87, the replay check's later passes */
+static void replay_check_snap(int restore, ID3D11Texture2D *bb);
 
 /* One pass over this frame's commands: as recorded, or (step 61) with
  * `interp` set, the draws under this sub-frame's cameras. Called with g_lock
@@ -2836,6 +2990,24 @@ static void replay_pass(int interp)
 
     REPLAY_SIDE();
     QueryPerformanceCounter(&t0);
+    g_bk_mode = BK_OFF;                 /* step 87: the first of passes captured, the rest drawn from that */
+    if (g_bake && g_bk_plan > 1) {
+        if (g_bk_pass == 0) {
+            if (g_bk_cap < g_ps->rc_n) {
+                bake_t *n = (bake_t *)realloc(g_bk, (size_t)g_ps->rc_n * sizeof(bake_t));
+                if (n) {
+                    g_bk = n;
+                    g_bk_cap = g_ps->rc_n;
+                }
+            }
+            if (g_bk_cap >= g_ps->rc_n) {
+                d3d8_BakeReset();
+                g_bk_mode = BK_CAPTURE;
+            }
+        } else if (g_bk_cap >= g_ps->rc_n) {
+            g_bk_mode = BK_BAKED;
+        }
+    }
     for (i = 0; i < g_ps->rc_n; i++) {
         const rcmd_t *c = &g_ps->rc[i];
         switch (c->kind) {
@@ -2843,7 +3015,7 @@ static void replay_pass(int interp)
             if (interp)
                 ic_draw(c);
             else
-                draw_exec(&c->u.draw.d, c->u.draw.pin, c->u.draw.pinned, (D3D8UpKept *)&c->u.draw.kept);
+                draw_cmd(c, &c->u.draw.d, 0);
             break;
         case RC_CLEAR:
             clear_exec(&c->u.clear.t, c->u.clear.flags, c->u.clear.color, c->u.clear.z, c->u.clear.stencil);
@@ -2856,6 +3028,8 @@ static void replay_pass(int interp)
             break;
         }
     }
+    g_bk_mode = BK_OFF;
+    g_bk_pass++;
     QueryPerformanceCounter(&t1);
     g_st.replay_ms += (double)(t1.QuadPart - t0.QuadPart) * 1000.0 / (double)g_qpf.QuadPart;
     g_rp_ms[interp != 0] += (double)(t1.QuadPart - t0.QuadPart) * 1000.0 / (double)g_qpf.QuadPart;    /* step 74 */
@@ -2909,6 +3083,7 @@ static void replay_done(void)
                 if (g_ps->rc[i].u.draw.pin[s])
                     g_ps->rc[i].u.draw.pin[s]->lpVtbl->Release(g_ps->rc[i].u.draw.pin[s]);
     rc_unhold(g_ps, 0, g_ps->rc_n);     /* step 84 */
+    g_bk_plan = g_bk_pass = 0;          /* step 87: its captures go with it */
     g_st.replay_frames++;
     g_st.replay_cmds += g_ps->rc_n;
     g_st.replay_bytes += (double)g_ps->ra_bytes;
@@ -2936,8 +3111,16 @@ static void replay_run(void)
         slot_free(g_ps);
         return;
     }
-    for (p = 0; p < (g_replay > 1 ? g_replay : 1); p++)
+    for (p = 0; p < (g_replay > 1 ? g_replay : 1); p++) {
+        if (p && g_replay_check) {      /* step 87: the check's later passes start where the frame did too */
+            ID3D11Texture2D *bb = back_tex();
+            if (bb) {
+                replay_check_snap(1, bb);
+                ID3D11Texture2D_Release(bb);
+            }
+        }
         replay_pass(0);
+    }
     replay_done();
 }
 
@@ -5453,7 +5636,7 @@ static void ic_draw(const rcmd_t *c)
     if (c->u.draw.cls != IC_NONE && c->u.draw.cam != g_imc) {
         g_st.interp_kept++;             /* step 65: under another camera than the world's: as recorded */
         g_st.interp_other_cam++;
-        draw_exec(d, c->u.draw.pin, c->u.draw.pinned, (D3D8UpKept *)&c->u.draw.kept);
+        draw_cmd(c, d, 0);              /* step 87 */
         return;
     }
     cam_on = c->u.draw.cam < IC_CAMS && g_isub[c->u.draw.cam].on;
@@ -5471,7 +5654,7 @@ static void ic_draw(const rcmd_t *c)
     }
     if (c->u.draw.cls == IC_NONE || (!cam_on && !w_move && !b_move)) {
         g_st.interp_kept++;
-        draw_exec(d, c->u.draw.pin, c->u.draw.pinned, (D3D8UpKept *)&c->u.draw.kept);
+        draw_cmd(c, d, 0);
         return;
     }
     if (w_move) {                       /* W(t), from the frame before's W and this one's */
@@ -5636,7 +5819,7 @@ static void ic_draw(const rcmd_t *c)
         m.ff = &ff;
         g_st.interp_ff++;
     }
-    draw_exec(&m, c->u.draw.pin, c->u.draw.pinned, (D3D8UpKept *)&c->u.draw.kept);
+    draw_cmd(c, &m, 1);
     while (n_keep) {                    /* step 76: the recording as it was, for the next sub-frame */
         n_keep--;
         memcpy(&k4[4 * keep[n_keep].reg], keep[n_keep].v, 4 * sizeof(float));
@@ -8129,6 +8312,8 @@ static int replay_frame(fslot_t *f)
                 g_st.interp_at[ia_k() < 8 ? ia_k() : 7]++;
             }
         }
+        g_bk_pass = 0;                  /* step 87: the passes it gets */
+        g_bk_plan = interp ? fr.n : (unsigned)(g_replay > 1 ? g_replay : 1);
         if (interp) {
             ic_sub(g_interp_t0 ? fr.t0[0] : fr.t[0]);
             replay_pass(1);             /* the first sub-frame */
