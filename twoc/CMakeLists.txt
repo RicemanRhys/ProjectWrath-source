@@ -18,6 +18,16 @@ set(CMAKE_C_STANDARD_REQUIRED ON)
 set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 
+# Link-time code generation in Release (notes 18.87): every target below (the
+# game's recompiled code, the mirror, xboxrecomp's libraries, SDL) compiled
+# with /GL and linked with /LTCG. ~7% off the game thread at cast_bug's start,
+# its own recompiled code ~14%; /fp stays precise, so the floating point is
+# the same. -DTWOC_LTCG=OFF builds without it.
+option(TWOC_LTCG "Link-time code generation in Release builds" ON)
+if(MSVC AND TWOC_LTCG)
+    set(CMAKE_INTERPROCEDURAL_OPTIMIZATION_RELEASE ON)
+endif()
+
 # Common definitions
 add_compile_definitions(
     WIN32_LEAN_AND_MEAN
