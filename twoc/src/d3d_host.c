@@ -449,6 +449,10 @@ static unsigned g_msaa = 1;             /* step 58: the samples a pixel MSAA ask
 static volatile LONG g_ovl_open;        /* Esc: the next present runs the overlay */
 static volatile LONG g_ovl_pauses = 1;  /* step 79: "Pause the game while this menu is open", for the game side */
 static volatile LONG g_show_fps;        /* step 82: "Show frame rate" (RECOMP_SHOW_FPS): the counter in the corner */
+static volatile LONG g_startmsg = 1;    /* step 86: "Show the startup message" (RECOMP_STARTUP_MESSAGE, unset: on) */
+static LONGLONG g_startmsg_t0;          /* its first frame (QPC); 0 before it */
+#define STARTMSG_MS 8000.0              /* shown this long from the first frame, */
+#define STARTMSG_FADE_MS 1000.0         /* fading out over its last part */
 static SRWLOCK g_pause_lock = SRWLOCK_INIT;
 static d3dh_apply_fn g_apply_game, g_apply_host;   /* step 78: the bridge's parts of a settings change */
 static double g_rwide;                  /* step 78: g_wide as the game side records under it (d3dh_record_wide) */
@@ -884,6 +888,9 @@ int d3dh_create(unsigned width, unsigned height, unsigned host_w, unsigned host_
         g_show_fps = getenv("RECOMP_SHOW_FPS") && *getenv("RECOMP_SHOW_FPS") && strcmp(getenv("RECOMP_SHOW_FPS"), "0") != 0;
         if (g_show_fps)
             fprintf(stderr, "[D3DB] host frame-rate counter: on (show_fps)\n");
+        g_startmsg = !(getenv("RECOMP_STARTUP_MESSAGE") && strcmp(getenv("RECOMP_STARTUP_MESSAGE"), "0") == 0);
+        if (!g_startmsg)
+            fprintf(stderr, "[D3DB] host startup message: off (startup_message)\n");
         fprintf(stderr, "[D3DB] host render thread: %s%s; this CPU has %u cores, %u logical processors%s\n",
                 twoc_rt_name(g_rt_mode), g_rt_sync ? " (sync: the game waits for each frame, a check)" : "",
                 g_rt_cores, g_rt_logical,
@@ -7343,6 +7350,10 @@ static void overlay_apply(twoc_settings_t *was, const twoc_settings_t *s)
         InterlockedExchange(&g_show_fps, s->show_fps);
         fprintf(stderr, "[OVL] frame-rate counter: %s\n", s->show_fps ? "on" : "off");
     }
+    if (s->startup_message != was->startup_message) {  /* step 86: off takes it away at once */
+        InterlockedExchange(&g_startmsg, s->startup_message);
+        fprintf(stderr, "[OVL] startup message: %s\n", s->startup_message ? "on" : "off");
+    }
     if (s->render_thread != was->render_thread) {   /* step 79: at the game's next Swap */
         d3dh_set_render_thread(s->render_thread);
         fprintf(stderr, "[OVL] render thread: %s\n", twoc_rt_name(s->render_thread));
@@ -7534,12 +7545,40 @@ static int ovl_draw(ID3D11Texture2D *dst, int running)
     return chord_close ? r | OVL_CLOSE : r;
 }
 
-/* Step 82: the frame-rate counter over the picture in `dst` (the visible
- * swap chain's buffer), the overlay closed. With g_lock held. */
-static void counter_draw(ID3D11Texture2D *dst)
+/* Step 86: the startup message's opacity now (1 for its first 7 s from the
+ * first frame, fading to 0 by 8 s), 0 when it is done, off, or the host
+ * isn't drawing. Its first call is the first frame. */
+static float startmsg_alpha(void)
 {
+    LARGE_INTEGER q;
+    double ms;
+
+    if (!g_startmsg || g_startmsg_t0 < 0)
+        return 0.0f;
+    QueryPerformanceCounter(&q);
+    if (!g_startmsg_t0) {
+        g_startmsg_t0 = q.QuadPart;
+        fprintf(stderr, "[D3DB] host startup message: \"Press F1 to open the settings menu\" (with a controller,"
+                " \"or hold Start\") for %.0f s from this frame\n", STARTMSG_MS / 1000.0);
+    }
+    ms = (double)(q.QuadPart - g_startmsg_t0) * 1000.0 / (double)g_qpf.QuadPart;
+    if (ms >= STARTMSG_MS) {
+        g_startmsg_t0 = -1;             /* done for this run */
+        return 0.0f;
+    }
+    return ms <= STARTMSG_MS - STARTMSG_FADE_MS ? 1.0f : (float)((STARTMSG_MS - ms) / STARTMSG_FADE_MS);
+}
+
+/* Step 82: the frame-rate counter over the picture in `dst` (the visible
+ * swap chain's buffer), the overlay closed. With g_lock held. Step 86: and
+ * the startup message at opacity `msg_alpha` (0: none). */
+static void counter_draw(ID3D11Texture2D *dst, float msg_alpha)
+{
+    extern int twoc_pad_connected(void);
     ID3D11RenderTargetView *rtv = NULL;
     char lines[96];
+    float pic[5];
+    double k;
 
     REPLAY_SIDE();
     if (!g_ovs.ready) {
@@ -7550,9 +7589,19 @@ static void counter_draw(ID3D11Texture2D *dst)
     if (g_ovs.ready < 0)
         return;
     ovl_rates_text(g_meas.ok, g_meas.game, g_meas.shown, 1, lines, sizeof(lines));
+    /* the picture inside the buffer, as blit_draw places it (the whole buffer when it is the picture's size) */
+    k = (double)g_buf_w / g_w < (double)g_buf_h / g_h ? (double)g_buf_w / g_w : (double)g_buf_h / g_h;
+    pic[2] = (float)(int)(g_w * k + 0.5);
+    pic[3] = (float)(int)(g_h * k + 0.5);
+    pic[0] = (float)(int)((g_buf_w - pic[2]) / 2);
+    pic[1] = (float)(int)((g_buf_h - pic[3]) / 2);
+    pic[4] = 1.15f * (pic[3] > 490 ? pic[3] / 650.0f : 0.75f);  /* the counter's rule by the picture's height, +15% */
     if (SUCCEEDED(ID3D11Device_CreateRenderTargetView(d3d8_GetD3D11Device(), (ID3D11Resource *)dst, NULL, &rtv))) {
         /* sized by the picture, not the desktop's DPI: 22 px text at 800 lines */
-        ovl_counter(rtv, g_buf_w, g_buf_h, g_buf_h > 490 ? (float)g_buf_h / 650.0f : 0.75f, lines);
+        ovl_counter(rtv, g_buf_w, g_buf_h, g_buf_h > 490 ? (float)g_buf_h / 650.0f : 0.75f,
+                    g_show_fps ? lines : NULL,
+                    twoc_pad_connected() ? "Press F1 to open the settings menu\n(or hold Start on the controller)"
+                                         : "Press F1 to open the settings menu", msg_alpha, pic);
         ID3D11RenderTargetView_Release(rtv);
     }
 }
@@ -7876,8 +7925,11 @@ static int present_one(double t_s, unsigned swap_no, unsigned interval, unsigned
                 copy_unscaled(dst, src);
             if (g_ovl_open && g_ovs.active && !g_ovs.s.pause)
                 ovl_r = ovl_draw(dst, 1);   /* step 57: the overlay over the running game */
-            else if (g_show_fps)
-                counter_draw(dst);      /* step 82: on the window's picture only, never in a dump */
+            else {
+                float ma = startmsg_alpha();    /* step 86: the startup message, like the counter */
+                if (g_show_fps || ma > 0.0f)
+                    counter_draw(dst, ma);  /* step 82: on the window's picture only, never in a dump */
+            }
         }
         if (src)
             ID3D11Texture2D_Release(src);
@@ -8228,6 +8280,8 @@ static void trigger_file(unsigned swap_no)
                 ts.fullscreen = atoi(v) != 0;
             } else if (strcmp(k, "pacing") == 0) {
                 ts.pacing = twoc_pacing_parse(v);
+            } else if (strcmp(k, "startmsg") == 0) {        /* step 86: startup_message */
+                ts.startup_message = atoi(v) != 0;
             } else if (strcmp(k, "pause") == 0) {           /* step 79 */
                 ts.pause = atoi(v) != 0;
             } else if (strcmp(k, "rthread") == 0) {         /* step 79 (st.py turns '_' into spaces) */

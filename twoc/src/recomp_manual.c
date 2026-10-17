@@ -3950,6 +3950,7 @@ void sub_001542AB(void)
     uint32_t outBuf = MEM32(esp + 8);
     XBOX_INPUT_STATE state;
     DWORD result, port;
+    int real = 0;                       /* step 86: a controller answered (the startup message's line) */
 
     trace_hit("poll sub_001542AB", &hits);
 
@@ -3968,6 +3969,7 @@ void sub_001542AB(void)
         if (now >= retry_ms) {
             result = xi_get(port, &state, &g_xi_poll, "XInput stand-in");
             retry_ms = result == ERROR_SUCCESS ? 0 : now + 1000;
+            real = result == ERROR_SUCCESS;
         }
         if (result != ERROR_SUCCESS) {
             memset(&state, 0, sizeof(state));
@@ -3976,8 +3978,10 @@ void sub_001542AB(void)
     } else if (port == 0 && pads_xinput_present(0) == 0 && !g_dev_xi_file) {
         memset(&state, 0, sizeof(state));   /* step 70: the pads thread saw no XInput user 0: not asked */
         result = ERROR_DEVICE_NOT_CONNECTED;
-    } else
+    } else {
         result = xi_get(port, &state, &g_xi_poll, "XInput stand-in");
+        real = result == ERROR_SUCCESS;
+    }
     /* Step 70: every other pad joins port 0 (pads.h): SDL's, and XInput users
      * 1-3, by position, under the same map. Steam Input's virtual pad on user
      * 0 is left out while the pad behind it is read directly. None: as before. */
@@ -3993,6 +3997,9 @@ void sub_001542AB(void)
             result = ERROR_SUCCESS;
         }
     }
+    if (port == 0 && (real || nothers))
+        InterlockedExchange64(&g_pad_seen_ms, (LONG64)GetTickCount64());
+    int pad_start = 0;
     if (result == ERROR_SUCCESS) {
         static DWORD kb_packets;
         controls_apply_pad(&state.Gamepad, nothers ? &others : NULL);  /* step 57: the PC controller's map; as is by default */

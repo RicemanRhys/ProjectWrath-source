@@ -32,6 +32,8 @@ static const key_t_ g_fixed[] = {
       "auto (on with 4 or more processor cores), on or off: the frames between game frames drawn on a thread of"
       " their own, with a frame rate above 60" },
     { "show_fps", "RECOMP_SHOW_FPS", "1: the game's updates and the frames shown a second in the picture's corner" },
+    { "startup_message", "RECOMP_STARTUP_MESSAGE",
+      "1: \"Press F1 to open the settings menu\" for the first seconds, 0: not" },
     { "hud", "RECOMP_HUD", "centre (the game's 4:3 places) or edges: the HUD counters at the screen's edges, wider than 4:3" },
     { "hud_margin", "RECOMP_HUD_MARGIN", "0-10: percent of the screen's width the HUD at the edges keeps in from them" },
     { "draw_distance", "RECOMP_DRAW_DISTANCE", "1 (the game's), 1.5, 2 or 3: the level's far plane and fog times this" },
@@ -319,6 +321,8 @@ void twoc_settings_current(twoc_settings_t *s)
     s->adaptive = !(v && strcmp(v, "0") == 0);
     s->render_thread = twoc_rt_parse(getenv("RECOMP_RENDER_THREAD"));
     s->show_fps = env_on("RECOMP_SHOW_FPS");
+    v = getenv("RECOMP_STARTUP_MESSAGE");
+    s->startup_message = !(v && strcmp(v, "0") == 0);
     v = getenv("RECOMP_HUD");
     s->hud = v && _stricmp(v, "edges") == 0;
     v = getenv("RECOMP_HUD_MARGIN");
@@ -388,6 +392,8 @@ static void key_text(const twoc_settings_t *s, size_t i, char *buf, size_t cap)
         snprintf(buf, cap, "%s", twoc_rt_name(s->render_thread));      /* off, the default for now: unwritten */
     else if (strcmp(k, "show_fps") == 0 && s->show_fps)
         snprintf(buf, cap, "1");        /* step 82: off, the default: unwritten */
+    else if (strcmp(k, "startup_message") == 0 && !s->startup_message)
+        snprintf(buf, cap, "0");        /* step 86: on, the default: unwritten */
     else if (strcmp(k, "hud") == 0)
         snprintf(buf, cap, "%s", s->hud ? "edges" : "centre");
     else if (strcmp(k, "hud_margin") == 0)

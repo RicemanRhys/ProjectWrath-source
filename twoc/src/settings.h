@@ -20,6 +20,8 @@
  *   render_thread = off | on | auto           RECOMP_RENDER_THREAD (unset: off for now; step 79)
  *   show_fps    = 0 | 1                       RECOMP_SHOW_FPS (unset: off; step 82: the game's updates and
  *                                             the frames shown a second in the picture's corner)
+ *   startup_message = 0 | 1                   RECOMP_STARTUP_MESSAGE (unset: on; step 86: "Press F1 to
+ *                                             open the settings menu" at the bottom for ~8 s)
  *   hud         = centre | edges              RECOMP_HUD (unset: centre)
  *   hud_margin  = 0-10                        RECOMP_HUD_MARGIN (percent of the width; unset: 0)
  *   draw_distance = 1 | 1.5 | 2 | 3           RECOMP_DRAW_DISTANCE (unset: 1, the game's)
@@ -115,6 +117,7 @@ typedef struct {
     int adaptive;                       /* step 75: 1 fewer sub-frames while late (also when unset), 0 always all */
     int render_thread;                  /* step 79: TWOC_RT_* (unset: off) */
     int show_fps;                       /* step 82: 1 the measured rates in a corner, 0 not (also unset) */
+    int startup_message;                /* step 86: 1 the F1 line for the first seconds (also unset), 0 not */
     int hud, hud_margin;                /* step 65: 0 the HUD in the middle 4:3, 1 at the edges; 0-10 percent in */
     double draw_distance;               /* step 69: the far plane and fog times this; 1 the game's (also unset) */
     int volume;                         /* 0-100; -1: never set (Windows' own level) */

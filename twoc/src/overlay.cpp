@@ -560,7 +560,50 @@ extern "C" void ovl_rates_text(int ok, double game_ups, double shown_fps, int br
                  slow ? ": slow" : " (full speed)", shown_fps);
 }
 
-extern "C" void ovl_counter(ID3D11RenderTargetView *rtv, unsigned w, unsigned h, float scale, const char *lines)
+/* Step 86: the startup message, centred near the bottom of the picture (pic: x, y, w, h in the target, then
+ * the message's own scale, by the picture's height), its lines at `alpha`; made smaller if a line would
+ * leave the picture's middle 4:3. `scale` is the frame's (the counter's). */
+static void startup_lines(const float *pic, float scale, const char *msg, float alpha)
+{
+    const char *nl = strchr(msg, '\n');
+    char a[128], b[128];
+    float room = (pic[2] < pic[3] * 4.0f / 3.0f ? pic[2] : pic[3] * 4.0f / 3.0f) * 0.92f;
+    float fs = pic[4] / scale, wa, wb, wide, padx, pady;
+
+    snprintf(a, sizeof(a), "%.*s", nl ? (int)(nl - msg) : (int)strlen(msg), msg);
+    snprintf(b, sizeof(b), "%s", nl ? nl + 1 : "");
+    wa = ImGui::CalcTextSize(a).x;      /* at the frame's scale */
+    wb = b[0] ? ImGui::CalcTextSize(b).x : 0.0f;
+    wide = (wa > wb ? wa : wb) * fs + 2.0f * 12.0f * pic[4];
+    if (wide > room && wide > 0)
+        fs *= room / wide;
+    padx = 12.0f * scale * fs;
+    pady = 6.0f * scale * fs;
+    ImGui::SetNextWindowPos(ImVec2(pic[0] + pic[2] * 0.5f, pic[1] + pic[3] * 0.985f), ImGuiCond_Always,
+                            ImVec2(0.5f, 1.0f));
+    ImGui::SetNextWindowBgAlpha(0.6f);
+    ImGui::PushStyleVar(ImGuiStyleVar_Alpha, alpha);
+    ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding, ImVec2(padx, pady));
+    ImGui::PushStyleVar(ImGuiStyleVar_ItemSpacing, ImVec2(4.0f * scale * fs, 3.0f * scale * fs));
+    ImGui::Begin("##startup", NULL, ImGuiWindowFlags_NoDecoration | ImGuiWindowFlags_NoInputs |
+                                        ImGuiWindowFlags_AlwaysAutoResize | ImGuiWindowFlags_NoNav |
+                                        ImGuiWindowFlags_NoFocusOnAppearing | ImGuiWindowFlags_NoSavedSettings);
+    ImGui::SetWindowFontScale(fs);
+    {
+        float inner = (wa > wb ? wa : wb) * fs;
+        ImGui::SetCursorPosX(padx + (inner - wa * fs) * 0.5f);
+        ImGui::TextUnformatted(a);
+        if (b[0]) {
+            ImGui::SetCursorPosX(padx + (inner - wb * fs) * 0.5f);
+            ImGui::TextUnformatted(b);
+        }
+    }
+    ImGui::End();
+    ImGui::PopStyleVar(3);
+}
+
+extern "C" void ovl_counter(ID3D11RenderTargetView *rtv, unsigned w, unsigned h, float scale, const char *lines,
+                            const char *msg, float msg_alpha, const float *pic)
 {
     ID3D11DeviceContext *ctx = NULL;
     ID3D11RenderTargetView *old_rtv = NULL;
@@ -581,16 +624,20 @@ extern "C" void ovl_counter(ID3D11RenderTargetView *rtv, unsigned w, unsigned h,
     }
     ImGui_ImplDX11_NewFrame();
     ImGui::NewFrame();
-    ImGui::SetNextWindowPos(ImVec2(io.DisplaySize.x * 0.01f, io.DisplaySize.y * 0.01f), ImGuiCond_Always);
-    ImGui::SetNextWindowBgAlpha(0.55f);
-    ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding, ImVec2(8.0f * scale, 5.0f * scale));    /* a small box */
-    ImGui::PushStyleVar(ImGuiStyleVar_ItemSpacing, ImVec2(4.0f * scale, 2.0f * scale));
-    ImGui::Begin("##fps", NULL, ImGuiWindowFlags_NoDecoration | ImGuiWindowFlags_NoInputs |
-                                    ImGuiWindowFlags_AlwaysAutoResize | ImGuiWindowFlags_NoNav |
-                                    ImGuiWindowFlags_NoFocusOnAppearing | ImGuiWindowFlags_NoSavedSettings);
-    ImGui::TextUnformatted(lines);
-    ImGui::End();
-    ImGui::PopStyleVar(2);
+    if (lines) {                        /* step 86: NULL with only the startup message to draw */
+        ImGui::SetNextWindowPos(ImVec2(io.DisplaySize.x * 0.01f, io.DisplaySize.y * 0.01f), ImGuiCond_Always);
+        ImGui::SetNextWindowBgAlpha(0.55f);
+        ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding, ImVec2(8.0f * scale, 5.0f * scale));    /* a small box */
+        ImGui::PushStyleVar(ImGuiStyleVar_ItemSpacing, ImVec2(4.0f * scale, 2.0f * scale));
+        ImGui::Begin("##fps", NULL, ImGuiWindowFlags_NoDecoration | ImGuiWindowFlags_NoInputs |
+                                        ImGuiWindowFlags_AlwaysAutoResize | ImGuiWindowFlags_NoNav |
+                                        ImGuiWindowFlags_NoFocusOnAppearing | ImGuiWindowFlags_NoSavedSettings);
+        ImGui::TextUnformatted(lines);
+        ImGui::End();
+        ImGui::PopStyleVar(2);
+    }
+    if (msg && msg_alpha > 0.0f && pic)
+        startup_lines(pic, scale, msg, msg_alpha);
     ImGui::Render();
     {
         ID3D11Device *dev = NULL;
@@ -802,6 +849,15 @@ static int tab_display(twoc_settings_t *s, const ovl_info_t *in)
             more("In the picture's top left corner while this menu is closed: the game's updates a second (59.94 "
                  "is its full speed; under it the game itself runs slow) and the frames shown a second (with a "
                  "frame rate above Game (60), the game's frames and those drawn in between). Applied at once.");
+        }
+        {   /* step 86 */
+            bool m = s->startup_message != 0;
+            if (ImGui::Checkbox("Show the startup message", &m)) {
+                s->startup_message = m;
+                r |= OVL_CHANGED;
+            }
+            more("\"Press F1 to open the settings menu\" (and, with a controller, \"or hold Start\") at the bottom "
+                 "of the picture for the first seconds of each start. Off also takes it away if it is showing.");
         }
         if (s->framerate) {             /* step 75 */
             static const char *const ad_names[2] = { "On", "Off" };
