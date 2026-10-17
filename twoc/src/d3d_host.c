@@ -682,13 +682,22 @@ static LRESULT CALLBACK wnd_proc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp)
 {
     if (hwnd == g_hwnd)
         key_track(msg, wp, lp);
-    if (hwnd == g_hwnd && msg == WM_KEYDOWN && wp == VK_ESCAPE) {
-        if (!(lp & (1 << 30)) && g_ready) { /* step 54: Esc opens and closes the settings overlay */
-            if (g_ovl_open && ovl_cancel_capture())
-                return 0;               /* step 57: it was waiting for a key or button: that wait ends */
-            if (!g_ovl_open)
+    if (hwnd == g_hwnd && msg == WM_KEYDOWN && (wp == VK_F1 || wp == VK_ESCAPE)) {
+        /* Step 86: F1 opens and closes the settings overlay (step 54's Esc before). Esc is back / cancel: with
+         * the overlay open it ends a binding's wait (step 57), else closes the overlay; closed, it does
+         * nothing. F1 during a binding's wait ends the wait and closes the overlay. */
+        if (!(lp & (1 << 30)) && g_ready) {
+            int was_capture = g_ovl_open && ovl_cancel_capture();
+            if (wp == VK_ESCAPE && was_capture)
+                return 0;
+            if (!g_ovl_open && wp == VK_F1) {
                 ovl_opened();
-            InterlockedExchange(&g_ovl_open, !g_ovl_open);
+                InterlockedExchange(&g_ovl_open, 1);
+                fprintf(stderr, "[OVL] F1: the settings overlay opens\n");
+            } else if (g_ovl_open) {
+                InterlockedExchange(&g_ovl_open, 0);
+                fprintf(stderr, "[OVL] %s: the settings overlay closes\n", wp == VK_F1 ? "F1" : "Esc");
+            }
         }
         return 0;
     }

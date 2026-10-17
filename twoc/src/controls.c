@@ -49,8 +49,9 @@ static const struct {
     { "rstick_left", "Right stick left" }, { "rstick_right", "Right stick right" },
 };
 
-/* The keys a binding may take: not Esc (the overlay), Alt or the Windows
- * keys (the keyboard is ignored while they are held), F12 or the mouse. */
+/* The keys a binding may take: not F1 or Esc (the overlay opens and closes
+ * with F1, Esc cancels or closes it; step 86), Alt or the Windows keys (the
+ * keyboard is ignored while they are held), F12 or the mouse. */
 static const struct {
     unsigned char vk;
     const char *ini, *label;
@@ -79,7 +80,7 @@ static const struct {
     { VK_NUMPAD6, "num6", "Num 6" }, { VK_NUMPAD7, "num7", "Num 7" }, { VK_NUMPAD8, "num8", "Num 8" },
     { VK_NUMPAD9, "num9", "Num 9" }, { VK_ADD, "numplus", "Num +" }, { VK_SUBTRACT, "numminus", "Num -" },
     { VK_MULTIPLY, "numstar", "Num *" }, { VK_DIVIDE, "numslash", "Num /" }, { VK_DECIMAL, "numperiod", "Num ." },
-    { VK_F1, "f1", "F1" }, { VK_F2, "f2", "F2" }, { VK_F3, "f3", "F3" }, { VK_F4, "f4", "F4" },
+    { VK_F2, "f2", "F2" }, { VK_F3, "f3", "F3" }, { VK_F4, "f4", "F4" },
     { VK_F5, "f5", "F5" }, { VK_F6, "f6", "F6" }, { VK_F7, "f7", "F7" }, { VK_F8, "f8", "F8" },
     { VK_F9, "f9", "F9" }, { VK_F10, "f10", "F10" }, { VK_F11, "f11", "F11" },
 };

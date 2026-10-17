@@ -56,7 +56,8 @@ void ovl_input(UINT msg, WPARAM wp, LPARAM lp, float sx, float sy);
 /* The overlay is opening: no keys or buttons held over from before. */
 void ovl_opened(void);
 /* Step 57: Esc while a binding waits for its key or button ends the wait
- * (returns 1) instead of closing the overlay. Window thread. */
+ * (returns 1) instead of closing the overlay; step 86: F1 ends it and closes
+ * the overlay. Window thread. */
 int ovl_cancel_capture(void);
 /* One frame into `rtv` (w x h pixels, UI scaled by `scale`), editing `s`.
  * Returns OVL_CHANGED when the player changed a setting, OVL_CLOSE when

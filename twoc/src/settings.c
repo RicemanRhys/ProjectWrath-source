@@ -441,7 +441,7 @@ int twoc_settings_save(const twoc_settings_t *s)
         fprintf(stderr, "[CFG] %s not written\n", twoc_settings_path());
         return -1;
     }
-    fprintf(f, "# Crash TWOC settings, written by the settings overlay (Esc in the game window).\n"
+    fprintf(f, "# Crash TWOC settings, written by the settings overlay (F1 in the game window).\n"
                "# run_twoc.ps1 switches and RECOMP_* variables win over these. Delete the file for the defaults.\n");
     for (i = 0; i < N_KEYS; i++) {
         char now[64], then[64];
@@ -453,7 +453,7 @@ int twoc_settings_save(const twoc_settings_t *s)
         if (!*v)
             continue;
         if (i >= K_PAD && !bindings++)
-            fprintf(f, "# Controls changed from the defaults (Esc, Controls): pad_<Xbox input> = <PC controller input>,\n"
+            fprintf(f, "# Controls changed from the defaults (F1, Controls): pad_<Xbox input> = <PC controller input>,\n"
                        "# key_<Xbox input> = up to two keys, or none; extra_<PC controller input> = <Xbox button> or none.\n");
         fprintf(f, g_keys[i].note[0] ? "%s = %s           # %s\n" : "%s = %s\n", g_keys[i].key, v, g_keys[i].note);
     }

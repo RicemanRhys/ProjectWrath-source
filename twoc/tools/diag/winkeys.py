@@ -65,7 +65,7 @@ for a in sys.argv[1:]:
     else:
         vk = vk_of(a)
         post(0x0100, vk, key_lp(a, vk, False))                        # WM_KEYDOWN
-        if vk not in (0x1B,):
+        if vk != 0x1B and not 0x70 <= vk <= 0x7B:                     # step 86: no WM_CHAR for F1-F12 either
             post(0x0102, vk, 1)                                       # WM_CHAR for text keys
         time.sleep(0.05)                                              # long enough for a game poll to see it
         post(0x0101, vk, key_lp(a, vk, True))                         # WM_KEYUP

@@ -314,7 +314,7 @@ void d3dh_stats(d3dh_stats_t *out);
 
 /* ── Step 54 (notes 18.57): the settings overlay and live settings ──
  *
- * Esc on the host window opens the overlay at the next present: that present
+ * F1 on the host window (step 86; Esc before) opens the overlay at the next present: that present
  * holds the game until it closes. Settings the host can't apply itself (the
  * aspect, the render size, the pacing: d3d_bridge.c decides them) go to the
  * callbacks set here, without the host's lock.

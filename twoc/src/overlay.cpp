@@ -498,7 +498,8 @@ static int tab_controls(twoc_settings_t *s, float room)
              "front; no controller is needed. Movement keys push the stick all the way. Keys do nothing while Alt "
              "is held (Alt+Enter, Alt+Tab).");
     }
-    help("Click a key, then press the new one; Esc cancels. Right-click a key to clear it.");
+    help("Click a key, then press the new one; Esc cancels. Right-click a key to clear it. F1 (this menu) and "
+         "Esc can't be bound.");
     if (ImGui::BeginTable("##keys", 3, ImGuiTableFlags_SizingStretchProp | ImGuiTableFlags_RowBg)) {
         ImGui::TableSetupColumn("Xbox controller", ImGuiTableColumnFlags_WidthStretch);
         ImGui::TableSetupColumn("Key", ImGuiTableColumnFlags_WidthFixed, fs * 6.5f);
