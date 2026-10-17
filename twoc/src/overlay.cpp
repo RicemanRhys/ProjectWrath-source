@@ -426,7 +426,8 @@ static int tab_controls(twoc_settings_t *s, float room)
     ImGui::SeparatorText("Controller");
     help("The game reads an Xbox controller. Click one of its inputs, then press the PC controller's button "
          "(or move a stick) for it; Esc cancels. A button another input had is swapped with it; an extra "
-         "button (a paddle, a trackpad click) presses it as well.");
+         "button (a paddle, a trackpad click) presses it as well. Start held about a second opens and closes "
+         "this menu; a shorter press reaches the game when it is let go.");
     snprintf(lbl, sizeof(lbl), "PC controller (%s)", pads_style_name(style));
     if (ImGui::BeginTable("##pad", 2, ImGuiTableFlags_SizingStretchProp | ImGuiTableFlags_RowBg)) {
         ImGui::TableSetupColumn("Xbox controller", ImGuiTableColumnFlags_WidthStretch);
@@ -1094,7 +1095,7 @@ static int build(twoc_settings_t *s, const ovl_info_t *in, float room)
     }
 
     ImGui::Spacing();
-    if (ImGui::Button(in->pad ? "Resume  (Esc, B)" : "Resume  (Esc)"))
+    if (ImGui::Button(in->pad ? "Resume  (F1, B, Start held)" : "Resume  (F1 or Esc)"))
         r |= OVL_CLOSE;
     if (in->save_note) {
         ImGui::SameLine();
@@ -1102,7 +1103,8 @@ static int build(twoc_settings_t *s, const ovl_info_t *in, float room)
     }
     if (in->pad)                        /* step 82 */
         help("Controller: D-pad or left stick to move, A to choose, B to close, LB / RB for the tabs. "
-             "View + Menu held opens and closes this menu.");
+             "Start (Menu, Options) held about a second, or View + Menu held, opens and closes this menu. "
+             "Keyboard: F1.");
     return r;
 }
 

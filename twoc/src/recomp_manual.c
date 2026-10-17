@@ -3727,24 +3727,60 @@ static void overlay_gate(DWORD port, XBOX_INPUT_STATE *s)
  * or the left stick, A, B, LB and RB drive it (overlay.cpp). After the
  * chord acts, View and Start count again only once both are up. No pad, or
  * no chord: the state reaches the game as before.
+ *
+ * Step 86 (notes 18.89): a controller's Start (Menu, Options) held alone
+ * START_HOLD_MS opens the overlay too, and closes it. So a press of the
+ * controllers' Start (`pad_start`: XInput, the SDL pads and the stand-in,
+ * after the controller map, before the keyboard and the input file) is held
+ * back from the game from the moment it goes down; let go sooner, the game
+ * gets it then, as a press of CHORD_TAP_MS. The pause menu therefore opens
+ * when Start is let go, not when it is pressed. The chord and the hold share
+ * g_chord_release: whichever acts first, the other doesn't until both
+ * buttons are up. A Start from the keyboard or the input file goes through
+ * at once, as before.
  */
 #define CHORD_MS 700
 #define CHORD_TAP_MS 100
-extern void d3dh_overlay_pad_open(void);
-static volatile LONG g_chord_release;   /* the chord acted: both up before it counts again */
+#define START_HOLD_MS 1000
+static volatile LONG64 g_pad_seen_ms;   /* step 86: when port 0's poll last read a controller */
 
-static void chord_game(XBOX_GAMEPAD *g)
+/* Step 86: a controller (not the keyboard or the input file) answered the
+ * game's poll in the last 1.5 s, or the pads thread sees one (SDL mode: an
+ * SDL pad or XInput user 0, before the game polls at all, on the splash):
+ * the startup message's "hold Start" line. */
+int twoc_pad_connected(void)
 {
-    static ULONGLONG both_since, tap_until;
-    static int held_back, start_seen;
+    static ULONGLONG asked;             /* the pads thread's answer, asked at most every 500 ms (one caller: */
+    static int seen;                    /* the presenting thread) */
+    ULONGLONG now = GetTickCount64();
+    LONG64 t = g_pad_seen_ms;
+
+    if (t && (LONG64)now - t < 1500)
+        return 1;
+    if (now - asked >= 500) {
+        asked = now;
+        seen = pads_mode() == PADS_SDL && (pads_xinput_present(0) == 1 || pads_others() > 0);
+    }
+    return seen;
+}
+extern void d3dh_overlay_pad_open(void);
+static volatile LONG g_chord_release;   /* the chord or the hold acted: View and Start up before they count again */
+
+static void chord_game(XBOX_GAMEPAD *g, int pad_start)
+{
+    static ULONGLONG both_since, tap_until, hold_since;
+    static int held_back, start_seen, pad_prev;
     ULONGLONG now = GetTickCount64();
     int v = (g->wButtons & XBOX_GAMEPAD_BACK) != 0, s = (g->wButtons & XBOX_GAMEPAD_START) != 0;
+    int pad_down = pad_start && !pad_prev;
     unsigned closes;
 
+    pad_prev = pad_start;
     if (!d3db_host_on || d3dh_overlay_input(&closes)) {
         both_since = 0;                 /* no overlay here, or it is open: the game's pad is idle meanwhile */
         held_back = 0;
         tap_until = 0;
+        hold_since = 0;
         start_seen = s;
         if (!v && !s)
             InterlockedExchange(&g_chord_release, 0);
@@ -3755,9 +3791,12 @@ static void chord_game(XBOX_GAMEPAD *g)
             InterlockedExchange(&g_chord_release, 0);
         both_since = 0;
         held_back = 0;
+        hold_since = 0;
         start_seen = s;
         return;
     }
+    if (pad_down && !hold_since)        /* step 86: the controller's Start: held back until let go or held long */
+        hold_since = now ? now : 1;
     if (v && s) {
         if (!both_since) {
             both_since = now ? now : 1;
@@ -3765,22 +3804,45 @@ static void chord_game(XBOX_GAMEPAD *g)
         }
         if (now - both_since >= CHORD_MS) {
             fprintf(stderr, "[XPP] View + Menu held %u ms: the settings overlay opens%s\n", CHORD_MS,
-                    held_back ? " (Start held back from the game)" : "");
+                    held_back || hold_since ? " (Start held back from the game)" : "");
             InterlockedExchange(&g_chord_release, 1);
             both_since = 0;
+            hold_since = 0;
             d3dh_overlay_pad_open();
+            g->wButtons &= (WORD)~XBOX_GAMEPAD_START;
+            start_seen = 0;
+            return;
         }
     } else if (both_since) {
-        if (held_back && !s)            /* Start let go before the chord: the game gets its press now */
+        if (held_back && !s && !hold_since) /* Start let go before the chord: the game gets its press now */
             tap_until = now + CHORD_TAP_MS;
         both_since = 0;
         held_back = 0;
     }
-    if (held_back && s)
+    if (hold_since) {
+        if (!pad_start) {               /* let go before the hold: the game gets its press now */
+            fprintf(stderr, "[XPP] Start pressed %llu ms: the game gets it now, as a press of %u ms\n",
+                    (unsigned long long)(now - hold_since), CHORD_TAP_MS);
+            tap_until = now + CHORD_TAP_MS;
+            hold_since = 0;
+        } else if (now - hold_since >= START_HOLD_MS) {
+            fprintf(stderr, "[XPP] Start held %u ms: the settings overlay opens (Start held back from the game)\n",
+                    START_HOLD_MS);
+            InterlockedExchange(&g_chord_release, 1);
+            hold_since = 0;
+            both_since = 0;
+            held_back = 0;
+            d3dh_overlay_pad_open();
+            g->wButtons &= (WORD)~XBOX_GAMEPAD_START;
+            start_seen = 0;
+            return;
+        }
+    }
+    if ((held_back && s) || (hold_since && pad_start))
         g->wButtons &= (WORD)~XBOX_GAMEPAD_START;
     if (now < tap_until)
         g->wButtons |= XBOX_GAMEPAD_START;
-    start_seen = s && !(held_back && v);
+    start_seen = (g->wButtons & XBOX_GAMEPAD_START) != 0;
 }
 
 /* Step 82: port 0's pad for the open overlay's frame (any thread): XInput
@@ -3791,7 +3853,7 @@ static void chord_game(XBOX_GAMEPAD *g)
  * overlay to close. */
 int twoc_pad_overlay(unsigned *nav, short *lx, short *ly)
 {
-    static ULONGLONG xi_retry, both_since;
+    static ULONGLONG xi_retry, both_since, start_since;
     static dev_pad_file_t xi_d, in_d;
     XBOX_INPUT_STATE st;
     pads_src_t others;
@@ -3854,17 +3916,31 @@ int twoc_pad_overlay(unsigned *nav, short *lx, short *ly)
         if (!v && !s)
             InterlockedExchange(&g_chord_release, 0);
         both_since = 0;
+        start_since = 0;
     } else if (v && s) {
         if (!both_since)
             both_since = now ? now : 1;
+        start_since = 0;
         if (now - both_since >= CHORD_MS) {
             fprintf(stderr, "[XPP] View + Menu held %u ms: the settings overlay closes\n", CHORD_MS);
             InterlockedExchange(&g_chord_release, 1);
             both_since = 0;
             close = 1;
         }
-    } else
+    } else if (s) {                     /* step 86: Start alone held closes it too */
         both_since = 0;
+        if (!start_since)
+            start_since = now ? now : 1;
+        if (now - start_since >= START_HOLD_MS) {
+            fprintf(stderr, "[XPP] Start held %u ms: the settings overlay closes\n", START_HOLD_MS);
+            InterlockedExchange(&g_chord_release, 1);
+            start_since = 0;
+            close = 1;
+        }
+    } else {
+        both_since = 0;
+        start_since = 0;
+    }
     return close;
 }
 
@@ -3920,13 +3996,14 @@ void sub_001542AB(void)
     if (result == ERROR_SUCCESS) {
         static DWORD kb_packets;
         controls_apply_pad(&state.Gamepad, nothers ? &others : NULL);  /* step 57: the PC controller's map; as is by default */
+        pad_start = (state.Gamepad.wButtons & XBOX_GAMEPAD_START) != 0;    /* step 86: the controllers' Start */
         if (kb_port(port) && controls_apply_keys(&state.Gamepad))
             kb_packets++;                           /* the keyboard's changes count as packets */
         state.dwPacketNumber += kb_packets + others_packets;
     }
     dev_autostart_poll(port, &state, &result);
     if (result == ERROR_SUCCESS && port == 0)
-        chord_game(&state.Gamepad);     /* step 82: View + Menu opens the overlay; Start held back meanwhile */
+        chord_game(&state.Gamepad, pad_start);  /* step 82: View + Menu opens the overlay; step 86: Start held */
     if (result == ERROR_SUCCESS)
         overlay_gate(port, &state);     /* step 54 */
     if (result == ERROR_SUCCESS) {

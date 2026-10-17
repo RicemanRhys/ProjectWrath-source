@@ -118,6 +118,9 @@
  * stands in for xbox_d3d8's fixed back buffer) and the pacing
  * (d3dh_set_pacing: the swap chain made again when it needs the other kind).
  * Without Esc, and with RECOMP_ANISOTROPY unset, nothing here runs.
+ * Step 86 (notes 18.89): F1 opens and closes it instead of Esc, which only
+ * closes it (or ends a binding's wait); on a controller Start held ~1 s
+ * (recomp_manual.c) or View + Menu.
  *
  * Step 57: with "Pause the game" off (RECOMP_OVERLAY_PAUSE=0) the overlay
  * doesn't hold the game: each present draws it over the new frame and the
