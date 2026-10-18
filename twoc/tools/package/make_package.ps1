@@ -155,8 +155,9 @@ $pkg = @(
     "DLLs the exe imports (dumpbin /dependents) and where they come from:"
 ) + $depLines + @(
     "",
-    "Loaded at run time when present: nvapi64.dll (NVIDIA only; the variable-refresh query), xaudio2_9.dll",
-    "(Windows), the GPU's own driver DLLs. Needs: 64-bit Windows 10 or 11 with a DirectX 11 GPU."
+    "Loaded at run time when present: nvapi64.dll (NVIDIA only; the variable-refresh query), xaudio2_9.dll,",
+    "powrprof.dll and pdh.dll (Windows; the power log, notes 18.94), the GPU's own driver DLLs. Needs: 64-bit",
+    "Windows 10 or 11 with a DirectX 11 GPU."
 )
 [IO.File]::WriteAllText((Join-Path $Out 'PACKAGE.txt'), (($pkg -join "`r`n") + "`r`n"), (New-Object Text.UTF8Encoding($false)))
 

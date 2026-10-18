@@ -7,21 +7,36 @@ on a second CPU core) hold up on a handheld. The game files in game_files\ are y
 copy of the disc. There are no saves in this folder: start a new game and name it WOMBAT,
 which opens every warp room (all crystals), so every level in the tests can be reached.
 
+*** Choose the Legion Space power mode BEFORE starting the game and don't change it while
+*** it runs (my Legion Go crashed after a mid-game switch). To change it: close the game,
+*** change the mode, then start the game again.
+
+*** Keep it cool: play with the Legion Go in your hands or on a hard, flat surface (a desk
+*** or table), never on a bed, sofa, cushion or blanket, and keep its vents (on the back and
+*** along the top edge) clear. Don't cover it while it charges. If the back gets too hot to
+*** hold comfortably, close the game and let it cool down.
+
 New in this package:
-  - The frozen splash is fixed (the last round: 3 of 12 starts with full screen on froze
-    on the Universal logo until alt+tab, and stuttered after). The desktop froze the same
-    way, 7 starts in 16, and now 0. Starting with full screen on, the game opens in a
-    window and goes full screen once its first frames are on the screen, and full screen
-    stays in Windows' normal way of showing windows (DWM's composition), which never froze.
-    If the screen still stops taking frames, the game does what alt+tab did by itself
-    within about a second and a half. Full screen stays off in this package's settings
-    until the first test below confirms it here.
-  - If the splash still freezes: alt+tab once (then back to the game).
-  - The game draws at the screen's own size (native, 1920 x 1200 or 2560 x 1600, whatever
-    Windows is set to), which held 60 plugged in last round.
-  - Four new settings (part F): Render scale, MSAA + SMAA, Pause when in the background,
-    and Skip the title animation (on in this package).
-  - Two launchers for the first test: fullscreen start test, and fullscreen old way.
+  - The game logs what the chip and Windows' power settings do, so the next zip shows what
+    happened if the Legion Go crashes again: Windows' power mode, the power plan, plugged
+    in or on battery (and how many watts the battery delivers), the processor's real
+    speed in MHz and as a share of its rated speed, and a temperature if Windows offers
+    one. Every 10 seconds, and at once when any of them changes (with how fast the game
+    was running). It goes into the log and into run_twoc.power.log, which is written
+    straight to the disk line by line, so it survives even if the Legion Go crashes.
+    Collect logs also takes Windows' own records of crashes and power losses from the last
+    3 days (events.txt). Nothing to do: it is always on and costs nothing measurable.
+  - Presets (part F): the settings menu's Display tab starts with Preset: Low, Standard,
+    High or Custom. Low is for playing on battery or in Legion Space's Balanced mode: it
+    draws a smaller picture (1280 x 800) at 72 frames a second, so the chip has much less
+    to do and stays cooler. Standard is what this package starts with (the screen's own
+    size at its refresh rate). High adds anti-aliasing for a PC with power to spare.
+  - More render sizes, grouped by the screen's shape (4:3, 16:10, 16:9, 21:9) with the
+    Legion Go's (16:10) marked, any size of your own (Custom), and a line saying what the
+    game really draws.
+  - Draw distance is gone from the settings menu (on request).
+  - Still from last time: the frozen-splash fix (if the splash ever freezes: alt+tab once),
+    Render scale, MSAA + SMAA, Pause when in the background, Skip the title animation.
 
 What's in the folder
 --------------------
@@ -31,9 +46,10 @@ What's in the folder
   Play Crash (fullscreen old way).bat        full screen at once, as the last package did,
                                   with only the new recovery to unfreeze it (the first
                                   test's comparison, optional)
-  Play Crash (72 fps test).bat    starts the game at 72 fps (test 2)
+  Play Crash (72 fps test).bat    starts the game at 72 fps (an optional test; the Low
+                                  preset is 72 fps too)
   Play Crash (ack wait test).bat  an optional test: starts the game with the "ack wait"
-                                  switch on (test 2's d; part C says what it is)
+                                  switch on (part C says what it is)
   Play Crash (bake off).bat       starts the game with "baked draws" off, to compare (an
                                   optional test)
   Play Crash (Vulkan probe).bat   an optional one-minute test: a second small window that
@@ -47,7 +63,8 @@ What's in the folder
   PACKAGE.txt                     which build this is
 
 The game also makes these when it runs: logs\ (earlier runs' logs), run_twoc.err.log (the
-last run's log), game_files\UDATA (saves), game_files\UDATA_backups (copies of the save,
+last run's log), run_twoc.power.log (the last run's power log), game_files\UDATA (saves),
+game_files\UDATA_backups (copies of the save,
 part E) and game_files\TDATA, and, outside this folder,
 %LOCALAPPDATA%\xboxrecomp (the Xbox's empty hard-disk images: about 5 GB on paper, but
 "sparse" files that take only a few MB of real space).
@@ -69,6 +86,8 @@ A. Set up the Legion Go (once)
     (Test 2 is on battery.)
 5.  Power: press the Legion L button to open Legion Space and set the thermal mode to
     Performance. Then Settings > System > Power & battery > Power mode: Best performance.
+    Do this before starting the game, never while it runs (see the top of this file); each
+    test below says which mode to set before it.
 6.  In AMD Software (Adrenalin), Gaming > Graphics, make sure these are off (they change
     the frame rate behind the game's back): Radeon Chill, Frame Rate Target Control,
     AMD Fluid Motion Frames, Radeon Boost, Radeon Super Resolution, Enhanced Sync.
@@ -109,6 +128,7 @@ B. Start the game (on the Legion Go)
 5.  Menu held about a second (or View + Menu held, or F1) opens the settings menu; the
     game keeps running behind it.
     The "Display" tab has everything for these tests:
+      Preset .............. Low / Standard / High / Custom (part F)
       Frame rate .......... Game (60) / Match display / 90 fps / 144 fps / ...
       the lines under it .. "Now: 144.00 fps, 2.4 frames each game frame." (the plan) and
                             "Measured: the game 60 updates a second (full speed); 144
@@ -141,52 +161,53 @@ All on the Legion Go. Write what you see in Test notes.txt as you go.
    If all ten fullscreen starts were fine, turn Fullscreen on in the settings menu for the
    rest of the tests (it is saved), or keep the window: say which in Test notes.txt.
 
-2. The battery round (cast_bug's start, standing still 30 seconds, one run of the game
-   each). Unplug the charger and write down the time and the percentage. Then:
-     a. Match display: start "Play Crash.bat". Go to cast_bug, stand 30 s, write it down.
+2. The power-mode round: where it crashed (plugged in; avalanch and the snow boss). Set
+   the mode before each start, never while the game runs:
+     a. With the game closed, Legion Space: Performance. Start "Play Crash.bat" (it starts
+        on the Standard preset). Play avalanch and the snow boss for about 10 minutes.
         Close the game.
-     b. 72 fps: start "Play Crash (72 fps test).bat" (the settings menu says "72 fps").
-        Go to cast_bug, stand 30 s, write it down. Close the game.
-     c. Render scale 67%: start "Play Crash.bat". Go to cast_bug. Settings menu, Display
-        tab, Render scale: 67%, close the menu. Stand 30 s, write it down. Then set it back
-        to 100% and close the game.
-     d. Ack wait (optional): start "Play Crash (ack wait test).bat". Go to cast_bug, stand
-        30 s, write it down. Close the game.
-   At the end, the battery percentage. Then plug the charger back in.
+     b. With the game closed, Legion Space: Balanced. Start "Play Crash.bat", settings
+        menu, Display tab, Preset: Low. Play the same for about 10 minutes. Close the game.
+     c. Optional: Balanced again, but Preset Standard (the last round's "very slow demo"
+        was Balanced with these settings). 5 minutes is enough. Close the game.
+   For each, write down: the counter's "Game N/s" and "Shown N/s" a minute into each level,
+   how warm the back got, the fan, and anything odd. If the Legion Go crashes or freezes:
+   note the time (roughly), hold the power button to switch it off if it is frozen, start
+   it again, and run "Collect logs.bat" before anything else. The power log was written to
+   the disk as the game ran, so it shows what happened up to the crash.
 
-   Getting to cast_bug (every run): start a new game named WOMBAT and press Start to skip
-   the intro. In the hub, walk Crash onto the round lift in the middle; it takes him up to
-   the bonus warp room. Go through its gate to the first pad; the level is cast_bug. When
-   it has loaded, put the controller down: Crash stands at the start.
+3. Low on battery (cast_bug's start, then avalanch). Unplug the charger and write down the
+   time and the percentage. With the game closed, set Legion Space to Balanced. Start
+   "Play Crash.bat", Preset: Low. Go to cast_bug and stand 30 s: write down the counter
+   and the Measured line. Then play avalanch for 5 minutes. Close the game, write down the
+   battery percentage and plug the charger back in.
 
-   What to write down after the 30 seconds, each time:
+   Getting to cast_bug: start a new game named WOMBAT and press Start to skip the intro. In
+   the hub, walk Crash onto the round lift in the middle; it takes him up to the bonus warp
+   room. Go through its gate to the first pad; the level is cast_bug. When it has loaded,
+   put the controller down: Crash stands at the start.
+
+   What to write down after the 30 seconds:
      - the counter's two numbers in the top left corner: "Game N/s" and "Shown N/s"
      - the Measured line: open the settings menu (hold Menu), and on the Display tab copy
        the line that starts "Measured:" as it is. Then close the menu.
      - anything you saw: stutter, Crash in slow motion
 
-3. Standard against High (plugged in, cast_bug's start, one run of "Play Crash.bat"). Stand
-   30 s with each of these, changed in the settings menu, writing down the counter, the
-   Measured line and how it looks (edges, the fences and leaves):
-     a. Anti-aliasing Off (as it starts)
-     b. Anti-aliasing SMAA
-     c. Anti-aliasing MSAA 2x + SMAA
-     d. Render scale 125% with Anti-aliasing Off
-   Then set Anti-aliasing back to Off and Render scale to 100%.
+4. High (plugged in, Legion Space Performance, set before starting): start "Play
+   Crash.bat", Preset: High, cast_bug's start for 30 s: the counter, the Measured line and
+   how it looks (edges, fences, leaves) against Standard.
 
-4. DXVK once (optional; the DXVK-test folder, its own README): cast_bug's start, Match
-   display, Render thread Auto, 30 s, the counter and the Measured line.
-
-5. A 10-minute play session, plugged in, in any levels you like: note stutter, how warm
-   the back gets and fan noise, and whether the game ever slowed down.
-
-6. The small things not tried last time:
+5. The small things:
+     - The Preset line: pick Low, then change one of the settings under it (Anti-aliasing,
+       say): does the Preset say Custom? Then pick Standard again.
+     - Render size: open its list. Is 16:10 marked as the aspect ratio chosen? Is the line
+       under it ("Renders ... at 16:10") readable?
      - View + Menu held about a second: does it open and close the settings menu?
-     - Could you read the startup line at the bottom ("Press F1 ... or hold Start")?
      - Pause when in the background (part F): turn it on, then press the Windows key or
        minimise the game: does the game stop and go quiet, and go on when you come back?
-     - Skip the title animation (part F): turn it off, close and start the game again:
-       how long until the main menu (roughly)? Then turn it back on.
+
+Optional, if there is time: the DXVK-test folder once (its own README; cast_bug's start,
+Standard, 30 s, the counter and the Measured line).
 
 What baked draws are (the optional "bake off" launcher): at 144 Hz each game frame is shown
 2 or 3 times, each time drawn again, a little further along. The first drawing works out
@@ -203,7 +224,7 @@ What the ack wait test is: one of the game's helper threads (the one that answer
 game's graphics commands) keeps a CPU core busy all the time, waiting for the next one.
 "Play Crash (ack wait test).bat" makes it rest between commands instead, which gives back
 about half a core. Plugged in it made no difference last round; on battery the freed half
-core might help: that is what 2d finds out. It is only a test; play with "Play Crash.bat".
+core might help. It is only an optional test; play with "Play Crash.bat".
 
 Then bring the logs back (part D).
 
@@ -217,9 +238,10 @@ Steps 1-3 on the Legion Go, step 4 on the desktop.
 2.  Double-click "Collect logs.bat". It takes about 20 seconds; the screen turns grey
     with a moving white bar twice (that's vrrprobe testing how the display shows frames).
 3.  It makes LegionGo_logs_<date>_<time>.zip in this folder and opens Explorer on it.
-    The zip has the last run's log, the earlier runs' logs (logs\), crash_twoc.ini,
-    Test notes.txt, a summary of the PC (CPU, GPU and driver, Windows version, power
-    mode, plugged in or not, the screen's modes and refresh rate) and vrrprobe's results.
+    The zip has the last run's log and power log, the earlier runs' (logs\),
+    crash_twoc.ini, Test notes.txt, a summary of the PC (CPU, GPU and driver, Windows
+    version, power mode, plugged in or not, the screen's modes and refresh rate), Windows'
+    crash and power records of the last 3 days (events.txt) and vrrprobe's results.
 4.  Copy the zip to the desktop PC (USB stick, a cloud folder or LocalSend) and give it
     to Claude.
 
@@ -250,6 +272,23 @@ the copies too) into the other folder's game_files\.
 F. The new settings
 -------------------
 All in the settings menu (Menu held, or F1), saved to crash_twoc.ini.
+  Preset (top of the Display tab) .... sets several settings at once:
+        Low ....... for a handheld on battery or in a Balanced power mode: render size
+                    1280 x 800, 72 frames a second, render thread Auto, adaptive frame rate
+                    on, anti-aliasing off, 2x filtering, render scale 100%. The chip has
+                    much less to do: cooler, quieter, longer on battery.
+        Standard .. the screen's own size (native) at its refresh rate (Match display),
+                    render thread Auto, adaptive on, anti-aliasing off, 4x filtering. This
+                    package starts on it.
+        High ...... Standard with MSAA 2x + SMAA and 16x filtering, for more graphics power.
+        Custom .... your own mix. Changing any of a preset's settings afterwards makes it
+                    Custom. Full screen, the aspect ratio and the HUD stay as they are.
+  Render size (Display tab) .......... the sizes are grouped by shape: 4:3, 16:10, 16:9 and
+        21:9, the group of the chosen aspect ratio marked (16:10 here: 1280 x 800,
+        1440 x 900, 1680 x 1050, 1920 x 1200, 2560 x 1600, 3840 x 2400); Custom takes any
+        width and height from 64 to 8192 (- and + change them, or type them, then Apply).
+        The line under it says what the game really draws ("Renders 1280x800 at 16:10.")
+        and, for a size of another shape, that the picture fits inside it with bars.
   Render scale (Display tab) ......... draws the picture at this share of the render size
         and shows it at the render size: 25% to 200%. Under 100% the graphics chip has
         less to draw (softer, cooler, longer on battery: 67% or 75% are good there); over
@@ -269,6 +308,12 @@ All in the settings menu (Menu held, or F1), saved to crash_twoc.ini.
 
 If something goes wrong
 -----------------------
+- The Legion Go crashes, restarts or freezes while the game runs: note the time, start it
+  again (hold the power button about 10 seconds to switch off a frozen one), and run
+  "Collect logs.bat" first, before starting the game again. The power log
+  (run_twoc.power.log) and Windows' own records (events.txt in the zip) show what the
+  chip did up to then. Note in Test notes.txt what you were doing and which Legion Space
+  mode was on.
 - The Universal logo freezes at the start (the picture stops, the sound goes on): wait 10
   seconds (the game should get going by itself), then alt+tab once and back to the game.
   Note it in Test notes.txt either way.

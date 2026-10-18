@@ -1,7 +1,7 @@
 Legion Go test notes (this file goes into the zip "Collect logs.bat" makes)
 ==========================================================================
 
-Legion Space thermal mode:
+Legion Space thermal mode (set before each start):
 Windows power mode:
 Screen refresh rate and resolution (Settings):
 
@@ -26,55 +26,39 @@ Screen refresh rate and resolution (Settings):
     5:
    Full screen on for the other tests, or the window?
 
-2. The battery round (cast_bug's start, 30 s standing, README part C). The time you unplugged
-   and the percentage:
-   a. Match display ("Play Crash.bat")
-      Game:        /s    Shown:        /s
+2. The power-mode round (plugged in, avalanch and the snow boss, README part C). The mode set
+   before each start, never while the game ran.
+   a. Performance, Preset Standard (about 10 minutes)
+      avalanch:   Game:        /s    Shown:        /s
+      snow boss:  Game:        /s    Shown:        /s
+      Warmth, fan, anything odd:
+   b. Balanced, Preset Low (about 10 minutes)
+      avalanch:   Game:        /s    Shown:        /s
+      snow boss:  Game:        /s    Shown:        /s
+      Warmth, fan, anything odd:
+   c. Optional: Balanced, Preset Standard (5 minutes)
+      avalanch:   Game:        /s    Shown:        /s
+      Anything odd:
+   Crashes or freezes (the time, what you were doing, the Legion Space mode):
+
+3. Low on battery (Balanced, set before starting). The time you unplugged and the percentage:
+   cast_bug's start, 30 s:  Game:        /s    Shown:        /s
       Measured:
-      Seen:
-   b. 72 fps ("Play Crash (72 fps test).bat")
-      Game:        /s    Shown:        /s
-      Measured:
-      Seen:
-   c. Render scale 67% ("Play Crash.bat", then 67% in the menu)
-      Game:        /s    Shown:        /s
-      Measured:
-      Seen (how soft does it look?):
-   d. Ack wait ("Play Crash (ack wait test).bat"; optional)
-      Game:        /s    Shown:        /s
-      Measured:
-      Seen:
+   avalanch, 5 minutes (stutter, slow motion, warmth):
    Battery percentage at the end:
 
-3. Standard against High (plugged in, cast_bug's start, 30 s each)
-   a. Anti-aliasing Off
+4. High (plugged in, Performance), cast_bug's start, 30 s
       Game:        /s    Shown:        /s
       Measured:
-   b. SMAA
-      Game:        /s    Shown:        /s
-      Measured:
-      Seen (edges, fences, leaves):
-   c. MSAA 2x + SMAA
-      Game:        /s    Shown:        /s
-      Measured:
-      Seen:
-   d. Render scale 125%, Anti-aliasing Off
-      Game:        /s    Shown:        /s
-      Measured:
-      Seen:
+      Seen (edges, fences, leaves) against Standard:
 
-4. DXVK (optional; the DXVK-test folder): cast_bug's start, the counter and the Measured line:
-
-5. A 10-minute session (where, stutter, warmth, fan, any slowdown):
-
-6. The small things
+5. The small things
+   Preset: after changing a setting under Low, did it say Custom?
+   Render size list: was 16:10 marked? Was the "Renders ..." line readable?
    View + Menu held: did it open and close the settings menu?
-   The startup line at the bottom: could you read it?
    Pause when in the background: did the game stop and go quiet, and go on again?
-   Skip the title animation off: about how long until the main menu?
 
-Optional: the Vulkan probe ("Play Crash (Vulkan probe).bat"): did its second window open?
-Optional: baked draws off ("Play Crash (bake off).bat") at cast_bug's start:
+Optional: DXVK (the DXVK-test folder), cast_bug's start:
       Game:        /s    Shown:        /s
 
 Anything else (crashes, sound crackles, controls, picture problems):
