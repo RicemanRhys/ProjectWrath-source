@@ -276,6 +276,21 @@ static struct {
     long frames, underruns, dropped;
 } g_mon_stats;
 
+/* The frame thread's wakeups beside the underruns (twoc step 90, notes
+ * 18.93: the Legion Go's runs with 83-290 underruns): with XAudio2 its
+ * waits for room in the device's queue ask for 1 ms; how many came back
+ * late and by how much, and how far apart the thread made its frames of
+ * 256 samples (5.33 ms each), with the fewest queued when one was made.
+ * Logged only. */
+static struct {
+    long waits, late3, late20;
+    double late_max_ms;
+    long gaps, gap2, gap4;
+    double gap_max_ms;
+    int64_t last_us;
+    int min_queued;
+} g_wake = { .min_queued = 1 << 30 };
+
 static void monitor_stats(MCPXAPUState *d)
 {
     long long now = qemu_clock_get_ms(QEMU_CLOCK_REALTIME);
@@ -290,6 +305,19 @@ static void monitor_stats(MCPXAPUState *d)
             g_mon_stats.frames * 256000.0 / (now - g_mon_stats.t0_ms),
             g_mon_stats.underruns, g_mon_stats.dropped,
             xa2_is_active() ? xa2_buffers_queued() : -1);
+    if (g_wake.waits || g_wake.gaps)
+        fprintf(stderr, "[APU-OUT] wakeups: %ld waits for room (asked 1 ms), %ld back over 3 ms late, %ld over 20"
+                " ms (more than a timer tick), the latest %.1f ms; frames made %ld, %ld over 2 frames (10.7 ms) after"
+                " the one before, %ld over 4"
+                " (21.3 ms), the longest %.1f ms; fewest queued at a frame %d\n", g_wake.waits, g_wake.late3,
+                g_wake.late20, g_wake.late_max_ms, g_wake.gaps, g_wake.gap2, g_wake.gap4, g_wake.gap_max_ms,
+                g_wake.min_queued == 1 << 30 ? -1 : g_wake.min_queued);
+    {
+        int64_t last = g_wake.last_us;
+        memset(&g_wake, 0, sizeof(g_wake));
+        g_wake.last_us = last;
+        g_wake.min_queued = 1 << 30;
+    }
     memset(&g_mon_stats, 0, sizeof(g_mon_stats));
     g_mon_stats.t0_ms = now;
 }
@@ -474,13 +502,35 @@ static void throttle(MCPXAPUState *d)
     int64_t now_us = qemu_clock_get_us(QEMU_CLOCK_REALTIME);
 
     if (xa2_is_active()) {
+        int q = xa2_buffers_queued();
+        int64_t made;
+        if (q < g_wake.min_queued)      /* twoc step 90 (logged only) */
+            g_wake.min_queued = q;
         /* A device that stops playing gets 100 ms, then the frame goes out
          * anyway (the monitor drops it if the queue is still full). */
         while (!d->pause_requested &&
                xa2_buffers_queued() >= THROTTLE_QUEUE_TARGET &&
                qemu_clock_get_us(QEMU_CLOCK_REALTIME) - now_us < 100000) {
+            int64_t w0 = qemu_clock_get_us(QEMU_CLOCK_REALTIME);
+            double late;
             qemu_cond_timedwait(&d->cond, &d->lock, 1);
+            late = (qemu_clock_get_us(QEMU_CLOCK_REALTIME) - w0) / 1000.0 - 1.0;
+            g_wake.waits++;
+            g_wake.late3 += late > 3.0;
+            g_wake.late20 += late > 20.0;
+            if (late > g_wake.late_max_ms)
+                g_wake.late_max_ms = late;
         }
+        made = qemu_clock_get_us(QEMU_CLOCK_REALTIME);  /* the next frame is made from here */
+        if (g_wake.last_us) {
+            double gap = (made - g_wake.last_us) / 1000.0;
+            g_wake.gaps++;
+            g_wake.gap2 += gap > 2 * EP_FRAME_US / 1000.0;
+            g_wake.gap4 += gap > 4 * EP_FRAME_US / 1000.0;
+            if (gap > g_wake.gap_max_ms)
+                g_wake.gap_max_ms = gap;
+        }
+        g_wake.last_us = made;
         d->sleep_acc_us += (int)(qemu_clock_get_us(QEMU_CLOCK_REALTIME) - now_us);
         return;
     }
