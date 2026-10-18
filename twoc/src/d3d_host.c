@@ -433,8 +433,69 @@ static int g_fs_at_start;               /* RECOMP_FULLSCREEN */
 static volatile LONG g_client_w, g_client_h;
 static unsigned g_buf_w, g_buf_h;
 static UINT g_flip_flags;               /* the swap chain's flags, for ResizeBuffers */
-#define WM_TWOC_FULLSCREEN (WM_APP + 1) /* wParam 1 on, 0 off, 2 toggle */
+#define WM_TWOC_FULLSCREEN (WM_APP + 1) /* wParam 1 on, 0 off, 2 toggle, 3 the deferred switch (step 90) */
 #define WM_TWOC_FIT (WM_APP + 2)        /* the host picture's size changed: fit the window to it */
+
+/* Step 90 (notes 18.93): the Legion Go's startup stall. 3 of 12 starts with
+ * fullscreen on stopped taking frames ~0.2 s after the first present (the
+ * window was made borderless before the device and its swap chain), and the
+ * render thread then sat in Present 11-19 s until alt+tab; the switch made
+ * mid-run, from a window, never did. So a start with fullscreen on begins in
+ * the window and the window thread makes it borderless once FS_DEFER_SHOWN
+ * presents have been shown (g_fs_defer; the presenting thread counts them in
+ * present_one and posts the switch), the way Alt+Enter does mid-run. The
+ * overlay and the ini see fullscreen on throughout (fs_wanted).
+ *
+ * The desktop reproduced it (RTX, 4K at 240 Hz, run from a console like the
+ * package): in 7 of 16 starts with the game's window in front (0 of 16 with
+ * the console in front) frames stopped at the switch into fullscreen, the
+ * moment DXGI took the swap chain out of DWM's composition onto a hardware
+ * plane ("overlay", present_mode), and the splash froze at ~1 frame a second
+ * until the run ended; the deferred switch stalled as often (8 of 16). A
+ * fullscreen swap chain one line shorter than the window (g_fs_buf_short,
+ * stretched by the blit; the window still covers the screen, so the taskbar
+ * hides and it looks the same) stays composed: 0 of 32. So that is the
+ * default; RECOMP_FULLSCREEN_COMPOSED=0 lets DXGI promote it as before, 1
+ * makes the window itself a line short instead (a test).
+ *
+ * And a recovery that does what alt+tab did, from the window thread (a timer:
+ * a blocked Present can't hold it, and it calls no DXGI): when the display
+ * releases no frame 3 times running (pace) and then shows none for
+ * DR_STALL_MS (in case frames come again by themselves; none did in the
+ * desktop's 20 watched episodes), or the presenting thread has been inside Present
+ * over DR_PRESENT_MS, step 1 activates the window and puts it
+ * on top with SWP_FRAMECHANGED; if no frame is shown within DR_STEP_MS, step
+ * 2 leaves fullscreen (it comes back after FS_DEFER_SHOWN shown, as at the
+ * start); then step 3 minimises and restores it. Once frames are shown again
+ * the presenting thread makes the swap chain again (g_flip_remake), the
+ * runs that stalled having stuttered after (notes 18.92). Never while the
+ * window is minimised or another program's window is in front (the player
+ * put it there); each step is logged. */
+#define FS_DEFER_SHOWN 60
+#define FS_DEFER_MAX_MS 5000.0          /* no frame statistics at all: switch this long after the first present */
+#define DR_PRESENT_MS 1000.0
+#define DR_STALL_MS 500.0               /* no frame shown this long after pace's 3 misses: a stall */
+#define DR_STEP_MS 500.0
+#define DR_EPISODES 4                   /* recoveries a run, at most */
+#define DR_TIMER 0x7D90
+static volatile LONG g_fs_defer;        /* fullscreen asked for at the start, the switch not made yet */
+static LONG g_fs_defer_n = FS_DEFER_SHOWN;   /* RECOMP_FULLSCREEN_DEFER: frames shown first (0: at once, as before) */
+static LONG g_fs_short, g_fs_buf_short = 1;    /* RECOMP_FULLSCREEN_COMPOSED: 2 (unset) the swap chain 1 line short, 1 the window, 0 neither */
+static volatile LONG g_fs_switching;    /* step 90: the window thread restyling it (the focus pause waits) */
+static volatile LONG64 g_fs_switch_q;   /* QPC of the last switch either way */
+static volatile LONG g_fs_defer_base;   /* g_shown_seq when the deferred switch was armed */
+static int g_fs_defer_from_switch;      /* the last switch to fullscreen was the deferred one (window thread) */
+static volatile LONG64 g_present_since; /* QPC entering IDXGISwapChain1_Present, 0 outside it */
+static volatile LONG g_stall_seq;       /* bumped by pace's 3 misses */
+static volatile LONG g_shown_seq;       /* presents seen shown by the frame statistics */
+static volatile LONG g_flip_remake;     /* the window thread asks: the swap chain made again at the next present */
+static volatile LONG g_disp_recovering; /* a recovery under way (the focus pause waits) */
+static LONGLONG g_first_present_q;      /* QPC of the first present */
+
+static int fs_wanted(void)
+{
+    return g_fs || g_fs_defer;
+}
 
 /* Step 54: the settings overlay and live settings (overlay.cpp). */
 static unsigned g_dev_w, g_dev_h;       /* xbox_d3d8's own back buffer: its size is fixed */
@@ -562,21 +623,26 @@ static void set_fullscreen(HWND hwnd, int on)
 
     if (!on == !g_fs)
         return;
+    InterlockedExchange(&g_fs_switching, 1);
     if (on) {
         memset(&mi, 0, sizeof(mi));
         mi.cbSize = sizeof(mi);
         placed.length = sizeof(placed);
         GetWindowPlacement(hwnd, &placed);
         style = GetWindowLongA(hwnd, GWL_STYLE);
-        if (!GetMonitorInfoA(MonitorFromWindow(hwnd, MONITOR_DEFAULTTONEAREST), &mi))
+        if (!GetMonitorInfoA(MonitorFromWindow(hwnd, MONITOR_DEFAULTTONEAREST), &mi)) {
+            InterlockedExchange(&g_fs_switching, 0);
             return;
+        }
         InterlockedExchange(&g_fs, 1);
         SetWindowLongA(hwnd, GWL_STYLE, (style & ~(LONG)(WS_OVERLAPPEDWINDOW)) | (LONG)WS_POPUP);
         SetWindowPos(hwnd, HWND_TOP, mi.rcMonitor.left, mi.rcMonitor.top, mi.rcMonitor.right - mi.rcMonitor.left,
-                     mi.rcMonitor.bottom - mi.rcMonitor.top, SWP_FRAMECHANGED | SWP_NOOWNERZORDER | SWP_SHOWWINDOW);
-        fprintf(stderr, "[D3DB] host window: borderless fullscreen, %ldx%ld at %ld,%ld (Alt+Enter: back)\n",
-                mi.rcMonitor.right - mi.rcMonitor.left, mi.rcMonitor.bottom - mi.rcMonitor.top, mi.rcMonitor.left,
-                mi.rcMonitor.top);
+                     mi.rcMonitor.bottom - mi.rcMonitor.top - g_fs_short, SWP_FRAMECHANGED | SWP_NOOWNERZORDER | SWP_SHOWWINDOW);
+        fprintf(stderr, "[D3DB] host window: borderless fullscreen, %ldx%ld at %ld,%ld (Alt+Enter: back)%s\n",
+                mi.rcMonitor.right - mi.rcMonitor.left, mi.rcMonitor.bottom - mi.rcMonitor.top - g_fs_short,
+                mi.rcMonitor.left, mi.rcMonitor.top,
+                g_fs_short ? " (1 line short of the screen, so DWM keeps composing it: RECOMP_FULLSCREEN_COMPOSED=1)"
+                : g_fs_buf_short ? " (its swap chain 1 line short, so DWM keeps composing it)" : "");
     } else {
         InterlockedExchange(&g_fs, 0);
         SetWindowLongA(hwnd, GWL_STYLE, style);
@@ -584,6 +650,206 @@ static void set_fullscreen(HWND hwnd, int on)
         SetWindowPos(hwnd, NULL, 0, 0, 0, 0,
                      SWP_NOMOVE | SWP_NOSIZE | SWP_NOZORDER | SWP_NOOWNERZORDER | SWP_FRAMECHANGED);
         fprintf(stderr, "[D3DB] host window: windowed\n");
+    }
+    {
+        LARGE_INTEGER q;
+        QueryPerformanceCounter(&q);
+        InterlockedExchange64(&g_fs_switch_q, q.QuadPart);
+    }
+    InterlockedExchange(&g_fs_switching, 0);
+}
+
+/* ── Step 90: the display's recovery (window thread) ─────────── */
+
+static struct {
+    int step;                           /* 0 watching, 1-3 the step last taken, 4 given up this episode */
+    int episodes;
+    LONG stall_seen, shown_at;          /* g_stall_seq handled; g_shown_seq when the step was taken */
+    LONGLONG at;                        /* QPC of the step */
+    int told_alone;                     /* "left alone" logged this episode */
+    int restore_due;                    /* step 3: restore at the next tick */
+    LONGLONG stall_q;                   /* QPC the episode began */
+    int after_switch;                   /* episodes begun within 3 s of a deferred switch to fullscreen */
+    int watch;                          /* 3 misses seen: is a frame shown within DR_STALL_MS? */
+    LONG watch_shown, watch_presents;   /* g_shown_seq and the presents at the misses */
+} g_dr;
+
+static double qpc_ms(LONGLONG a, LONGLONG b)
+{
+    return (double)(b - a) * 1000.0 / (double)g_qpf.QuadPart;
+}
+
+/* The window in front belongs to the player's game: ours, its console (or
+ * the terminal that owns the console's window, Windows Terminal), or another
+ * of this process's windows (or none). */
+static int dr_ours_in_front(HWND hwnd)
+{
+    HWND fg = GetForegroundWindow(), con = GetConsoleWindow();
+    DWORD pid = 0;
+
+    if (!fg || fg == hwnd || (con && (fg == con || fg == GetAncestor(con, GA_ROOTOWNER) || fg == GetWindow(con, GW_OWNER))))
+        return 1;
+    GetWindowThreadProcessId(fg, &pid);
+    return pid == GetCurrentProcessId();
+}
+
+/* Fullscreen again once FS_DEFER_SHOWN more presents have been shown (the
+ * presenting thread posts the switch, present_one). */
+static void fs_defer_arm(void)
+{
+    InterlockedExchange(&g_fs_defer_base, g_shown_seq);
+    InterlockedExchange(&g_fs_defer, 1);
+}
+
+/* Frames are shown again after a stall: the swap chain made again, in the
+ * window (a swap chain made on the borderless window is what stalled at the
+ * start), and fullscreen again after FS_DEFER_SHOWN shown; unless this is
+ * the second stall within 3 s of a deferred switch to fullscreen: then the
+ * window stays for the run. */
+static void dr_remake(HWND hwnd)
+{
+    int recent = g_fs_switch_q && g_dr.stall_q >= g_fs_switch_q && qpc_ms(g_fs_switch_q, g_dr.stall_q) < 3000.0;
+
+    if (g_fs || g_fs_defer) {
+        if (recent && g_fs_defer_from_switch && ++g_dr.after_switch >= 2) {
+            InterlockedExchange(&g_fs_defer, 0);
+            set_fullscreen(hwnd, 0);
+            fprintf(stderr, "[D3DB] host display: it stalled again within 3 s of going fullscreen: in the window for"
+                    " the rest of this run (Alt+Enter to try fullscreen again); the swap chain made again\n");
+        } else {
+            if (g_fs)
+                set_fullscreen(hwnd, 0);
+            fs_defer_arm();
+            fprintf(stderr, "[D3DB] host display: the swap chain made again in the window, fullscreen again after %d"
+                    " frames shown\n", g_fs_defer_n);
+        }
+    } else {
+        fprintf(stderr, "[D3DB] host display: the swap chain made again at the next present\n");
+    }
+    InterlockedExchange(&g_flip_remake, 1);
+}
+
+static void dr_tick(HWND hwnd)
+{
+    LARGE_INTEGER q;
+    LONGLONG since = g_present_since;
+    LONG stall = g_stall_seq, shown = g_shown_seq;
+    double in_present;
+    int stalled;
+
+    QueryPerformanceCounter(&q);
+    in_present = since ? qpc_ms(since, q.QuadPart) : 0.0;
+    if (g_dr.restore_due) {             /* step 3's second half */
+        g_dr.restore_due = 0;
+        ShowWindow(hwnd, SW_RESTORE);
+        SetForegroundWindow(hwnd);
+        fprintf(stderr, "[D3DB] host display recovery: step 3: the window restored\n");
+    }
+    if (g_dr.step == 0) {
+        char why[128];
+        if (stall != g_dr.stall_seen) {
+            /* 3 misses: watched first, a recovery only if no frame is shown for DR_STALL_MS after them (on
+             * the desktop every such episode was a stall, but a slow display could take frames again). */
+            g_dr.stall_seen = stall;
+            g_dr.stall_q = q.QuadPart;
+            g_dr.watch = 1;
+            g_dr.watch_shown = shown;
+            g_dr.watch_presents = (LONG)g_st.presents;
+            return;
+        }
+        if (g_dr.watch && shown - g_dr.watch_shown >= 3) {
+            fprintf(stderr, "[D3DB] host display: frames shown again %.0f ms after the display's 3 misses (no"
+                    " recovery needed)\n", qpc_ms(g_dr.stall_q, q.QuadPart));
+            g_dr.watch = 0;
+            return;
+        }
+        if (g_dr.watch && qpc_ms(g_dr.stall_q, q.QuadPart) >= DR_STALL_MS)
+            snprintf(why, sizeof(why), "no frame shown for %.0f ms after the display released none in %d ms 3 times"
+                     " running (%ld presents meanwhile)", qpc_ms(g_dr.stall_q, q.QuadPart), VSYNC_WAIT_MS,
+                     (long)((LONG)g_st.presents - g_dr.watch_presents));
+        else if (in_present > DR_PRESENT_MS)
+            snprintf(why, sizeof(why), "the presenting thread inside Present for %.0f ms", in_present);
+        else
+            return;
+        g_dr.watch = 0;
+        if (!g_dr.stall_q || in_present > DR_PRESENT_MS)
+            g_dr.stall_q = q.QuadPart;
+        if (IsIconic(hwnd) || !IsWindowVisible(hwnd) || !dr_ours_in_front(hwnd)) {
+            if (!g_dr.told_alone++)
+                fprintf(stderr, "[D3DB] host display stall (%s) with the window %s: left alone\n", why,
+                        IsIconic(hwnd) || !IsWindowVisible(hwnd) ? "minimised" : "behind another program's");
+            return;
+        }
+        if (g_dr.episodes >= DR_EPISODES) {
+            if (!g_dr.told_alone++)
+                fprintf(stderr, "[D3DB] host display stall (%s): %d recoveries already, left alone\n", why,
+                        DR_EPISODES);
+            return;
+        }
+        g_dr.episodes++;
+        g_dr.told_alone = 0;
+        InterlockedExchange(&g_disp_recovering, 1);
+        SetForegroundWindow(hwnd);
+        BringWindowToTop(hwnd);
+        SetWindowPos(hwnd, HWND_TOP, 0, 0, 0, 0, SWP_NOMOVE | SWP_NOSIZE | SWP_FRAMECHANGED | SWP_SHOWWINDOW);
+        g_dr.step = 1;
+        g_dr.shown_at = shown;
+        g_dr.at = q.QuadPart;
+        fprintf(stderr, "[D3DB] host display recovery %d: %s (%s, presents shown %ld); step 1, as alt+tab: the"
+                " window activated and put on top (SWP_FRAMECHANGED)\n", g_dr.episodes, why,
+                g_fs ? "fullscreen" : "in a window", (long)shown);
+        return;
+    }
+    if (g_dr.step >= 4) {               /* given up: watch again once frames come */
+        if (shown - g_dr.shown_at >= 3 && in_present < 100) {
+            fprintf(stderr, "[D3DB] host display: frames shown again %.0f ms after the recovery gave up\n",
+                    qpc_ms(g_dr.at, q.QuadPart));
+            dr_remake(hwnd);
+            g_dr.step = 0;
+            g_dr.stall_seen = g_stall_seq;
+            InterlockedExchange(&g_disp_recovering, 0);
+        }
+        return;
+    }
+    stalled = !(shown - g_dr.shown_at >= 3 && in_present < 100);
+    if (!stalled) {
+        fprintf(stderr, "[D3DB] host display recovery %d: frames shown again %.0f ms after step %d\n",
+                g_dr.episodes, qpc_ms(g_dr.at, q.QuadPart), g_dr.step);
+        dr_remake(hwnd);
+        g_dr.step = 0;
+        g_dr.stall_seen = g_stall_seq;  /* the misses of this episode */
+        InterlockedExchange(&g_disp_recovering, 0);
+        return;
+    }
+    if (qpc_ms(g_dr.at, q.QuadPart) < (g_dr.step == 1 ? DR_STEP_MS : 2 * DR_STEP_MS))
+        return;
+    g_dr.at = q.QuadPart;
+    g_dr.shown_at = shown;
+    if (g_dr.step == 1) {
+        g_dr.step = 2;
+        if (g_fs) {
+            fs_defer_arm();             /* back once frames are shown in the window, as at the start */
+            set_fullscreen(hwnd, 0);
+            fprintf(stderr, "[D3DB] host display recovery %d: still no frame shown (%ld shown, %u presents); step 2:"
+                    " out of fullscreen (back after %ld frames shown in the window)\n", g_dr.episodes, (long)shown,
+                    g_st.presents, (long)g_fs_defer_n);
+        } else {
+            SetWindowPos(hwnd, HWND_TOP, 0, 0, 0, 0, SWP_NOMOVE | SWP_NOSIZE | SWP_FRAMECHANGED | SWP_SHOWWINDOW);
+            fprintf(stderr, "[D3DB] host display recovery %d: still no frame shown (%ld shown, %u presents); step 2:"
+                    " the window framed again\n", g_dr.episodes, (long)shown, g_st.presents);
+        }
+    } else if (g_dr.step == 2) {
+        g_dr.step = 3;
+        ShowWindow(hwnd, SW_MINIMIZE);
+        g_dr.restore_due = 1;
+        fprintf(stderr, "[D3DB] host display recovery %d: still no frame shown (%ld shown, %u presents); step 3:"
+                " the window minimised, then restored\n", g_dr.episodes, (long)shown, g_st.presents);
+    } else {
+        g_dr.step = 4;
+        fprintf(stderr, "[D3DB] host display recovery %d: still no frame shown after step 3 (%s for %.0f ms):"
+                " left to the player (alt+tab)\n", g_dr.episodes, in_present > 0 ? "inside Present" : "presenting",
+                in_present);
+        InterlockedExchange(&g_disp_recovering, 0);
     }
 }
 
@@ -728,7 +994,10 @@ static LRESULT CALLBACK wnd_proc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp)
         break;
     case WM_SYSKEYDOWN:                 /* Alt+Enter (step 54); the game reads no keys */
         if (wp == VK_RETURN && (lp & (1 << 29)) && !(lp & (1 << 30))) {
-            set_fullscreen(hwnd, !g_fs);
+            int was_fs = fs_wanted();
+            InterlockedExchange(&g_fs_defer, 0);    /* step 90: the player's switch, at once */
+            g_fs_defer_from_switch = 0;
+            set_fullscreen(hwnd, !was_fs);
             return 0;
         }
         break;
@@ -737,8 +1006,26 @@ static LRESULT CALLBACK wnd_proc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp)
             return 0;
         break;
     case WM_TWOC_FULLSCREEN:
-        set_fullscreen(hwnd, wp == 2 ? !g_fs : (int)wp);
+        if (wp == 3) {                  /* step 90: the deferred switch, if nothing changed it meanwhile */
+            if (InterlockedCompareExchange(&g_fs_defer, 0, 2) == 2) {
+                g_fs_defer_from_switch = 1;
+                set_fullscreen(hwnd, 1);
+            }
+            return 0;
+        }
+        {
+            int was_fs = fs_wanted();
+            InterlockedExchange(&g_fs_defer, 0);
+            g_fs_defer_from_switch = 0;
+            set_fullscreen(hwnd, wp == 2 ? !was_fs : (int)wp);
+        }
         return 0;
+    case WM_TIMER:
+        if (wp == DR_TIMER && hwnd == g_hwnd) {     /* step 90 */
+            dr_tick(hwnd);
+            return 0;
+        }
+        break;
     case WM_TWOC_FIT:
         fit_window(hwnd);
         return 0;
@@ -825,12 +1112,21 @@ static DWORD WINAPI win_thread(LPVOID p)
             fprintf(stderr, "[D3DB] host window: client %ldx%ld real pixels\n", c.right - c.left, c.bottom - c.top);
         }
     }
-    if (g_hwnd && g_fs_at_start) {      /* step 54: RECOMP_FULLSCREEN; the player asked for it, so it takes focus */
+    if (g_hwnd && g_fs_at_start && g_fs_defer_n <= 0) {    /* RECOMP_FULLSCREEN_DEFER=0: at once, as before */
         set_fullscreen(g_hwnd, 1);
         SetForegroundWindow(g_hwnd);
+        fprintf(stderr, "[D3DB] host window: fullscreen at once at the start (RECOMP_FULLSCREEN_DEFER=0)\n");
+    } else if (g_hwnd && g_fs_at_start) {  /* step 54: RECOMP_FULLSCREEN; the player asked for it, so it takes focus */
+        fs_defer_arm();                 /* step 90: in the window until the first frames are shown */
+        ShowWindow(g_hwnd, SW_SHOW);
+        SetForegroundWindow(g_hwnd);
+        fprintf(stderr, "[D3DB] host window: fullscreen at the start: in the window until %d frames have been shown,"
+                " then borderless fullscreen\n", g_fs_defer_n);
     } else if (g_hwnd) {
         ShowWindow(g_hwnd, SW_SHOWNOACTIVATE);
     }
+    if (g_hwnd)
+        SetTimer(g_hwnd, DR_TIMER, 200, NULL);     /* step 90: the display's recovery */
     SetEvent(args->made);
     if (!g_hwnd || !g_hwnd_dev)
         return 1;
@@ -996,6 +1292,10 @@ int d3dh_create(unsigned width, unsigned height, unsigned host_w, unsigned host_
         const char *fs = getenv("RECOMP_FULLSCREEN"), *an = getenv("RECOMP_ANISOTROPY");
         int a = an ? atoi(an) : 1;
         g_fs_at_start = fs && *fs && strcmp(fs, "0") != 0;
+        if (getenv("RECOMP_FULLSCREEN_DEFER") && *getenv("RECOMP_FULLSCREEN_DEFER"))     /* step 90 */
+            g_fs_defer_n = atoi(getenv("RECOMP_FULLSCREEN_DEFER"));
+        g_fs_short = getenv("RECOMP_FULLSCREEN_COMPOSED") && atoi(getenv("RECOMP_FULLSCREEN_COMPOSED")) == 1;
+        g_fs_buf_short = !getenv("RECOMP_FULLSCREEN_COMPOSED") || atoi(getenv("RECOMP_FULLSCREEN_COMPOSED")) == 2;
         g_aniso = a >= 16 ? 16 : a >= 8 ? 8 : a >= 4 ? 4 : a >= 2 ? 2 : 1;
         if (g_aniso > 1)
             fprintf(stderr, "[D3DB] host: anisotropic filtering %ldx on linearly filtered stages\n", g_aniso);
@@ -6732,6 +7032,7 @@ static void pace(int mid, double slots)
                 pace_note(why);
                 fprintf(stderr, "[D3DB] host: the display released no frame in %d ms, 3 times running;"
                         " the frame limiter paces for %d s, %.3f Hz\n", VSYNC_WAIT_MS, VSYNC_RETRY_S, g_frame_hz);
+                InterlockedIncrement(&g_stall_seq);    /* step 90: the window thread's recovery */
             }
         } else {
             misses = 0;
@@ -7074,11 +7375,11 @@ static void ic_queue(int on)
 
 static void flip_fit(void)
 {
-    unsigned w = g_fs ? (unsigned)g_client_w : g_w, h = g_fs ? (unsigned)g_client_h : g_h;
+    unsigned w = g_fs ? (unsigned)g_client_w : g_w, h = g_fs ? (unsigned)g_client_h - g_fs_buf_short : g_h;
     HRESULT hr;
 
     REPLAY_SIDE();
-    if (!w || !h || (w == g_buf_w && h == g_buf_h))
+    if (!w || !h || h > 0x7FFFFFFF || (w == g_buf_w && h == g_buf_h))
         return;
     hr = IDXGISwapChain1_ResizeBuffers(g_flip, 0, w, h, DXGI_FORMAT_UNKNOWN, g_flip_flags);
     if (FAILED(hr)) {
@@ -7237,6 +7538,27 @@ static int recreate_flip(UINT flags)
     }
     IDXGIFactory2_Release(f);
     return g_flip && sd.Flags == flags ? 0 : -1;
+}
+
+/* Step 90: the visible swap chain made again after the display stalled
+ * (the window thread asks, g_flip_remake), as it was; vsync pacing again if
+ * the limiter stood in for it. With g_lock held, from the presenting thread,
+ * after flip_fit. */
+static void flip_remake(void)
+{
+    int held = g_vs_held != NULL;
+    unsigned hi = g_vs_held_interval;
+    int r;
+
+    REPLAY_SIDE();
+    r = recreate_flip(g_flip_flags);
+    if (held && g_latency) {
+        g_interval = hi;
+        g_frame_hz = 0;
+        pace_note("");
+    }
+    fprintf(stderr, "[D3DB] host swap chain made again after the display's stall: %ux%u%s%s\n", g_buf_w, g_buf_h,
+            r == 0 ? "" : " (not as it was)", held && g_latency ? "; vsync pacing again" : "");
 }
 
 void d3dh_set_pacing(unsigned interval, double frame_hz)
@@ -7638,7 +7960,7 @@ static int ovl_begin(void)
         twoc_settings_current(&g_ovs.s);
         g_ovs.have = 1;
     }
-    g_ovs.fs_seen = g_fs;
+    g_ovs.fs_seen = fs_wanted();
     g_ovs.s.fullscreen = g_ovs.fs_seen;
     g_ovs.was = g_ovs.s;
     InterlockedExchange(&g_ovl_pauses, g_ovs.s.pause);     /* step 79 */
@@ -7686,8 +8008,8 @@ static int ovl_draw(ID3D11Texture2D *dst, int running)
 
     REPLAY_SIDE();
     QueryPerformanceCounter(&now);
-    if (g_fs != g_ovs.fs_seen) {        /* Alt+Enter while open */
-        g_ovs.fs_seen = g_fs;
+    if (fs_wanted() != g_ovs.fs_seen) {        /* Alt+Enter while open */
+        g_ovs.fs_seen = fs_wanted();
         g_ovs.s.fullscreen = g_ovs.was.fullscreen = g_ovs.fs_seen;
     }
     memset(&in, 0, sizeof(in));
@@ -8104,6 +8426,14 @@ static int present_one(double t_s, unsigned swap_no, unsigned interval, unsigned
         fprintf(stderr, "[D3DB] host dump %s at +%.1f s, guest swap %u\n", path, t_s, swap_no);
     }
     flip_fit();                         /* step 54 */
+    if (g_flip_remake && InterlockedExchange(&g_flip_remake, 0))
+        flip_remake();                  /* step 90: after the display's stall */
+    if (!g_flip) {
+        if (src)
+            ID3D11Texture2D_Release(src);
+        LeaveCriticalSection(&g_lock);
+        return 0;
+    }
     {   /* xbox_d3d8's back buffer -> the visible flip-model swap chain */
         ID3D11Texture2D *dst = NULL;
         if (src && SUCCEEDED(IDXGISwapChain1_GetBuffer(g_flip, 0, &IID_ID3D11Texture2D, (void **)&dst))) {
@@ -8125,7 +8455,15 @@ static int present_one(double t_s, unsigned swap_no, unsigned interval, unsigned
         if (dst)
             ID3D11Texture2D_Release(dst);
     }
+    {
+        LARGE_INTEGER p0;
+        QueryPerformanceCounter(&p0);
+        InterlockedExchange64(&g_present_since, p0.QuadPart);  /* step 90: the window thread watches */
+        if (!g_first_present_q)
+            g_first_present_q = p0.QuadPart;
+    }
     hr = IDXGISwapChain1_Present(g_flip, interval, 0);
+    InterlockedExchange64(&g_present_since, 0);
     g_st.presents++;
     meas_present(swap_no);              /* step 82 */
     {   /* How many DWM compositions apart consecutive presents land: the
@@ -8209,6 +8547,8 @@ static int present_one(double t_s, unsigned swap_no, unsigned interval, unsigned
         }
         if (SUCCEEDED(IDXGISwapChain1_GetFrameStatistics(g_flip, &fs)) && fs.PresentCount) {
             if (fs.PresentCount != last_pc) {
+                UINT dn = last_pc && fs.PresentCount > last_pc ? fs.PresentCount - last_pc : 1;
+                InterlockedAdd(&g_shown_seq, (LONG)(dn > 16 ? 16 : dn));  /* step 90 */
                 if (last_pc && fs.PresentCount == last_pc + 1) {
                     UINT d = fs.PresentRefreshCount - last_prc;
                     g_st.displayed[d > 8 ? 8 : d]++;
@@ -8240,6 +8580,22 @@ static int present_one(double t_s, unsigned swap_no, unsigned interval, unsigned
             }
         } else {
             g_st.display_unmeasured++;
+        }
+    }
+    if (g_fs_defer == 1 && !g_vs_held && !g_disp_recovering) {
+        /* Step 90: fullscreen asked for at the start (or after a stall's recovery): once FS_DEFER_SHOWN presents
+         * have been shown, the window thread switches, as Alt+Enter would. Without frame statistics at all, after
+         * FS_DEFER_MAX_MS of presents with the display's vsync taking them. */
+        LONG n = g_shown_seq - g_fs_defer_base;
+        LARGE_INTEGER q;
+        double ms;
+        QueryPerformanceCounter(&q);
+        ms = g_first_present_q ? (double)(q.QuadPart - g_first_present_q) * 1000.0 / (double)g_qpf.QuadPart : 0;
+        if ((n >= g_fs_defer_n || (g_shown_seq == 0 && ms >= FS_DEFER_MAX_MS)) &&
+            InterlockedCompareExchange(&g_fs_defer, 2, 1) == 1) {
+            fprintf(stderr, "[D3DB] host window: %ld frames shown (+%.1f s, present %u): borderless fullscreen now%s\n",
+                    (long)n, t_s, g_st.presents, n >= g_fs_defer_n ? "" : " (no frame statistics)");
+            PostMessageA(g_hwnd, WM_TWOC_FULLSCREEN, 3, 0);
         }
     }
     if (FAILED(hr) && ++g_st.present_fails <= 5)
@@ -8438,7 +8794,7 @@ static void trigger_file(unsigned swap_no)
     REPLAY_SIDE();
     if (!g_ovs.have) {
         twoc_settings_current(&g_ovs.s);
-        g_ovs.s.fullscreen = g_fs;
+        g_ovs.s.fullscreen = fs_wanted();
         g_ovs.was = g_ovs.s;
         g_ovs.have = 1;
     }
