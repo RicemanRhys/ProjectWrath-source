@@ -7,6 +7,8 @@
  * environment, so a run_twoc.ps1 switch or a variable set by hand wins over
  * the file, and without the file nothing is set: the run is as before.
  *
+ *   preset      = low | standard | high | custom    RECOMP_PRESET (step 91: the Display tab's Preset; a
+ *                                             label only, the keys below are what apply)
  *   fullscreen  = 0 | 1                       RECOMP_FULLSCREEN
  *   widescreen  = 0 | 1 | W:H                 RECOMP_WIDESCREEN (0: 4:3, 1: 16:9; step 64: the
  *                                             overlay's Aspect ratio writes 16:10 and 21:9 as W:H)
@@ -104,6 +106,13 @@
  * animation runs ~128 times its speed, so the main menu opens ~22 s sooner;
  * from the next start, the launcher's switch winning as for every key.
  *
+ * Step 91: presets. low, standard and high each set the render size, the
+ * frame rate, the render thread, the adaptive frame rate, anti-aliasing,
+ * anisotropic filtering and the render scale together (twoc_preset_apply);
+ * custom sets nothing. The file's other keys win on load: the label read is
+ * kept only while those settings still are the preset's, else it is custom,
+ * and changing any of them in the overlay makes it custom too.
+ *
  * The settings overlay (overlay.cpp) shows the values in effect and writes
  * the file back when the player changes one.
  */
@@ -123,6 +132,7 @@ enum { TWOC_AA_OFF, TWOC_AA_FXAA, TWOC_AA_SMAA, TWOC_AA_MSAA2, TWOC_AA_MSAA4, TW
 #define TWOC_RENDER_SCALE_MIN 25        /* step 90: render_scale's range, percent */
 #define TWOC_RENDER_SCALE_MAX 200
 enum { TWOC_RT_OFF, TWOC_RT_ON, TWOC_RT_AUTO, TWOC_RT_COUNT };   /* step 79: the render thread */
+enum { TWOC_PRESET_CUSTOM, TWOC_PRESET_LOW, TWOC_PRESET_STANDARD, TWOC_PRESET_HIGH, TWOC_PRESET_COUNT };  /* step 91 */
 
 typedef struct {
     int fullscreen;
@@ -148,6 +158,7 @@ typedef struct {
     int render_scale;                   /* step 90: percent of the render size drawn, 25-200 (100 also unset) */
     int pause_unfocused;                /* step 90: 1 the game holds while the window is in the background */
     int fast_title;                     /* step 90: 1 the title animation sped up (from the next start) */
+    int preset;                         /* step 91: TWOC_PRESET_* (custom also unset, or when the settings left it) */
     twoc_controls_t controls;           /* the controller map and the key bindings */
 } twoc_settings_t;
 
@@ -166,6 +177,10 @@ const char *twoc_aa_name(int aa);       /* the file's word: off, fxaa, smaa, msa
 int twoc_aa_parse(const char *v);       /* TWOC_AA_OFF for anything unknown */
 const char *twoc_rt_name(int rt);       /* step 79: off, on, auto */
 int twoc_rt_parse(const char *v);       /* TWOC_RT_OFF for anything unknown (sync, a check, is on) */
+const char *twoc_preset_name(int p);    /* step 91: custom, low, standard, high */
+int twoc_preset_parse(const char *v);   /* TWOC_PRESET_CUSTOM for anything unknown */
+void twoc_preset_apply(twoc_settings_t *s, int p);          /* the preset's settings into `s` (custom: none) */
+int twoc_preset_matches(const twoc_settings_t *s, int p);   /* `s` has preset p's settings (custom: always) */
 unsigned twoc_aa_samples(int aa);       /* MSAA's samples a pixel; 1 for the others */
 int twoc_aa_post(int aa);               /* step 90: the filter on the finished frame: TWOC_AA_FXAA, _SMAA or _OFF */
 int twoc_render_scale_parse(const char *v);     /* step 90: 25-200, 100 unset or unknown */

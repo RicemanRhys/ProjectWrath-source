@@ -8991,6 +8991,9 @@ static void trigger_file(unsigned swap_no)
                 ts.render_scale = twoc_render_scale_parse(v);
             } else if (strcmp(k, "pausebg") == 0) {         /* step 90: pause_unfocused */
                 ts.pause_unfocused = atoi(v) != 0;
+            } else if (strcmp(k, "preset") == 0) {          /* step 91: as the overlay's Preset */
+                ts.preset = twoc_preset_parse(v);
+                twoc_preset_apply(&ts, ts.preset);
             } else {
                 fprintf(stderr, "[D3DB] trigger file: set %s: not a setting here\n", k);
             }
