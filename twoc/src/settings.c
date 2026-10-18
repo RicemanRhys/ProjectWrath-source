@@ -39,7 +39,6 @@ static const key_t_ g_fixed[] = {
       "1: \"Press F1 to open the settings menu\" for the first seconds, 0: not" },
     { "hud", "RECOMP_HUD", "centre (the game's 4:3 places) or edges: the HUD counters at the screen's edges, wider than 4:3" },
     { "hud_margin", "RECOMP_HUD_MARGIN", "0-10: percent of the screen's width the HUD at the edges keeps in from them" },
-    { "draw_distance", "RECOMP_DRAW_DISTANCE", "1 (the game's), 1.5, 2 or 3: the level's far plane and fog times this" },
     { "volume", "RECOMP_VOLUME", "0-100, the game's level in Windows' volume mixer" },
     { "music_volume", "RECOMP_MUSIC_VOLUME", "0-100: music, ambience and speech (the game's streams)" },
     { "effects_volume", "RECOMP_EFFECTS_VOLUME", "0-100: the sound effects" },
@@ -55,6 +54,10 @@ static const key_t_ g_fixed[] = {
       "sdl: every pad (SDL3; Xbox pads through XInput), or xinput: XInput only, as before" },
 };
 #define N_FIXED (sizeof(g_fixed) / sizeof(g_fixed[0]))
+
+/* Keys of settings since removed: an older file's line is skipped without a
+ * word, and the next save leaves it out (step 91: step 69's draw distance). */
+static const char *const g_retired[] = { "draw_distance" };
 
 /* Step 57: then one key per binding (controls.h), at its default unwritten:
  * pad_<xbox input> for the controller map, key_<binding> for the keyboard;
@@ -240,6 +243,16 @@ static char *trim(char *s)
     return s;
 }
 
+static int retired(const char *k)
+{
+    size_t i;
+
+    for (i = 0; i < sizeof(g_retired) / sizeof(g_retired[0]); i++)
+        if (_stricmp(k, g_retired[i]) == 0)
+            return 1;
+    return 0;
+}
+
 void twoc_settings_load(void)
 {
     FILE *f = fopen(twoc_settings_path(), "r");
@@ -272,6 +285,8 @@ void twoc_settings_load(void)
         v = trim(v);
         for (i = 0; i < N_KEYS && _stricmp(k, g_keys[i].key) != 0; i++)
             ;
+        if (i == N_KEYS && retired(k))
+            continue;
         if (i == N_KEYS) {
             fprintf(stderr, "[CFG] line %d: unknown key '%s': ignored\n", lineno, k);
             continue;
@@ -354,9 +369,6 @@ void twoc_settings_current(twoc_settings_t *s)
     v = getenv("RECOMP_HUD_MARGIN");
     s->hud_margin = v ? atoi(v) : 0;
     s->hud_margin = s->hud_margin < 0 ? 0 : s->hud_margin > 10 ? 10 : s->hud_margin;
-    v = getenv("RECOMP_DRAW_DISTANCE");
-    s->draw_distance = v && *v ? atof(v) : 1.0;
-    s->draw_distance = s->draw_distance < 1.0 ? 1.0 : s->draw_distance > 4.0 ? 4.0 : s->draw_distance;
     v = getenv("RECOMP_VOLUME");
     s->volume = v && *v ? atoi(v) : -1;
     if (s->volume > 100)
@@ -427,8 +439,6 @@ static void key_text(const twoc_settings_t *s, size_t i, char *buf, size_t cap)
         snprintf(buf, cap, "%s", s->hud ? "edges" : "centre");
     else if (strcmp(k, "hud_margin") == 0)
         snprintf(buf, cap, "%d", s->hud_margin);
-    else if (strcmp(k, "draw_distance") == 0)
-        snprintf(buf, cap, "%g", s->draw_distance);
     else if (strcmp(k, "volume") == 0 && s->volume >= 0)
         snprintf(buf, cap, "%d", s->volume);
     else if (strcmp(k, "music_volume") == 0 && s->music >= 0)

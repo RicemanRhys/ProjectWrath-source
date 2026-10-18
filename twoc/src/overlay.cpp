@@ -720,30 +720,6 @@ static int tab_display(twoc_settings_t *s, const ovl_info_t *in)
         if (s->hud && !wide)
             help("Now: as the game draws it (the picture is 4:3).");
     }
-    {   /* step 69: the draw distance */
-        static const double dists[] = { 1.0, 1.5, 2.0, 3.0 };
-        static const char *const dist_names[] = { "Game (1x)", "1.5x", "2x", "3x" };
-        int cur = -1, n = (int)(sizeof(dists) / sizeof(dists[0]));
-        for (i = 0; i < n; i++)
-            if (s->draw_distance == dists[i])
-                cur = i;
-        snprintf(buf, sizeof(buf), "%gx", s->draw_distance);
-        ImGui::SetNextItemWidth(ImGui::GetFontSize() * 12);
-        if (ImGui::BeginCombo("Draw distance", cur >= 0 ? dist_names[cur] : buf)) {
-            if (cur < 0)                /* another multiplier, from the command line or the file */
-                ImGui::Selectable(buf, true);
-            for (i = 0; i < n; i++)
-                if (ImGui::Selectable(dist_names[i], i == cur) && i != cur) {
-                    s->draw_distance = dists[i];
-                    r |= OVL_CHANGED;
-                }
-            ImGui::EndCombo();
-        }
-        more("How far the world is drawn. Each level ends its view at a set distance and fogs what is near "
-             "it; this multiplies both, so open levels show more of themselves under a lighter haze. Crates and "
-             "fruit still appear 45 units out and enemies 25 from Crash, as the game decides, which shows more "
-             "at 3x. Applied at once.");
-    }
     {
         int cur = -1;
         char lbl[64];

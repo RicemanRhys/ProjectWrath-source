@@ -327,7 +327,7 @@ void d3dh_stats(d3dh_stats_t *out);
  *
  * Step 78 (notes 18.81): a live change is queued and each side applies it
  * at its own frame boundary, the way a render thread will need: `game` (the
- * aspect and draw distance the game thread's translation reads) on the game
+ * aspect the game thread's translation reads) on the game
  * thread at its Swap, `host` (the host picture's size, the pacing) on the
  * presenting side between frames. */
 #include "settings.h"

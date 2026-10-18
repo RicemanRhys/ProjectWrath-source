@@ -31,7 +31,6 @@
  *                                             open the settings menu" at the bottom for ~8 s)
  *   hud         = centre | edges              RECOMP_HUD (unset: centre)
  *   hud_margin  = 0-10                        RECOMP_HUD_MARGIN (percent of the width; unset: 0)
- *   draw_distance = 1 | 1.5 | 2 | 3           RECOMP_DRAW_DISTANCE (unset: 1, the game's)
  *   volume      = 0-100                       RECOMP_VOLUME (the game's volume in Windows' mixer)
  *   music_volume   = 0-100                    RECOMP_MUSIC_VOLUME (stream voices: music, ambience, speech)
  *   effects_volume = 0-100                    RECOMP_EFFECTS_VOLUME (buffer voices: the sound effects)
@@ -90,11 +89,8 @@
  * the game's port 0, plugged and unplugged while it runs; xinput is
  * XInput user 0 alone, as before. Applied at once.
  *
- * Step 69: the draw distance (notes 18.72). Each level sets its camera's
- * far plane and its fog; draw_distance multiplies both (and the sky with
- * them), so the world is drawn further out under fog that ends further
- * away. Crates and fruit are still drawn within 45 units and enemies woken
- * within 25, as the game decides. From the next frame.
+ * Step 91: step 69's draw_distance is gone; a file that still has it loads
+ * as if it didn't, without a message.
  *
  * Step 90 (notes 18.93): msaa*+smaa draws with MSAA and then filters the
  * finished frame with SMAA, which also smooths the alpha-tested edges MSAA
@@ -142,7 +138,6 @@ typedef struct {
     int show_fps;                       /* step 82: 1 the measured rates in a corner, 0 not (also unset) */
     int startup_message;                /* step 86: 1 the F1 line for the first seconds (also unset), 0 not */
     int hud, hud_margin;                /* step 65: 0 the HUD in the middle 4:3, 1 at the edges; 0-10 percent in */
-    double draw_distance;               /* step 69: the far plane and fog times this; 1 the game's (also unset) */
     int volume;                         /* 0-100; -1: never set (Windows' own level) */
     int music, effects;                 /* 0-100; -1: never set (100, the game's mix) */
     int speakers;                       /* 0 stereo, 1 5.1; -1: never set (stereo) */

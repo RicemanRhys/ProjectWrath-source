@@ -7863,7 +7863,7 @@ static float overlay_scale(void)
  * and the bridge's host part: the host picture's size, the pacing) on the
  * presenting side between frames, and the game side (the frame-rate setting,
  * which decides whether frames are recorded, and the bridge's game part: the
- * aspect and draw distance its translation reads) on the game thread at its
+ * aspect its translation reads) on the game thread at its
  * Swap. On one thread both drain where the change used to be applied at
  * once (after an overlay frame, after the hold), the host side first.
  * Settings the frames don't depend on (the HUD, read at record time and
@@ -7912,9 +7912,8 @@ static void sq_apply_game(const twoc_settings_t *was, const twoc_settings_t *s)
     GAME_SIDE();
     if (s->framerate != was->framerate)
         d3dh_set_framerate(s->framerate);       /* step 61: from the frame after this one */
-    if (g_apply_game && (s->widescreen != was->widescreen || s->wide_w != was->wide_w || s->wide_h != was->wide_h ||
-                         s->draw_distance != was->draw_distance))
-        g_apply_game(s);                /* d3d_bridge.c: the aspect, the draw distance */
+    if (g_apply_game && (s->widescreen != was->widescreen || s->wide_w != was->wide_w || s->wide_h != was->wide_h))
+        g_apply_game(s);                /* d3d_bridge.c: the aspect */
 }
 
 /* Side `k` (0 the game's, 1 the host's) applies what was queued since it
@@ -7948,7 +7947,7 @@ static void overlay_apply(twoc_settings_t *was, const twoc_settings_t *s)
         s->antialiasing != was->antialiasing || s->framerate != was->framerate || s->adaptive != was->adaptive ||
         s->widescreen != was->widescreen || s->wide_w != was->wide_w || s->wide_h != was->wide_h ||
         strcmp(s->render_size, was->render_size) != 0 || s->pacing != was->pacing ||
-        s->draw_distance != was->draw_distance || s->render_scale != was->render_scale)
+        s->render_scale != was->render_scale)
         sq_push(was, s);                /* step 78 */
     if (s->pause_unfocused != was->pause_unfocused)    /* step 90 */
         d3dh_set_pause_unfocused(s->pause_unfocused);
@@ -8989,8 +8988,6 @@ static void trigger_file(unsigned swap_no)
                 ts.antialiasing = twoc_aa_parse(v);
             } else if (strcmp(k, "aniso") == 0) {
                 ts.anisotropy = atoi(v);
-            } else if (strcmp(k, "distance") == 0) {
-                ts.draw_distance = atof(v);
             } else if (strcmp(k, "framerate") == 0) {
                 ts.framerate = twoc_framerate_parse(v);
             } else if (strcmp(k, "adaptive") == 0) {
