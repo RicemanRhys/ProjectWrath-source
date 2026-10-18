@@ -17,21 +17,32 @@ which opens every warp room (all crystals), so every level in the tests can be r
 *** hold comfortably, close the game and let it cool down.
 
 New in this package:
-  - The game logs what the chip and Windows' power settings do, so the next zip shows what
-    happened if the Legion Go crashes again: Windows' power mode, the power plan, plugged
-    in or on battery (and how many watts the battery delivers), the processor's real
-    speed in MHz and as a share of its rated speed, and a temperature if Windows offers
-    one. Every 10 seconds, and at once when any of them changes (with how fast the game
-    was running). It goes into the log and into run_twoc.power.log, which is written
-    straight to the disk line by line, so it survives even if the Legion Go crashes.
-    Collect logs also takes Windows' own records of crashes and power losses from the last
-    3 days (events.txt). Nothing to do: it is always on and costs nothing measurable.
-  - More render sizes, grouped by the screen's shape (4:3, 16:10, 16:9, 21:9) with the
-    Legion Go's (16:10) marked, any size of your own (Custom), and a line saying what the
-    game really draws.
-  - Draw distance is gone from the settings menu (on request).
-  - Still from last time: the frozen-splash fix (if the splash ever freezes: alt+tab once),
-    Render scale, MSAA + SMAA, Pause when in the background, Skip the title animation.
+  - "Reset display settings to defaults", a button at the bottom of the Display tab. It
+    asks first (Yes / No; works with the controller: D-pad to the button, A, then Left for
+    Yes and A, or B for No) and puts every setting on that tab back to the game's own
+    default: Render size Game (480 lines), Frame rate Game (60), Render scale 100%,
+    Anti-aliasing and Ambient occlusion Off, Anisotropic filtering Off, Render thread Off,
+    the HUD in the centre, the counter off. Full screen, the aspect ratio, sound, controls
+    and saves stay as they are.
+  - 72 fps is in the Frame rate list now: half of 144 Hz, so each frame is held for 2
+    refreshes and motion stays even. The line under the list says what it does on 144,
+    180 and 240 Hz screens.
+  - "Show frame rate" is Off / Simple / Detailed. Simple is the two numbers as before.
+    Detailed adds the game thread's and the render thread's milliseconds a frame, the
+    adaptive frame rate's step, the processor's speed (MHz and % of its rated speed), the
+    battery's watts (or "Plugged in"), Windows' power mode and the temperature if Windows
+    has one. This package starts on Simple.
+  - "Play Crash (safe settings).bat": every setting at its default, in a window, and
+    crash_twoc.ini neither read nor written (the settings menu says so at its top). If the
+    game won't start after a settings change, use this.
+  - An About tab in the settings menu (the fifth; LB / RB): the build, the graphics chip and
+    its driver, the screen's mode and refresh rate, the Windows version and the game files'
+    check. THIRD_PARTY_LICENSES.txt lists the other people's code inside the game and
+    beside it, with their licences.
+  - Still from last time: the power log (run_twoc.power.log, written straight to the disk,
+    and Windows' crash records in Collect logs' zip), the render sizes grouped by shape,
+    the frozen-splash fix (if the splash ever freezes: alt+tab once), Render scale, MSAA +
+    SMAA, Pause when in the background, Skip the title animation.
 
 What's in the folder
 --------------------
@@ -45,7 +56,8 @@ What's in the folder
                                   window, without reading or writing crash_twoc.ini (the
                                   settings menu says so while it is on). If the game won't
                                   start after a settings change, use this.
-  Play Crash (72 fps test).bat    starts the game at 72 fps (an optional test)
+  Play Crash (72 fps test).bat    starts the game at 72 fps for one run (an optional test;
+                                  72 fps is in the Frame rate list now too)
   Play Crash (ack wait test).bat  an optional test: starts the game with the "ack wait"
                                   switch on (part C says what it is)
   Play Crash (bake off).bat       starts the game with "baked draws" off, to compare (an
@@ -59,6 +71,8 @@ What's in the folder
   game_files\                     the disc files (default.xbe and Crashdat\)
   tools\                          vrrprobe.exe (a display test) and the log collector
   PACKAGE.txt                     which build this is
+  THIRD_PARTY_LICENSES.txt        the other people's code in the game and beside it, and
+                                  their licences
 
 The game also makes these when it runs: logs\ (earlier runs' logs), run_twoc.err.log (the
 last run's log), run_twoc.power.log (the last run's power log), game_files\UDATA (saves),
@@ -131,7 +145,7 @@ B. Start the game (on the Legion Go)
       the lines under it .. "Now: 144.00 fps, 2.4 frames each game frame." (the plan) and
                             "Measured: the game 60 updates a second (full speed); 144
                             frames shown a second." (what really happens)
-      Show frame rate ..... the counter in the corner, on or off
+      Show frame rate ..... the counter in the corner: Off, Simple or Detailed
       Adaptive frame rate . leave On
       Render thread ....... Auto / On / Off; the line under it says whether it is on
       Render scale ........ 100% (the screen's size) or less or more (part F)
@@ -213,6 +227,24 @@ All on the Legion Go. Write what you see in Test notes.txt as you go.
 5. The small things:
      - Render size: open its list. Is 16:10 marked as the aspect ratio chosen? Is the line
        under it ("Renders ... at 16:10") readable?
+     - Show frame rate: Detailed. Are the extra lines readable (the threads' ms, Adaptive,
+       CPU MHz, Battery W or Plugged in, Power mode, a temperature)? Note one set of them on
+       battery. Then back to Simple.
+     - Frame rate 72 fps from the list: does the line under it say "Even: 72.00 fps, each
+       frame held 2 refreshes"?
+     - Reset display settings to defaults (bottom of the Display tab), with the controller:
+       does No (or B) leave everything as it was, and Yes put the tab back to the defaults
+       (a small window, Frame rate Game (60))? Afterwards set the package's settings again
+       (the Aspect ratio stays 16:10): Render size "Monitor (native, ...)", Frame rate
+       "Match display", Anisotropic filtering 4x, Render thread Auto, Show frame rate
+       Simple, HUD position Screen edges, Skip the title animation on. (Or close the game
+       and copy crash_twoc.ini from the desktop again.)
+     - The About tab: does it name the Legion Go's graphics chip (AMD Radeon) and driver,
+       1920x1200 (or your resolution) at 144 Hz, and Windows 11? Copy its lines into Test
+       notes.txt.
+     - "Play Crash (safe settings).bat" once: does it start in a small window with the
+       orange "Safe settings" line at the top of the settings menu? Close it; then
+       "Play Crash.bat" should start with your settings as before.
      - View + Menu held about a second: does it open and close the settings menu?
      - Pause when in the background (part F): turn it on, then press the Windows key or
        minimise the game: does the game stop and go quiet, and go on when you come back?

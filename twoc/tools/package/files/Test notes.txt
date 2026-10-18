@@ -54,6 +54,12 @@ Screen refresh rate and resolution (Settings):
 
 5. The small things
    Render size list: was 16:10 marked? Was the "Renders ..." line readable?
+   Show frame rate Detailed: readable? One set of its lines on battery:
+   72 fps from the list: did the line under it say even, 2 refreshes?
+   Reset display settings: No left everything as it was? Yes put the defaults back?
+   About tab (copy its lines):
+   Safe settings launcher: small window, the orange line in the menu, and Play Crash.bat
+   afterwards with your settings?
    View + Menu held: did it open and close the settings menu?
    Pause when in the background: did the game stop and go quiet, and go on again?
 
