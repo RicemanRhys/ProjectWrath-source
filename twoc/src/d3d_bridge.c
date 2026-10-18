@@ -5140,6 +5140,21 @@ static void mirror_swap(void)
                 last_mse = st.disp_ms_even;
                 last_msd = st.disp_ms_dev;
             }
+            {   /* step 90: the visible swap chain's presentation mode (d3d_host.c present_mode) */
+                static const char *const nm[TWOC_PMODES] = { "composed", "overlay", "none", "composition failure",
+                                                             "not read" };
+                static unsigned last_pm[TWOC_PMODES];
+                unsigned k, d[TWOC_PMODES], total = 0;
+                for (k = 0; k < TWOC_PMODES; k++) {
+                    d[k] = st.pmode[k] - last_pm[k];
+                    last_pm[k] = st.pmode[k];
+                    total += d[k];
+                }
+                if (total)
+                    log_block_printf(&lb, "[D3DB] host presentation mode this interval (read 4 a second): composed %u,"
+                            " overlay %u, none %u, composition failure %u, not read %u; now %s\n", d[0], d[1], d[2],
+                            d[3], d[4], nm[st.pmode_now < TWOC_PMODES ? st.pmode_now : TWOC_PMODES - 1]);
+            }
             log_block_printf(&lb, "[D3DB] host draws: mirrored %ld (to render targets %ld, with pixel shaders %ld,"
                     " immediate %ld, of them pre-transformed %ld; DrawVertices calls %ld),"
                     " host draws %u (fails %u); not mirrored: target %ld, vertex program %ld, primitive %ld,"

@@ -85,6 +85,10 @@ typedef struct {
     /* ... the HUD's draws and, with the HUD at the edges, its elements
      * moved left, moved right and left in the middle. */
     unsigned hud_draws, hud_left, hud_right, hud_mid, hud_passes;
+    /* Step 90: the visible swap chain's presentation mode (GetFrameStatisticsMedia), read 4 times a second:
+     * composed, overlay, none, composition failure, not read; and the last one read. */
+#define TWOC_PMODES 5
+    unsigned pmode[TWOC_PMODES], pmode_now;
 } d3dh_stats_t;
 
 /* A state already in xbox_d3d8's (PC D3D8) numbering and values. */

@@ -325,6 +325,8 @@ static volatile LONG g_ready;
 static HWND g_hwnd;                     /* visible: the flip-model swap chain */
 static HWND g_hwnd_dev;                 /* hidden: xbox_d3d8's own swap chain */
 static IDXGISwapChain1 *g_flip;
+static IDXGISwapChainMedia *g_media;    /* step 90: g_flip's, for its presentation mode (NULL: none) */
+static int g_media_tried;
 static unsigned g_w, g_h, g_interval;   /* g_w, g_h: the host back buffer */
 static unsigned g_gw, g_gh;             /* the guest back buffer (18.56) */
 static double g_wide;                   /* 18.56: the host picture's width / height if wider than the guest's, else 0 */
@@ -7491,6 +7493,11 @@ static int recreate_flip(UINT flags)
     REPLAY_SIDE();
     if (FAILED(IDXGISwapChain_GetParent(d3d8_GetSwapChain(), &IID_IDXGIFactory2, (void **)&f)))
         return -1;
+    if (g_media) {                      /* step 90: its reference keeps the old swap chain (and the window) */
+        IDXGISwapChainMedia_Release(g_media);
+        g_media = NULL;
+    }
+    g_media_tried = 0;
     IDXGISwapChain1_Release(g_flip);
     g_flip = NULL;
     if (g_latency) {
@@ -8381,6 +8388,59 @@ static void replay_check(int after, unsigned swap_no)
     }
 }
 
+/* Step 90 (notes 18.93): how DXGI presents the visible swap chain, from
+ * IDXGISwapChainMedia::GetFrameStatisticsMedia's CompositionMode, read 4
+ * times a second at a present: DWM composes it, a hardware overlay plane
+ * shows it, "none" or a composition failure; counted for the 10-s interval
+ * and a line when it changes (the runs that stuttered after the startup
+ * stall may have been in another mode than the clean ones, notes 18.92).
+ * With g_lock held, after the present. */
+static const char *const g_mode_name[TWOC_PMODES] = {
+    "composed (DWM)", "overlay (a hardware plane)", "none", "composition failure", "not read",
+};
+
+static void present_mode(double t_s)
+{
+    static LONGLONG last_q;
+    static int last = -1, fails;
+    DXGI_FRAME_STATISTICS_MEDIA m;
+    LARGE_INTEGER q;
+    HRESULT hr;
+    int mode;
+
+    REPLAY_SIDE();
+    QueryPerformanceCounter(&q);
+    if (last_q && q.QuadPart - last_q < g_qpf.QuadPart / 4)
+        return;
+    last_q = q.QuadPart;
+    if (!g_media_tried) {
+        g_media_tried = 1;
+        if (FAILED(IDXGISwapChain1_QueryInterface(g_flip, &IID_IDXGISwapChainMedia, (void **)&g_media)))
+            g_media = NULL;
+        if (!g_media && last == -1)
+            fprintf(stderr, "[D3DB] host presentation mode: no IDXGISwapChainMedia here; not read\n");
+    }
+    mode = TWOC_PMODES - 1;
+    if (g_media) {
+        memset(&m, 0, sizeof(m));
+        hr = IDXGISwapChainMedia_GetFrameStatisticsMedia(g_media, &m);
+        if (SUCCEEDED(hr))
+            mode = m.CompositionMode <= DXGI_FRAME_PRESENTATION_MODE_COMPOSITION_FAILURE ? (int)m.CompositionMode
+                                                                                         : TWOC_PMODES - 1;
+        else if (!fails++)
+            fprintf(stderr, "[D3DB] host presentation mode: GetFrameStatisticsMedia 0x%08lX (counted as not read)\n",
+                    (unsigned long)hr);
+    }
+    g_st.pmode[mode]++;
+    g_st.pmode_now = (unsigned)mode;
+    if (mode != TWOC_PMODES - 1 && mode != last) {
+        fprintf(stderr, "[D3DB] host presentation mode: %s%s%s at present %u, +%.1f s (%s)\n", g_mode_name[mode],
+                last >= 0 ? ", was " : "", last >= 0 ? g_mode_name[last] : "", g_st.presents, t_s,
+                fs_wanted() ? (g_fs ? "fullscreen" : "fullscreen asked for, in the window") : "in a window");
+        last = mode;
+    }
+}
+
 /* One present: the back buffer (as drawn now) dumped when due and shown at
  * DXGI `interval`, after its wait. Step 61: sub-frame `sub` of `k` (k 1: the
  * frame itself; only the last of a frame is a frame's dump). Returns the
@@ -8582,6 +8642,7 @@ static int present_one(double t_s, unsigned swap_no, unsigned interval, unsigned
             g_st.display_unmeasured++;
         }
     }
+    present_mode(t_s);                  /* step 90 */
     if (g_fs_defer == 1 && !g_vs_held && !g_disp_recovering) {
         /* Step 90: fullscreen asked for at the start (or after a stall's recovery): once FS_DEFER_SHOWN presents
          * have been shown, the window thread switches, as Alt+Enter would. Without frame statistics at all, after
