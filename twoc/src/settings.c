@@ -32,7 +32,7 @@ static const key_t_ g_fixed[] = {
     { "ao_strength", "RECOMP_AO_STRENGTH", "0-100: how much of the ambient occlusion is applied" },
     { "ao_half", "RECOMP_AO_HALF", "1: ambient occlusion worked out at half the resolution (cheaper, a little softer)" },
     { "framerate", "RECOMP_FRAMERATE",
-      "60 (the game's), display (interpolated frames at the display's rate) or a rate in Hz (90, 120, 144, 165,"
+      "60 (the game's), display (interpolated frames at the display's rate) or a rate in Hz (72, 90, 120, 144, 165,"
       " 180, 240: interpolated, shown evenly where the display can)" },
     { "adaptive_framerate", "RECOMP_FRAMERATE_ADAPTIVE",
       "1: fewer interpolated frames while game frames run late, 0: always the display's count" },

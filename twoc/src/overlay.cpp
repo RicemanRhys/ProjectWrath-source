@@ -985,13 +985,14 @@ static int tab_display(twoc_settings_t *s, const ovl_info_t *in)
 
     {   /* step 61 */
         /* step 77: the game's, the display's, or a rate (the file's own other N listed too) */
-        static const int fr_vals[8] = { 0, 1, 90, 120, 144, 165, 180, 240 };
-        static const char *const fr_names[8] = { "Game (60)", "Match display", "90 fps", "120 fps", "144 fps",
-                                                 "165 fps", "180 fps", "240 fps" };
-        const char *names[9];
+        /* step 93: 72, half of 144 Hz (the Legion Go's even rate) */
+        static const int fr_vals[9] = { 0, 1, 72, 90, 120, 144, 165, 180, 240 };
+        static const char *const fr_names[9] = { "Game (60)", "Match display", "72 fps", "90 fps", "120 fps",
+                                                 "144 fps", "165 fps", "180 fps", "240 fps" };
+        const char *names[10];
         char other[24];
-        int n = 8, cur = -1;
-        for (i = 0; i < 8; i++) {
+        int n = 9, cur = -1;
+        for (i = 0; i < 9; i++) {
             names[i] = fr_names[i];
             if (fr_vals[i] == s->framerate)
                 cur = i;
@@ -1002,7 +1003,7 @@ static int tab_display(twoc_settings_t *s, const ovl_info_t *in)
             cur = n++;
         }
         ImGui::SetNextItemWidth(ImGui::GetFontSize() * 12);
-        if (ImGui::Combo("Frame rate", &cur, names, n) && cur < 8 && fr_vals[cur] != s->framerate) {
+        if (ImGui::Combo("Frame rate", &cur, names, n, n) && cur < 9 && fr_vals[cur] != s->framerate) {
             s->framerate = fr_vals[cur];
             r |= OVL_CHANGED;
         }
@@ -1028,6 +1029,10 @@ static int tab_display(twoc_settings_t *s, const ovl_info_t *in)
             snprintf(line, sizeof(line), "Now: 59.94 fps, one frame each game frame: %s.",
                      in->interp_why ? in->interp_why : "this pacing");
         help(line);
+        if (s->framerate == 72)         /* step 93: what 72 does on the displays it is for and against */
+            help("72 fps: on a 144 Hz display (the Legion Go) even, each frame held 2 refreshes; on a 240 Hz or "
+                 "180 Hz display 60 fps instead (each frame held 4 or 3 refreshes), unless it has variable "
+                 "refresh (G-SYNC, FreeSync), which shows 72 evenly.");
         if (s->framerate && in->interp_note && in->interp_note[0])
             help(in->interp_note);      /* step 77: even or not on this display, and why */
         ovl_rates_text(in->meas_ok, in->game_ups, in->shown_fps, 0, line, sizeof(line));
