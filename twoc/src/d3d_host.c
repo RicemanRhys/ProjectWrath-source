@@ -177,6 +177,7 @@
 #include "ao.h"
 #include "pads.h"
 #include "vk_probe.h"
+#include "power_log.h"
 
 #define WIN_CLASS          "TwocD3DBridge"
 #define WIN_TITLE           "Crash TWOC - D3D bridge (host)"
@@ -1244,9 +1245,9 @@ int d3dh_create(unsigned width, unsigned height, unsigned host_w, unsigned host_
         if (w && *w)
             g_wd_secs = atof(w);
         g_ovl_pauses = !(getenv("RECOMP_OVERLAY_PAUSE") && strcmp(getenv("RECOMP_OVERLAY_PAUSE"), "0") == 0);
-        g_show_fps = getenv("RECOMP_SHOW_FPS") && *getenv("RECOMP_SHOW_FPS") && strcmp(getenv("RECOMP_SHOW_FPS"), "0") != 0;
+        g_show_fps = twoc_show_fps_parse(getenv("RECOMP_SHOW_FPS"));     /* step 93: 2 Detailed */
         if (g_show_fps)
-            fprintf(stderr, "[D3DB] host frame-rate counter: on (show_fps)\n");
+            fprintf(stderr, "[D3DB] host frame-rate counter: %s (show_fps)\n", g_show_fps == 2 ? "detailed" : "on");
         g_pause_bg = getenv("RECOMP_PAUSE_UNFOCUSED") && *getenv("RECOMP_PAUSE_UNFOCUSED") &&
                      strcmp(getenv("RECOMP_PAUSE_UNFOCUSED"), "0") != 0;   /* step 90 */
         if (g_pause_bg)
@@ -8259,7 +8260,7 @@ static void overlay_apply(twoc_settings_t *was, const twoc_settings_t *s)
     }
     if (s->show_fps != was->show_fps) {     /* step 82: from the next present */
         InterlockedExchange(&g_show_fps, s->show_fps);
-        fprintf(stderr, "[OVL] frame-rate counter: %s\n", s->show_fps ? "on" : "off");
+        fprintf(stderr, "[OVL] frame-rate counter: %s\n", s->show_fps == 2 ? "detailed" : s->show_fps ? "on" : "off");
     }
     if (s->startup_message != was->startup_message) {  /* step 86: off takes it away at once */
         InterlockedExchange(&g_startmsg, s->startup_message);
@@ -8310,7 +8311,46 @@ static struct {
     unsigned n;                         /* samples taken since the start or a gap */
     int ok;
     double game, shown;
+    double a_game, a_replay;            /* step 93: g_st.interp_adapt_* at the last sample */
+    unsigned a_frames;
+    char detail[384];                   /* step 93: the Detailed counter's lines below the two rates */
 } g_meas;
+
+/* Step 93: the Detailed counter's lines, at a sample (never a frame): the
+ * threads' ms a game frame since the last sample (ia_frame's counters,
+ * kept while frames are interpolated), the adaptive step, the power log's
+ * latest reading. Replay side. */
+static void meas_detail(void)
+{
+    char *b = g_meas.detail, pw[192];
+    size_t cap = sizeof(g_meas.detail);
+    unsigned fr = g_st.interp_adapt_frames - g_meas.a_frames;
+    double gm = fr ? (g_st.interp_adapt_game - g_meas.a_game) / fr : 0.0;
+    double rm = fr ? (g_st.interp_adapt_replay - g_meas.a_replay) / fr : 0.0;
+    int n;
+
+    g_meas.a_frames = g_st.interp_adapt_frames;
+    g_meas.a_game = g_st.interp_adapt_game;
+    g_meas.a_replay = g_st.interp_adapt_replay;
+    if (!fr)
+        n = snprintf(b, cap, "Threads: measured above Game (60)");
+    else if (g_thr_v)
+        n = snprintf(b, cap, "Game thread %.1f ms\nRender thread %.1f ms", gm, rm);
+    else
+        n = snprintf(b, cap, "Game thread %.1f + %.1f ms\n(render thread off)", gm, rm);
+    if (n < (int)cap) {
+        if (ic_possible() && g_interp) {
+            unsigned k = ia_k();
+            n += snprintf(b + n, cap - n, "\nAdaptive: %.0f fps, step %u of %u%s", fp_step_fps(k), k + 1,
+                          g_fp.nsteps, g_iadapt ? "" : " (off)");
+        } else {
+            n += snprintf(b + n, cap - n, "\nAdaptive: - (Game (60))");
+        }
+    }
+    power_log_brief(pw, sizeof(pw));
+    if (n < (int)cap)
+        snprintf(b + n, cap - n, "\n%s", pw);
+}
 
 static void meas_present(unsigned swap_no)
 {
@@ -8341,6 +8381,8 @@ static void meas_present(unsigned swap_no)
         g_meas.shown = (double)(g_meas.pres[0] - g_meas.pres[MEAS_N - 1]) / dt;
         g_meas.ok = 1;
     }
+    if (g_show_fps == 2)
+        meas_detail();                  /* step 93 */
 }
 
 /* The present after Esc: the overlay's first frame. No lock held. */
@@ -8492,7 +8534,7 @@ static void counter_draw(ID3D11Texture2D *dst, float msg_alpha)
 {
     extern int twoc_pad_connected(void);
     ID3D11RenderTargetView *rtv = NULL;
-    char lines[96];
+    char lines[512];
     float pic[5];
     double k;
 
@@ -8505,6 +8547,8 @@ static void counter_draw(ID3D11Texture2D *dst, float msg_alpha)
     if (g_ovs.ready < 0)
         return;
     ovl_rates_text(g_meas.ok, g_meas.game, g_meas.shown, 1, lines, sizeof(lines));
+    if (g_show_fps == 2 && g_meas.detail[0])    /* step 93: Detailed */
+        snprintf(lines + strlen(lines), sizeof(lines) - strlen(lines), "\n%s", g_meas.detail);
     /* the picture inside the buffer, as blit_draw places it (the whole buffer when it is the picture's size) */
     k = (double)g_buf_w / g_w < (double)g_buf_h / g_h ? (double)g_buf_w / g_w : (double)g_buf_h / g_h;
     pic[2] = (float)(int)(g_w * k + 0.5);
@@ -9291,7 +9335,7 @@ static void trigger_file(unsigned swap_no)
             } else if (strcmp(k, "rthread") == 0) {         /* step 79 (st.py turns '_' into spaces) */
                 ts.render_thread = twoc_rt_parse(v);
             } else if (strcmp(k, "showfps") == 0) {         /* step 82 */
-                ts.show_fps = atoi(v) != 0;
+                ts.show_fps = twoc_show_fps_parse(v);
             } else if (strcmp(k, "scale") == 0) {           /* step 90: render_scale */
                 ts.render_scale = twoc_render_scale_parse(v);
             } else if (strcmp(k, "ao") == 0) {              /* step 92 */

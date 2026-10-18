@@ -56,6 +56,11 @@ void power_log_start(const power_log_hooks_t *hooks);
  * modes, the plan, the CPU's speed over the interval, the temperature. The
  * interval's averages start again. Any thread; never waits on the sampler. */
 void power_log_interval(char *buf, size_t cap);
+/* Step 93: the latest reading for the Detailed frame-rate counter, a line
+ * each (no newline at the end): the CPU's MHz and % of its rated speed,
+ * "Battery N.N W" or "Plugged in", Windows' power mode, the temperature
+ * when there is one. Any thread; takes the sampler's lock only to copy. */
+void power_log_brief(char *buf, size_t cap);
 /* The interval's game updates a second, and the game and render threads'
  * ms a game frame (below 0: not measured), for the change lines. */
 void power_log_game(double ups);

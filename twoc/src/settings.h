@@ -28,8 +28,10 @@
  *   adaptive_framerate = 0 | 1                RECOMP_FRAMERATE_ADAPTIVE (unset: on; step 75. The old
  *                                             name RECOMP_D3D_BRIDGE_INTERP_ADAPT still reads)
  *   render_thread = off | on | auto           RECOMP_RENDER_THREAD (unset: off for now; step 79)
- *   show_fps    = 0 | 1                       RECOMP_SHOW_FPS (unset: off; step 82: the game's updates and
- *                                             the frames shown a second in the picture's corner)
+ *   show_fps    = 0 | 1 | 2                   RECOMP_SHOW_FPS (unset: off; step 82: the game's updates and
+ *                                             the frames shown a second in the picture's corner; step 93:
+ *                                             2 Detailed, also the threads' ms, the adaptive step, the CPU's
+ *                                             speed, the battery, the power mode, the temperature)
  *   startup_message = 0 | 1                   RECOMP_STARTUP_MESSAGE (unset: on; step 86: "Press F1 to
  *                                             open the settings menu" at the bottom for ~8 s)
  *   hud         = centre | edges              RECOMP_HUD (unset: centre)
@@ -148,7 +150,7 @@ typedef struct {
     int framerate;                      /* step 61: 0 the game's 60, 1 the display's (interpolated); step 77: N Hz */
     int adaptive;                       /* step 75: 1 fewer sub-frames while late (also when unset), 0 always all */
     int render_thread;                  /* step 79: TWOC_RT_* (unset: off) */
-    int show_fps;                       /* step 82: 1 the measured rates in a corner, 0 not (also unset) */
+    int show_fps;                       /* step 82: 1 the measured rates in a corner, 0 not (also unset); 2 more */
     int startup_message;                /* step 86: 1 the F1 line for the first seconds (also unset), 0 not */
     int hud, hud_margin;                /* step 65: 0 the HUD in the middle 4:3, 1 at the edges; 0-10 percent in */
     int volume;                         /* 0-100; -1: never set (Windows' own level) */
@@ -194,6 +196,7 @@ int twoc_ao_strength_parse(const char *v);  /* 0-100, TWOC_AO_STRENGTH_DEFAULT u
 unsigned twoc_aa_samples(int aa);       /* MSAA's samples a pixel; 1 for the others */
 int twoc_aa_post(int aa);               /* step 90: the filter on the finished frame: TWOC_AA_FXAA, _SMAA or _OFF */
 int twoc_render_scale_parse(const char *v);     /* step 90: 25-200, 100 unset or unknown */
+int twoc_show_fps_parse(const char *v);         /* step 93: 0 off (unset), 1 Simple, 2 Detailed */
 /* Step 91: the render size's arithmetic, the bridge's and the overlay's
  * (notes 18.56, 18.67, 18.93). render_size "WxH" (each 64-8192) or "native"
  * (the primary monitor's mode) into its box *pw x *ph; "" or "0" is 0 x 0,

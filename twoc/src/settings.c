@@ -39,7 +39,9 @@ static const key_t_ g_fixed[] = {
     { "render_thread", "RECOMP_RENDER_THREAD",
       "auto (on with 4 or more processor cores), on or off: the frames between game frames drawn on a thread of"
       " their own, with a frame rate above 60" },
-    { "show_fps", "RECOMP_SHOW_FPS", "1: the game's updates and the frames shown a second in the picture's corner" },
+    { "show_fps", "RECOMP_SHOW_FPS",
+      "1: the game's updates and the frames shown a second in the picture's corner; 2: also the threads, the CPU and"
+      " the power (Detailed)" },
     { "startup_message", "RECOMP_STARTUP_MESSAGE",
       "1: \"Press F1 to open the settings menu\" for the first seconds, 0: not" },
     { "hud", "RECOMP_HUD", "centre (the game's 4:3 places) or edges: the HUD counters at the screen's edges, wider than 4:3" },
@@ -315,6 +317,14 @@ int twoc_rt_parse(const char *v)
     return TWOC_RT_OFF;
 }
 
+/* Step 93: show_fps = 0 | 1 | 2; anything else set and not 0 is 1, as before. */
+int twoc_show_fps_parse(const char *v)
+{
+    if (!v || !*v || strcmp(v, "0") == 0)
+        return 0;
+    return atoi(v) == 2 ? 2 : 1;
+}
+
 const char *twoc_settings_path(void)
 {
     static char path[MAX_PATH + 32];
@@ -460,7 +470,7 @@ void twoc_settings_current(twoc_settings_t *s)
     v = getenv("RECOMP_FRAMERATE_ADAPTIVE");
     s->adaptive = !(v && strcmp(v, "0") == 0);
     s->render_thread = twoc_rt_parse(getenv("RECOMP_RENDER_THREAD"));
-    s->show_fps = env_on("RECOMP_SHOW_FPS");
+    s->show_fps = twoc_show_fps_parse(getenv("RECOMP_SHOW_FPS"));    /* step 93: 2 Detailed */
     v = getenv("RECOMP_STARTUP_MESSAGE");
     s->startup_message = !(v && strcmp(v, "0") == 0);
     v = getenv("RECOMP_HUD");
@@ -554,7 +564,7 @@ static void key_text(const twoc_settings_t *s, size_t i, char *buf, size_t cap)
     else if (strcmp(k, "render_thread") == 0 && s->render_thread != TWOC_RT_OFF)
         snprintf(buf, cap, "%s", twoc_rt_name(s->render_thread));      /* off, the default for now: unwritten */
     else if (strcmp(k, "show_fps") == 0 && s->show_fps)
-        snprintf(buf, cap, "1");        /* step 82: off, the default: unwritten */
+        snprintf(buf, cap, "%d", s->show_fps);     /* step 82: off, the default: unwritten */
     else if (strcmp(k, "startup_message") == 0 && !s->startup_message)
         snprintf(buf, cap, "0");        /* step 86: on, the default: unwritten */
     else if (strcmp(k, "hud") == 0)

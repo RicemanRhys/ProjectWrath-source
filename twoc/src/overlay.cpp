@@ -1039,15 +1039,21 @@ static int tab_display(twoc_settings_t *s, const ovl_info_t *in)
         if (!in->running && in->meas_ok && strlen(line) > 1)    /* step 82: held, the rates from before it opened */
             snprintf(line + strlen(line) - 1, sizeof(line) - strlen(line) + 1, ", before this menu opened.");
         help(line);                     /* step 82: what is measured, beside the plan above */
-        {
-            bool f = s->show_fps != 0;
-            if (ImGui::Checkbox("Show frame rate", &f)) {
-                s->show_fps = f;
+        {   /* step 93: Off / Simple / Detailed */
+            static const char *const sf_names[3] = { "Off", "Simple", "Detailed" };
+            int cur = s->show_fps >= 0 && s->show_fps <= 2 ? s->show_fps : 1;
+            ImGui::SetNextItemWidth(ImGui::GetFontSize() * 12);
+            if (ImGui::Combo("Show frame rate", &cur, sf_names, 3) && cur != s->show_fps) {
+                s->show_fps = cur;
                 r |= OVL_CHANGED;
             }
-            more("In the picture's top left corner while this menu is closed: the game's updates a second (59.94 "
-                 "is its full speed; under it the game itself runs slow) and the frames shown a second (with a "
-                 "frame rate above Game (60), the game's frames and those drawn in between). Applied at once.");
+            more("In the picture's top left corner while this menu is closed. Simple: the game's updates a second "
+                 "(59.94 is its full speed; under it the game itself runs slow) and the frames shown a second "
+                 "(with a frame rate above Game (60), the game's frames and those drawn in between). Detailed "
+                 "adds the game thread's and the render thread's milliseconds a game frame and the adaptive "
+                 "frame rate's step (both with a frame rate above Game (60)), the processor's speed, the battery's "
+                 "watts or \"Plugged in\", Windows' power mode and a temperature if Windows has one (from the "
+                 "power log, read once a second). Applied at once.");
         }
         {   /* step 86 */
             bool m = s->startup_message != 0;

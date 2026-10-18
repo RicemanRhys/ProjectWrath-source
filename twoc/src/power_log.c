@@ -639,6 +639,38 @@ void power_log_interval(char *buf, size_t cap)
         detail_text(&s, &a, buf + n, cap - n);
 }
 
+void power_log_brief(char *buf, size_t cap)
+{
+    sample_t s;
+    int have, n;
+    char t[48];
+
+    AcquireSRWLockExclusive(&g_lock);
+    have = g_have;
+    s = g_now;
+    ReleaseSRWLockExclusive(&g_lock);
+    if (!have) {
+        snprintf(buf, cap, "%s", g_hooks.now_s ? "Power: not read yet" : "Power: not logged (RECOMP_POWER_LOG=0)");
+        return;
+    }
+    if (s.cpu_ok)
+        n = snprintf(buf, cap, "CPU %.0f MHz, %.0f%% of rated", s.mhz, s.perf_pct);
+    else if (s.nt_max)
+        n = snprintf(buf, cap, "CPU %u MHz, %.0f%% of rated", s.nt_cur, 100.0 * s.nt_cur / s.nt_max);
+    else
+        n = snprintf(buf, cap, "CPU speed not read");
+    if (n < (int)cap) {
+        if (s.ac == 0 && s.rate_mw < 0)
+            n += snprintf(buf + n, cap - n, "\nBattery %.1f W", -s.rate_mw / 1000.0);
+        else
+            n += snprintf(buf + n, cap - n, "\n%s", s.ac == 1 ? "Plugged in" : s.ac == 0 ? "On battery" : "Power source unknown");
+    }
+    if (n < (int)cap)
+        n += snprintf(buf + n, cap - n, "\nPower mode: %s", overlay_name(&s, t, sizeof(t)));
+    if (s.temp_ok > 0 && n < (int)cap)
+        snprintf(buf + n, cap - n, "\n%.0f C", s.temp_c);
+}
+
 static volatile LONG g_ms_fresh;
 
 void power_log_game(double ups)
