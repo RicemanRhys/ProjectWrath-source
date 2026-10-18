@@ -17,6 +17,8 @@
  *                | msaa2x+smaa | msaa4x+smaa | msaa8x+smaa        (step 90: MSAA, then SMAA on the frame)
  *   render_scale = 25-200                     RECOMP_RENDER_SCALE (step 90: percent of the render size the
  *                                             picture is drawn at; unset: 100)
+ *   pause_unfocused = 0 | 1                   RECOMP_PAUSE_UNFOCUSED (step 90: the game holds, muted, while
+ *                                             its window is in the background or minimised; unset: off)
  *   framerate   = 60 | display | N            RECOMP_FRAMERATE (unset: 60; step 77: N a rate in Hz)
  *   adaptive_framerate = 0 | 1                RECOMP_FRAMERATE_ADAPTIVE (unset: on; step 75. The old
  *                                             name RECOMP_D3D_BRIDGE_INTERP_ADAPT still reads)
@@ -135,6 +137,7 @@ typedef struct {
     int keyboard;                       /* 1: the keyboard plays too (also when unset), 0: not */
     int controller_input;               /* step 70: PADS_SDL (also when unset) or PADS_XINPUT_ONLY */
     int render_scale;                   /* step 90: percent of the render size drawn, 25-200 (100 also unset) */
+    int pause_unfocused;                /* step 90: 1 the game holds while the window is in the background */
     twoc_controls_t controls;           /* the controller map and the key bindings */
 } twoc_settings_t;
 

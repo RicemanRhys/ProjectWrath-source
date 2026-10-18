@@ -528,6 +528,17 @@ static int fs_wanted(void)
     return g_fs || g_fs_defer;
 }
 
+/* Step 90: "Pause when in the background" (pause_unfocused). The window
+ * thread decides (bg_eval): the window minimised or another window in front,
+ * once it has had the focus at least once, and not while fullscreen waits
+ * for its first frames, is being switched (and 2 s after), or the display
+ * recovers from a stall; the game thread then waits at the start of its
+ * Swap, the session muted, as the overlay's hold does (bg_hold). */
+static volatile LONG g_pause_bg;        /* the setting */
+static volatile LONG g_bg_hold;         /* hold the game now */
+static int g_ever_active;               /* the window has had the focus (window thread) */
+#define BG_AFTER_SWITCH_MS 2000.0
+
 /* Step 54: the settings overlay and live settings (overlay.cpp). */
 static unsigned g_dev_w, g_dev_h;       /* xbox_d3d8's own back buffer: its size is fixed */
 static struct {                         /* stands in for it after a live size change (d3dh_resize), or with MSAA */
@@ -758,6 +769,26 @@ static void dr_remake(HWND hwnd)
         fprintf(stderr, "[D3DB] host display: the swap chain made again at the next present\n");
     }
     InterlockedExchange(&g_flip_remake, 1);
+}
+
+/* Step 90: the window in the background or not, for the focus pause. */
+static void bg_eval(HWND hwnd)
+{
+    LARGE_INTEGER q;
+    HWND fg = GetForegroundWindow();
+    int iconic = IsIconic(hwnd), bg = iconic || fg != hwnd, hold, excluded;
+
+    if (fg == hwnd && !iconic)
+        g_ever_active = 1;
+    QueryPerformanceCounter(&q);
+    excluded = g_fs_defer || g_fs_switching || g_disp_recovering ||
+               (g_fs_switch_q && qpc_ms(g_fs_switch_q, q.QuadPart) < BG_AFTER_SWITCH_MS);
+    hold = g_bg_hold ? g_pause_bg && bg : g_pause_bg && g_ever_active && bg && !excluded;
+    if (hold == (int)g_bg_hold)
+        return;
+    InterlockedExchange(&g_bg_hold, hold);
+    fprintf(stderr, "[D3DB] host window %s: %s\n", hold ? (iconic ? "minimised" : "in the background") : "in front again",
+            hold ? "the game holds, muted (pause when in the background)" : "the game goes on");
 }
 
 static void dr_tick(HWND hwnd)
@@ -1022,6 +1053,8 @@ static LRESULT CALLBACK wnd_proc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp)
             InterlockedExchange(&g_client_w, (LONG)LOWORD(lp));
             InterlockedExchange(&g_client_h, (LONG)HIWORD(lp));
         }
+        if (hwnd == g_hwnd)             /* step 90: minimised or back, for the focus pause */
+            bg_eval(hwnd);
         break;
     case WM_SYSKEYDOWN:                 /* Alt+Enter (step 54); the game reads no keys */
         if (wp == VK_RETURN && (lp & (1 << 29)) && !(lp & (1 << 30))) {
@@ -1054,8 +1087,13 @@ static LRESULT CALLBACK wnd_proc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp)
     case WM_TIMER:
         if (wp == DR_TIMER && hwnd == g_hwnd) {     /* step 90 */
             dr_tick(hwnd);
+            bg_eval(hwnd);
             return 0;
         }
+        break;
+    case WM_ACTIVATEAPP:                /* step 90: the focus pause, at once */
+        if (hwnd == g_hwnd)
+            bg_eval(hwnd);
         break;
     case WM_TWOC_FIT:
         fit_window(hwnd);
@@ -1216,6 +1254,10 @@ int d3dh_create(unsigned width, unsigned height, unsigned host_w, unsigned host_
         g_show_fps = getenv("RECOMP_SHOW_FPS") && *getenv("RECOMP_SHOW_FPS") && strcmp(getenv("RECOMP_SHOW_FPS"), "0") != 0;
         if (g_show_fps)
             fprintf(stderr, "[D3DB] host frame-rate counter: on (show_fps)\n");
+        g_pause_bg = getenv("RECOMP_PAUSE_UNFOCUSED") && *getenv("RECOMP_PAUSE_UNFOCUSED") &&
+                     strcmp(getenv("RECOMP_PAUSE_UNFOCUSED"), "0") != 0;   /* step 90 */
+        if (g_pause_bg)
+            fprintf(stderr, "[D3DB] host: the game holds while its window is in the background (pause_unfocused)\n");
         g_startmsg = !(getenv("RECOMP_STARTUP_MESSAGE") && strcmp(getenv("RECOMP_STARTUP_MESSAGE"), "0") == 0);
         if (!g_startmsg)
             fprintf(stderr, "[D3DB] host startup message: off (startup_message)\n");
@@ -7908,6 +7950,8 @@ static void overlay_apply(twoc_settings_t *was, const twoc_settings_t *s)
         strcmp(s->render_size, was->render_size) != 0 || s->pacing != was->pacing ||
         s->draw_distance != was->draw_distance || s->render_scale != was->render_scale)
         sq_push(was, s);                /* step 78 */
+    if (s->pause_unfocused != was->pause_unfocused)    /* step 90 */
+        d3dh_set_pause_unfocused(s->pause_unfocused);
     if (s->hud != was->hud || s->hud_margin != was->hud_margin) {   /* step 65: from the next overlay pass */
         d3dh_set_hud(s->hud, s->hud_margin);
         fprintf(stderr, "[OVL] HUD position: %s, margin %d%%\n", s->hud ? "screen edges" : "centre (4:3)",
@@ -8961,6 +9005,8 @@ static void trigger_file(unsigned swap_no)
                 ts.show_fps = atoi(v) != 0;
             } else if (strcmp(k, "scale") == 0) {           /* step 90: render_scale */
                 ts.render_scale = twoc_render_scale_parse(v);
+            } else if (strcmp(k, "pausebg") == 0) {         /* step 90: pause_unfocused */
+                ts.pause_unfocused = atoi(v) != 0;
             } else {
                 fprintf(stderr, "[D3DB] trigger file: set %s: not a setting here\n", k);
             }
@@ -9359,12 +9405,39 @@ static void present_thread(double t_s, unsigned swap_no)
     LeaveCriticalSection(&g_rec);
 }
 
+void d3dh_set_pause_unfocused(int on)
+{
+    InterlockedExchange(&g_pause_bg, on != 0);
+    fprintf(stderr, "[OVL] pause when in the background: %s\n", on ? "on" : "off");
+}
+
+/* Step 90: the game held at the start of its Swap while the window is in the
+ * background (bg_eval), its audio session muted; the frame before stays on
+ * the screen. Game thread. */
+static void bg_hold(unsigned swap_no)
+{
+    LARGE_INTEGER a, b;
+
+    QueryPerformanceCounter(&a);
+    fprintf(stderr, "[D3DB] host: the game holds at guest swap %u (its window in the background)\n", swap_no);
+    twoc_audio_mute(1);
+    while (g_bg_hold && g_ready)
+        Sleep(20);
+    twoc_audio_mute(0);
+    QueryPerformanceCounter(&b);
+    fprintf(stderr, "[D3DB] host: the game goes on after %.1f s held\n",
+            (double)(b.QuadPart - a.QuadPart) / (double)g_qpf.QuadPart);
+    QueryPerformanceCounter(&g_game_t0);    /* the hold isn't the game side's time on the frame */
+}
+
 void d3dh_present(double t_s, unsigned swap_no)
 {
     int ovl_r, side;
 
     if (!g_ready)
         return;
+    if (g_bg_hold)                      /* step 90: pause when in the background */
+        bg_hold(swap_no);
     if (g_burn_ms > 0) {                /* step 82: the test aid, inside the game side's time (g_game_t0 to slot_fill) */
         static uint32_t rnd = 1;
         LARGE_INTEGER b0, b;

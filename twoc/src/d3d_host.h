@@ -345,6 +345,8 @@ void d3dh_record_wide(double wide);
 void d3dh_resize(unsigned host_w, unsigned host_h, double wide);
 /* Step 90: the render scale, 25-200 percent of the render size, at once. */
 void d3dh_set_render_scale(int pct);
+/* Step 90: "Pause when in the background" (RECOMP_PAUSE_UNFOCUSED), at once. */
+void d3dh_set_pause_unfocused(int on);
 /* New pacing, as d3dh_create's `interval` and `frame_hz`. */
 void d3dh_set_pacing(unsigned interval, double frame_hz);
 /* Step 63: why the pacing about to be set (d3dh_create, d3dh_set_pacing)

@@ -1156,6 +1156,16 @@ static int build(twoc_settings_t *s, const ovl_info_t *in, float room)
              "once, and its sound plays on. It gets no controller or keyboard input until the menu closes, and "
              "a button still held then counts only once it is let go.");
     }
+    {   /* step 90 */
+        bool p = s->pause_unfocused != 0;
+        if (ImGui::Checkbox("Pause when in the background", &p)) {
+            s->pause_unfocused = p;
+            r |= OVL_CHANGED;
+        }
+        more("The game waits, silent, while its window is minimised or another window is in front, as it waits "
+             "under this menu, and goes on when it is in front again. Not while it is starting or switching to "
+             "fullscreen. Applied at once.");
+    }
     if (ImGui::BeginTabBar("##tabs")) {
         /* step 82: LB and RB pick the tab before or after */
 #define TAB_FLAGS(i) (g_tab_want == (i) ? ImGuiTabItemFlags_SetSelected : ImGuiTabItemFlags_None)
