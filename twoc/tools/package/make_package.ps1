@@ -16,6 +16,7 @@
 #     Play Crash (safe settings).bat (notes 18.96: RECOMP_IGNORE_INI=1, the defaults, the ini untouched),
 #     Collect logs.bat, crash_twoc.ini (the Legion Go's settings), README.txt, Test notes.txt
 #     (text files written with CRLF line ends)
+#   THIRD_PARTY_LICENSES.txt (twoc/, from third_party_licenses.py)
 #   PACKAGE.txt: the build (commits, exe hash, link-time code generation), the imported DLLs and
 #     where each comes from
 #
@@ -127,6 +128,8 @@ function Put-Text([string]$from, [string]$to) {
 $files = Join-Path $here 'files'
 foreach ($f in Get-ChildItem -File $files) { Put-Text $f.FullName (Join-Path $Out $f.Name) }
 Put-Text (Join-Path $files 'tools\collect_logs.ps1') (Join-Path $Out 'tools\collect_logs.ps1')
+# Every third-party component's licence (notes 18.96; twoc/tools/package/third_party_licenses.py writes it).
+Put-Text (Join-Path $twoc 'THIRD_PARTY_LICENSES.txt') (Join-Path $Out 'THIRD_PARTY_LICENSES.txt')
 
 # PACKAGE.txt: what this is built from.
 function Git1([string]$dir, [string[]]$a) { try { (& git -C $dir @a 2>$null | Select-Object -First 1) } catch { '' } }

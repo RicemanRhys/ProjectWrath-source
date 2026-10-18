@@ -162,15 +162,26 @@ static void thousands(unsigned long long v, char *buf, size_t cap)
         snprintf(buf, cap, "%llu", v);
 }
 
+/* Step 93: the check's outcome, for the F1 menu's About tab. */
+static char g_result[600] = "not checked this run";
+
+const char *twoc_game_files_result(void)
+{
+    return g_result;
+}
+
 /* The log line, then the box: MB_YESNO asks "start anyway?"; returns 1 to start. */
 static int tell(const char *log_line, const char *msg, UINT kind)
 {
     int r;
+    snprintf(g_result, sizeof(g_result), "%s", log_line);
     fprintf(stderr, "[FILES] %s\n", log_line);
     fflush(stderr);
     r = MessageBoxA(NULL, msg, "Crash TWOC - game files", kind | MB_SETFOREGROUND);
     if (kind & MB_YESNO)
         fprintf(stderr, "[FILES] %s\n", r == IDYES ? "started anyway (the player chose Yes)" : "not started (No)");
+    if ((kind & MB_YESNO) && r == IDYES && strlen(g_result) + 40 < sizeof(g_result))
+        snprintf(g_result + strlen(g_result), sizeof(g_result) - strlen(g_result), "; started anyway");
     return (kind & MB_YESNO) && r == IDYES;
 }
 
@@ -253,6 +264,8 @@ int twoc_game_files_check(void)
     QueryPerformanceCounter(&t1);
     if (!line[0] && !extra) {
         thousands(total + 1, a, sizeof(a));
+        snprintf(g_result, sizeof(g_result), "as on the disc: default.xbe (SHA-256 %.16s...), Crashdat %u files; %s in "
+                 "all", hex, total, a);
         fprintf(stderr, "[FILES] game files as on the disc: default.xbe (SHA-256 %.16s...), Crashdat %u files; %s "
                 "in all (%.1f ms)\n", hex, total, a, (double)(t1.QuadPart - t0.QuadPart) * 1000.0 / (double)f.QuadPart);
         return 1;

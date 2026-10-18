@@ -53,7 +53,7 @@ static int g_cap, g_cap_idx, g_cap_slot;
 static unsigned g_pad_mask, g_pad_last;
 static int g_pad_fresh = 1;
 static int g_tab_cur, g_tab_want = -1;
-#define N_TABS 4                        /* Display, Audio, Controls, Saves (step 83) */
+#define N_TABS 5                        /* Display, Audio, Controls, Saves (step 83), About (step 93) */
 #define TWOC_FAST_TITLE_SAVES "20 seconds" /* step 90: the menu at 5.9 s from the launch instead of 27.6 */
 static int g_sv_shown;                  /* step 83: the Saves tab shown since the overlay opened */
 #define RESET_ASK "Reset the Display settings?"     /* step 93: the reset button's question */
@@ -1394,6 +1394,43 @@ static void tab_saves(void)
         help(st.status);
 }
 
+/* Step 93: what this build is and what it runs on (about.c). */
+static void tab_about(const ovl_info_t *in)
+{
+    static const char *const names[] = { "Build", "Link-time build", "SDL", "Graphics card", "Driver",
+                                         "Display", "Windows", "Game files" };
+    const twoc_about_t *a = in->about;
+    const char *vals[8];
+    int i;
+
+    ImGui::SeparatorText("Crash Bandicoot: The Wrath of Cortex, PC port");
+    if (!a) {
+        help("Not collected.");
+        return;
+    }
+    vals[0] = a->build;
+    vals[1] = a->ltcg;
+    vals[2] = a->sdl;
+    vals[3] = a->gpu;
+    vals[4] = a->driver;
+    vals[5] = a->display;
+    vals[6] = a->windows;
+    vals[7] = a->files;
+    if (ImGui::BeginTable("##about", 2, ImGuiTableFlags_SizingStretchProp | ImGuiTableFlags_RowBg)) {
+        ImGui::TableSetupColumn("##k", ImGuiTableColumnFlags_WidthFixed, ImGui::GetFontSize() * 7.5f);
+        ImGui::TableSetupColumn("##v", ImGuiTableColumnFlags_WidthStretch);
+        for (i = 0; i < 8; i++) {
+            ImGui::TableNextRow();
+            ImGui::TableNextColumn();
+            ImGui::TextDisabled("%s", names[i]);
+            ImGui::TableNextColumn();
+            ImGui::TextWrapped("%s", vals[i]);
+        }
+        ImGui::EndTable();
+    }
+    help("The same lines are in the log ([ABOUT]). Third-party parts and their licences: THIRD_PARTY_LICENSES.txt next to the game.");
+}
+
 static int build(twoc_settings_t *s, const ovl_info_t *in, float room)
 {
     int r = 0;
@@ -1449,6 +1486,11 @@ static int build(twoc_settings_t *s, const ovl_info_t *in, float room)
             ImGui::EndTabItem();
         } else
             g_sv_shown = 0;
+        if (ImGui::BeginTabItem("About", NULL, TAB_FLAGS(4))) {     /* step 93 */
+            g_tab_cur = 4;
+            tab_about(in);
+            ImGui::EndTabItem();
+        }
 #undef TAB_FLAGS
         g_tab_want = -1;
         ImGui::EndTabBar();

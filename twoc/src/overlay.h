@@ -15,6 +15,7 @@
 #include <d3d11.h>
 
 #include "settings.h"
+#include "about.h"
 
 #ifdef __cplusplus
 extern "C" {
@@ -48,6 +49,7 @@ typedef struct {
                                          * is that times the render scale */
     int fast_title_now;                 /* step 90: this run's title animation sped up */
     int ao;                             /* step 92: the ambient occlusion in effect (TWOC_AO_*) */
+    const twoc_about_t *about;          /* step 93: the About tab's lines (collected at the opening) */
 } ovl_info_t;
 
 enum { OVL_CHANGED = 1, OVL_CLOSE = 2 };

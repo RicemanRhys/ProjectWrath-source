@@ -111,6 +111,8 @@ set(GAME_SOURCES
     # The power mode and the CPU's speed, logged from a thread of its own (step 91);
     # powrprof.dll and pdh.dll load at run time, so the exe imports nothing new
     src/power_log.c
+    # The F1 menu's About tab: the build, the graphics card and driver, the display, Windows (step 93)
+    src/about.c
     # Vulkan, stage 1: a probe behind RECOMP_VULKAN=probe (notes 18.89); volk loads
     # vulkan-1.dll at run time, so the exe imports nothing new
     src/vk_probe.c
@@ -160,6 +162,16 @@ add_executable(${PROJECT_NAME} WIN32
     ${GAME_SOURCES}
     ${RECOMP_GEN_SOURCES}
 )
+
+# The commit and date the About tab shows (step 93): build/generated/build_info.h, made again at every
+# build by tools/build_info.cmake and replaced only when it changes.
+add_custom_target(twoc_build_info
+    COMMAND ${CMAKE_COMMAND} -DREPO=${CMAKE_CURRENT_SOURCE_DIR}/.. -DXR=${XBOXRECOMP_DIR}
+            -DOUT=${TWOC_GENERATED_DIR}/build_info.h -DLTCG=${TWOC_LTCG}
+            -P ${CMAKE_CURRENT_SOURCE_DIR}/tools/build_info.cmake
+    BYPRODUCTS ${TWOC_GENERATED_DIR}/build_info.h
+    VERBATIM)
+add_dependencies(${PROJECT_NAME} twoc_build_info)
 
 # Link against the xboxrecomp umbrella target (all 6 runtime libraries)
 target_link_libraries(${PROJECT_NAME} PRIVATE xboxrecomp SDL3::SDL3-static)

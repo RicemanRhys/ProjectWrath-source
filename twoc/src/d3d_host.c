@@ -8296,6 +8296,7 @@ static struct {
     LONG fs_seen;
     LARGE_INTEGER freq, t0, last;
     unsigned frames;
+    twoc_about_t about;                 /* step 93: the About tab, collected at each opening */
 } g_ovs;
 
 /* Step 82: what is measured, for the overlay's Frame rate line and the
@@ -8404,6 +8405,7 @@ static int ovl_begin(void)
     }
     g_ovs.fs_seen = fs_wanted();
     g_ovs.s.fullscreen = g_ovs.fs_seen;
+    twoc_about_collect(&g_ovs.about, d3d8_GetD3D11Device(), g_hwnd, d3dh_display_hz());     /* step 93 */
     g_ovs.was = g_ovs.s;
     InterlockedExchange(&g_ovl_pauses, g_ovs.s.pause);     /* step 79 */
     g_ovs.dirty = 0;
@@ -8476,6 +8478,7 @@ static int ovl_draw(ID3D11Texture2D *dst, int running)
     in.aa = g_aa;                       /* step 58 */
     in.ms_samples = g_bb.ms;
     in.ao = (int)g_ao_mode;             /* step 92 */
+    in.about = &g_ovs.about;            /* step 93 */
     if (ic_possible()) {                /* step 61/77 */
         in.interp_fps = fp_step_fps(0);
         in.interp_per = fp_step_per(0);
