@@ -28,32 +28,31 @@ Screen refresh rate and resolution (Settings):
 
 2. The power-mode round (plugged in, avalanch and the snow boss, README part C). The mode set
    before each start, never while the game ran.
-   a. Performance, Preset Standard (about 10 minutes)
+   a. Performance, the package's settings (native, Match display, 4x) (about 10 minutes)
       avalanch:   Game:        /s    Shown:        /s
       snow boss:  Game:        /s    Shown:        /s
       Warmth, fan, anything odd:
-   b. Balanced, Preset Low (about 10 minutes)
+   b. Balanced, Render size 1280x800, Frame rate 72 fps, filtering 2x (about 10 minutes)
       avalanch:   Game:        /s    Shown:        /s
       snow boss:  Game:        /s    Shown:        /s
       Warmth, fan, anything odd:
-   c. Optional: Balanced, Preset Standard (5 minutes)
+   c. Optional: Balanced, the package's settings again (native, Match display, 4x) (5 minutes)
       avalanch:   Game:        /s    Shown:        /s
       Anything odd:
    Crashes or freezes (the time, what you were doing, the Legion Space mode):
 
-3. Low on battery (Balanced, set before starting). The time you unplugged and the percentage:
+3. 1280x800, 72 fps, filtering 2x on battery (Balanced, set before starting). The time you unplugged and the percentage:
    cast_bug's start, 30 s:  Game:        /s    Shown:        /s
       Measured:
    avalanch, 5 minutes (stutter, slow motion, warmth):
    Battery percentage at the end:
 
-4. High (plugged in, Performance), cast_bug's start, 30 s
+4. MSAA 2x + SMAA and filtering 16x (plugged in, Performance), cast_bug's start, 30 s
       Game:        /s    Shown:        /s
       Measured:
-      Seen (edges, fences, leaves) against Standard:
+      Seen (edges, fences, leaves) against test 2a:
 
 5. The small things
-   Preset: after changing a setting under Low, did it say Custom?
    Render size list: was 16:10 marked? Was the "Renders ..." line readable?
    View + Menu held: did it open and close the settings menu?
    Pause when in the background: did the game stop and go quiet, and go on again?

@@ -26,11 +26,6 @@ New in this package:
     straight to the disk line by line, so it survives even if the Legion Go crashes.
     Collect logs also takes Windows' own records of crashes and power losses from the last
     3 days (events.txt). Nothing to do: it is always on and costs nothing measurable.
-  - Presets (part F): the settings menu's Display tab starts with Preset: Low, Standard,
-    High or Custom. Low is for playing on battery or in Legion Space's Balanced mode: it
-    draws a smaller picture (1280 x 800) at 72 frames a second, so the chip has much less
-    to do and stays cooler. Standard is what this package starts with (the screen's own
-    size at its refresh rate). High adds anti-aliasing for a PC with power to spare.
   - More render sizes, grouped by the screen's shape (4:3, 16:10, 16:9, 21:9) with the
     Legion Go's (16:10) marked, any size of your own (Custom), and a line saying what the
     game really draws.
@@ -46,8 +41,7 @@ What's in the folder
   Play Crash (fullscreen old way).bat        full screen at once, as the last package did,
                                   with only the new recovery to unfreeze it (the first
                                   test's comparison, optional)
-  Play Crash (72 fps test).bat    starts the game at 72 fps (an optional test; the Low
-                                  preset is 72 fps too)
+  Play Crash (72 fps test).bat    starts the game at 72 fps (an optional test)
   Play Crash (ack wait test).bat  an optional test: starts the game with the "ack wait"
                                   switch on (part C says what it is)
   Play Crash (bake off).bat       starts the game with "baked draws" off, to compare (an
@@ -128,7 +122,7 @@ B. Start the game (on the Legion Go)
 5.  Menu held about a second (or View + Menu held, or F1) opens the settings menu; the
     game keeps running behind it.
     The "Display" tab has everything for these tests:
-      Preset .............. Low / Standard / High / Custom (part F)
+      Render size ......... Monitor (native, 1920x1200) / 1280x800 / ... (part F)
       Frame rate .......... Game (60) / Match display / 90 fps / 144 fps / ...
       the lines under it .. "Now: 144.00 fps, 2.4 frames each game frame." (the plan) and
                             "Measured: the game 60 updates a second (full speed); 144
@@ -137,8 +131,13 @@ B. Start the game (on the Legion Go)
       Adaptive frame rate . leave On
       Render thread ....... Auto / On / Off; the line under it says whether it is on
       Render scale ........ 100% (the screen's size) or less or more (part F)
+      Anisotropic filtering  Off / 2x / 4x / 8x / 16x (further down, under Textures)
       Anti-aliasing ....... Off / FXAA / SMAA / MSAA / MSAA + SMAA (part F)
     Changes apply at once and are saved to crash_twoc.ini when you close the menu.
+    This package starts with: Render size "Monitor (native, ...)" (the screen's own size),
+    Frame rate "Match display", Anisotropic filtering 4x, Anti-aliasing Off, Render scale
+    100%, Render thread Auto, Adaptive frame rate On. The tests below say which of these
+    to change, and when to put them back.
 6.  To stop: close the game window (or Alt+F4). The black console window should close with
     it within a second or two. If it stays open (still saying "Crash is running"), the
     game's process didn't finish exiting: note that in Test notes.txt, with whether
@@ -163,24 +162,31 @@ All on the Legion Go. Write what you see in Test notes.txt as you go.
 
 2. The power-mode round: where it crashed (plugged in; avalanch and the snow boss). Set
    the mode before each start, never while the game runs:
-     a. With the game closed, Legion Space: Performance. Start "Play Crash.bat" (it starts
-        on the Standard preset). Play avalanch and the snow boss for about 10 minutes.
+     a. With the game closed, Legion Space: Performance. Start "Play Crash.bat" and keep the
+        package's settings (Render size "Monitor (native, ...)", Frame rate "Match display",
+        Anisotropic filtering 4x). Play avalanch and the snow boss for about 10 minutes.
         Close the game.
-     b. With the game closed, Legion Space: Balanced. Start "Play Crash.bat", settings
-        menu, Display tab, Preset: Low. Play the same for about 10 minutes. Close the game.
-     c. Optional: Balanced again, but Preset Standard (the last round's "very slow demo"
-        was Balanced with these settings). 5 minutes is enough. Close the game.
+     b. With the game closed, Legion Space: Balanced. Start "Play Crash.bat", open the
+        settings menu, and on the Display tab set three things: Render size 1280x800 (in
+        the 16:10 group), Frame rate 72 fps, and Anisotropic filtering 2x. Leave everything
+        else as it is. Play the same for about 10 minutes. Close the game.
+     c. Optional: Balanced again, but with the package's settings back: on the Display tab
+        set Render size "Monitor (native, ...)", Frame rate "Match display" and Anisotropic
+        filtering 4x (the last round's "very slow demo" was Balanced with these settings).
+        5 minutes is enough. Close the game.
    For each, write down: the counter's "Game N/s" and "Shown N/s" a minute into each level,
    how warm the back got, the fan, and anything odd. If the Legion Go crashes or freezes:
    note the time (roughly), hold the power button to switch it off if it is frozen, start
    it again, and run "Collect logs.bat" before anything else. The power log was written to
    the disk as the game ran, so it shows what happened up to the crash.
 
-3. Low on battery (cast_bug's start, then avalanch). Unplug the charger and write down the
-   time and the percentage. With the game closed, set Legion Space to Balanced. Start
-   "Play Crash.bat", Preset: Low. Go to cast_bug and stand 30 s: write down the counter
-   and the Measured line. Then play avalanch for 5 minutes. Close the game, write down the
-   battery percentage and plug the charger back in.
+3. The lighter settings on battery (cast_bug's start, then avalanch). Unplug the charger
+   and write down the time and the percentage. With the game closed, set Legion Space to
+   Balanced. Start "Play Crash.bat", and on the settings menu's Display tab set Render size
+   1280x800, Frame rate 72 fps and Anisotropic filtering 2x (as in test 2b; they are saved,
+   so if you did 2b last they are still set). Go to cast_bug and stand 30 s: write down the
+   counter and the Measured line. Then play avalanch for 5 minutes. Close the game, write
+   down the battery percentage and plug the charger back in.
 
    Getting to cast_bug: start a new game named WOMBAT and press Start to skip the intro. In
    the hub, walk Crash onto the round lift in the middle; it takes him up to the bonus warp
@@ -193,21 +199,23 @@ All on the Legion Go. Write what you see in Test notes.txt as you go.
        the line that starts "Measured:" as it is. Then close the menu.
      - anything you saw: stutter, Crash in slow motion
 
-4. High (plugged in, Legion Space Performance, set before starting): start "Play
-   Crash.bat", Preset: High, cast_bug's start for 30 s: the counter, the Measured line and
-   how it looks (edges, fences, leaves) against Standard.
+4. Anti-aliasing (plugged in, Legion Space Performance, set before starting): start "Play
+   Crash.bat". On the Display tab set Render size "Monitor (native, ...)", Frame rate
+   "Match display", Anti-aliasing "MSAA 2x + SMAA" and Anisotropic filtering 16x. Then
+   cast_bug's start for 30 s: the counter, the Measured line and how it looks (edges,
+   fences, leaves) against test 2a. Afterwards set Anti-aliasing back to Off and
+   Anisotropic filtering back to 4x.
 
 5. The small things:
-     - The Preset line: pick Low, then change one of the settings under it (Anti-aliasing,
-       say): does the Preset say Custom? Then pick Standard again.
      - Render size: open its list. Is 16:10 marked as the aspect ratio chosen? Is the line
        under it ("Renders ... at 16:10") readable?
      - View + Menu held about a second: does it open and close the settings menu?
      - Pause when in the background (part F): turn it on, then press the Windows key or
        minimise the game: does the game stop and go quiet, and go on when you come back?
 
-Optional, if there is time: the DXVK-test folder once (its own README; cast_bug's start,
-Standard, 30 s, the counter and the Measured line).
+Optional, if there is time: the DXVK-test folder once (its own README; cast_bug's start
+with the package's settings: native, Match display, 4x; 30 s, the counter and the Measured
+line).
 
 What baked draws are (the optional "bake off" launcher): at 144 Hz each game frame is shown
 2 or 3 times, each time drawn again, a little further along. The first drawing works out
@@ -272,17 +280,10 @@ the copies too) into the other folder's game_files\.
 F. The new settings
 -------------------
 All in the settings menu (Menu held, or F1), saved to crash_twoc.ini.
-  Preset (top of the Display tab) .... sets several settings at once:
-        Low ....... for a handheld on battery or in a Balanced power mode: render size
-                    1280 x 800, 72 frames a second, render thread Auto, adaptive frame rate
-                    on, anti-aliasing off, 2x filtering, render scale 100%. The chip has
-                    much less to do: cooler, quieter, longer on battery.
-        Standard .. the screen's own size (native) at its refresh rate (Match display),
-                    render thread Auto, adaptive on, anti-aliasing off, 4x filtering. This
-                    package starts on it.
-        High ...... Standard with MSAA 2x + SMAA and 16x filtering, for more graphics power.
-        Custom .... your own mix. Changing any of a preset's settings afterwards makes it
-                    Custom. Full screen, the aspect ratio and the HUD stay as they are.
+  On battery or in Legion Space's Balanced mode, lighter settings keep the chip cooler,
+  quieter and longer on battery: Render size 1280x800, Frame rate 72 fps and Anisotropic
+  filtering 2x (Display tab). Plugged in, the package's own: Render size "Monitor (native,
+  ...)", Frame rate "Match display", Anisotropic filtering 4x.
   Render size (Display tab) .......... the sizes are grouped by shape: 4:3, 16:10, 16:9 and
         21:9, the group of the chosen aspect ratio marked (16:10 here: 1280 x 800,
         1440 x 900, 1680 x 1050, 1920 x 1200, 2560 x 1600, 3840 x 2400); Custom takes any
