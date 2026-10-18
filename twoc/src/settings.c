@@ -22,7 +22,8 @@ static const key_t_ g_fixed[] = {
     { "render_size", "RECOMP_RENDER_SIZE", "game (480 lines), WxH or native" },
     { "pacing", "RECOMP_PACING", "auto, vsync, limiter or limiter+vsync" },
     { "anisotropy", "RECOMP_ANISOTROPY", "1 (the game's filtering), 2, 4, 8 or 16" },
-    { "antialiasing", "RECOMP_ANTIALIASING", "off, fxaa, smaa, msaa2x, msaa4x or msaa8x" },
+    { "antialiasing", "RECOMP_ANTIALIASING",
+      "off, fxaa, smaa, msaa2x, msaa4x, msaa8x, or msaa2x+smaa, msaa4x+smaa, msaa8x+smaa (MSAA, then SMAA)" },
     { "framerate", "RECOMP_FRAMERATE",
       "60 (the game's), display (interpolated frames at the display's rate) or a rate in Hz (90, 120, 144, 165,"
       " 180, 240: interpolated, shown evenly where the display can)" },
@@ -144,7 +145,8 @@ int twoc_pacing_parse(const char *v)
     return TWOC_PACING_AUTO;
 }
 
-static const char *g_aa_names[TWOC_AA_COUNT] = { "off", "fxaa", "smaa", "msaa2x", "msaa4x", "msaa8x" };
+static const char *g_aa_names[TWOC_AA_COUNT] = { "off", "fxaa", "smaa", "msaa2x", "msaa4x", "msaa8x",
+                                                 "msaa2x+smaa", "msaa4x+smaa", "msaa8x+smaa" };
 
 const char *twoc_aa_name(int aa)
 {
@@ -157,14 +159,21 @@ int twoc_aa_parse(const char *v)
 
     for (i = 0; v && i < TWOC_AA_COUNT; i++)    /* msaa4 reads as msaa4x */
         if (_stricmp(v, g_aa_names[i]) == 0 ||
-            (i >= TWOC_AA_MSAA2 && _strnicmp(v, g_aa_names[i], 5) == 0 && v[5] == 0))
+            (i >= TWOC_AA_MSAA2 && i <= TWOC_AA_MSAA8 && _strnicmp(v, g_aa_names[i], 5) == 0 && v[5] == 0))
             return i;
     return TWOC_AA_OFF;
 }
 
 unsigned twoc_aa_samples(int aa)
 {
-    return aa == TWOC_AA_MSAA2 ? 2 : aa == TWOC_AA_MSAA4 ? 4 : aa == TWOC_AA_MSAA8 ? 8 : 1;
+    return aa == TWOC_AA_MSAA2 || aa == TWOC_AA_MSAA2_SMAA ? 2 : aa == TWOC_AA_MSAA4 || aa == TWOC_AA_MSAA4_SMAA ? 4
+           : aa == TWOC_AA_MSAA8 || aa == TWOC_AA_MSAA8_SMAA ? 8 : 1;
+}
+
+int twoc_aa_post(int aa)
+{
+    return aa == TWOC_AA_FXAA ? TWOC_AA_FXAA
+           : aa == TWOC_AA_SMAA || aa >= TWOC_AA_MSAA2_SMAA ? TWOC_AA_SMAA : TWOC_AA_OFF;
 }
 
 /* Step 79: render_thread = off | on | auto (1 and 0 read too; sync, a check

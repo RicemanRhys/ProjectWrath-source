@@ -6631,9 +6631,9 @@ static ID3D11Texture2D *frame_tex(void)
     ID3D11Texture2D *src = back_tex(), *out = NULL;
 
     REPLAY_SIDE();
-    if (!src || (g_aa != TWOC_AA_FXAA && g_aa != TWOC_AA_SMAA))
+    if (!src || twoc_aa_post(g_aa) == TWOC_AA_OFF)     /* step 90: MSAA + SMAA filters the resolved frame too */
         return src;
-    if (aa_post(g_aa, src, &out) != 0) {
+    if (aa_post(twoc_aa_post(g_aa), src, &out) != 0) {
         g_st.post_aa_fails++;
         return src;
     }

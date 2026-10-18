@@ -14,6 +14,7 @@
  *   pacing      = auto | vsync | limiter | limiter+vsync    RECOMP_PACING
  *   anisotropy  = 1 | 2 | 4 | 8 | 16          RECOMP_ANISOTROPY (1: the game's own filtering)
  *   antialiasing = off | fxaa | smaa | msaa2x | msaa4x | msaa8x    RECOMP_ANTIALIASING (unset: off)
+ *                | msaa2x+smaa | msaa4x+smaa | msaa8x+smaa        (step 90: MSAA, then SMAA on the frame)
  *   framerate   = 60 | display | N            RECOMP_FRAMERATE (unset: 60; step 77: N a rate in Hz)
  *   adaptive_framerate = 0 | 1                RECOMP_FRAMERATE_ADAPTIVE (unset: on; step 75. The old
  *                                             name RECOMP_D3D_BRIDGE_INTERP_ADAPT still reads)
@@ -102,7 +103,9 @@ extern "C" {
 #endif
 
 enum { TWOC_PACING_AUTO, TWOC_PACING_VSYNC, TWOC_PACING_LIMITER, TWOC_PACING_LIMITER_VSYNC, TWOC_PACING_COUNT };
-enum { TWOC_AA_OFF, TWOC_AA_FXAA, TWOC_AA_SMAA, TWOC_AA_MSAA2, TWOC_AA_MSAA4, TWOC_AA_MSAA8, TWOC_AA_COUNT };
+enum { TWOC_AA_OFF, TWOC_AA_FXAA, TWOC_AA_SMAA, TWOC_AA_MSAA2, TWOC_AA_MSAA4, TWOC_AA_MSAA8,
+       TWOC_AA_MSAA2_SMAA, TWOC_AA_MSAA4_SMAA, TWOC_AA_MSAA8_SMAA,     /* step 90: MSAA, then SMAA on the frame */
+       TWOC_AA_COUNT };
 enum { TWOC_RT_OFF, TWOC_RT_ON, TWOC_RT_AUTO, TWOC_RT_COUNT };   /* step 79: the render thread */
 
 typedef struct {
@@ -146,6 +149,7 @@ int twoc_aa_parse(const char *v);       /* TWOC_AA_OFF for anything unknown */
 const char *twoc_rt_name(int rt);       /* step 79: off, on, auto */
 int twoc_rt_parse(const char *v);       /* TWOC_RT_OFF for anything unknown (sync, a check, is on) */
 unsigned twoc_aa_samples(int aa);       /* MSAA's samples a pixel; 1 for the others */
+int twoc_aa_post(int aa);               /* step 90: the filter on the finished frame: TWOC_AA_FXAA, _SMAA or _OFF */
 
 /* host_audio.cpp: the process's volume in Windows' mixer (its audio session),
  * 0-100, set on a short-lived thread of its own. */
