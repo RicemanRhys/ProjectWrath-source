@@ -46,6 +46,7 @@ typedef struct {
     short pad_lx, pad_ly;               /* ... its left stick */
     unsigned view_w, view_h;            /* step 90: the size it is shown at (the render size); host_w x host_h
                                          * is that times the render scale */
+    int fast_title_now;                 /* step 90: this run's title animation sped up */
 } ovl_info_t;
 
 enum { OVL_CHANGED = 1, OVL_CLOSE = 2 };

@@ -54,6 +54,7 @@ static unsigned g_pad_mask, g_pad_last;
 static int g_pad_fresh = 1;
 static int g_tab_cur, g_tab_want = -1;
 #define N_TABS 4                        /* Display, Audio, Controls, Saves (step 83) */
+#define TWOC_FAST_TITLE_SAVES "20 seconds" /* step 90: the menu at 5.9 s from the launch instead of 27.6 */
 static int g_sv_shown;                  /* step 83: the Saves tab shown since the overlay opened */
 
 static void capture_end(void)
@@ -891,6 +892,21 @@ static int tab_display(twoc_settings_t *s, const ovl_info_t *in)
             }
             more("\"Press F1 to open the settings menu\" (and, with a controller, \"or hold Start\") at the bottom "
                  "of the picture for the first seconds of each start. Off also takes it away if it is showing.");
+        }
+        {   /* step 90: -FastTitle's switch, from the next start */
+            bool t = s->fast_title != 0;
+            if (ImGui::Checkbox("Skip the title animation", &t)) {
+                s->fast_title = t;
+                r |= OVL_CHANGED;
+            }
+            more("At each start, after the logos, the game plays its title animation (Crash and the title "
+                 "music) before the main menu opens. On, the animation runs many times faster, so the main menu "
+                 "opens about " TWOC_FAST_TITLE_SAVES " sooner; the logos and the menu are as before. From the "
+                 "next start (a launcher's -FastTitle wins over this).");
+            snprintf(line, sizeof(line), "Now: %s this run.%s", in->fast_title_now ? "on" : "off",
+                     !s->fast_title != !in->fast_title_now ? (s->fast_title ? " On from the next start."
+                                                                             : " Off from the next start.") : "");
+            help(line);
         }
         if (s->framerate) {             /* step 75 */
             static const char *const ad_names[2] = { "On", "Off" };

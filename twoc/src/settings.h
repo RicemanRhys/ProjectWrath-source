@@ -19,6 +19,8 @@
  *                                             picture is drawn at; unset: 100)
  *   pause_unfocused = 0 | 1                   RECOMP_PAUSE_UNFOCUSED (step 90: the game holds, muted, while
  *                                             its window is in the background or minimised; unset: off)
+ *   fast_title  = 0 | 1                       RECOMP_DEV_FAST_TITLE (step 90: the title animation sped up,
+ *                                             -FastTitle's; from the next start; unset: off)
  *   framerate   = 60 | display | N            RECOMP_FRAMERATE (unset: 60; step 77: N a rate in Hz)
  *   adaptive_framerate = 0 | 1                RECOMP_FRAMERATE_ADAPTIVE (unset: on; step 75. The old
  *                                             name RECOMP_D3D_BRIDGE_INTERP_ADAPT still reads)
@@ -94,6 +96,18 @@
  * away. Crates and fruit are still drawn within 45 units and enemies woken
  * within 25, as the game decides. From the next frame.
  *
+ * Step 90 (notes 18.93): msaa*+smaa draws with MSAA and then filters the
+ * finished frame with SMAA, which also smooths the alpha-tested edges MSAA
+ * leaves (fences, foliage). render_scale draws the picture at that share of
+ * the render size and shows it at the render size (under 100 lighter, over
+ * 100 supersampled), within the graphics card's largest texture; applied at
+ * once. pause_unfocused holds the game, muted, as the overlay's hold does,
+ * while its window is in the background or minimised (not before the window
+ * has had the focus once, nor while it is being switched to fullscreen or
+ * the display recovers from a stall). fast_title is -FastTitle: the title
+ * animation runs ~128 times its speed, so the main menu opens ~22 s sooner;
+ * from the next start, the launcher's switch winning as for every key.
+ *
  * The settings overlay (overlay.cpp) shows the values in effect and writes
  * the file back when the player changes one.
  */
@@ -138,6 +152,7 @@ typedef struct {
     int controller_input;               /* step 70: PADS_SDL (also when unset) or PADS_XINPUT_ONLY */
     int render_scale;                   /* step 90: percent of the render size drawn, 25-200 (100 also unset) */
     int pause_unfocused;                /* step 90: 1 the game holds while the window is in the background */
+    int fast_title;                     /* step 90: 1 the title animation sped up (from the next start) */
     twoc_controls_t controls;           /* the controller map and the key bindings */
 } twoc_settings_t;
 

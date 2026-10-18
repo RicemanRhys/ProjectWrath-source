@@ -7952,6 +7952,8 @@ static void overlay_apply(twoc_settings_t *was, const twoc_settings_t *s)
         sq_push(was, s);                /* step 78 */
     if (s->pause_unfocused != was->pause_unfocused)    /* step 90 */
         d3dh_set_pause_unfocused(s->pause_unfocused);
+    if (s->fast_title != was->fast_title)
+        fprintf(stderr, "[OVL] skip the title animation: %s from the next start\n", s->fast_title ? "on" : "off");
     if (s->hud != was->hud || s->hud_margin != was->hud_margin) {   /* step 65: from the next overlay pass */
         d3dh_set_hud(s->hud, s->hud_margin);
         fprintf(stderr, "[OVL] HUD position: %s, margin %d%%\n", s->hud ? "screen edges" : "centre (4:3)",
@@ -8129,6 +8131,8 @@ static int ovl_draw(ID3D11Texture2D *dst, int running)
     in.host_h = g_h;
     in.view_w = g_vw;                   /* step 90 */
     in.view_h = g_vh;
+    in.fast_title_now = getenv("RECOMP_DEV_FAST_TITLE") && *getenv("RECOMP_DEV_FAST_TITLE") &&
+                        strcmp(getenv("RECOMP_DEV_FAST_TITLE"), "0") != 0;
     in.guest_w = g_gw;
     in.guest_h = g_gh;
     in.display_hz = d3dh_display_hz();

@@ -48,6 +48,8 @@ static const key_t_ g_fixed[] = {
     { "pause", "RECOMP_OVERLAY_PAUSE", "1: the game waits while the overlay is open, 0: it runs behind it" },
     { "pause_unfocused", "RECOMP_PAUSE_UNFOCUSED",
       "1: the game waits, muted, while its window is in the background or minimised" },
+    { "fast_title", "RECOMP_DEV_FAST_TITLE",
+      "1: the title animation runs fast, so the main menu opens sooner (from the next start)" },
     { "keyboard", "RECOMP_KEYBOARD", "1: the keyboard plays too (key_ bindings), 0: the controller only" },
     { "controller_input", "RECOMP_CONTROLLER_INPUT",
       "sdl: every pad (SDL3; Xbox pads through XInput), or xinput: XInput only, as before" },
@@ -374,6 +376,7 @@ void twoc_settings_current(twoc_settings_t *s)
     s->controller_input = pads_mode_parse(getenv("RECOMP_CONTROLLER_INPUT"));
     s->render_scale = twoc_render_scale_parse(getenv("RECOMP_RENDER_SCALE"));     /* step 90 */
     s->pause_unfocused = env_on("RECOMP_PAUSE_UNFOCUSED");
+    s->fast_title = env_on("RECOMP_DEV_FAST_TITLE");
     keys_init();
     controls_default_pad(&s->controls);
     controls_default_keys(&s->controls);
@@ -443,6 +446,8 @@ static void key_text(const twoc_settings_t *s, size_t i, char *buf, size_t cap)
     else if (strcmp(k, "render_scale") == 0 && s->render_scale != 100)
         snprintf(buf, cap, "%d", s->render_scale);     /* step 90: 100, 1 and 0, the defaults: unwritten */
     else if (strcmp(k, "pause_unfocused") == 0 && s->pause_unfocused)
+        snprintf(buf, cap, "1");
+    else if (strcmp(k, "fast_title") == 0 && s->fast_title)
         snprintf(buf, cap, "1");
     else if (strcmp(k, "controller_input") == 0 && s->controller_input != PADS_SDL)
         snprintf(buf, cap, "%s", pads_mode_name(s->controller_input));     /* sdl, the default: unwritten */
