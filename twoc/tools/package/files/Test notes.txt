@@ -6,7 +6,7 @@ Windows power mode:
 Screen refresh rate (Settings):
 Window or full screen:
 
-First test: cast_bug's start, standing still 30 s each (README part C). For each: the
+First test, on the Legion Go: cast_bug's start, standing still 30 s each (README part C). For each: the
 counter's two numbers, the settings menu's "Measured:" line copied as it is, and anything
 you saw (stutter, slow motion).
 
@@ -27,14 +27,15 @@ you saw (stutter, slow motion).
       Game:        /s    Shown:        /s
       Measured:
       Seen:
-   e. Baked draws off ("Play Crash (bake off).bat")
+   e. Baked draws off ("Play Crash (bake off).bat"; round 1 only, compared with a)
       Game:        /s    Shown:        /s
       Measured:
       Seen:
 
-  Vulkan probe ("Play Crash (Vulkan probe).bat"; optional): did the second window open?
+  Vulkan probe ("Play Crash (Vulkan probe).bat"; optional, plugged in, a minute in the hub):
+      did its second window open (yes / no)?
 
-  Round 2, on battery. The time you unplugged:
+  Round 2, on battery (a to d, not e). The time you unplugged:
    a. Match display ("Play Crash.bat")
       Game:        /s    Shown:        /s
       Measured:
@@ -53,13 +54,14 @@ you saw (stutter, slow motion).
       Seen:
    Battery percentage at the end:
 
-Did holding Menu about a second open and close the settings menu? Did View + Menu? Did the
+Did holding Menu about a second open and close the settings menu? Did View + Menu? Did F1
+(only if a keyboard was attached)? Did the
 controller move around in it? Did a short press of Menu still open the game's pause menu (when
 you let go), and did holding it open only the settings menu, not the pause menu too?
 Did the line "Press F1 to open the settings menu (or hold Start on the controller)" show at the
 bottom for the first seconds, and could you read it?
 
-The other tests (if there's time). For each: the counter's numbers (or the "Measured:" line), smooth or stutters
+The other tests (optional, if there's time). For each: the counter's numbers (or the "Measured:" line), smooth or stutters
 (how often), does the game itself slow down, fan noise / warmth / CPU temperature, plugged
 in or battery.
 

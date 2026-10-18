@@ -7,6 +7,12 @@ on a second CPU core) hold up on a handheld. The game files in game_files\ are y
 copy of the disc. There are no saves in this folder: start a new game and name it WOMBAT,
 which opens every warp room (all crystals), so every level in the tests can be reached.
 
+New in this package: the settings menu opens by holding Menu (Start) about a second on
+the controller, or with F1 on a keyboard; View + Menu held still works too. For the first
+8 seconds a line at the bottom of the picture says so. "Baked draws" make the in-between
+frames cheaper to draw (test e compares). Two new launchers: bake off (test e) and the
+Vulkan probe (optional).
+
 What's in the folder
 --------------------
   Play Crash.bat                  starts the game
@@ -71,8 +77,8 @@ the folder. (Only a Windows "N" edition lacks Media Foundation; the Legion Go do
 one.)
 
 
-B. Start the game
------------------
+B. Start the game (on the Legion Go)
+------------------------------------
 1.  Double-click "Play Crash.bat". A black console window opens, then the game window.
     Leave the console open; it closes by itself when the game ends.
     If Windows says "Windows protected your PC", click "More info", then "Run anyway".
@@ -102,9 +108,9 @@ B. Start the game
 
 C. The tests
 ------------
-First test (the one that matters most): cast_bug's start, standing still 30 seconds, in
-four runs of the game. All of it is on the Legion Go. Round 1 plugged in, round 2 on
-battery.
+First test (the one that matters most): cast_bug's start, standing still 30 seconds, one
+run of the game each. All of it is on the Legion Go. Round 1 plugged in: a to e (d is
+optional). Round 2 on battery: a to d.
 
 Getting to cast_bug (every run): start a new game named WOMBAT and press Start to skip
 the intro. In the hub, walk Crash onto the round lift in the middle; it takes him up to
@@ -128,11 +134,11 @@ Round 1, plugged in (charger in, Legion Space on Performance):
      saves it), and close the game.
   d. Ack wait (optional, see below): start "Play Crash (ack wait test).bat". Go to
      cast_bug, stand 30 s, write it down. Close the game.
-  e. Baked draws off: start "Play Crash (bake off).bat". Go to cast_bug, stand 30 s, write
-     it down. Close the game.
+  e. Baked draws off (round 1 only; it is compared with a): start "Play Crash (bake
+     off).bat". Go to cast_bug, stand 30 s, write it down. Close the game.
 
 Round 2, on battery: unplug the charger and write down the time you did. Then a, b, c and
-d again, the same way (not e). (The log also notes every 10 seconds whether it is plugged
+d (optional) again, the same way. Not e. (The log also notes every 10 seconds whether it is plugged
 in and the battery's percentage.)
 
 What baked draws are: at 144 Hz each game frame is shown 2 or 3 times, each time drawn
@@ -141,11 +147,12 @@ draw's settings from scratch; now the first one does, and the others reuse what 
 (on in "Play Crash.bat"). On the desktop that takes about a third off the render thread's
 time, with the same picture. e turns it off for one run, so a and e compare the two.
 
-The Vulkan probe (optional, about a minute, plugged in): start "Play Crash (Vulkan
-probe).bat". A second small window opens beside the game and shows a plain colour: that
-is the probe, testing Vulkan (another way to draw that a later version may use). Let the
-game reach the hub and stay a minute, then close the game. Nothing to write down; its
-findings are in the log, which "Collect logs.bat" takes.
+The Vulkan probe (optional, about a minute, on the Legion Go, plugged in, after round 1):
+start "Play Crash (Vulkan probe).bat". A second small window, "Crash TWOC - Vulkan probe",
+opens beside the game and shows a slowly changing colour: that is the probe, testing
+Vulkan (another way to draw that a later version may use). Let the game reach the hub and
+stay a minute, then close the game. Write down only whether the second window opened; the
+rest is in the log, which "Collect logs.bat" takes.
 
 What the ack wait test is: one of the game's helper threads (the one that answers the
 game's graphics commands) keeps a CPU core busy all the time, waiting for the next one.
@@ -155,7 +162,7 @@ a frame). On the Legion Go the CPU and the graphics share one power budget, so t
 freed half core might make the rest faster: that is what d finds out. It is only a test;
 play with "Play Crash.bat".
 
-Then, if there's time, the other tests below (also on the Legion Go).
+Then, if there's time, the other tests below (optional, also on the Legion Go).
 
 The other tests: for each, get to the place, stand still for 30 seconds, then play
 normally for a minute or two (run, turn the camera, jump). Write down in "Test notes.txt":
