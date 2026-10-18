@@ -745,44 +745,6 @@ static int tab_display(twoc_settings_t *s, const ovl_info_t *in)
     int r = 0, i;
     char buf[64], line[160];
 
-    {   /* step 91: presets, each a set of the settings below */
-        static const char *const names[TWOC_PRESET_COUNT] = { "Custom", "Low", "Standard", "High" };
-        static const char *const what[TWOC_PRESET_COUNT] = {
-            "Your own choice of the settings below.",
-            "For a handheld on battery or in a Balanced power mode: 1280x800 at 72 fps, 2x filtering, no "
-            "anti-aliasing. Cooler, quieter and longer on battery.",
-            "The screen's own size at its refresh rate, 4x filtering, no anti-aliasing: for most PCs, and a "
-            "handheld plugged in.",
-            "Standard with MSAA 2x + SMAA and 16x filtering: smoother edges, for a PC with graphics power to spare." };
-        static const int order[TWOC_PRESET_COUNT] = { TWOC_PRESET_LOW, TWOC_PRESET_STANDARD, TWOC_PRESET_HIGH,
-                                                      TWOC_PRESET_CUSTOM };
-        int cur = s->preset >= 0 && s->preset < TWOC_PRESET_COUNT ? s->preset : TWOC_PRESET_CUSTOM;
-        float maxh = ImGui::GetTextLineHeightWithSpacing() * 18, room = ImGui::GetIO().DisplaySize.y * 0.9f;
-        ImGui::SetNextItemWidth(ImGui::GetFontSize() * 12);
-        ImGui::SetNextWindowSizeConstraints(ImVec2(0, 0), ImVec2(FLT_MAX, maxh < room ? maxh : room));
-        if (ImGui::BeginCombo("Preset", names[cur])) {
-            for (i = 0; i < TWOC_PRESET_COUNT; i++) {
-                int p = order[i];
-                if (ImGui::Selectable(names[p], p == cur) && p != cur) {
-                    twoc_preset_apply(s, p);    /* Custom: the settings as they are */
-                    s->preset = p;
-                    r |= OVL_CHANGED;
-                }
-                ImGui::Indent();
-                ImGui::PushTextWrapPos(ImGui::GetCursorPosX() + ImGui::GetFontSize() * 20);
-                ImGui::TextDisabled("%s", what[p]);
-                ImGui::PopTextWrapPos();
-                ImGui::Unindent();
-            }
-            ImGui::EndCombo();
-        }
-        more("A preset sets the render size, the frame rate, the render thread, the adaptive frame rate, "
-             "anti-aliasing, anisotropic filtering and the render scale together; changing any of them "
-             "afterwards makes it Custom. Fullscreen, the aspect ratio and the HUD stay as they are. Applied at "
-             "once.");
-        help(what[cur]);
-    }
-
     ImGui::SeparatorText("Display");
     {
         bool f = s->fullscreen != 0;
@@ -1204,10 +1166,6 @@ static int tab_display(twoc_settings_t *s, const ovl_info_t *in)
         if (s->ao != TWOC_AO_OFF && in->ao == TWOC_AO_OFF) {
             help("Now: off; it couldn't be set up on this graphics card (see the log's [AO] lines).");
         }
-    }
-    if (s->preset != TWOC_PRESET_CUSTOM && !twoc_preset_matches(s, s->preset)) {
-        s->preset = TWOC_PRESET_CUSTOM;     /* step 91: one of the preset's settings changed */
-        r |= OVL_CHANGED;
     }
     return r;
 }

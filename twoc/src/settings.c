@@ -17,8 +17,6 @@ typedef struct {
 } key_t_;
 
 static const key_t_ g_fixed[] = {
-    { "preset", "RECOMP_PRESET",
-      "low, standard, high or custom: the settings menu's Preset (the keys below are what apply)" },
     { "fullscreen", "RECOMP_FULLSCREEN", "" },
     { "widescreen", "RECOMP_WIDESCREEN", "the aspect ratio: 0 (4:3), 1 (16:9) or W:H (16:10, 21:9)" },
     { "render_size", "RECOMP_RENDER_SIZE", "game (480 lines), WxH or native" },
@@ -63,8 +61,9 @@ static const key_t_ g_fixed[] = {
 #define N_FIXED (sizeof(g_fixed) / sizeof(g_fixed[0]))
 
 /* Keys of settings since removed: an older file's line is skipped without a
- * word, and the next save leaves it out (step 91: step 69's draw distance). */
-static const char *const g_retired[] = { "draw_distance" };
+ * word, and the next save leaves it out (step 91: step 69's draw distance;
+ * step 93: step 91's presets). */
+static const char *const g_retired[] = { "draw_distance", "preset" };
 
 /* Step 57: then one key per binding (controls.h), at its default unwritten:
  * pad_<xbox input> for the controller map, key_<binding> for the keyboard;
@@ -316,55 +315,6 @@ int twoc_rt_parse(const char *v)
     return TWOC_RT_OFF;
 }
 
-/* Step 91: the presets' settings (settings.h). */
-static const struct {
-    const char *name, *render_size;
-    int framerate, render_thread, adaptive, antialiasing, anisotropy, render_scale;
-} g_presets[TWOC_PRESET_COUNT] = {
-    { "custom", NULL, 0, 0, 0, 0, 0, 0 },
-    { "low", "1280x800", 72, TWOC_RT_AUTO, 1, TWOC_AA_OFF, 2, 100 },
-    { "standard", "native", 1, TWOC_RT_AUTO, 1, TWOC_AA_OFF, 4, 100 },
-    { "high", "native", 1, TWOC_RT_AUTO, 1, TWOC_AA_MSAA2_SMAA, 16, 100 },
-};
-
-const char *twoc_preset_name(int p)
-{
-    return p >= 0 && p < TWOC_PRESET_COUNT ? g_presets[p].name : "custom";
-}
-
-int twoc_preset_parse(const char *v)
-{
-    int p;
-
-    for (p = 0; v && p < TWOC_PRESET_COUNT; p++)
-        if (_stricmp(v, g_presets[p].name) == 0)
-            return p;
-    return TWOC_PRESET_CUSTOM;
-}
-
-void twoc_preset_apply(twoc_settings_t *s, int p)
-{
-    if (p <= TWOC_PRESET_CUSTOM || p >= TWOC_PRESET_COUNT)
-        return;
-    snprintf(s->render_size, sizeof(s->render_size), "%s", g_presets[p].render_size);
-    s->framerate = g_presets[p].framerate;
-    s->render_thread = g_presets[p].render_thread;
-    s->adaptive = g_presets[p].adaptive;
-    s->antialiasing = g_presets[p].antialiasing;
-    s->anisotropy = g_presets[p].anisotropy;
-    s->render_scale = g_presets[p].render_scale;
-}
-
-int twoc_preset_matches(const twoc_settings_t *s, int p)
-{
-    if (p <= TWOC_PRESET_CUSTOM || p >= TWOC_PRESET_COUNT)
-        return 1;
-    return _stricmp(s->render_size, g_presets[p].render_size) == 0 && s->framerate == g_presets[p].framerate &&
-           s->render_thread == g_presets[p].render_thread && !s->adaptive == !g_presets[p].adaptive &&
-           s->antialiasing == g_presets[p].antialiasing && s->anisotropy == g_presets[p].anisotropy &&
-           s->render_scale == g_presets[p].render_scale;
-}
-
 const char *twoc_settings_path(void)
 {
     static char path[MAX_PATH + 32];
@@ -541,9 +491,6 @@ void twoc_settings_current(twoc_settings_t *s)
     s->ao_half = env_on("RECOMP_AO_HALF");
     s->pause_unfocused = env_on("RECOMP_PAUSE_UNFOCUSED");
     s->fast_title = env_on("RECOMP_DEV_FAST_TITLE");
-    s->preset = twoc_preset_parse(getenv("RECOMP_PRESET"));     /* step 91: kept while the settings are its */
-    if (!twoc_preset_matches(s, s->preset))
-        s->preset = TWOC_PRESET_CUSTOM;
     keys_init();
     controls_default_pad(&s->controls);
     controls_default_keys(&s->controls);
@@ -564,9 +511,7 @@ static void key_text(const twoc_settings_t *s, size_t i, char *buf, size_t cap)
     const char *k = g_keys[i].key;
 
     buf[0] = 0;
-    if (strcmp(k, "preset") == 0)
-        snprintf(buf, cap, "%s", twoc_preset_name(s->preset));
-    else if (strcmp(k, "fullscreen") == 0)
+    if (strcmp(k, "fullscreen") == 0)
         snprintf(buf, cap, "%d", s->fullscreen ? 1 : 0);
     else if (strcmp(k, "widescreen") == 0 && !s->widescreen)
         snprintf(buf, cap, "0");

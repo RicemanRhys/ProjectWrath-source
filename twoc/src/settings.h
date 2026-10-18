@@ -7,9 +7,7 @@
  * environment, so a run_twoc.ps1 switch or a variable set by hand wins over
  * the file, and without the file nothing is set: the run is as before.
  *
- *   preset      = low | standard | high | custom    RECOMP_PRESET (step 91: the Display tab's Preset; a
- *                                             label only, the keys below are what apply)
- *   fullscreen  = 0 | 1                       RECOMP_FULLSCREEN
+ *   fullscreen  = 0 | 1                      RECOMP_FULLSCREEN
  *   widescreen  = 0 | 1 | W:H                 RECOMP_WIDESCREEN (0: 4:3, 1: 16:9; step 64: the
  *                                             overlay's Aspect ratio writes 16:10 and 21:9 as W:H)
  *   render_size = game | WxH | native         RECOMP_RENDER_SIZE (game: the guest's 480 lines)
@@ -95,7 +93,9 @@
  * XInput user 0 alone, as before. Applied at once.
  *
  * Step 91: step 69's draw_distance is gone; a file that still has it loads
- * as if it didn't, without a message.
+ * as if it didn't, without a message. Step 93: so is step 91's preset (low,
+ * standard, high, custom), the same way; every setting it set is still its
+ * own key, with the same default.
  *
  * Step 90 (notes 18.93): msaa*+smaa draws with MSAA and then filters the
  * finished frame with SMAA, which also smooths the alpha-tested edges MSAA
@@ -114,13 +114,6 @@
  * world's opaque draws (d3d_host.c, ao.c) and multiplied into the picture
  * before the game's blended draws, particles and HUD, less in fog;
  * ao_strength scales it. Applied at once.
- *
- * Step 91: presets. low, standard and high each set the render size, the
- * frame rate, the render thread, the adaptive frame rate, anti-aliasing,
- * anisotropic filtering and the render scale together (twoc_preset_apply);
- * custom sets nothing. The file's other keys win on load: the label read is
- * kept only while those settings still are the preset's, else it is custom,
- * and changing any of them in the overlay makes it custom too.
  *
  * The settings overlay (overlay.cpp) shows the values in effect and writes
  * the file back when the player changes one.
@@ -141,7 +134,6 @@ enum { TWOC_AA_OFF, TWOC_AA_FXAA, TWOC_AA_SMAA, TWOC_AA_MSAA2, TWOC_AA_MSAA4, TW
 #define TWOC_RENDER_SCALE_MIN 25        /* step 90: render_scale's range, percent */
 #define TWOC_RENDER_SCALE_MAX 200
 enum { TWOC_RT_OFF, TWOC_RT_ON, TWOC_RT_AUTO, TWOC_RT_COUNT };   /* step 79: the render thread */
-enum { TWOC_PRESET_CUSTOM, TWOC_PRESET_LOW, TWOC_PRESET_STANDARD, TWOC_PRESET_HIGH, TWOC_PRESET_COUNT };  /* step 91 */
 enum { TWOC_AO_OFF, TWOC_AO_SSAO, TWOC_AO_GTAO, TWOC_AO_COUNT };   /* step 92: ambient occlusion */
 #define TWOC_AO_STRENGTH_DEFAULT 100    /* step 92: ao_strength, percent */
 
@@ -169,7 +161,6 @@ typedef struct {
     int render_scale;                   /* step 90: percent of the render size drawn, 25-200 (100 also unset) */
     int pause_unfocused;                /* step 90: 1 the game holds while the window is in the background */
     int fast_title;                     /* step 90: 1 the title animation sped up (from the next start) */
-    int preset;                         /* step 91: TWOC_PRESET_* (custom also unset, or when the settings left it) */
     int ao;                             /* step 92: TWOC_AO_* (off also unset) */
     int ao_strength;                    /* step 92: percent, 0-100 (TWOC_AO_STRENGTH_DEFAULT also unset) */
     int ao_half;                        /* step 92: 1 worked out at half the resolution, upsampled (unset: 0) */
@@ -191,10 +182,6 @@ const char *twoc_aa_name(int aa);       /* the file's word: off, fxaa, smaa, msa
 int twoc_aa_parse(const char *v);       /* TWOC_AA_OFF for anything unknown */
 const char *twoc_rt_name(int rt);       /* step 79: off, on, auto */
 int twoc_rt_parse(const char *v);       /* TWOC_RT_OFF for anything unknown (sync, a check, is on) */
-const char *twoc_preset_name(int p);    /* step 91: custom, low, standard, high */
-int twoc_preset_parse(const char *v);   /* TWOC_PRESET_CUSTOM for anything unknown */
-void twoc_preset_apply(twoc_settings_t *s, int p);          /* the preset's settings into `s` (custom: none) */
-int twoc_preset_matches(const twoc_settings_t *s, int p);   /* `s` has preset p's settings (custom: always) */
 const char *twoc_ao_name(int ao);       /* step 92: off, ssao, gtao */
 int twoc_ao_parse(const char *v);       /* TWOC_AO_OFF for anything unknown */
 int twoc_ao_strength_parse(const char *v);  /* 0-100, TWOC_AO_STRENGTH_DEFAULT unset or unknown */
