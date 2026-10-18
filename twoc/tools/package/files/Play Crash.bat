@@ -32,6 +32,12 @@ if exist run_twoc.err.log (
         if exist run_twoc.power.log move /y run_twoc.power.log "logs\run_%%t.power.log" >nul
     )
 )
+rem A power log left on its own (the DXVK test's launcher moves only the others): by its own time.
+if exist run_twoc.power.log (
+    for /f "usebackq delims=" %%t in (`powershell -NoProfile -Command "(Get-Item 'run_twoc.power.log').LastWriteTime.ToString('yyyy-MM-dd_HH-mm-ss')"`) do (
+        move /y run_twoc.power.log "logs\run_%%t.power.log" >nul
+    )
+)
 
 echo Crash is running. Close the game window to stop it (this window closes with it).
 if defined RECOMP_FRAMERATE echo Frame rate for this run: %RECOMP_FRAMERATE%
