@@ -21,6 +21,7 @@
 # and crash_twoc.ini next to itself, so the folder runs from anywhere. An existing DIR is
 # replaced only with -Force and only if it holds a PACKAGE.txt (one this script made).
 # Build first: cmake --build twoc\build --config Release --parallel
+# Then smoke-test a scratch copy (never the package itself): smoke_test.ps1 (notes 18.91).
 param(
     [string]$Out = (Join-Path ([Environment]::GetFolderPath('Desktop')) 'Crash\LegionGoPackage'),
     [string]$Exe,
