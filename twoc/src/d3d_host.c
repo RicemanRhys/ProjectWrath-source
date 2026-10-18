@@ -328,6 +328,35 @@ static IDXGISwapChain1 *g_flip;
 static IDXGISwapChainMedia *g_media;    /* step 90: g_flip's, for its presentation mode (NULL: none) */
 static int g_media_tried;
 static unsigned g_w, g_h, g_interval;   /* g_w, g_h: the host back buffer */
+/* Step 90 (notes 18.93): the render scale. The host draws at render_scale
+ * percent of the render size (g_w x g_h, the back buffer) and shows it at
+ * the render size (g_vw x g_vh: the window's client and its swap chain),
+ * stretched by the blit; 100 (the default): the two are the same, as
+ * before. Largest side within the device's largest texture. */
+static unsigned g_vw, g_vh;
+static volatile LONG g_rscale = 100;
+#define RSCALE_MAX_TEX 16384u           /* D3D11_REQ_TEXTURE2D_U_OR_V_DIMENSION at feature level 11 */
+
+static void scaled_size(unsigned vw, unsigned vh, int pct, unsigned *w, unsigned *h)
+{
+    double k = pct / 100.0, f;
+
+    if (pct == 100 || !vw || !vh) {
+        *w = vw;
+        *h = vh;
+        return;
+    }
+    *w = 2 * (unsigned)(vw * k / 2.0 + 0.5);
+    *h = (unsigned)(vh * k + 0.5);
+    if (*w > RSCALE_MAX_TEX || *h > RSCALE_MAX_TEX) {
+        f = (double)RSCALE_MAX_TEX / *w < (double)RSCALE_MAX_TEX / *h ? (double)RSCALE_MAX_TEX / *w
+                                                                       : (double)RSCALE_MAX_TEX / *h;
+        *w = 2 * (unsigned)(*w * f / 2.0);
+        *h = (unsigned)(*h * f);
+    }
+    *w = *w < 16 ? 16 : *w;
+    *h = *h < 16 ? 16 : *h;
+}
 static unsigned g_gw, g_gh;             /* the guest back buffer (18.56) */
 static double g_wide;                   /* 18.56: the host picture's width / height if wider than the guest's, else 0 */
 static int g_dpi_aware;                 /* 18.56: the window in real pixels (a render size was asked for) */
@@ -862,7 +891,7 @@ static void dr_tick(HWND hwnd)
 static void fit_window(HWND hwnd)
 {
     RECT w, c, wa;
-    LONG cw = (LONG)g_w, ch = (LONG)g_h, fw, fh, cx, cy;
+    LONG cw = (LONG)g_vw, ch = (LONG)g_vh, fw, fh, cx, cy;
 
     if (g_fs || !SystemParametersInfoA(SPI_GETWORKAREA, 0, &wa, 0))
         return;
@@ -1068,8 +1097,8 @@ static DWORD WINAPI win_thread(LPVOID p)
 
     r.left = 0;
     r.top = 0;
-    r.right = (LONG)g_w;
-    r.bottom = (LONG)g_h;
+    r.right = (LONG)g_vw;          /* step 90: the render size, whatever the render scale */
+    r.bottom = (LONG)g_vh;
     if (g_dpi_aware) {
         /* 18.56: a render size was asked for, so the window's pixels are the
          * monitor's (the process isn't DPI aware, and Windows would scale a
@@ -1281,8 +1310,13 @@ int d3dh_create(unsigned width, unsigned height, unsigned host_w, unsigned host_
     }
     g_gw = width ? width : 640;
     g_gh = height ? height : 480;
-    g_w = host_w ? host_w : g_gw;
-    g_h = host_h ? host_h : g_gh;
+    g_vw = host_w ? host_w : g_gw;
+    g_vh = host_h ? host_h : g_gh;
+    g_rscale = twoc_render_scale_parse(getenv("RECOMP_RENDER_SCALE"));     /* step 90 */
+    scaled_size(g_vw, g_vh, g_rscale, &g_w, &g_h);
+    if (g_rscale != 100)
+        fprintf(stderr, "[D3DB] host render scale %ld%%: drawn at %ux%u, shown at %ux%u\n", g_rscale, g_w, g_h,
+                g_vw, g_vh);
     g_wide = wide;
     g_rwide = wide;
     g_dpi_aware = dpi_aware;
@@ -1346,8 +1380,8 @@ int d3dh_create(unsigned width, unsigned height, unsigned host_w, unsigned host_
         hr = IDXGISwapChain_GetParent(d3d8_GetSwapChain(), &IID_IDXGIFactory2, (void **)&f);
         if (SUCCEEDED(hr)) {
             memset(&sd, 0, sizeof(sd));
-            sd.Width = g_w;
-            sd.Height = g_h;
+            sd.Width = g_vw;   /* step 90: the window shows the render size */
+            sd.Height = g_vh;
             sd.Format = DXGI_FORMAT_R8G8B8A8_UNORM;     /* xbox_d3d8's back buffer format */
             sd.SampleDesc.Count = 1;
             sd.BufferUsage = DXGI_USAGE_RENDER_TARGET_OUTPUT;
@@ -7377,7 +7411,7 @@ static void ic_queue(int on)
 
 static void flip_fit(void)
 {
-    unsigned w = g_fs ? (unsigned)g_client_w : g_w, h = g_fs ? (unsigned)g_client_h - g_fs_buf_short : g_h;
+    unsigned w = g_fs ? (unsigned)g_client_w : g_vw, h = g_fs ? (unsigned)g_client_h - g_fs_buf_short : g_vh;
     HRESULT hr;
 
     REPLAY_SIDE();
@@ -7696,18 +7730,25 @@ static void set_antialiasing(int aa)
                                                        : " (the device takes no MSAA: off)") : "");
 }
 
-void d3dh_resize(unsigned host_w, unsigned host_h, double wide)
+void d3dh_resize(unsigned view_w, unsigned view_h, double wide)
 {
     HRESULT hr;
-    int i;
+    int i, view_changed;
+    unsigned host_w, host_h;
 
     REPLAY_SIDE();
-    if (!g_ready || !host_w || !host_h)
+    if (!g_ready || !view_w || !view_h)
         return;
     EnterCriticalSection(&g_lock);
     g_wide = wide;
+    scaled_size(view_w, view_h, g_rscale, &host_w, &host_h);   /* step 90: the render scale */
+    view_changed = view_w != g_vw || view_h != g_vh;
+    g_vw = view_w;
+    g_vh = view_h;
     if (host_w == g_w && host_h == g_h) {
         LeaveCriticalSection(&g_lock);
+        if (view_changed)
+            PostMessageA(g_hwnd, WM_TWOC_FIT, 0, 0);
         return;
     }
     hr = bb_rebuild(host_w, host_h);
@@ -7724,12 +7765,30 @@ void d3dh_resize(unsigned host_w, unsigned host_h, double wide)
         ID3D11Texture2D_Release(g_staging);
         g_staging = NULL;
     }
-    fprintf(stderr, "[D3DB] host picture %ux%u -> %ux%u (%s)%s\n", g_w, g_h, host_w, host_h,
-            wide > 0 ? "widescreen" : "4:3", g_bb.tex ? ", in a render target of its own" : "");
+    {
+        char sc[64] = "";
+        if (g_rscale != 100 || host_w != view_w || host_h != view_h)
+            snprintf(sc, sizeof(sc), "; render scale %ld%%, shown at %ux%u", g_rscale, view_w, view_h);
+        fprintf(stderr, "[D3DB] host picture %ux%u -> %ux%u (%s)%s%s\n", g_w, g_h, host_w, host_h,
+                wide > 0 ? "widescreen" : "4:3", g_bb.tex ? ", in a render target of its own" : "", sc);
+    }
     g_w = host_w;
     g_h = host_h;
     LeaveCriticalSection(&g_lock);
     PostMessageA(g_hwnd, WM_TWOC_FIT, 0, 0);
+}
+
+/* Step 90: the render scale, live (the host side's part of a settings
+ * change): the back buffer made again at that share of the render size. */
+void d3dh_set_render_scale(int pct)
+{
+    REPLAY_SIDE();
+    pct = pct < TWOC_RENDER_SCALE_MIN ? TWOC_RENDER_SCALE_MIN : pct > TWOC_RENDER_SCALE_MAX ? TWOC_RENDER_SCALE_MAX : pct;
+    if (pct == g_rscale)
+        return;
+    InterlockedExchange(&g_rscale, pct);
+    fprintf(stderr, "[OVL] render scale: %d%%\n", pct);
+    d3dh_resize(g_vw, g_vh, g_wide);
 }
 
 /* The overlay's UI scale: the swap chain's pixels per client pixel, times
@@ -7797,6 +7856,8 @@ static void sq_apply_host(const twoc_settings_t *was, const twoc_settings_t *s)
         d3dh_set_interp_adaptive(s->adaptive);
         fprintf(stderr, "[OVL] adaptive frame rate: %s\n", s->adaptive ? "on" : "off");
     }
+    if (s->render_scale != was->render_scale)  /* step 90: the size drawn, the shown one kept */
+        d3dh_set_render_scale(s->render_scale);
     if (g_apply_host && (s->widescreen != was->widescreen || s->wide_w != was->wide_w || s->wide_h != was->wide_h ||
                          strcmp(s->render_size, was->render_size) != 0 || s->pacing != was->pacing ||
                          s->framerate != was->framerate))
@@ -7845,7 +7906,7 @@ static void overlay_apply(twoc_settings_t *was, const twoc_settings_t *s)
         s->antialiasing != was->antialiasing || s->framerate != was->framerate || s->adaptive != was->adaptive ||
         s->widescreen != was->widescreen || s->wide_w != was->wide_w || s->wide_h != was->wide_h ||
         strcmp(s->render_size, was->render_size) != 0 || s->pacing != was->pacing ||
-        s->draw_distance != was->draw_distance)
+        s->draw_distance != was->draw_distance || s->render_scale != was->render_scale)
         sq_push(was, s);                /* step 78 */
     if (s->hud != was->hud || s->hud_margin != was->hud_margin) {   /* step 65: from the next overlay pass */
         d3dh_set_hud(s->hud, s->hud_margin);
@@ -8022,6 +8083,8 @@ static int ovl_draw(ID3D11Texture2D *dst, int running)
     memset(&in, 0, sizeof(in));
     in.host_w = g_w;
     in.host_h = g_h;
+    in.view_w = g_vw;                   /* step 90 */
+    in.view_h = g_vh;
     in.guest_w = g_gw;
     in.guest_h = g_gh;
     in.display_hz = d3dh_display_hz();
@@ -8896,6 +8959,8 @@ static void trigger_file(unsigned swap_no)
                 ts.render_thread = twoc_rt_parse(v);
             } else if (strcmp(k, "showfps") == 0) {         /* step 82 */
                 ts.show_fps = atoi(v) != 0;
+            } else if (strcmp(k, "scale") == 0) {           /* step 90: render_scale */
+                ts.render_scale = twoc_render_scale_parse(v);
             } else {
                 fprintf(stderr, "[D3DB] trigger file: set %s: not a setting here\n", k);
             }

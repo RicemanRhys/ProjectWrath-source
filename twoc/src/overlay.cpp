@@ -763,7 +763,40 @@ static int tab_display(twoc_settings_t *s, const ovl_info_t *in)
         more("The size the host draws the game at; the game itself draws 640x480. The picture is the largest "
              "of its aspect ratio that fits. A window opened without a render size is "
              "scaled by Windows until the next start; fullscreen is unaffected.");
-        snprintf(line, sizeof(line), "Now %ux%u.", in->host_w, in->host_h);
+        snprintf(line, sizeof(line), "Now %ux%u.", in->view_w ? in->view_w : in->host_w,
+                 in->view_h ? in->view_h : in->host_h);
+        help(line);
+    }
+    {   /* step 90: the render scale, a share of the render size */
+        static const int sc[] = { 25, 50, 67, 75, 85, 100, 125, 150, 175, 200 };
+        int n = (int)(sizeof(sc) / sizeof(sc[0])), cur = -1;
+        char lbl[32];
+        for (i = 0; i < n; i++)
+            if (sc[i] == s->render_scale)
+                cur = i;
+        snprintf(buf, sizeof(buf), "%d%%%s", s->render_scale, s->render_scale == 100 ? " (the render size)" : "");
+        ImGui::SetNextItemWidth(ImGui::GetFontSize() * 12);
+        if (ImGui::BeginCombo("Render scale", buf)) {
+            if (cur < 0)                /* another percentage, from the command line or the file */
+                ImGui::Selectable(buf, true);
+            for (i = 0; i < n; i++) {
+                snprintf(lbl, sizeof(lbl), "%d%%%s", sc[i], sc[i] == 100 ? " (the render size)" : "");
+                if (ImGui::Selectable(lbl, i == cur) && i != cur) {
+                    s->render_scale = sc[i];
+                    r |= OVL_CHANGED;
+                }
+            }
+            ImGui::EndCombo();
+        }
+        more("Draws the picture at this share of the render size and shows it at the render size. Under 100% "
+             "the graphics card has less to draw (a handheld on battery: softer, cooler); over 100% it draws "
+             "more pixels than are shown and scales them down (supersampling: smoother edges, at a cost). Works "
+             "with anti-aliasing and the frame rate. Applied at once.");
+        if (in->view_w && (in->view_w != in->host_w || in->view_h != in->host_h))
+            snprintf(line, sizeof(line), "Now: drawn at %ux%u, shown at %ux%u.", in->host_w, in->host_h,
+                     in->view_w, in->view_h);
+        else
+            snprintf(line, sizeof(line), "Now: drawn at the render size, %ux%u.", in->host_w, in->host_h);
         help(line);
     }
 

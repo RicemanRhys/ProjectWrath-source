@@ -24,6 +24,8 @@ static const key_t_ g_fixed[] = {
     { "anisotropy", "RECOMP_ANISOTROPY", "1 (the game's filtering), 2, 4, 8 or 16" },
     { "antialiasing", "RECOMP_ANTIALIASING",
       "off, fxaa, smaa, msaa2x, msaa4x, msaa8x, or msaa2x+smaa, msaa4x+smaa, msaa8x+smaa (MSAA, then SMAA)" },
+    { "render_scale", "RECOMP_RENDER_SCALE",
+      "25-200: percent of the render size the picture is drawn at (under 100 lighter, over 100 supersampled)" },
     { "framerate", "RECOMP_FRAMERATE",
       "60 (the game's), display (interpolated frames at the display's rate) or a rate in Hz (90, 120, 144, 165,"
       " 180, 240: interpolated, shown evenly where the display can)" },
@@ -174,6 +176,17 @@ int twoc_aa_post(int aa)
 {
     return aa == TWOC_AA_FXAA ? TWOC_AA_FXAA
            : aa == TWOC_AA_SMAA || aa >= TWOC_AA_MSAA2_SMAA ? TWOC_AA_SMAA : TWOC_AA_OFF;
+}
+
+int twoc_render_scale_parse(const char *v)
+{
+    int p;
+
+    if (!v || !*v)
+        return 100;
+    p = atoi(v);
+    return p <= 0 ? 100 : p < TWOC_RENDER_SCALE_MIN ? TWOC_RENDER_SCALE_MIN
+           : p > TWOC_RENDER_SCALE_MAX ? TWOC_RENDER_SCALE_MAX : p;
 }
 
 /* Step 79: render_thread = off | on | auto (1 and 0 read too; sync, a check
@@ -357,6 +370,7 @@ void twoc_settings_current(twoc_settings_t *s)
     v = getenv("RECOMP_KEYBOARD");
     s->keyboard = !(v && strcmp(v, "0") == 0);
     s->controller_input = pads_mode_parse(getenv("RECOMP_CONTROLLER_INPUT"));
+    s->render_scale = twoc_render_scale_parse(getenv("RECOMP_RENDER_SCALE"));     /* step 90 */
     keys_init();
     controls_default_pad(&s->controls);
     controls_default_keys(&s->controls);
@@ -423,6 +437,8 @@ static void key_text(const twoc_settings_t *s, size_t i, char *buf, size_t cap)
         snprintf(buf, cap, "%d", s->pause ? 1 : 0);
     else if (strcmp(k, "keyboard") == 0)
         snprintf(buf, cap, "%d", s->keyboard ? 1 : 0);
+    else if (strcmp(k, "render_scale") == 0 && s->render_scale != 100)
+        snprintf(buf, cap, "%d", s->render_scale);     /* step 90: 100, 1 and 0, the defaults: unwritten */
     else if (strcmp(k, "controller_input") == 0 && s->controller_input != PADS_SDL)
         snprintf(buf, cap, "%s", pads_mode_name(s->controller_input));     /* sdl, the default: unwritten */
     else if (i >= K_PAD) {              /* a binding: written only when it isn't the default */

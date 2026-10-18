@@ -44,6 +44,8 @@ typedef struct {
     double game_ups, shown_fps;         /* ... the game's updates (guest swaps) and the frames presented a second */
     unsigned pad;                       /* step 82: port 0's pad (OVL_PAD_*, pads.h; 0: none), for navigation */
     short pad_lx, pad_ly;               /* ... its left stick */
+    unsigned view_w, view_h;            /* step 90: the size it is shown at (the render size); host_w x host_h
+                                         * is that times the render scale */
 } ovl_info_t;
 
 enum { OVL_CHANGED = 1, OVL_CLOSE = 2 };

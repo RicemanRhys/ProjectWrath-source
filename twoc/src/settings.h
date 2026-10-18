@@ -15,6 +15,8 @@
  *   anisotropy  = 1 | 2 | 4 | 8 | 16          RECOMP_ANISOTROPY (1: the game's own filtering)
  *   antialiasing = off | fxaa | smaa | msaa2x | msaa4x | msaa8x    RECOMP_ANTIALIASING (unset: off)
  *                | msaa2x+smaa | msaa4x+smaa | msaa8x+smaa        (step 90: MSAA, then SMAA on the frame)
+ *   render_scale = 25-200                     RECOMP_RENDER_SCALE (step 90: percent of the render size the
+ *                                             picture is drawn at; unset: 100)
  *   framerate   = 60 | display | N            RECOMP_FRAMERATE (unset: 60; step 77: N a rate in Hz)
  *   adaptive_framerate = 0 | 1                RECOMP_FRAMERATE_ADAPTIVE (unset: on; step 75. The old
  *                                             name RECOMP_D3D_BRIDGE_INTERP_ADAPT still reads)
@@ -106,6 +108,8 @@ enum { TWOC_PACING_AUTO, TWOC_PACING_VSYNC, TWOC_PACING_LIMITER, TWOC_PACING_LIM
 enum { TWOC_AA_OFF, TWOC_AA_FXAA, TWOC_AA_SMAA, TWOC_AA_MSAA2, TWOC_AA_MSAA4, TWOC_AA_MSAA8,
        TWOC_AA_MSAA2_SMAA, TWOC_AA_MSAA4_SMAA, TWOC_AA_MSAA8_SMAA,     /* step 90: MSAA, then SMAA on the frame */
        TWOC_AA_COUNT };
+#define TWOC_RENDER_SCALE_MIN 25        /* step 90: render_scale's range, percent */
+#define TWOC_RENDER_SCALE_MAX 200
 enum { TWOC_RT_OFF, TWOC_RT_ON, TWOC_RT_AUTO, TWOC_RT_COUNT };   /* step 79: the render thread */
 
 typedef struct {
@@ -130,6 +134,7 @@ typedef struct {
     int pause;                          /* 1: the overlay holds the game (also when unset), 0: it runs */
     int keyboard;                       /* 1: the keyboard plays too (also when unset), 0: not */
     int controller_input;               /* step 70: PADS_SDL (also when unset) or PADS_XINPUT_ONLY */
+    int render_scale;                   /* step 90: percent of the render size drawn, 25-200 (100 also unset) */
     twoc_controls_t controls;           /* the controller map and the key bindings */
 } twoc_settings_t;
 
@@ -150,6 +155,7 @@ const char *twoc_rt_name(int rt);       /* step 79: off, on, auto */
 int twoc_rt_parse(const char *v);       /* TWOC_RT_OFF for anything unknown (sync, a check, is on) */
 unsigned twoc_aa_samples(int aa);       /* MSAA's samples a pixel; 1 for the others */
 int twoc_aa_post(int aa);               /* step 90: the filter on the finished frame: TWOC_AA_FXAA, _SMAA or _OFF */
+int twoc_render_scale_parse(const char *v);     /* step 90: 25-200, 100 unset or unknown */
 
 /* host_audio.cpp: the process's volume in Windows' mixer (its audio session),
  * 0-100, set on a short-lived thread of its own. */

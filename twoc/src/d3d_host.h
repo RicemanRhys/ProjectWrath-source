@@ -340,8 +340,11 @@ void d3dh_record_wide(double wide);
 /* The host picture at a new size and aspect (`wide` as for d3dh_create).
  * From the first change on, a host render target of that size stands in for
  * xbox_d3d8's back buffer, whose size is fixed; screen-sized render targets
- * are made again at their next use. */
+ * are made again at their next use. Step 90: the size shown (the render
+ * size); the picture is drawn at the render scale's share of it. */
 void d3dh_resize(unsigned host_w, unsigned host_h, double wide);
+/* Step 90: the render scale, 25-200 percent of the render size, at once. */
+void d3dh_set_render_scale(int pct);
 /* New pacing, as d3dh_create's `interval` and `frame_hz`. */
 void d3dh_set_pacing(unsigned interval, double frame_hz);
 /* Step 63: why the pacing about to be set (d3dh_create, d3dh_set_pacing)
