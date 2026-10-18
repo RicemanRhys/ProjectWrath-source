@@ -18,6 +18,9 @@ set RECOMP_AC97_READY=1
 set RECOMP_D3D_BRIDGE=1
 set RECOMP_PB_EXEC=
 set RECOMP_WATCHDOG_SECS=
+rem The power log (notes 18.94): Windows' power mode, the plan, the CPU's speed and a temperature,
+rem also written to this file line by line straight to the disk, so it survives the PC crashing.
+set RECOMP_POWER_LOG=run_twoc.power.log
 
 rem The log of the run before is kept in logs\, named by the time it ended.
 if not exist logs mkdir logs
@@ -26,6 +29,7 @@ if exist run_twoc.err.log (
         move /y run_twoc.err.log "logs\run_%%t.err.log" >nul
         if exist run_twoc.out.log move /y run_twoc.out.log "logs\run_%%t.out.log" >nul
         if exist xbox_kernel.log move /y xbox_kernel.log "logs\run_%%t.kernel.log" >nul
+        if exist run_twoc.power.log move /y run_twoc.power.log "logs\run_%%t.power.log" >nul
     )
 )
 

@@ -111,6 +111,7 @@
 #include "d3d_bridge.h"
 #include "d3d_host.h"
 #include "log_block.h"
+#include "power_log.h"
 
 /* ── Guest D3D layout (notes 18.31, step29_option_b_plan.md section 1) ── */
 
@@ -243,6 +244,12 @@ static void cen_addf(uint64_t n, const char *fmt, ...)
 static double now_s(void)
 {
     return (GetTickCount64() - g_t0_ms) / 1000.0;
+}
+
+/* Step 91: the power log's view of the game (power_log.h). */
+static unsigned power_frame_counter(void)
+{
+    return MEM32(GAME_FRAME_COUNTER);
 }
 
 /* One-off event line, at most `max` per tag counter. */
@@ -730,6 +737,10 @@ void d3db_init(void)
                 g_psprobe ? "; pixel-shader probe" : "", g_texcheck ? "; P8 texture check" : "");
     if (d3db_census_on)
         fprintf(stderr, "[D3DB] census on: a [D3DB] c block every %d s\n", CEN_PERIOD_MS / 1000);
+    if (d3db_host_on) {                 /* step 91: the power mode and the CPU's speed, on a thread of its own */
+        power_log_hooks_t h = { power_frame_counter, now_s };
+        power_log_start(&h);
+    }
 }
 
 /* ── The mirror (S2) ────────────────────────────────────────── */
@@ -4998,26 +5009,11 @@ static void mirror_swap(void)
                     st.clears, st.clears_colour, st.clears_depth, st.clears_partial_colour,
                     (long)g_clears_other_rt, (long)g_nolock, (long)g_interleaved, (long)g_d3dx_draws,
                     st.dumps, st.present_fails, st.present_status);
-            {   /* step 82: plugged in or on battery (a handheld slows on battery, notes 18.84) */
-                SYSTEM_POWER_STATUS ps;
-                char pw[160];
-                int pn = 0;
-                if (!GetSystemPowerStatus(&ps))
-                    pn = snprintf(pw, sizeof(pw), "unknown (GetSystemPowerStatus failed)");
-                else {
-                    pn = snprintf(pw, sizeof(pw), "%s", ps.ACLineStatus == 1 ? "plugged in"
-                                                        : ps.ACLineStatus == 0 ? "on battery" : "power source unknown");
-                    if (ps.BatteryFlag & 128)
-                        pn += snprintf(pw + pn, sizeof(pw) - pn, ", no battery");
-                    else if (ps.BatteryLifePercent <= 100)
-                        pn += snprintf(pw + pn, sizeof(pw) - pn, ", battery %u%%%s", ps.BatteryLifePercent,
-                                       ps.BatteryFlag != 255 && (ps.BatteryFlag & 8) ? " (charging)" : "");
-                    if (ps.ACLineStatus == 0 && ps.BatteryLifeTime != (DWORD)-1)
-                        pn += snprintf(pw + pn, sizeof(pw) - pn, ", about %lu min left",
-                                       (unsigned long)(ps.BatteryLifeTime / 60));
-                    if (ps.SystemStatusFlag & 1)
-                        pn += snprintf(pw + pn, sizeof(pw) - pn, ", battery saver on");
-                }
+            {   /* step 82: plugged in or on battery (a handheld slows on battery, notes 18.84); step 91: the
+                 * power mode, the plan, the CPU's speed and a temperature, read by the power log's thread */
+                char pw[1024];
+                power_log_game((n - last_swaps) / dt);
+                power_log_interval(pw, sizeof(pw));
                 log_block_printf(&lb, "[D3DB] host power: %s\n", pw);
             }
             if (st.paced)       /* S7: the frame limiter */
@@ -5239,6 +5235,8 @@ static void mirror_swap(void)
                                  " replay side %.2f)\n", steps, st.interp_adapt_changes - lc, fr,
                                  fr ? (st.interp_adapt_dt - ldt) / fr : 0.0, fr ? (st.interp_adapt_busy - lbu) / fr : 0.0,
                                  fr ? (st.interp_adapt_game - lga) / fr : 0.0, fr ? (st.interp_adapt_replay - lre) / fr : 0.0);
+                if (fr)                 /* step 91: for the power log's change lines */
+                    power_log_thread_ms((st.interp_adapt_game - lga) / fr, (st.interp_adapt_replay - lre) / fr);
                 memcpy(la, st.interp_at, sizeof(la));
                 lc = st.interp_adapt_changes;
                 lfr = st.interp_adapt_frames;

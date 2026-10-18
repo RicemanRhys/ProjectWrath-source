@@ -106,6 +106,9 @@ set(GAME_SOURCES
     # The save's backups and the game files' check at the start (notes 18.86)
     src/saves.c
     src/gamefiles.c
+    # The power mode and the CPU's speed, logged from a thread of its own (step 91);
+    # powrprof.dll and pdh.dll load at run time, so the exe imports nothing new
+    src/power_log.c
     # Vulkan, stage 1: a probe behind RECOMP_VULKAN=probe (notes 18.89); volk loads
     # vulkan-1.dll at run time, so the exe imports nothing new
     src/vk_probe.c

@@ -1,6 +1,7 @@
-# Collect logs.bat (Legion Go package, twoc/tools/package): zips the game's logs, the settings,
-# the tester's notes, a system summary (CPU, GPU, Windows, power, the display's modes and refresh
-# rate) and vrrprobe's display test into LegionGo_logs_<time>.zip next to "Play Crash.bat".
+# Collect logs.bat (Legion Go package, twoc/tools/package): zips the game's logs (with the power
+# logs, notes 18.94), the settings, the tester's notes, a system summary (CPU, GPU, Windows, power,
+# the display's modes and refresh rate), the System log's crash and power events (events.txt) and
+# vrrprobe's display test into LegionGo_logs_<time>.zip next to "Play Crash.bat".
 # Windows PowerShell 5.1; ASCII only (5.1 reads a script without a BOM as the ANSI code page).
 $ErrorActionPreference = 'Continue'
 $pkg   = Split-Path -Parent $PSScriptRoot
@@ -66,7 +67,7 @@ if ($game.Count) {
 Write-Host "Collecting into $zip ..."
 
 # 1. The game's files: the last run's logs, the earlier runs' (logs\), the settings, the notes.
-foreach ($f in 'run_twoc.err.log', 'run_twoc.out.log', 'xbox_kernel.log', 'crash_twoc.ini', 'Test notes.txt', 'PACKAGE.txt') {
+foreach ($f in 'run_twoc.err.log', 'run_twoc.out.log', 'xbox_kernel.log', 'run_twoc.power.log', 'crash_twoc.ini', 'Test notes.txt', 'PACKAGE.txt') {
     $p = Join-Path $pkg $f
     if (Test-Path -LiteralPath $p) { Copy-Item -LiteralPath $p -Destination $work }
 }
@@ -127,6 +128,40 @@ try {
     }
 } catch { Add "process list failed: $_" }
 $sys | Set-Content -Encoding UTF8 (Join-Path $work 'system.txt')
+
+# 2b. Step 91 (notes 18.94): the System log's crash, power and display-driver events from the last
+#     3 days, newest first, and the active power plan, in events.txt.
+$ev = New-Object System.Collections.Generic.List[string]
+$ev.Add("Collected $(Get-Date -Format 'yyyy-MM-dd HH:mm:ss zzz'). System log events of the last 3 days (wevtutil; its dates are UTC), newest first:")
+$ev.Add('  Kernel-Power 41: Windows started again without a clean shutdown (a crash, a hang, power lost);')
+$ev.Add('  EventLog 6008: the shutdown before was unexpected; BugCheck 1001: a blue screen and its code;')
+$ev.Add('  source Display (4101: the display driver stopped responding and recovered).')
+$ev.Add('')
+try {
+    $q = "*[System[((Provider[@Name='Microsoft-Windows-Kernel-Power'] and EventID=41) or " +
+         "(Provider[@Name='EventLog'] and EventID=6008) or " +
+         "(EventID=1001 and (Provider[@Name='Microsoft-Windows-WER-SystemErrorReporting'] or Provider[@Name='BugCheck'])) or " +
+         "Provider[@Name='Display'] or EventID=4101) and TimeCreated[timediff(@SystemTime) <= 259200000]]]"
+    $r = @(& wevtutil.exe qe System "/q:$q" /f:text /rd:true 2>&1 | ForEach-Object { "$_" })
+    if ($r.Count) { foreach ($l in $r) { $ev.Add($l) } } else { $ev.Add('(no such events)') }
+} catch { $ev.Add("wevtutil failed: $_") }
+# Kernel-Power 41's own fields tell a blue screen (BugcheckCode not 0) from a hang ended with the
+# power button (LongPowerButtonPressDetected) or power lost.
+try {
+    $k41 = @(Get-WinEvent -FilterHashtable @{ LogName = 'System'; ProviderName = 'Microsoft-Windows-Kernel-Power'; Id = 41;
+                                              StartTime = (Get-Date).AddDays(-3) } -ErrorAction Stop)
+    $ev.Add('')
+    $ev.Add('== Kernel-Power 41, each with its data (local time) ==')
+    foreach ($e in $k41) {
+        $x = [xml]$e.ToXml()
+        $d = @($x.Event.EventData.Data | ForEach-Object { "$($_.Name)=$($_.'#text')" }) -join ', '
+        $ev.Add("$($e.TimeCreated.ToString('yyyy-MM-dd HH:mm:ss')): $d")
+    }
+} catch { $ev.Add(''); $ev.Add("Kernel-Power 41 in the last 3 days: none ($($_.Exception.Message))") }
+$ev.Add('')
+$ev.Add('== powercfg /getactivescheme ==')
+try { foreach ($l in @(& powercfg.exe /getactivescheme 2>&1)) { $ev.Add("$l") } } catch { $ev.Add("powercfg failed: $_") }
+$ev | Set-Content -Encoding UTF8 (Join-Path $work 'events.txt')
 
 # 3. vrrprobe: the display as it describes itself (modes, rotation, scale, EDID range), then
 #    two short tests of how frames presented at 90 fps reach the screen (a grey screen with a

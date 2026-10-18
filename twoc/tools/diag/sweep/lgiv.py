@@ -6,7 +6,8 @@ EV = re.compile(r'host (swap chain|frame rate plan|picture|device \d|interpolati
                 r'interpolation: [\d.]+ fps, |: the display released|: vsync pacing again|baked draws: o)|watchdog|\[OVL\]|\[BAT\]|'
                 r'\[VK\]|CRASH\]|THREADCHECK|RECOMP_FRAMERATE|ack thread|\[XPP\] Start|\[CFG\] (settings written|render|framerate|full|adapt)|'
                 r'\[DEV\] main menu|present fails [1-9]|\[SAVE\]|\[FILES\]|startup message|overlay ready|'
-                r'host window|host display|presentation mode:|the game holds|the game goes on|swap chain made again')
+                r'host window|host display|presentation mode:|the game holds|the game goes on|swap chain made again|'
+                r'\[POWER\] .*(change|sampling|no temperature)')
 
 
 def run(p):
@@ -32,7 +33,22 @@ def run(p):
             continue
         m = re.search(r'host power: (.*)', l)
         if m:
-            cur['pw'] = m.group(1).replace('plugged in, battery ', 'AC ').replace('on battery, battery ', 'BAT ')
+            pw = m.group(1).split(';')[0].replace('plugged in, battery ', 'AC ').replace('on battery, battery ', 'BAT ')
+            # step 91 (notes 18.94): the power mode, the CPU's average MHz (% of its rated) and the temperature
+            mm = re.search(r'power mode ([^(;]+?) \(', m.group(1))
+            if mm:
+                pw += ' ' + {'Best power efficiency': 'eff', 'Balanced': 'bal', 'Better performance': 'better',
+                             'Best performance': 'best'}.get(mm.group(1), mm.group(1))
+            mm = re.search(r'CPU (\d+) MHz on average over \d+ readings \((\d+)-(\d+)\), (\d+)% of', m.group(1))
+            if mm:
+                pw += ' %sMHz(%s-%s)%s%%' % mm.groups()
+            mm = re.search(r'; ([\d.]+) C \(', m.group(1))
+            if mm:
+                pw += ' %sC' % mm.group(1)
+            mm = re.search(r'the battery delivering ([\d.]+) W', m.group(1))
+            if mm:
+                pw += ' %sW' % mm.group(1)
+            cur['pw'] = pw
         m = re.search(r'swap gaps this interval: over 25 ms (\d+), over 50 ms (\d+), over 100 ms (\d+), longest ([\d.]+)', l)
         if m:
             cur['gaps'] = '%s/%s/%s %s' % m.groups()
