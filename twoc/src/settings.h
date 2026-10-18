@@ -179,8 +179,11 @@ void twoc_settings_current(twoc_settings_t *s);
  * title, anisotropy, anti-aliasing, ambient occlusion, the HUD. Fullscreen,
  * the aspect ratio, audio, controls and saves are left as they are. */
 void twoc_settings_display_defaults(twoc_settings_t *s);
-/* Write `s` to crash_twoc.ini. Returns 0 on success. */
+/* Write `s` to crash_twoc.ini. Returns 0 on success, 1 when the file is
+ * ignored this run (step 93: RECOMP_IGNORE_INI, the safe settings: the
+ * file is neither read nor written), -1 when it couldn't be written. */
 int twoc_settings_save(const twoc_settings_t *s);
+int twoc_settings_ignored(void);
 const char *twoc_settings_path(void);
 const char *twoc_pacing_name(int pacing);
 int twoc_pacing_parse(const char *v);   /* TWOC_PACING_AUTO for anything unknown */

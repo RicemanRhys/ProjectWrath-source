@@ -362,9 +362,18 @@ static int retired(const char *k)
     return 0;
 }
 
+/* Step 93: RECOMP_IGNORE_INI=1 (the package's safe-settings launcher): the
+ * file is neither read nor written this run, so every setting is its
+ * default unless the launcher set its variable. */
+int twoc_settings_ignored(void)
+{
+    const char *v = getenv("RECOMP_IGNORE_INI");
+    return v && *v && strcmp(v, "0") != 0;
+}
+
 void twoc_settings_load(void)
 {
-    FILE *f = fopen(twoc_settings_path(), "r");
+    FILE *f;
     char line[256];
     int lineno = 0;
 
@@ -374,6 +383,13 @@ void twoc_settings_load(void)
         if (old && *old && !getenv("RECOMP_FRAMERATE_ADAPTIVE"))
             _putenv_s("RECOMP_FRAMERATE_ADAPTIVE", old);
     }
+    if (twoc_settings_ignored()) {      /* step 93: the safe settings */
+        fprintf(stderr, "[CFG] RECOMP_IGNORE_INI: %s not read, and not written this run (safe settings)\n",
+                twoc_settings_path());
+        twoc_settings_current(&g_start);
+        return;
+    }
+    f = fopen(twoc_settings_path(), "r");
     if (!f)
         return;                         /* no file: nothing set, the run as before */
     fprintf(stderr, "[CFG] settings from %s\n", twoc_settings_path());
@@ -621,10 +637,15 @@ static void key_text(const twoc_settings_t *s, size_t i, char *buf, size_t cap)
 
 int twoc_settings_save(const twoc_settings_t *s)
 {
-    FILE *f = fopen(twoc_settings_path(), "w");
+    FILE *f;
     size_t i;
     int bindings = 0;
 
+    if (twoc_settings_ignored()) {      /* step 93: the safe settings never write it */
+        fprintf(stderr, "[CFG] RECOMP_IGNORE_INI: %s not written (safe settings)\n", twoc_settings_path());
+        return 1;
+    }
+    f = fopen(twoc_settings_path(), "w");
     keys_init();
     if (!f) {
         fprintf(stderr, "[CFG] %s not written\n", twoc_settings_path());

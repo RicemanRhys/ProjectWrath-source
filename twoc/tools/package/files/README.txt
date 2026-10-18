@@ -41,6 +41,10 @@ What's in the folder
   Play Crash (fullscreen old way).bat        full screen at once, as the last package did,
                                   with only the new recovery to unfreeze it (the first
                                   test's comparison, optional)
+  Play Crash (safe settings).bat  starts the game with every setting at its default, in a
+                                  window, without reading or writing crash_twoc.ini (the
+                                  settings menu says so while it is on). If the game won't
+                                  start after a settings change, use this.
   Play Crash (72 fps test).bat    starts the game at 72 fps (an optional test)
   Play Crash (ack wait test).bat  an optional test: starts the game with the "ack wait"
                                   switch on (part C says what it is)
@@ -327,6 +331,9 @@ If something goes wrong
   the game looks for game_files\ in the wrong folder: use the .bat.
 - "Crash can't write to its save folder": copy the package somewhere you can write to
   (not C:\Program Files), or delete game_files\UDATA (the copies in UDATA_backups stay).
+- If the game won't start after a settings change, use "Play Crash (safe settings).bat": every
+  setting at its default, in a window, and crash_twoc.ini neither read nor changed. Then put
+  the setting back in crash_twoc.ini (or delete the file) and start "Play Crash.bat" again.
 - The game window opens and closes at once: run "Collect logs.bat" and bring the zip back.
 - A black screen or a crash at the start on the Legion Go only: the same; the log says
   which step failed.

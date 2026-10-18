@@ -44,6 +44,7 @@ if defined RECOMP_FRAMERATE echo Frame rate for this run: %RECOMP_FRAMERATE%
 if defined RECOMP_NV2A_ACK_WAIT echo Ack wait test for this run: %RECOMP_NV2A_ACK_WAIT% us
 if "%RECOMP_D3D_BRIDGE_BAKE%"=="0" echo Baked draws off for this run (the comparison)
 if defined RECOMP_VULKAN echo Vulkan probe for this run: a second window, [VK] lines in the log
+if defined RECOMP_IGNORE_INI echo Safe settings for this run: every setting at its default, crash_twoc.ini not read or written
 rem By its full path: cmd doesn't look in the current folder when NoDefaultCurrentDirectoryInExePath is set.
 "%~dp0crash_twoc.exe" >run_twoc.out.log 2>run_twoc.err.log
 set code=%errorlevel%

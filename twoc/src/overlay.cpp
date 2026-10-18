@@ -1398,6 +1398,13 @@ static int build(twoc_settings_t *s, const ovl_info_t *in, float room)
 {
     int r = 0;
 
+    if (twoc_settings_ignored()) {      /* step 93: the safe-settings launcher */
+        ImGui::PushTextWrapPos(ImGui::GetContentRegionAvail().x + ImGui::GetCursorPosX());
+        ImGui::TextColored(ImVec4(1.0f, 0.8f, 0.3f, 1.0f), "Safe settings: crash_twoc.ini is ignored this run and "
+                           "won't be written. Every setting starts at its default; changes here last until the "
+                           "game closes. Start the game the usual way for your own settings again.");
+        ImGui::PopTextWrapPos();
+    }
     {
         bool p = s->pause != 0;
         if (ImGui::Checkbox("Pause the game while this menu is open", &p)) {

@@ -8431,12 +8431,16 @@ static void ovl_end(void)
     g_ovs.active = 0;
     InterlockedIncrement(&g_ovl_closes);        /* before the gate opens: it masks what is held */
     InterlockedExchange(&g_ovl_session, 0);
-    if (g_ovs.dirty)
-        g_ovs.note = twoc_settings_save(&g_ovs.s) == 0 ? "Saved to crash_twoc.ini." : "crash_twoc.ini couldn't be written.";
+    if (g_ovs.dirty) {
+        int sv = twoc_settings_save(&g_ovs.s);
+        g_ovs.note = sv == 0 ? "Saved to crash_twoc.ini." : sv > 0 ? "Not saved: safe settings (crash_twoc.ini is ignored this run)."
+                                                           : "crash_twoc.ini couldn't be written.";
+    }
     QueryPerformanceCounter(&now);
     fprintf(stderr, "[OVL] settings closed after %.1f s (%u overlay frames)%s\n",
             (double)(now.QuadPart - g_ovs.t0.QuadPart) / (double)g_ovs.freq.QuadPart, g_ovs.frames,
-            g_ovs.dirty ? "; settings saved" : "");
+            !g_ovs.dirty ? "" : twoc_settings_ignored() ? "; settings changed, not saved (safe settings)"
+                                                        : "; settings saved");
 }
 
 /* One overlay frame over what `dst` (the visible swap chain's buffer) holds.
@@ -8491,7 +8495,9 @@ static int ovl_draw(ID3D11Texture2D *dst, int running)
         ic_why(why, sizeof(why));
         in.interp_why = why;
     }
-    in.save_note = g_ovs.dirty ? "Saved to crash_twoc.ini when you resume." : g_ovs.note;
+    in.save_note = g_ovs.dirty ? (twoc_settings_ignored() ? "Safe settings: not saved when you resume."
+                                                          : "Saved to crash_twoc.ini when you resume.")
+                               : g_ovs.note;
     if (SUCCEEDED(ID3D11Device_CreateRenderTargetView(d3d8_GetD3D11Device(), (ID3D11Resource *)dst, NULL, &rtv)))
         r = ovl_frame(rtv, g_buf_w, g_buf_h, overlay_scale(),
                       (float)((double)(now.QuadPart - g_ovs.last.QuadPart) / (double)g_ovs.freq.QuadPart),

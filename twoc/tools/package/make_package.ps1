@@ -13,6 +13,7 @@
 #   files\: Play Crash.bat, Play Crash (72 fps test).bat, Play Crash (ack wait test).bat,
 #     Play Crash (bake off).bat, Play Crash (Vulkan probe).bat (notes 18.90),
 #     Play Crash (fullscreen start test).bat, Play Crash (fullscreen old way).bat (notes 18.93),
+#     Play Crash (safe settings).bat (notes 18.96: RECOMP_IGNORE_INI=1, the defaults, the ini untouched),
 #     Collect logs.bat, crash_twoc.ini (the Legion Go's settings), README.txt, Test notes.txt
 #     (text files written with CRLF line ends)
 #   PACKAGE.txt: the build (commits, exe hash, link-time code generation), the imported DLLs and
