@@ -56,6 +56,9 @@ static int g_tab_cur, g_tab_want = -1;
 #define N_TABS 4                        /* Display, Audio, Controls, Saves (step 83) */
 #define TWOC_FAST_TITLE_SAVES "20 seconds" /* step 90: the menu at 5.9 s from the launch instead of 27.6 */
 static int g_sv_shown;                  /* step 83: the Saves tab shown since the overlay opened */
+#define RESET_ASK "Reset the Display settings?"     /* step 93: the reset button's question */
+static bool g_reset_shut;               /* step 93: the overlay opened again: the question isn't left open */
+static bool g_reset_open;               /* ... the question is up (last frame) */
 
 static void capture_end(void)
 {
@@ -107,6 +110,8 @@ static int pad_nav(const ovl_info_t *in)
         if (press & OVL_PAD_B)
             r |= OVL_CLOSE;
     }
+    if (g_reset_open)
+        press &= ~(OVL_PAD_LB | OVL_PAD_RB);    /* step 93: the question answered first, on its own tab */
     if (press & OVL_PAD_LB)
         g_tab_want = (g_tab_cur + N_TABS - 1) % N_TABS;
     if (press & OVL_PAD_RB)
@@ -209,6 +214,8 @@ extern "C" void ovl_opened(void)
     g_cap = CAP_NONE;
     g_pad_fresh = 1;                    /* step 82: buttons held now (the chord's) count once let go */
     g_sv_shown = 0;                     /* step 83: the backups listed again */
+    g_reset_shut = true;                /* step 93 */
+    g_reset_open = false;
     if (g_ready) {
         ImGui::GetIO().ClearInputKeys();
         ImGui::GetIO().ClearInputMouse();
@@ -1167,6 +1174,40 @@ static int tab_display(twoc_settings_t *s, const ovl_info_t *in)
             help("Now: off; it couldn't be set up on this graphics card (see the log's [AO] lines).");
         }
     }
+    ImGui::Spacing();                   /* step 93: everything above back to its default, after a question */
+    ImGui::Separator();
+    if (ImGui::Button("Reset display settings to defaults"))
+        ImGui::OpenPopup(RESET_ASK);
+    more("Sets every setting on this tab back to what the game starts with when it has no settings file: "
+         "Render size Game (480 lines), Render scale 100%, Pacing Auto, Frame rate Game (60), Adaptive On, "
+         "Render thread Off, Show frame rate Off, the startup message on, Skip the title animation off, "
+         "Anisotropic filtering Off, Anti-aliasing Off, Ambient occlusion Off, HUD in the centre. Fullscreen, "
+         "the aspect ratio, sound, controls and saves stay as they are. Asks first.");
+    ImGui::SetNextWindowPos(ImGui::GetMainViewport()->GetCenter(), ImGuiCond_Appearing, ImVec2(0.5f, 0.5f));
+    g_reset_open = false;
+    if (ImGui::BeginPopupModal(RESET_ASK, NULL, ImGuiWindowFlags_AlwaysAutoResize | ImGuiWindowFlags_NoSavedSettings)) {
+        g_reset_open = !g_reset_shut;
+        bool no = g_reset_shut;         /* the overlay closed with the question open */
+        ImGui::PushTextWrapPos(ImGui::GetFontSize() * 24);
+        ImGui::TextUnformatted("Every setting on the Display tab goes back to its default. Fullscreen, the "
+                               "aspect ratio, sound, controls and saves stay as they are.");
+        ImGui::PopTextWrapPos();
+        ImGui::Spacing();
+        if (ImGui::Button("Yes", ImVec2(ImGui::GetFontSize() * 6, 0))) {
+            twoc_settings_display_defaults(s);
+            r |= OVL_CHANGED;
+            no = true;
+        }
+        ImGui::SameLine();
+        if (ImGui::Button("No", ImVec2(ImGui::GetFontSize() * 6, 0)) ||
+            ImGui::IsKeyPressed(ImGuiKey_GamepadFaceRight, false))
+            no = true;                  /* B on the pad, as it closes a list */
+        ImGui::SetItemDefaultFocus();   /* No first: Yes is a step away */
+        if (no)
+            ImGui::CloseCurrentPopup();
+        ImGui::EndPopup();
+    }
+    g_reset_shut = false;
     return r;
 }
 

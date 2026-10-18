@@ -505,6 +505,26 @@ void twoc_settings_current(twoc_settings_t *s)
         }
 }
 
+void twoc_settings_display_defaults(twoc_settings_t *s)
+{
+    s->render_size[0] = 0;              /* each as twoc_settings_current reads it unset */
+    s->render_scale = 100;
+    s->pacing = TWOC_PACING_AUTO;
+    s->framerate = 0;
+    s->adaptive = 1;
+    s->render_thread = TWOC_RT_OFF;
+    s->show_fps = 0;
+    s->startup_message = 1;
+    s->fast_title = 0;
+    s->anisotropy = 1;
+    s->antialiasing = TWOC_AA_OFF;
+    s->ao = TWOC_AO_OFF;
+    s->ao_strength = TWOC_AO_STRENGTH_DEFAULT;
+    s->ao_half = 0;
+    s->hud = 0;
+    s->hud_margin = 0;
+}
+
 /* Key i's value in `s` as the file writes it ("" for a volume never set). */
 static void key_text(const twoc_settings_t *s, size_t i, char *buf, size_t cap)
 {

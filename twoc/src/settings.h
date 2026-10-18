@@ -171,6 +171,12 @@ typedef struct {
 void twoc_settings_load(void);
 /* The settings in effect, from the RECOMP_* variables. */
 void twoc_settings_current(twoc_settings_t *s);
+/* Step 93: the Display tab's settings in `s` back to their defaults (what a
+ * run without the file has): render size, render scale, pacing, frame rate,
+ * adaptive, render thread, the counter, the startup message, skipping the
+ * title, anisotropy, anti-aliasing, ambient occlusion, the HUD. Fullscreen,
+ * the aspect ratio, audio, controls and saves are left as they are. */
+void twoc_settings_display_defaults(twoc_settings_t *s);
 /* Write `s` to crash_twoc.ini. Returns 0 on success. */
 int twoc_settings_save(const twoc_settings_t *s);
 const char *twoc_settings_path(void);
