@@ -149,7 +149,7 @@ time, with the same picture. e turns it off for one run, so a and e compare the 
 
 The Vulkan probe (optional, about a minute, on the Legion Go, plugged in, after round 1):
 start "Play Crash (Vulkan probe).bat". A second small window, "Crash TWOC - Vulkan probe",
-opens beside the game and shows a slowly changing colour: that is the probe, testing
+opens beside the game and shows a colour that keeps changing: that is the probe, testing
 Vulkan (another way to draw that a later version may use). Let the game reach the hub and
 stay a minute, then close the game. Write down only whether the second window opened; the
 rest is in the log, which "Collect logs.bat" takes.
