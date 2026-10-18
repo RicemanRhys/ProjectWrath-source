@@ -5,7 +5,8 @@ import re, sys
 EV = re.compile(r'host (swap chain|frame rate plan|picture|device \d|interpolation (on|off)|render thread: (on|off) from|'
                 r'interpolation: [\d.]+ fps, |: the display released|: vsync pacing again|baked draws: o)|watchdog|\[OVL\]|\[BAT\]|'
                 r'\[VK\]|CRASH\]|THREADCHECK|RECOMP_FRAMERATE|ack thread|\[XPP\] Start|\[CFG\] (settings written|render|framerate|full|adapt)|'
-                r'\[DEV\] main menu|present fails [1-9]|\[SAVE\]|\[FILES\]|startup message|overlay ready')
+                r'\[DEV\] main menu|present fails [1-9]|\[SAVE\]|\[FILES\]|startup message|overlay ready|'
+                r'host window|host display|presentation mode:|the game holds|the game goes on|swap chain made again')
 
 
 def run(p):
@@ -68,6 +69,12 @@ def run(p):
         m = re.search(r'limiter: paced \d+ \(\+\d+\), late \d+ \(\+(\d+)\), waited (\d+) ms', l)
         if m:
             cur['lim'] = 'late%s w%s' % m.groups()
+        m = re.search(r'presentation mode this interval \(read 4 a second\): composed (\d+), overlay (\d+), none (\d+)', l)
+        if m:   # step 90 (notes 18.93): c/o/n reads of the swap chain's mode
+            cur['pm'] = 'c%s/o%s/n%s' % m.groups()
+        m = re.search(r'\[APU-OUT\] wakeups: .*?, (\d+) over 4 \(21\.3 ms\), the longest ([\d.]+) ms; fewest queued at a frame (-?\d+)', l)
+        if m:   # step 90: frames made over 21.3 ms apart, the longest gap, the fewest queued
+            cur['wk'] = 'wk%s/%s/q%s' % m.groups()
         m = re.search(r'\[APU-OUT\].*?(\d+) underruns', l)
         if m and m.group(1) != '0':
             cur['ur'] = m.group(1)
@@ -76,10 +83,10 @@ def run(p):
     for r in rows:
         for e in r['ev']:
             print('   ', e)
-        print('%6.1f %-9s gs%5.1f pr%5d %-12s %-30s k%-5s m%-5s rep%-5s busy %-5s g%-5s r%-5s %-14s %-22s rec%-4s dc%-12s bk %-22s %s %s' % (
+        print('%6.1f %-9s gs%5.1f pr%5d %-12s %-30s k%-5s m%-5s rep%-5s busy %-5s g%-5s r%-5s %-14s %-22s rec%-4s dc%-12s bk %-22s %s %s %s %s' % (
             r['t'], r['lvl'], r['gs'], r['pr'], r.get('gaps', ''), r.get('shown', ''), r.get('k', ''), r.get('match', ''),
             r.get('rep', ''), r.get('busy', ''), r.get('gside', ''), r.get('rside', ''), r.get('allow', ''), r.get('rt', ''),
-            r.get('recus', ''), r.get('dc', ''), r.get('bk', ''), r.get('pw', ''), ('UR' + r['ur']) if 'ur' in r else ''))
+            r.get('recus', ''), r.get('dc', ''), r.get('bk', ''), r.get('pw', ''), ('UR' + r['ur']) if 'ur' in r else '', r.get('pm', ''), r.get('wk', '')))
     for e in events:
         print('   ', e)
 
