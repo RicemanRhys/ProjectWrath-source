@@ -19,6 +19,9 @@
  *                | msaa2x+smaa | msaa4x+smaa | msaa8x+smaa        (step 90: MSAA, then SMAA on the frame)
  *   render_scale = 25-200                     RECOMP_RENDER_SCALE (step 90: percent of the render size the
  *                                             picture is drawn at; unset: 100)
+ *   ao          = off | ssao | gtao           RECOMP_AO (step 92: ambient occlusion; unset: off)
+ *   ao_strength = 0-100                       RECOMP_AO_STRENGTH (step 92: percent of it applied; unset: 100)
+ *   ao_half     = 0 | 1                       RECOMP_AO_HALF (step 92: at half the resolution; unset: off)
  *   pause_unfocused = 0 | 1                   RECOMP_PAUSE_UNFOCUSED (step 90: the game holds, muted, while
  *                                             its window is in the background or minimised; unset: off)
  *   fast_title  = 0 | 1                       RECOMP_DEV_FAST_TITLE (step 90: the title animation sped up,
@@ -106,6 +109,12 @@
  * animation runs ~128 times its speed, so the main menu opens ~22 s sooner;
  * from the next start, the launcher's switch winning as for every key.
  *
+ * Step 92: ambient occlusion (notes 18.95). ssao or gtao darkens corners,
+ * creases and the ground under things, worked out from the depth of the
+ * world's opaque draws (d3d_host.c, ao.c) and multiplied into the picture
+ * before the game's blended draws, particles and HUD, less in fog;
+ * ao_strength scales it. Applied at once.
+ *
  * Step 91: presets. low, standard and high each set the render size, the
  * frame rate, the render thread, the adaptive frame rate, anti-aliasing,
  * anisotropic filtering and the render scale together (twoc_preset_apply);
@@ -161,6 +170,9 @@ typedef struct {
     int pause_unfocused;                /* step 90: 1 the game holds while the window is in the background */
     int fast_title;                     /* step 90: 1 the title animation sped up (from the next start) */
     int preset;                         /* step 91: TWOC_PRESET_* (custom also unset, or when the settings left it) */
+    int ao;                             /* step 92: TWOC_AO_* (off also unset) */
+    int ao_strength;                    /* step 92: percent, 0-100 (TWOC_AO_STRENGTH_DEFAULT also unset) */
+    int ao_half;                        /* step 92: 1 worked out at half the resolution, upsampled (unset: 0) */
     twoc_controls_t controls;           /* the controller map and the key bindings */
 } twoc_settings_t;
 

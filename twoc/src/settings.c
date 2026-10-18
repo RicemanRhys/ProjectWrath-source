@@ -28,6 +28,11 @@ static const key_t_ g_fixed[] = {
       "off, fxaa, smaa, msaa2x, msaa4x, msaa8x, or msaa2x+smaa, msaa4x+smaa, msaa8x+smaa (MSAA, then SMAA)" },
     { "render_scale", "RECOMP_RENDER_SCALE",
       "25-200: percent of the render size the picture is drawn at (under 100 lighter, over 100 supersampled)" },
+    { "ao", "RECOMP_AO",
+      "off, ssao or gtao: ambient occlusion, corners and contact shadows darkened from the depth (GTAO: Intel's"
+      " XeGTAO)" },
+    { "ao_strength", "RECOMP_AO_STRENGTH", "0-100: how much of the ambient occlusion is applied" },
+    { "ao_half", "RECOMP_AO_HALF", "1: ambient occlusion worked out at half the resolution (cheaper, a little softer)" },
     { "framerate", "RECOMP_FRAMERATE",
       "60 (the game's), display (interpolated frames at the display's rate) or a rate in Hz (90, 120, 144, 165,"
       " 180, 240: interpolated, shown evenly where the display can)" },
@@ -531,6 +536,9 @@ void twoc_settings_current(twoc_settings_t *s)
     s->keyboard = !(v && strcmp(v, "0") == 0);
     s->controller_input = pads_mode_parse(getenv("RECOMP_CONTROLLER_INPUT"));
     s->render_scale = twoc_render_scale_parse(getenv("RECOMP_RENDER_SCALE"));     /* step 90 */
+    s->ao = twoc_ao_parse(getenv("RECOMP_AO"));                                   /* step 92 */
+    s->ao_strength = twoc_ao_strength_parse(getenv("RECOMP_AO_STRENGTH"));
+    s->ao_half = env_on("RECOMP_AO_HALF");
     s->pause_unfocused = env_on("RECOMP_PAUSE_UNFOCUSED");
     s->fast_title = env_on("RECOMP_DEV_FAST_TITLE");
     s->preset = twoc_preset_parse(getenv("RECOMP_PRESET"));     /* step 91: kept while the settings are its */
@@ -604,6 +612,12 @@ static void key_text(const twoc_settings_t *s, size_t i, char *buf, size_t cap)
         snprintf(buf, cap, "%d", s->keyboard ? 1 : 0);
     else if (strcmp(k, "render_scale") == 0 && s->render_scale != 100)
         snprintf(buf, cap, "%d", s->render_scale);     /* step 90: 100, 1 and 0, the defaults: unwritten */
+    else if (strcmp(k, "ao") == 0 && s->ao != TWOC_AO_OFF)
+        snprintf(buf, cap, "%s", twoc_ao_name(s->ao));     /* step 92: off, the default: unwritten */
+    else if (strcmp(k, "ao_strength") == 0 && s->ao_strength != TWOC_AO_STRENGTH_DEFAULT)
+        snprintf(buf, cap, "%d", s->ao_strength);
+    else if (strcmp(k, "ao_half") == 0 && s->ao_half)
+        snprintf(buf, cap, "1");        /* off, the default: unwritten */
     else if (strcmp(k, "pause_unfocused") == 0 && s->pause_unfocused)
         snprintf(buf, cap, "1");
     else if (strcmp(k, "fast_title") == 0 && s->fast_title)

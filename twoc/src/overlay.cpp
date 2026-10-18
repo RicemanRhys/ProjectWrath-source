@@ -1174,6 +1174,37 @@ static int tab_display(twoc_settings_t *s, const ovl_info_t *in)
             snprintf(line, sizeof(line), "Now: %s.", aa_names[in->aa >= 0 && in->aa < TWOC_AA_COUNT ? in->aa : 0]);
         help(line);
     }
+    ImGui::SeparatorText("Ambient occlusion");  /* step 92 */
+    {
+        static const char *const ao_names[TWOC_AO_COUNT] = { "Off", "SSAO", "GTAO" };
+        ImGui::SetNextItemWidth(ImGui::GetFontSize() * 12);
+        if (ImGui::Combo("Ambient occlusion", &s->ao, ao_names, TWOC_AO_COUNT))
+            r |= OVL_CHANGED;
+        more("Darkens corners, creases and the ground under and around things, as soft shadow from the light "
+             "all around, worked out from the 3D picture's depth. It goes in before the game's see-through "
+             "things, particles and HUD, and fades in fog. SSAO is the classic way; GTAO (Intel's XeGTAO) is "
+             "closer to how light really behaves and costs a little more. Not part of the game's own look. "
+             "Applied at once.");
+        if (s->ao != TWOC_AO_OFF) {
+            int v = s->ao_strength;
+            ImGui::SetNextItemWidth(ImGui::GetFontSize() * 12);
+            if (ImGui::SliderInt("Strength", &v, 0, 100, "%d%%")) {
+                s->ao_strength = v;
+                r |= OVL_CHANGED;
+            }
+            more("How much of the darkening is applied.");
+            bool hf = s->ao_half != 0;
+            if (ImGui::Checkbox("Half resolution", &hf)) {
+                s->ao_half = hf;
+                r |= OVL_CHANGED;
+            }
+            more("Works the occlusion out at half the picture's width and height, then fills it in by depth: "
+                 "about a third of the cost, a little softer. For a handheld or a large render size.");
+        }
+        if (s->ao != TWOC_AO_OFF && in->ao == TWOC_AO_OFF) {
+            help("Now: off; it couldn't be set up on this graphics card (see the log's [AO] lines).");
+        }
+    }
     if (s->preset != TWOC_PRESET_CUSTOM && !twoc_preset_matches(s, s->preset)) {
         s->preset = TWOC_PRESET_CUSTOM;     /* step 91: one of the preset's settings changed */
         r |= OVL_CHANGED;

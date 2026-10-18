@@ -8179,6 +8179,13 @@ static void sq_apply_host(const twoc_settings_t *was, const twoc_settings_t *s)
     }
     if (s->render_scale != was->render_scale)  /* step 90: the size drawn, the shown one kept */
         d3dh_set_render_scale(s->render_scale);
+    if (s->ao != was->ao || s->ao_strength != was->ao_strength)   /* step 92 */
+        set_ao(s->ao, s->ao_strength);
+    if (s->ao_half != was->ao_half) {
+        ao_stats_t st;
+        g_ao_half = s->ao_half != 0;    /* from the next pass */
+        ao_stats_take(&st);             /* the [AO] line's GPU times start over */
+    }
     if (g_apply_host && (s->widescreen != was->widescreen || s->wide_w != was->wide_w || s->wide_h != was->wide_h ||
                          strcmp(s->render_size, was->render_size) != 0 || s->pacing != was->pacing ||
                          s->framerate != was->framerate))
@@ -8226,7 +8233,8 @@ static void overlay_apply(twoc_settings_t *was, const twoc_settings_t *s)
         s->antialiasing != was->antialiasing || s->framerate != was->framerate || s->adaptive != was->adaptive ||
         s->widescreen != was->widescreen || s->wide_w != was->wide_w || s->wide_h != was->wide_h ||
         strcmp(s->render_size, was->render_size) != 0 || s->pacing != was->pacing ||
-        s->render_scale != was->render_scale)
+        s->render_scale != was->render_scale || s->ao != was->ao || s->ao_strength != was->ao_strength ||
+        s->ao_half != was->ao_half)
         sq_push(was, s);                /* step 78 */
     if (s->pause_unfocused != was->pause_unfocused)    /* step 90 */
         d3dh_set_pause_unfocused(s->pause_unfocused);
@@ -8421,6 +8429,7 @@ static int ovl_draw(ID3D11Texture2D *dst, int running)
     in.running = running;
     in.aa = g_aa;                       /* step 58 */
     in.ms_samples = g_bb.ms;
+    in.ao = (int)g_ao_mode;             /* step 92 */
     if (ic_possible()) {                /* step 61/77 */
         in.interp_fps = fp_step_fps(0);
         in.interp_per = fp_step_per(0);
@@ -9285,11 +9294,17 @@ static void trigger_file(unsigned swap_no)
                 ts.show_fps = atoi(v) != 0;
             } else if (strcmp(k, "scale") == 0) {           /* step 90: render_scale */
                 ts.render_scale = twoc_render_scale_parse(v);
-            } else if (strcmp(k, "aoradius") == 0) {        /* step 92's test aids: at the next pass */
+            } else if (strcmp(k, "ao") == 0) {              /* step 92 */
+                ts.ao = twoc_ao_parse(v);
+            } else if (strcmp(k, "aostrength") == 0) {
+                ts.ao_strength = twoc_ao_strength_parse(v);
+            } else if (strcmp(k, "aoradius") == 0) {        /* test aids, not settings: at the next pass */
                 if (atof(v) > 0)
                     g_ao_radius = (float)atof(v);
             } else if (strcmp(k, "aodenoise") == 0) {
                 g_ao_denoise = atoi(v) > 0 ? atoi(v) : g_ao_denoise;
+            } else if (strcmp(k, "aohalf") == 0) {
+                ts.ao_half = atoi(v) > 0;
             } else if (strcmp(k, "pausebg") == 0) {         /* step 90: pause_unfocused */
                 ts.pause_unfocused = atoi(v) != 0;
             } else if (strcmp(k, "preset") == 0) {          /* step 91: as the overlay's Preset */
