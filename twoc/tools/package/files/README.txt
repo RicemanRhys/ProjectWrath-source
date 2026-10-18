@@ -13,6 +13,10 @@ What's in the folder
   Play Crash (72 fps test).bat    starts the game at 72 fps (the first test's b, and test 3)
   Play Crash (ack wait test).bat  an optional test: starts the game with the "ack wait"
                                   switch on (the first test's d; part C says what it is)
+  Play Crash (bake off).bat       starts the game with "baked draws" off, to compare (the
+                                  first test's e; part C says what it is)
+  Play Crash (Vulkan probe).bat   an optional one-minute test: a second small window that
+                                  tries Vulkan (part C, after the first test)
   Collect logs.bat                zips the logs and a PC summary to bring back
   crash_twoc.ini                  the game's settings, already set up for the Legion Go
   Test notes.txt                  write what you see here; it goes into the zip
@@ -124,10 +128,24 @@ Round 1, plugged in (charger in, Legion Space on Performance):
      saves it), and close the game.
   d. Ack wait (optional, see below): start "Play Crash (ack wait test).bat". Go to
      cast_bug, stand 30 s, write it down. Close the game.
+  e. Baked draws off: start "Play Crash (bake off).bat". Go to cast_bug, stand 30 s, write
+     it down. Close the game.
 
 Round 2, on battery: unplug the charger and write down the time you did. Then a, b, c and
-d again, the same way. (The log also notes every 10 seconds whether it is plugged in and
-the battery's percentage.)
+d again, the same way (not e). (The log also notes every 10 seconds whether it is plugged
+in and the battery's percentage.)
+
+What baked draws are: at 144 Hz each game frame is shown 2 or 3 times, each time drawn
+again, a little further along. Until now every one of those drawings worked out every
+draw's settings from scratch; now the first one does, and the others reuse what it set up
+(on in "Play Crash.bat"). On the desktop that takes about a third off the render thread's
+time, with the same picture. e turns it off for one run, so a and e compare the two.
+
+The Vulkan probe (optional, about a minute, plugged in): start "Play Crash (Vulkan
+probe).bat". A second small window opens beside the game and shows a plain colour: that
+is the probe, testing Vulkan (another way to draw that a later version may use). Let the
+game reach the hub and stay a minute, then close the game. Nothing to write down; its
+findings are in the log, which "Collect logs.bat" takes.
 
 What the ack wait test is: one of the game's helper threads (the one that answers the
 game's graphics commands) keeps a CPU core busy all the time, waiting for the next one.

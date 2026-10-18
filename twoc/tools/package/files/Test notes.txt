@@ -27,6 +27,12 @@ you saw (stutter, slow motion).
       Game:        /s    Shown:        /s
       Measured:
       Seen:
+   e. Baked draws off ("Play Crash (bake off).bat")
+      Game:        /s    Shown:        /s
+      Measured:
+      Seen:
+
+  Vulkan probe ("Play Crash (Vulkan probe).bat"; optional): did the second window open?
 
   Round 2, on battery. The time you unplugged:
    a. Match display ("Play Crash.bat")
