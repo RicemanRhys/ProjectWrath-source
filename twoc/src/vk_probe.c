@@ -6,7 +6,8 @@
  * then loops: pump the window's messages, wait for the oldest of two frames
  * in flight, acquire, clear the image to a slowly changing colour, submit,
  * present (FIFO, so vsync paces it), and with present_wait wait for the
- * frame before to reach the screen and note when it did. Closing the probe's
+ * frame before to reach the screen and note when it did (step 90: with
+ * present_wait2 where version 1 is missing, as on AMD). Closing the probe's
  * window ends the probe, not the game. A failure anywhere logs why and ends
  * the probe the same way.
  */
@@ -44,7 +45,9 @@ static struct {
     VkCommandBuffer cb[VKP_INFLIGHT];
     VkFence fence[VKP_INFLIGHT];
     VkSemaphore acq[VKP_INFLIGHT];
-    int present_wait;                   /* VK_KHR_present_id and VK_KHR_present_wait on */
+    int present_wait;                   /* 1: VK_KHR_present_id and VK_KHR_present_wait on; 2 (step 90): their
+                                         * version 2 (present_id2, present_wait2: AMD's, notes 18.92); 0 neither */
+    int have_caps2;                     /* VK_KHR_get_surface_capabilities2 on (present_wait2 needs it) */
     HWND hwnd;
     volatile LONG w, h, closed;
     LARGE_INTEGER qpf;
@@ -180,9 +183,10 @@ static int make_instance(void)
     ie = (VkExtensionProperties *)calloc(n ? n : 1, sizeof(*ie));
     vkEnumerateInstanceExtensionProperties(NULL, &n, ie);
     for (i = 0; i < 3; i++)
-        if (has_ext(ie, n, want[i]))
+        if (has_ext(ie, n, want[i])) {
             on[non++] = want[i];
-        else if (i < 2) {
+            g.have_caps2 |= i == 2;
+        } else if (i < 2) {
             fprintf(stderr, "[VK] probe: the loader has no %s; probe off\n", want[i]);
             free(ie);
             return -1;
@@ -299,8 +303,11 @@ static int make_device(void)
     VkDeviceCreateInfo ci;
     VkPhysicalDevicePresentIdFeaturesKHR pid;
     VkPhysicalDevicePresentWaitFeaturesKHR pw;
+    VkPhysicalDevicePresentId2FeaturesKHR pid2;
+    VkPhysicalDevicePresentWait2FeaturesKHR pw2;
     VkPhysicalDeviceFeatures2 f2;
     VkResult r;
+    const char *why2 = "";
 
     vkEnumerateDeviceExtensionProperties(g.pd, NULL, &n, NULL);
     de = (VkExtensionProperties *)calloc(n ? n : 1, sizeof(*de));
@@ -318,7 +325,9 @@ static int make_device(void)
     pid.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_PRESENT_ID_FEATURES_KHR;
     pw.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_PRESENT_WAIT_FEATURES_KHR;
     f2.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_FEATURES_2;
-    if (has_ext(de, n, VK_KHR_PRESENT_ID_EXTENSION_NAME) && has_ext(de, n, VK_KHR_PRESENT_WAIT_EXTENSION_NAME)) {
+    if (has_ext(de, n, VK_KHR_PRESENT_ID_EXTENSION_NAME) && has_ext(de, n, VK_KHR_PRESENT_WAIT_EXTENSION_NAME) &&
+        !(getenv("RECOMP_VULKAN_PRESENT_WAIT") && atoi(getenv("RECOMP_VULKAN_PRESENT_WAIT")) == 2)) {
+        /* (RECOMP_VULKAN_PRESENT_WAIT=2, a test aid: version 2 even where version 1 is) */
         pid.pNext = &pw;
         f2.pNext = &pid;
         vkGetPhysicalDeviceFeatures2(g.pd, &f2);
@@ -326,6 +335,50 @@ static int make_device(void)
             on[non++] = VK_KHR_PRESENT_ID_EXTENSION_NAME;
             on[non++] = VK_KHR_PRESENT_WAIT_EXTENSION_NAME;
             g.present_wait = 1;
+        }
+    }
+    if (!g.present_wait && has_ext(de, n, VK_KHR_PRESENT_ID_2_EXTENSION_NAME) &&
+        has_ext(de, n, VK_KHR_PRESENT_WAIT_2_EXTENSION_NAME)) {
+        /* Step 90: version 1 missing (AMD has only version 2): present_id2 and present_wait2, which the surface
+         * must support too (vkGetPhysicalDeviceSurfaceCapabilities2KHR) and the swap chain asks for by flags. */
+        VkPhysicalDeviceSurfaceInfo2KHR sinfo;
+        VkSurfaceCapabilities2KHR caps2;
+        VkSurfaceCapabilitiesPresentId2KHR sid2;
+        VkSurfaceCapabilitiesPresentWait2KHR sw2;
+        memset(&pid2, 0, sizeof(pid2));
+        memset(&pw2, 0, sizeof(pw2));
+        memset(&f2, 0, sizeof(f2));
+        pid2.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_PRESENT_ID_2_FEATURES_KHR;
+        pw2.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_PRESENT_WAIT_2_FEATURES_KHR;
+        f2.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_FEATURES_2;
+        pid2.pNext = &pw2;
+        f2.pNext = &pid2;
+        vkGetPhysicalDeviceFeatures2(g.pd, &f2);
+        memset(&sinfo, 0, sizeof(sinfo));
+        memset(&caps2, 0, sizeof(caps2));
+        memset(&sid2, 0, sizeof(sid2));
+        memset(&sw2, 0, sizeof(sw2));
+        sinfo.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_SURFACE_INFO_2_KHR;
+        sinfo.surface = g.surf;
+        caps2.sType = VK_STRUCTURE_TYPE_SURFACE_CAPABILITIES_2_KHR;
+        sid2.sType = VK_STRUCTURE_TYPE_SURFACE_CAPABILITIES_PRESENT_ID_2_KHR;
+        sw2.sType = VK_STRUCTURE_TYPE_SURFACE_CAPABILITIES_PRESENT_WAIT_2_KHR;
+        caps2.pNext = &sid2;
+        sid2.pNext = &sw2;
+        if (!pid2.presentId2 || !pw2.presentWait2)
+            why2 = " (present_id2 / present_wait2 listed, their features off)";
+        else if (!g.have_caps2 || !vkGetPhysicalDeviceSurfaceCapabilities2KHR ||
+                 vkGetPhysicalDeviceSurfaceCapabilities2KHR(g.pd, &sinfo, &caps2) != VK_SUCCESS)
+            why2 = " (present_id2 / present_wait2: the surface's support can't be asked)";
+        else if (!sid2.presentId2Supported || !sw2.presentWait2Supported)
+            why2 = " (present_id2 / present_wait2: not for this window's surface)";
+        else {
+            on[non++] = VK_KHR_PRESENT_ID_2_EXTENSION_NAME;
+            on[non++] = VK_KHR_PRESENT_WAIT_2_EXTENSION_NAME;
+            g.present_wait = 2;
+            pid2.pNext = &pw2;
+            pw2.pNext = NULL;
+            f2.pNext = &pid2;
         }
     }
     free(de);
@@ -350,7 +403,7 @@ static int make_device(void)
     qi.pQueuePriorities = &prio;
     memset(&ci, 0, sizeof(ci));
     ci.sType = VK_STRUCTURE_TYPE_DEVICE_CREATE_INFO;
-    ci.pNext = g.present_wait ? &f2 : NULL;    /* f2 chains present_id and present_wait, both on as queried */
+    ci.pNext = g.present_wait ? &f2 : NULL;    /* f2 chains present_id(2) and present_wait(2), on as queried */
     ci.queueCreateInfoCount = 1;
     ci.pQueueCreateInfos = &qi;
     ci.enabledExtensionCount = non;
@@ -362,8 +415,10 @@ static int make_device(void)
     }
     volkLoadDevice(g.dev);
     vkGetDeviceQueue(g.dev, g.qf, 0, &g.q);
-    fprintf(stderr, "[VK] probe: device made: queue family %u of %u (%u queues), present_id + present_wait %s\n",
-            g.qf, nq, qp[g.qf].queueCount, g.present_wait ? "on" : "not available");
+    fprintf(stderr, "[VK] probe: device made: queue family %u of %u (%u queues), %s%s\n", g.qf, nq,
+            qp[g.qf].queueCount, g.present_wait == 1 ? "present_id + present_wait on"
+                                 : g.present_wait == 2 ? "present_id2 + present_wait2 on (version 1 not here)"
+                                                       : "present_id + present_wait not available", why2);
     return 0;
 }
 
@@ -429,6 +484,8 @@ static int make_swapchain(int first)
     ci.presentMode = VK_PRESENT_MODE_FIFO_KHR;  /* vsync: always there */
     ci.clipped = VK_TRUE;
     ci.oldSwapchain = old;
+    if (g.present_wait == 2)            /* step 90: version 2 is asked for by the swap chain */
+        ci.flags = VK_SWAPCHAIN_CREATE_PRESENT_ID_2_BIT_KHR | VK_SWAPCHAIN_CREATE_PRESENT_WAIT_2_BIT_KHR;
     r = vkCreateSwapchainKHR(g.dev, &ci, NULL, &g.sc);
     if (old)
         vkDestroySwapchainKHR(g.dev, old, NULL);
@@ -447,8 +504,8 @@ static int make_swapchain(int first)
         si.sType = VK_STRUCTURE_TYPE_SEMAPHORE_CREATE_INFO;
         vkCreateSemaphore(g.dev, &si, NULL, &g.done[i]);
     }
-    fprintf(stderr, "[VK] probe: swap chain %ux%u, %u images, format %d colour space %d, fifo\n", g.ext.width,
-            g.ext.height, g.nimg, (int)g.fmt, (int)g.cs);
+    fprintf(stderr, "[VK] probe: swap chain %ux%u, %u images, format %d colour space %d, fifo%s\n", g.ext.width,
+            g.ext.height, g.nimg, (int)g.fmt, (int)g.cs, g.present_wait == 2 ? ", present id 2 and wait 2" : "");
     return 0;
 }
 
@@ -580,6 +637,7 @@ static DWORD WINAPI probe_main(LPVOID p)
         VkPipelineStageFlags ws = VK_PIPELINE_STAGE_TRANSFER_BIT;
         VkPresentInfoKHR pi;
         VkPresentIdKHR pidi;
+        VkPresentId2KHR pidi2;
         double hue, now;
 
         pump();
@@ -647,13 +705,20 @@ static DWORD WINAPI probe_main(LPVOID p)
         pi.swapchainCount = 1;
         pi.pSwapchains = &g.sc;
         pi.pImageIndices = &img;
-        if (g.present_wait) {
+        if (g.present_wait == 1) {
             memset(&pidi, 0, sizeof(pidi));
             pidi.sType = VK_STRUCTURE_TYPE_PRESENT_ID_KHR;
             pidi.swapchainCount = 1;
             pidi.pPresentIds = &pid;
             pid++;
             pi.pNext = &pidi;
+        } else if (g.present_wait == 2) {   /* step 90 */
+            memset(&pidi2, 0, sizeof(pidi2));
+            pidi2.sType = VK_STRUCTURE_TYPE_PRESENT_ID_2_KHR;
+            pidi2.swapchainCount = 1;
+            pidi2.pPresentIds = &pid;
+            pid++;
+            pi.pNext = &pidi2;
         }
         r = vkQueuePresentKHR(g.q, &pi);
         if (r == VK_ERROR_OUT_OF_DATE_KHR || r == VK_SUBOPTIMAL_KHR)
@@ -665,7 +730,15 @@ static DWORD WINAPI probe_main(LPVOID p)
         frame++;
         frames++;
         if (g.present_wait && pid > 1) {    /* the frame before on screen: when */
-            r = vkWaitForPresentKHR(g.dev, g.sc, pid - 1, 100000000ull);
+            if (g.present_wait == 2) {
+                VkPresentWait2InfoKHR wi;
+                memset(&wi, 0, sizeof(wi));
+                wi.sType = VK_STRUCTURE_TYPE_PRESENT_WAIT_2_INFO_KHR;
+                wi.presentId = pid - 1;
+                wi.timeout = 100000000ull;
+                r = vkWaitForPresent2KHR(g.dev, g.sc, &wi);
+            } else
+                r = vkWaitForPresentKHR(g.dev, g.sc, pid - 1, 100000000ull);
             if (r == VK_SUCCESS) {
                 double t = now_ms();
                 if (last_shown > 0 && ng < VKP_GAPS)
