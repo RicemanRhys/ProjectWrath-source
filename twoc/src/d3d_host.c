@@ -354,7 +354,7 @@ static d3dh_stats_t g_st, g_stg;
 static LARGE_INTEGER g_qpf;                 /* step 60: QueryPerformanceFrequency */
 static int g_replay;                    /* step 60, RECOMP_D3D_BRIDGE_REPLAY: passes at each present, 0 off */
 static int g_replay_check;              /* RECOMP_D3D_BRIDGE_REPLAY_CHECK: drawn at once too, and compared */
-static int g_bake = 0;                  /* step 87, RECOMP_D3D_BRIDGE_BAKE: baked draws ("Step 87: baked draws") */
+static int g_bake = 1;                  /* step 87, RECOMP_D3D_BRIDGE_BAKE: baked draws ("Step 87: baked draws"), on */
 static volatile LONG g_interp_want;     /* step 61: RECOMP_FRAMERATE=display / the overlay, taken at a frame's end */
 static int g_interp;                    /* step 61: frames recorded and drawn as interpolated sub-frames */
 static unsigned g_subdump_from, g_subdump_to;   /* RECOMP_D3D_BRIDGE_SUBDUMP=A-B: each sub-frame of those swaps */
@@ -918,7 +918,7 @@ int d3dh_create(unsigned width, unsigned height, unsigned host_w, unsigned host_
             g_bake = strcmp(e, "0") != 0;
         fprintf(stderr, "[D3DB] host baked draws: %s (RECOMP_D3D_BRIDGE_BAKE%s)\n",
                 g_bake ? "on: a frame drawn more than once is translated at its first pass, its other passes drawn"
-                         " from that" : "off: every pass translated", e && *e ? "" : " unset");
+                         " from that" : "off: every pass translated", e && *e ? "" : " unset: on");
         e = getenv("RECOMP_FRAMERATE");                 /* step 61; step 77: display or N Hz */
         if (twoc_framerate_parse(e))
             d3dh_set_framerate(twoc_framerate_parse(e));
@@ -2768,7 +2768,10 @@ static int draw_exec(const d3dh_draw_t *d, IDirect3DBaseTexture8 *const *pin, co
  * capture no longer holds (a cache let an object go, a ring started over,
  * nothing captured) is drawn the ordinary way. The same pixels: every bound
  * object and constant the shaders read is the one the ordinary way gives.
- * RECOMP_D3D_BRIDGE_BAKE=0 off, 1 on.
+ * RECOMP_D3D_BRIDGE_BAKE=0 off, 1 on; unset: on (step 87's checks: REPLAY_CHECK
+ * with baked passes and the sub-frame check found no differing frame; the
+ * 25-level sweep in check mode none but in western, whose count the check
+ * itself gives with the baked draws off too: notes 18.90).
  *
  * The baked form is what a second backend would take too: a pipeline (its
  * key: vertex shader, input layout, pixel shader, blend, depth-stencil and
