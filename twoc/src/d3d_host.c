@@ -4224,7 +4224,10 @@ static void ic_why(char *buf, size_t cap)
     AcquireSRWLockShared(&g_why_lock);
     memcpy(note, g_pace_why, sizeof(note));
     ReleaseSRWLockShared(&g_why_lock);
-    if (g_fp.on && fp_active())         /* step 77 */
+    if (g_fp.on && fp_active() && g_fp.slot_hz > g_fp.game_hz * 1.01)  /* step 93: a target that fell back */
+        snprintf(buf, cap, "the even rate for that target on this %.2f Hz display is the game's own %.2f fps",
+                 g_fp.slot_hz, g_fp.game_hz);
+    else if (g_fp.on && fp_active())    /* step 77 */
         snprintf(buf, cap, "the display's %.2f Hz is no faster than the game's %.2f fps", g_fp.slot_hz,
                  g_fp.game_hz);
     else if (g_fp.on && g_frame_hz > 0 && !g_fp.limiter)

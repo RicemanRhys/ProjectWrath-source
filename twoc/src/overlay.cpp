@@ -1523,6 +1523,12 @@ extern "C" int ovl_frame(ID3D11RenderTargetView *rtv, unsigned w, unsigned h, fl
     EnterCriticalSection(&g_cs);
     if (info->running)                  /* step 57: smaller over the running game, to leave more of it in view */
         scale *= 0.8f;
+    {   /* step 93: never wider than the picture (34 font sizes of 18 px and the padding): a small window in real
+         * pixels, as the reset's Game (480 lines) on a scaled display gives, had the panel cut off at the right */
+        float wmax = (float)w * 0.98f / (34.0f * 18.0f + 32.0f);
+        if (scale > wmax)
+            scale = wmax;
+    }
     ImGuiIO &io = ImGui::GetIO();
     io.DisplaySize = ImVec2((float)w, (float)h);
     io.DeltaTime = dt > 0.0f ? dt : 1.0f / 60.0f;
