@@ -335,27 +335,10 @@ static unsigned g_w, g_h, g_interval;   /* g_w, g_h: the host back buffer */
  * before. Largest side within the device's largest texture. */
 static unsigned g_vw, g_vh;
 static volatile LONG g_rscale = 100;
-#define RSCALE_MAX_TEX 16384u           /* D3D11_REQ_TEXTURE2D_U_OR_V_DIMENSION at feature level 11 */
 
 static void scaled_size(unsigned vw, unsigned vh, int pct, unsigned *w, unsigned *h)
 {
-    double k = pct / 100.0, f;
-
-    if (pct == 100 || !vw || !vh) {
-        *w = vw;
-        *h = vh;
-        return;
-    }
-    *w = 2 * (unsigned)(vw * k / 2.0 + 0.5);
-    *h = (unsigned)(vh * k + 0.5);
-    if (*w > RSCALE_MAX_TEX || *h > RSCALE_MAX_TEX) {
-        f = (double)RSCALE_MAX_TEX / *w < (double)RSCALE_MAX_TEX / *h ? (double)RSCALE_MAX_TEX / *w
-                                                                       : (double)RSCALE_MAX_TEX / *h;
-        *w = 2 * (unsigned)(*w * f / 2.0);
-        *h = (unsigned)(*h * f);
-    }
-    *w = *w < 16 ? 16 : *w;
-    *h = *h < 16 ? 16 : *h;
+    twoc_render_scaled(vw, vh, pct, w, h);  /* settings.c, step 91: the overlay's too */
 }
 static unsigned g_gw, g_gh;             /* the guest back buffer (18.56) */
 static double g_wide;                   /* 18.56: the host picture's width / height if wider than the guest's, else 0 */
@@ -955,7 +938,7 @@ static int overlay_message(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp)
     switch (msg) {
     case WM_MOUSEMOVE: case WM_LBUTTONDOWN: case WM_LBUTTONUP: case WM_LBUTTONDBLCLK: case WM_RBUTTONDOWN:
     case WM_RBUTTONUP: case WM_RBUTTONDBLCLK: case WM_MOUSEWHEEL: case WM_KEYDOWN: case WM_KEYUP: case WM_SYSKEYUP:
-    case WM_SETFOCUS: case WM_KILLFOCUS:
+    case WM_SETFOCUS: case WM_KILLFOCUS: case WM_CHAR:     /* step 91: WM_CHAR, typed numbers */
         break;
     default:
         return 0;

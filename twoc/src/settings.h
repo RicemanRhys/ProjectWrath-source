@@ -169,6 +169,21 @@ int twoc_rt_parse(const char *v);       /* TWOC_RT_OFF for anything unknown (syn
 unsigned twoc_aa_samples(int aa);       /* MSAA's samples a pixel; 1 for the others */
 int twoc_aa_post(int aa);               /* step 90: the filter on the finished frame: TWOC_AA_FXAA, _SMAA or _OFF */
 int twoc_render_scale_parse(const char *v);     /* step 90: 25-200, 100 unset or unknown */
+/* Step 91: the render size's arithmetic, the bridge's and the overlay's
+ * (notes 18.56, 18.67, 18.93). render_size "WxH" (each 64-8192) or "native"
+ * (the primary monitor's mode) into its box *pw x *ph; "" or "0" is 0 x 0,
+ * the game's size; -1 (and 0 x 0) for anything else. */
+#define TWOC_RENDER_SIZE_MIN 64
+#define TWOC_RENDER_SIZE_MAX 8192
+int twoc_render_size_parse(const char *v, unsigned *pw, unsigned *ph);
+/* The picture for the guest's gw x gh at width/height `wide` (0: the
+ * guest's 4:3): at the guest's height without a box (rw 0), else the largest
+ * of its aspect that fits in rw x rh. Widths even. */
+void twoc_render_fit(unsigned rw, unsigned rh, unsigned gw, unsigned gh, double wide, unsigned *w, unsigned *h);
+/* What a picture of vw x vh is drawn at, at render scale `pct`: the largest
+ * side within the graphics card's largest texture. */
+#define TWOC_RENDER_SCALE_MAX_TEX 16384u    /* D3D11_REQ_TEXTURE2D_U_OR_V_DIMENSION at feature level 11 */
+void twoc_render_scaled(unsigned vw, unsigned vh, int pct, unsigned *w, unsigned *h);
 
 /* host_audio.cpp: the process's volume in Windows' mixer (its audio session),
  * 0-100, set on a short-lived thread of its own. */

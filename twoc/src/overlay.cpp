@@ -133,6 +133,11 @@ static ImGuiKey vk_key(WPARAM vk)
     case VK_SHIFT:  return ImGuiKey_LeftShift;
     case VK_CONTROL: return ImGuiKey_LeftCtrl;
     case VK_MENU:   return ImGuiKey_LeftAlt;
+    case 'A':       return ImGuiKey_A;      /* step 91: Ctrl+A, C, V, X, Z in the custom size's fields */
+    case 'C':       return ImGuiKey_C;
+    case 'V':       return ImGuiKey_V;
+    case 'X':       return ImGuiKey_X;
+    case 'Z':       return ImGuiKey_Z;
     default:        return ImGuiKey_None;
     }
 }
@@ -181,6 +186,10 @@ extern "C" void ovl_input(UINT msg, WPARAM wp, LPARAM lp, float sx, float sy)
                 io.AddKeyEvent(k, down);
             break;
         }
+        case WM_CHAR:                   /* step 91: typing in the custom render size's fields */
+            if (wp >= 0x20 && wp != 0x7F)
+                io.AddInputCharacter((unsigned)wp);
+            break;
         case WM_KILLFOCUS:
             io.AddFocusEvent(false);
             break;
@@ -261,16 +270,85 @@ extern "C" int ovl_init(ID3D11Device *dev, ID3D11DeviceContext *ctx)
     return g_ready ? 0 : -1;
 }
 
-static const char *const g_sizes[] = { "", "1280x720", "1600x900", "1920x1080", "2560x1440", "3840x2160", "native" };
-#define N_SIZES (int)(sizeof(g_sizes) / sizeof(g_sizes[0]))
+/* Step 91: the render sizes by aspect ratio, each the box the picture fits in
+ * (the largest of the chosen aspect inside it: twoc_render_fit). */
+static const char *const g_sz_43[] = { "1280x960", "1600x1200", "2048x1536" };
+static const char *const g_sz_1610[] = { "1280x800", "1440x900", "1680x1050", "1920x1200", "2560x1600", "3840x2400" };
+static const char *const g_sz_169[] = { "1280x720", "1600x900", "1920x1080", "2560x1440", "3840x2160" };
+static const char *const g_sz_219[] = { "2560x1080", "3440x1440", "3840x1600", "5120x2160" };
+static const struct {
+    const char *name;
+    double w, h;
+    const char *const *sizes;
+    int n;
+} g_size_groups[] = {
+    { "4:3", 4, 3, g_sz_43, 3 }, { "16:10", 16, 10, g_sz_1610, 6 },
+    { "16:9", 16, 9, g_sz_169, 5 }, { "21:9", 21, 9, g_sz_219, 4 },
+};
+#define N_SIZE_GROUPS (int)(sizeof(g_size_groups) / sizeof(g_size_groups[0]))
+
+/* The group a listed size is in, or -1. */
+static int size_listed(const char *v)
+{
+    int g, i;
+
+    for (g = 0; g < N_SIZE_GROUPS; g++)
+        for (i = 0; i < g_size_groups[g].n; i++)
+            if (_stricmp(v, g_size_groups[g].sizes[i]) == 0)
+                return g;
+    return -1;
+}
+
+/* The group whose aspect w x h is (within 4%; 21:9's monitors are 2.37-2.4), or -1. */
+static int size_aspect(unsigned w, unsigned h)
+{
+    double r = h ? (double)w / h : 0, best = 1.04;
+    int g, at = -1;
+
+    for (g = 0; r > 0 && g < N_SIZE_GROUPS; g++) {
+        double q = r / (g_size_groups[g].w / g_size_groups[g].h);
+        q = q < 1 ? 1 / q : q;
+        if (q < best) {
+            best = q;
+            at = g;
+        }
+    }
+    return at;
+}
+
+/* The monitor's mode for "native", read again at most every 2 s. */
+static void native_size(unsigned *w, unsigned *h)
+{
+    static unsigned nw, nh;
+    static ULONGLONG at;
+    ULONGLONG now = GetTickCount64();
+
+    if (!at || now - at > 2000) {
+        twoc_render_size_parse("native", &nw, &nh);
+        at = now;
+    }
+    *w = nw;
+    *h = nh;
+}
 
 static const char *size_label(const char *v, char *buf, size_t cap)
 {
+    int g;
+
     if (!v[0])
         return "Game (480 lines)";
-    if (_stricmp(v, "native") == 0)
-        return "Monitor (native)";
-    snprintf(buf, cap, "%s", v);
+    if (_stricmp(v, "native") == 0) {
+        unsigned w, h;
+        native_size(&w, &h);
+        if (!w)
+            return "Monitor (native)";
+        snprintf(buf, cap, "Monitor (native, %ux%u)", w, h);
+        return buf;
+    }
+    if ((g = size_listed(v)) >= 0)
+        snprintf(buf, cap, "%s  (%s)", v, g_size_groups[g].name);
+    else
+        snprintf(buf, cap, "%s  (custom)", v);
     return buf;
 }
 
@@ -720,29 +798,128 @@ static int tab_display(twoc_settings_t *s, const ovl_info_t *in)
         if (s->hud && !wide)
             help("Now: as the game draws it (the picture is 4:3).");
     }
-    {
-        int cur = -1;
-        char lbl[64];
-        for (i = 0; i < N_SIZES; i++)
-            if (_stricmp(g_sizes[i], s->render_size) == 0)
-                cur = i;
-        ImGui::SetNextItemWidth(ImGui::GetFontSize() * 12);
+    {   /* step 91: the render size by aspect ratio, a custom one, and what it draws */
+        static const ImVec4 mark(1.0f, 0.8f, 0.3f, 1.0f);
+        static bool custom;
+        static int cw = 1920, ch = 1080;
+        static char seen[32] = "\x01";
+        char lbl[64], an[24];
+        float fs = ImGui::GetFontSize();
+        double wide = s->widescreen && s->wide_h > 0 && s->wide_w / s->wide_h > 4.0 / 3.0 + 1e-6
+                          ? s->wide_w / s->wide_h : 0;
+        int asp = -1, g, listed = size_listed(s->render_size), sg = listed;
+        int is_game = !s->render_size[0], is_native = _stricmp(s->render_size, "native") == 0;
+        unsigned bw = 0, bh = 0, pw, ph, dw, dh;
+        unsigned gw = in->guest_w ? in->guest_w : 640, gh = in->guest_h ? in->guest_h : 480;
+
+        for (g = 0; g < N_SIZE_GROUPS; g++)    /* the chosen aspect's group, as the Aspect ratio list tells it */
+            if (!wide ? g == 0 : s->wide_w * g_size_groups[g].h == s->wide_h * g_size_groups[g].w)
+                asp = g;
+        if (asp >= 0)
+            snprintf(an, sizeof(an), "%s", g_size_groups[asp].name);
+        else
+            snprintf(an, sizeof(an), "%g:%g", s->wide_w, s->wide_h);
+        if (is_native)
+            native_size(&bw, &bh);
+        else if (!is_game)
+            twoc_render_size_parse(s->render_size, &bw, &bh);
+        if (sg < 0 && bw)
+            sg = size_aspect(bw, bh);
+        twoc_render_fit(bw, bh, gw, gh, wide, &pw, &ph);
+        twoc_render_scaled(pw, ph, s->render_scale, &dw, &dh);
+        if (strcmp(seen, s->render_size) != 0) {    /* a new size (or the first frame): the custom fields follow */
+            snprintf(seen, sizeof(seen), "%s", s->render_size);
+            custom = !is_game && !is_native && listed < 0;
+            if (custom && bw) {
+                cw = (int)bw;
+                ch = (int)bh;
+            }
+        }
+
+        ImGui::SetNextItemWidth(fs * 12);
+        {   /* the whole list at once where the picture is tall enough (ImGui's default shows 8 rows) */
+            float maxh = ImGui::GetFrameHeightWithSpacing() * 27, room = ImGui::GetIO().DisplaySize.y * 0.9f;
+            ImGui::SetNextWindowSizeConstraints(ImVec2(0, 0), ImVec2(FLT_MAX, maxh < room ? maxh : room));
+        }
         if (ImGui::BeginCombo("Render size", size_label(s->render_size, lbl, sizeof(lbl)))) {
-            if (cur < 0)                /* a size given on the command line or in the file */
-                ImGui::Selectable(size_label(s->render_size, lbl, sizeof(lbl)), true);
-            for (i = 0; i < N_SIZES; i++)
-                if (ImGui::Selectable(size_label(g_sizes[i], buf, sizeof(buf)), i == cur) && i != cur) {
-                    snprintf(s->render_size, sizeof(s->render_size), "%s", g_sizes[i]);
-                    r |= OVL_CHANGED;
+            if (ImGui::Selectable("Game (480 lines)", is_game) && !is_game) {
+                s->render_size[0] = 0;
+                r |= OVL_CHANGED;
+            }
+            if (ImGui::Selectable(size_label("native", lbl, sizeof(lbl)), is_native) && !is_native) {
+                snprintf(s->render_size, sizeof(s->render_size), "native");
+                r |= OVL_CHANGED;
+            }
+            for (g = 0; g < N_SIZE_GROUPS; g++) {
+                snprintf(lbl, sizeof(lbl), g == asp ? "%s  - the aspect ratio chosen" : "%s", g_size_groups[g].name);
+                if (g == asp)
+                    ImGui::PushStyleColor(ImGuiCol_Text, mark);
+                ImGui::SeparatorText(lbl);
+                if (g == asp)
+                    ImGui::PopStyleColor();
+                for (i = 0; i < g_size_groups[g].n; i++) {
+                    const char *v = g_size_groups[g].sizes[i];
+                    bool sel = _stricmp(v, s->render_size) == 0;
+                    if (ImGui::Selectable(v, sel) && !sel) {
+                        snprintf(s->render_size, sizeof(s->render_size), "%s", v);
+                        r |= OVL_CHANGED;
+                    }
                 }
+            }
+            ImGui::Separator();
+            if (ImGui::Selectable("Custom...", custom && listed < 0) && !custom) {
+                custom = true;
+                cw = (int)pw;           /* from the picture drawn now */
+                ch = (int)ph;
+            }
             ImGui::EndCombo();
         }
-        more("The size the host draws the game at; the game itself draws 640x480. The picture is the largest "
-             "of its aspect ratio that fits. A window opened without a render size is "
-             "scaled by Windows until the next start; fullscreen is unaffected.");
-        snprintf(line, sizeof(line), "Now %ux%u.", in->view_w ? in->view_w : in->host_w,
-                 in->view_h ? in->view_h : in->host_h);
+        more("The box the game is drawn in; the game itself draws 640x480. The picture is the largest of the "
+             "chosen aspect ratio that fits in it, so a size of another shape gets bars (the sizes are grouped "
+             "by shape, the chosen one marked). In a window the window takes that size in real pixels; "
+             "fullscreen shows it over the whole screen, keeping its shape. A window opened without a render "
+             "size is scaled by Windows until the next start. Applied at once.");
+        if (custom) {
+            ImGui::SetNextItemWidth(fs * 6.5f);
+            if (ImGui::InputInt("##cw", &cw, 16, 160))
+                cw = cw < TWOC_RENDER_SIZE_MIN ? TWOC_RENDER_SIZE_MIN : cw > TWOC_RENDER_SIZE_MAX ? TWOC_RENDER_SIZE_MAX : cw;
+            ImGui::SameLine();
+            ImGui::TextUnformatted("x");
+            ImGui::SameLine();
+            ImGui::SetNextItemWidth(fs * 6.5f);
+            if (ImGui::InputInt("##ch", &ch, 16, 160))
+                ch = ch < TWOC_RENDER_SIZE_MIN ? TWOC_RENDER_SIZE_MIN : ch > TWOC_RENDER_SIZE_MAX ? TWOC_RENDER_SIZE_MAX : ch;
+            ImGui::SameLine();
+            snprintf(lbl, sizeof(lbl), "%dx%d", cw, ch);
+            ImGui::BeginDisabled(_stricmp(lbl, s->render_size) == 0);
+            if (ImGui::Button("Apply##size")) {
+                snprintf(s->render_size, sizeof(s->render_size), "%s", lbl);
+                r |= OVL_CHANGED;
+            }
+            ImGui::EndDisabled();
+            more("Any width and height from 64 to 8192 pixels: type them (or use - and +), then Apply.");
+        }
+        if (dw == pw && dh == ph)
+            snprintf(line, sizeof(line), "Renders %ux%u at %s.", pw, ph, an);
+        else
+            snprintf(line, sizeof(line), "Renders %ux%u at %s: render scale %d%% of %ux%u, shown at %ux%u.", dw, dh,
+                     an, s->render_scale, pw, ph, pw, ph);
         help(line);
+        if (sg >= 0 && sg != asp)
+            snprintf(line, sizeof(line), "%ux%u is a %s size: at %s the picture fits inside it with bars "
+                     "(Aspect ratio %s fills it).", bw, bh, g_size_groups[sg].name, an, g_size_groups[sg].name);
+        else if (bw && (bw > pw + 2 || bh > ph + 2))
+            snprintf(line, sizeof(line), "The picture fits inside %ux%u, with thin bars.", bw, bh);
+        else
+            line[0] = 0;
+        if (line[0])
+            help(line);
+        if (in->view_w && (in->view_w != pw || in->view_h != ph))
+            snprintf(line, sizeof(line), "Now %ux%u.", in->view_w, in->view_h);
+        else
+            line[0] = 0;
+        if (line[0])
+            help(line);
     }
     {   /* step 90: the render scale, a share of the render size */
         static const int sc[] = { 25, 50, 67, 75, 85, 100, 125, 150, 175, 200 };

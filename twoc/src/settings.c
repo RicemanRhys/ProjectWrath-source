@@ -196,6 +196,72 @@ int twoc_render_scale_parse(const char *v)
            : p > TWOC_RENDER_SCALE_MAX ? TWOC_RENDER_SCALE_MAX : p;
 }
 
+int twoc_render_size_parse(const char *v, unsigned *pw, unsigned *ph)
+{
+    unsigned w = 0, h = 0;
+
+    *pw = *ph = 0;
+    if (!v || !*v || strcmp(v, "0") == 0)
+        return 0;
+    if (_stricmp(v, "native") == 0) {
+        DEVMODEA dm;
+        memset(&dm, 0, sizeof(dm));
+        dm.dmSize = sizeof(dm);
+        if (EnumDisplaySettingsA(NULL, ENUM_CURRENT_SETTINGS, &dm)) {
+            w = dm.dmPelsWidth;
+            h = dm.dmPelsHeight;
+        }
+    } else if (sscanf(v, "%ux%u", &w, &h) != 2 && sscanf(v, "%uX%u", &w, &h) != 2) {
+        w = h = 0;
+    }
+    if (w < TWOC_RENDER_SIZE_MIN || h < TWOC_RENDER_SIZE_MIN || w > TWOC_RENDER_SIZE_MAX || h > TWOC_RENDER_SIZE_MAX)
+        return -1;
+    *pw = w;
+    *ph = h;
+    return 0;
+}
+
+void twoc_render_fit(unsigned rw, unsigned rh, unsigned gw, unsigned gh, double wide, unsigned *w, unsigned *h)
+{
+    double r = wide > 0 ? wide : (double)gw / (double)gh;
+
+    *w = gw;
+    *h = gh;
+    if (!rw) {
+        if (wide > 0)
+            *w = 2 * (unsigned)(gh * r / 2.0 + 0.5);
+        return;
+    }
+    if ((double)rw / rh > r) {
+        *h = rh;
+        *w = 2 * (unsigned)(rh * r / 2.0 + 0.5);
+    } else {
+        *w = rw & ~1u;
+        *h = (unsigned)(rw / r + 0.5);
+    }
+}
+
+void twoc_render_scaled(unsigned vw, unsigned vh, int pct, unsigned *w, unsigned *h)
+{
+    double k = pct / 100.0, f;
+
+    if (pct == 100 || !vw || !vh) {
+        *w = vw;
+        *h = vh;
+        return;
+    }
+    *w = 2 * (unsigned)(vw * k / 2.0 + 0.5);
+    *h = (unsigned)(vh * k + 0.5);
+    if (*w > TWOC_RENDER_SCALE_MAX_TEX || *h > TWOC_RENDER_SCALE_MAX_TEX) {
+        f = (double)TWOC_RENDER_SCALE_MAX_TEX / *w < (double)TWOC_RENDER_SCALE_MAX_TEX / *h
+                ? (double)TWOC_RENDER_SCALE_MAX_TEX / *w : (double)TWOC_RENDER_SCALE_MAX_TEX / *h;
+        *w = 2 * (unsigned)(*w * f / 2.0);
+        *h = (unsigned)(*h * f);
+    }
+    *w = *w < 16 ? 16 : *w;
+    *h = *h < 16 ? 16 : *h;
+}
+
 /* Step 79: render_thread = off | on | auto (1 and 0 read too; sync, a check
  * in d3d_host.c, is on here). */
 static const char *g_rt_names[TWOC_RT_COUNT] = { "off", "on", "auto" };

@@ -608,29 +608,10 @@ static void render_size_init(void)
  * Returns -1 (and 0 x 0) for anything else. Step 54: also the overlay's. */
 static int render_size_parse(const char *v, unsigned *pw, unsigned *ph)
 {
-    unsigned w = 0, h = 0;
-
-    *pw = *ph = 0;
-    if (!v || !*v || strcmp(v, "0") == 0)
+    if (twoc_render_size_parse(v, pw, ph) == 0)     /* settings.c (step 91: the overlay's too) */
         return 0;
-    if (_stricmp(v, "native") == 0) {
-        DEVMODEA dm;
-        memset(&dm, 0, sizeof(dm));
-        dm.dmSize = sizeof(dm);
-        if (EnumDisplaySettingsA(NULL, ENUM_CURRENT_SETTINGS, &dm)) {
-            w = dm.dmPelsWidth;
-            h = dm.dmPelsHeight;
-        }
-    } else if (sscanf(v, "%ux%u", &w, &h) != 2 && sscanf(v, "%uX%u", &w, &h) != 2) {
-        w = h = 0;
-    }
-    if (w < 64 || h < 64 || w > 8192 || h > 8192) {
-        fprintf(stderr, "[WIDE] RECOMP_RENDER_SIZE=%s: not WxH (64-8192) or native; ignored\n", v);
-        return -1;
-    }
-    *pw = w;
-    *ph = h;
-    return 0;
+    fprintf(stderr, "[WIDE] RECOMP_RENDER_SIZE=%s: not WxH (64-8192) or native; ignored\n", v);
+    return -1;
 }
 
 /* The host back buffer for the guest's gw x gh: the picture's aspect (the
@@ -638,22 +619,7 @@ static int render_size_parse(const char *v, unsigned *pw, unsigned *ph)
  * RECOMP_RENDER_SIZE. Widths even. Neither set: the guest's own size. */
 static void host_size_for(uint32_t gw, uint32_t gh, double wide, unsigned *w, unsigned *h)
 {
-    double r = wide > 0 ? wide : (double)gw / (double)gh;
-
-    *w = gw;
-    *h = gh;
-    if (!g_render_w) {
-        if (wide > 0)
-            *w = 2 * (unsigned)(gh * r / 2.0 + 0.5);
-        return;
-    }
-    if ((double)g_render_w / g_render_h > r) {
-        *h = g_render_h;
-        *w = 2 * (unsigned)(g_render_h * r / 2.0 + 0.5);
-    } else {
-        *w = g_render_w & ~1u;
-        *h = (unsigned)(g_render_w / r + 0.5);
-    }
+    twoc_render_fit(g_render_w, g_render_h, gw, gh, wide, w, h);
 }
 
 static void host_size(uint32_t gw, uint32_t gh, unsigned *w, unsigned *h)
