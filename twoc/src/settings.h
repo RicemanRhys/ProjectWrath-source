@@ -133,6 +133,8 @@ enum { TWOC_AA_OFF, TWOC_AA_FXAA, TWOC_AA_SMAA, TWOC_AA_MSAA2, TWOC_AA_MSAA4, TW
 #define TWOC_RENDER_SCALE_MAX 200
 enum { TWOC_RT_OFF, TWOC_RT_ON, TWOC_RT_AUTO, TWOC_RT_COUNT };   /* step 79: the render thread */
 enum { TWOC_PRESET_CUSTOM, TWOC_PRESET_LOW, TWOC_PRESET_STANDARD, TWOC_PRESET_HIGH, TWOC_PRESET_COUNT };  /* step 91 */
+enum { TWOC_AO_OFF, TWOC_AO_SSAO, TWOC_AO_GTAO, TWOC_AO_COUNT };   /* step 92: ambient occlusion */
+#define TWOC_AO_STRENGTH_DEFAULT 100    /* step 92: ao_strength, percent */
 
 typedef struct {
     int fullscreen;
@@ -181,6 +183,9 @@ const char *twoc_preset_name(int p);    /* step 91: custom, low, standard, high 
 int twoc_preset_parse(const char *v);   /* TWOC_PRESET_CUSTOM for anything unknown */
 void twoc_preset_apply(twoc_settings_t *s, int p);          /* the preset's settings into `s` (custom: none) */
 int twoc_preset_matches(const twoc_settings_t *s, int p);   /* `s` has preset p's settings (custom: always) */
+const char *twoc_ao_name(int ao);       /* step 92: off, ssao, gtao */
+int twoc_ao_parse(const char *v);       /* TWOC_AO_OFF for anything unknown */
+int twoc_ao_strength_parse(const char *v);  /* 0-100, TWOC_AO_STRENGTH_DEFAULT unset or unknown */
 unsigned twoc_aa_samples(int aa);       /* MSAA's samples a pixel; 1 for the others */
 int twoc_aa_post(int aa);               /* step 90: the filter on the finished frame: TWOC_AA_FXAA, _SMAA or _OFF */
 int twoc_render_scale_parse(const char *v);     /* step 90: 25-200, 100 unset or unknown */

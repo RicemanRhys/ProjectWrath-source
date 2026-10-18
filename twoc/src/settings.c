@@ -175,6 +175,33 @@ int twoc_aa_parse(const char *v)
     return TWOC_AA_OFF;
 }
 
+/* Step 92: ambient occlusion. */
+static const char *const g_ao_names[TWOC_AO_COUNT] = { "off", "ssao", "gtao" };
+
+const char *twoc_ao_name(int ao)
+{
+    return ao >= 0 && ao < TWOC_AO_COUNT ? g_ao_names[ao] : "off";
+}
+
+int twoc_ao_parse(const char *v)
+{
+    int i;
+
+    for (i = 0; v && i < TWOC_AO_COUNT; i++)
+        if (_stricmp(v, g_ao_names[i]) == 0)
+            return i;
+    return TWOC_AO_OFF;
+}
+
+int twoc_ao_strength_parse(const char *v)
+{
+    int p;
+
+    if (!v || sscanf(v, "%d", &p) != 1)
+        return TWOC_AO_STRENGTH_DEFAULT;
+    return p < 0 ? 0 : p > 100 ? 100 : p;
+}
+
 unsigned twoc_aa_samples(int aa)
 {
     return aa == TWOC_AA_MSAA2 || aa == TWOC_AA_MSAA2_SMAA ? 2 : aa == TWOC_AA_MSAA4 || aa == TWOC_AA_MSAA4_SMAA ? 4

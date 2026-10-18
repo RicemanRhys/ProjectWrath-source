@@ -262,6 +262,9 @@ void *d3dh_rec_alloc(size_t n);
 /* Step 65: the game's overlay pass begins (1) or ends (0); its draws come
  * in between, with `overlay` set. */
 void d3dh_overlay_pass(int begin);
+/* Step 92: the game's world pass begins (1, with the world's projection,
+ * 0x242398, row-major) or ends (0); ambient occlusion goes in inside it. */
+void d3dh_world_pass(int begin, const float *proj);
 /* Step 65: the HUD at the screen edges (1) or in the middle 4:3 (0, as the
  * game draws it) in a picture wider than 4:3, `margin` percent of the
  * picture's width in from the edge (0-10). From the next overlay pass. */

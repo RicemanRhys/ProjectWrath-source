@@ -174,6 +174,7 @@
 #include "d3d_host.h"
 #include "overlay.h"
 #include "aa.h"
+#include "ao.h"
 #include "pads.h"
 #include "vk_probe.h"
 
@@ -529,7 +530,15 @@ static struct {                         /* stands in for it after a live size ch
     IDirect3DSurface8 *surf, *depth;    /* what is drawn into: tex's level 0, or (step 58) multisampled surfaces */
     unsigned ms;                        /* step 58: surf's samples a pixel, 0 when it is tex's level 0 */
     int dirty;                          /* step 58: drawn into since its last resolve */
+    ID3D11ShaderResourceView *dsrv;     /* step 92: depth's view for ambient occlusion (only while it is on) */
 } g_bb;
+/* Step 92: ambient occlusion ("Step 92: ambient occlusion", below). */
+static volatile LONG g_ao_mode;         /* RECOMP_AO / the overlay: TWOC_AO_*, read by both sides */
+static volatile LONG g_ao_strength = TWOC_AO_STRENGTH_DEFAULT;  /* RECOMP_AO_STRENGTH, percent */
+static int g_ao_depth;                  /* the back buffer's depth is readable (replay side) */
+static float g_ao_radius = 0.5f;        /* RECOMP_AO_RADIUS: the game's units (a test aid) */
+static int g_ao_half, g_ao_debug;       /* RECOMP_AO_HALF=1 half resolution, RECOMP_AO_DEBUG=1 the occlusion alone */
+static int g_ao_denoise = 2;            /* RECOMP_AO_DENOISE: the denoiser's passes (a test aid) */
 static volatile LONG g_aniso = 1;       /* RECOMP_ANISOTROPY: 1 leaves the game's filtering */
 static int g_aa;                        /* step 58, RECOMP_ANTIALIASING: TWOC_AA_* */
 static unsigned g_msaa = 1;             /* step 58: the samples a pixel MSAA asks for, 1 without */
@@ -1192,6 +1201,7 @@ static DWORD WINAPI win_thread(LPVOID p)
 /* ── Device ────────────────────────────────────────────────── */
 
 static void set_antialiasing(int aa);
+static void set_ao(int mode, int strength);     /* step 92 */
 
 int d3dh_create(unsigned width, unsigned height, unsigned host_w, unsigned host_h, double wide, int dpi_aware,
                 unsigned interval, double frame_hz, const char *dump_prefix)
@@ -1450,6 +1460,18 @@ int d3dh_create(unsigned width, unsigned height, unsigned host_w, unsigned host_
         if (aa != TWOC_AA_OFF)
             set_antialiasing(aa);
     }
+    {   /* step 92 */
+        int ao = twoc_ao_parse(getenv("RECOMP_AO"));
+        const char *e;
+        if ((e = getenv("RECOMP_AO_RADIUS")) && atof(e) > 0)
+            g_ao_radius = (float)atof(e);
+        g_ao_half = (e = getenv("RECOMP_AO_HALF")) && atoi(e) > 0;
+        g_ao_debug = (e = getenv("RECOMP_AO_DEBUG")) ? atoi(e) : 0;
+        if ((e = getenv("RECOMP_AO_DENOISE")) && atoi(e) > 0)
+            g_ao_denoise = atoi(e);
+        if (ao != TWOC_AO_OFF)
+            set_ao(ao, twoc_ao_strength_parse(getenv("RECOMP_AO_STRENGTH")));
+    }
     if (g_w != g_gw || g_h != g_gh)     /* 18.56 */
         fprintf(stderr, "[D3DB] host renders %ux%u for the guest's %ux%u: %s; full-width 2D stretched, other 2D"
                 " %s\n", g_w, g_h, g_gw, g_gh, g_wide > 0 ? "widescreen" : "4:3",
@@ -1557,6 +1579,64 @@ static IDirect3DSurface8 *ms_surface(unsigned w, unsigned h, D3DFORMAT fmt, unsi
         rv.ViewDimension = D3D11_RTV_DIMENSION_TEXTURE2DMS;
         hr = ID3D11Device_CreateRenderTargetView(d, (ID3D11Resource *)tex, &rv, &sf->rtv);
         sf->usage = D3DUSAGE_RENDERTARGET;
+    }
+    ID3D11Texture2D_Release(tex);
+    if (s && FAILED(hr)) {
+        s->lpVtbl->Release(s);
+        s = NULL;
+    }
+    return s;
+}
+
+/* Step 92: a D24S8 depth surface (`samples` a pixel) that a shader can also
+ * read, for ambient occlusion: the texture typeless, xbox_d3d8's surface
+ * wrapper given its depth view as ms_surface does, and *srv the depth as
+ * R24 UNORM. Made only while ambient occlusion is on; the depth drawn into
+ * it is the same as in a plain one. */
+static IDirect3DSurface8 *ao_depth_surface(unsigned w, unsigned h, unsigned samples, ID3D11ShaderResourceView **srv)
+{
+    ID3D11Device *d = d3d8_GetD3D11Device();
+    D3D11_TEXTURE2D_DESC td;
+    D3D11_DEPTH_STENCIL_VIEW_DESC dv;
+    D3D11_SHADER_RESOURCE_VIEW_DESC sv;
+    ID3D11Texture2D *tex = NULL;
+    IDirect3DSurface8 *s;
+    D3D8Surface *sf;
+    HRESULT hr = E_OUTOFMEMORY;
+
+    REPLAY_SIDE();
+    *srv = NULL;
+    memset(&td, 0, sizeof(td));
+    td.Width = w;
+    td.Height = h;
+    td.MipLevels = 1;
+    td.ArraySize = 1;
+    td.Format = DXGI_FORMAT_R24G8_TYPELESS;
+    td.SampleDesc.Count = samples ? samples : 1;
+    td.Usage = D3D11_USAGE_DEFAULT;
+    td.BindFlags = D3D11_BIND_DEPTH_STENCIL | D3D11_BIND_SHADER_RESOURCE;
+    if (FAILED(ID3D11Device_CreateTexture2D(d, &td, NULL, &tex)))
+        return NULL;
+    s = xbox_d3d8_surface_wrap(tex, w, h, D3DFMT_A8R8G8B8);  /* a colour format: no view made */
+    sf = (D3D8Surface *)s;
+    if (sf) {
+        memset(&dv, 0, sizeof(dv));
+        dv.Format = DXGI_FORMAT_D24_UNORM_S8_UINT;
+        dv.ViewDimension = td.SampleDesc.Count > 1 ? D3D11_DSV_DIMENSION_TEXTURE2DMS : D3D11_DSV_DIMENSION_TEXTURE2D;
+        hr = ID3D11Device_CreateDepthStencilView(d, (ID3D11Resource *)tex, &dv, &sf->dsv);
+        sf->format = D3DFMT_D24S8;
+        sf->usage = D3DUSAGE_DEPTHSTENCIL;
+    }
+    if (SUCCEEDED(hr)) {
+        memset(&sv, 0, sizeof(sv));
+        sv.Format = DXGI_FORMAT_R24_UNORM_X8_TYPELESS;
+        if (td.SampleDesc.Count > 1) {
+            sv.ViewDimension = D3D11_SRV_DIMENSION_TEXTURE2DMS;
+        } else {
+            sv.ViewDimension = D3D11_SRV_DIMENSION_TEXTURE2D;
+            sv.Texture2D.MipLevels = 1;
+        }
+        hr = ID3D11Device_CreateShaderResourceView(d, (ID3D11Resource *)tex, &sv, srv);
     }
     ID3D11Texture2D_Release(tex);
     if (s && FAILED(hr)) {
@@ -1816,7 +1896,14 @@ static int bind_target(const d3dh_target_t *t)
  * copied into earlier in the frame), is fetched at the replay instead, where
  * the target's contents are made. Stage 2 interpolates between two recorded
  * frames (notes 18.62). */
-enum { RC_DRAW, RC_CLEAR, RC_COPY, RC_FREED };
+enum { RC_DRAW, RC_CLEAR, RC_COPY, RC_FREED, RC_AO };     /* step 92: RC_AO, ambient occlusion here */
+/* Step 92: what an ambient-occlusion pass is given from the frame: the
+ * world's projection and the fog its opaque draws had. */
+typedef struct {
+    float proj[16];
+    float fog_start, fog_end, fog_density;
+    int fog_on;                         /* FOGTABLEMODE (D3DFOG_*: 3 linear), 0 no fog */
+} ao_mark_t;
 /* A recorded draw's stage: fetched at the replay (0, a texture that may be a
  * render target there), held from the recording (PIN_HELD), or (step 79,
  * with the render thread) the render target if there is one at the replay,
@@ -1849,6 +1936,7 @@ typedef struct {
         struct {
             uint32_t data, bytes;
         } freed;
+        ao_mark_t ao;                   /* step 92 */
     } u;
 } rcmd_t;
 
@@ -3344,6 +3432,8 @@ static int rec_draw(const d3dh_draw_t *d)
 }
 
 static void ic_draw(const rcmd_t *c);   /* step 61 */
+static void ao_exec(const ao_mark_t *m);    /* step 92 */
+static HRESULT bb_rebuild(unsigned w, unsigned h);    /* step 92 */
 static ID3D11Texture2D *back_tex(void); /* step 87, the replay check's later passes */
 static void replay_check_snap(int restore, ID3D11Texture2D *bb);
 
@@ -3392,6 +3482,9 @@ static void replay_pass(int interp)
             break;
         case RC_FREED:
             freed_exec(c->u.freed.data, c->u.freed.bytes);
+            break;
+        case RC_AO:                     /* step 92: each pass, so each sub-frame under its own camera */
+            ao_exec(&c->u.ao);
             break;
         }
     }
@@ -6322,6 +6415,197 @@ void d3dh_set_framerate(int display)
                 g_replay_check ? "_CHECK" : "=N");
 }
 
+/* ── Step 92: ambient occlusion (notes 18.95) ─────────────────
+ *
+ * The world pass (the display list flushed at 0x8929A, d3d_bridge.c's
+ * d3db_list_flush) draws the level's opaque geometry into the back buffer
+ * first, then what is blended (glass, water's surface, shadows' darkening,
+ * decals) with depth writes off, and the stencil shadow; the sky comes in a
+ * flush of its own before it, particles, snow and full-screen fades in
+ * flushes after it, the HUD and the pause menu in the overlay pass last.
+ * So the occlusion goes in at the world pass's first draw into the back
+ * buffer that doesn't write depth, once AO_MIN_DRAWS opaque ones have (or
+ * at the pass's end if none comes): everything drawn after it, blended
+ * things, particles and the HUD, is left as the game draws it. A world pass
+ * drawn into a render target (H2 Oh No's underwater pass, the textures the
+ * game renders) gets none, and neither does a frame without a world pass
+ * (the pause still).
+ *
+ * The game side notes the place (RC_AO among the frame's commands; at once
+ * when frames aren't recorded) with the world's projection from the pass's
+ * start and the fog of its last opaque draw; the replay side draws it
+ * (ao_exec, ao.c) in every pass over the frame, so each sub-frame gets the
+ * occlusion of its own depth. With it off nothing here runs and the back
+ * buffer is made as before; on, the back buffer always has a render target
+ * and a readable depth of its own (bb_rebuild). */
+#define AO_MIN_DRAWS 8
+static struct {
+    int in, marked;                     /* inside the world pass; its occlusion placed */
+    unsigned drew;                      /* its opaque draws into the back buffer so far */
+    ao_mark_t m;
+} g_aw;
+static volatile LONG g_ao_marks[3];     /* placed at a blended draw, at the pass's end; world passes without one */
+static unsigned g_ao_runs, g_ao_fails, g_ao_off;    /* replay side */
+
+static uint32_t rs_value(const d3dh_draw_t *d, uint32_t state, uint32_t dflt)
+{
+    unsigned i;
+
+    for (i = 0; i < d->n_rs; i++)
+        if (d->rs[i].state == state)
+            return d->rs[i].value;
+    return dflt;
+}
+
+/* The occlusion here. Game side, the recording lock held. */
+static void ao_mark(int at_end)
+{
+    int side;
+
+    g_aw.marked = 1;
+    InterlockedIncrement(&g_ao_marks[at_end ? 1 : 0]);
+    if (REC_ON()) {
+        rcmd_t *c;
+        if (g_replay_check) {           /* at once too, as the draws are */
+            side = side_set(SIDE_NOW);
+            ao_exec(&g_aw.m);
+            side_set(side);
+        }
+        c = rc_push(RC_AO);
+        if (c)
+            c->u.ao = g_aw.m;
+    } else {
+        side = side_set(SIDE_NOW);
+        ao_exec(&g_aw.m);
+        side_set(side);
+    }
+}
+
+/* A world-pass draw into the back buffer. Game side, the recording lock held. */
+static void ao_world_draw(const d3dh_draw_t *d)
+{
+    uint32_t v;
+
+    if (rs_value(d, 7, 1) && rs_value(d, 14, 1)) {      /* ZENABLE, ZWRITEENABLE: opaque */
+        g_aw.drew++;
+        g_aw.m.fog_on = rs_value(d, 28, 0) ? (int)rs_value(d, 35, 0) : 0;     /* FOGENABLE: FOGTABLEMODE */
+        v = rs_value(d, 36, 0);
+        memcpy(&g_aw.m.fog_start, &v, 4);
+        v = rs_value(d, 37, 0);
+        memcpy(&g_aw.m.fog_end, &v, 4);
+        v = rs_value(d, 38, 0);
+        memcpy(&g_aw.m.fog_density, &v, 4);
+    } else if (g_aw.drew >= AO_MIN_DRAWS) {
+        ao_mark(0);
+    }
+}
+
+/* d3d_bridge.c: the world pass begins (with the world's projection,
+ * 0x242398) or ends. */
+void d3dh_world_pass(int begin, const float *proj)
+{
+    int side;
+
+    if (!g_ready || (!g_ao_mode && !g_aw.in))
+        return;
+    rec_lock(0);
+    side = side_set(SIDE_GAME);
+    if (begin) {
+        memset(&g_aw, 0, sizeof(g_aw));
+        g_aw.in = g_ao_mode != 0;
+        memcpy(g_aw.m.proj, proj, sizeof(g_aw.m.proj));
+    } else if (g_aw.in) {
+        if (!g_aw.marked && g_aw.drew)
+            ao_mark(1);
+        else if (!g_aw.marked)
+            InterlockedIncrement(&g_ao_marks[2]);
+        g_aw.in = 0;
+    }
+    side_set(side);
+    rec_unlock();
+}
+
+/* Draw the occlusion into the back buffer. Replay side, g_lock held. */
+static void ao_exec(const ao_mark_t *m)
+{
+    static LARGE_INTEGER last;
+    LARGE_INTEGER now;
+    D3D11_TEXTURE2D_DESC td;
+    ao_params_t p;
+    int mode = (int)g_ao_mode;
+
+    REPLAY_SIDE();
+    if (!mode || !g_bb.dsrv || !g_bb.tex) {
+        g_ao_off++;
+        return;
+    }
+    ID3D11Texture2D_GetDesc(((D3D8Texture *)g_bb.tex)->d3d11_texture, &td);
+    memset(&p, 0, sizeof(p));
+    p.mode = mode;
+    p.strength = (float)g_ao_strength / 100.0f;
+    memcpy(p.proj, m->proj, sizeof(p.proj));
+    p.fog_mode = m->fog_on;
+    p.fog_start = m->fog_start;
+    p.fog_end = m->fog_end;
+    p.fog_density = m->fog_density;
+    p.radius = g_ao_radius;
+    p.half = g_ao_half;
+    p.denoise = g_ao_denoise;
+    p.debug = g_ao_debug;
+    if (ao_apply(&p, g_bb.dsrv, g_bb.ms ? g_bb.ms : 1, ((D3D8Surface *)g_bb.surf)->rtv, td.Width, td.Height) == 0) {
+        if (g_bb.ms)
+            g_bb.dirty = 1;
+        g_ao_runs++;
+    } else {
+        g_ao_fails++;
+    }
+    QueryPerformanceCounter(&now);
+    if (!last.QuadPart)
+        last = now;
+    if ((double)(now.QuadPart - last.QuadPart) >= 10.0 * (double)g_qpf.QuadPart) {
+        ao_stats_t s;
+        char gpu[160] = "";
+        ao_stats_take(&s);
+        if (s.timed)
+            snprintf(gpu, sizeof(gpu), "; GPU ms a pass (%u timed): depth %.3f, prefilter %.3f, occlusion %.3f,"
+                     " denoise %.3f, apply %.3f, all %.3f", s.timed, s.ms[0], s.ms[1], s.ms[2], s.ms[3], s.ms[4],
+                     s.total_ms);
+        fprintf(stderr, "[AO] %s, strength %ld%%, radius %.2f, %s size %ux%u%s: drawn %u, failed %u, off %u; placed"
+                " at a blended draw %ld, at the world pass's end %ld, world passes without one %ld%s\n",
+                twoc_ao_name(mode), (long)g_ao_strength, (double)p.radius, p.half ? "half" : "full", td.Width,
+                td.Height, g_bb.ms ? ", multisampled" : "", g_ao_runs, g_ao_fails, g_ao_off, (long)g_ao_marks[0],
+                (long)g_ao_marks[1], (long)g_ao_marks[2], gpu);
+        last = now;
+    }
+}
+
+/* The setting, at once (replay side): on for the first time, the back
+ * buffer is made again with a depth a shader can read. */
+static void set_ao(int mode, int strength)
+{
+    int was = (int)g_ao_mode;
+
+    REPLAY_SIDE();
+    EnterCriticalSection(&g_lock);
+    InterlockedExchange(&g_ao_strength, strength < 0 ? 0 : strength > 100 ? 100 : strength);
+    if (mode && !g_ao_depth) {
+        g_ao_depth = 1;
+        if (FAILED(bb_rebuild(g_w, g_h))) {
+            g_ao_depth = 0;
+            fprintf(stderr, "[D3DB] host ambient occlusion: no readable depth for the back buffer; off\n");
+            mode = TWOC_AO_OFF;
+        }
+    }
+    InterlockedExchange(&g_ao_mode, mode);
+    {
+        ao_stats_t s;
+        ao_stats_take(&s);              /* the [AO] line's GPU times start over with the new mode */
+    }
+    LeaveCriticalSection(&g_lock);
+    if (mode != was || mode)
+        fprintf(stderr, "[D3DB] host ambient occlusion: %s, strength %ld%%\n", twoc_ao_name(mode), (long)g_ao_strength);
+}
+
 int d3dh_draw_up(const d3dh_draw_t *d)
 {
     int r, side;
@@ -6330,6 +6614,8 @@ int d3dh_draw_up(const d3dh_draw_t *d)
         return -1;
     rec_lock(0);
     side = side_set(SIDE_GAME);         /* step 78 */
+    if (g_aw.in && !g_aw.marked && !d->target.data)     /* step 92 */
+        ao_world_draw(d);
     if (g_replay_check) {               /* at once, as without replay, and recorded */
         g_tc_now = &g_tcc;              /* step 78: at once the old way, from guest memory, in a cache of its own */
         side_set(SIDE_NOW);
@@ -7663,23 +7949,30 @@ static HRESULT bb_rebuild(unsigned w, unsigned h)
     IDirect3DSurface8 *surf = NULL, *depth = NULL;
     unsigned n = g_msaa > 1 ? ms_samples((D3DFORMAT)XDK_FMT_LIN_A8B8G8R8) : 1;
     ID3D11Texture2D *old = NULL, *dst = NULL;
+    ID3D11ShaderResourceView *dsrv = NULL;
     HRESULT hr = S_OK;
 
     REPLAY_SIDE();
-    if (w != g_dev_w || h != g_dev_h || n > 1) {
+    if (w != g_dev_w || h != g_dev_h || n > 1 || g_ao_depth) {     /* step 92: a readable depth needs its own */
         hr = g_dev->lpVtbl->CreateTexture(g_dev, w, h, 1, D3DUSAGE_RENDERTARGET, (D3DFORMAT)XDK_FMT_LIN_A8B8G8R8,
                                           D3DPOOL_DEFAULT, &tex);
         if (SUCCEEDED(hr) && n > 1) {
             surf = ms_surface(w, h, (D3DFORMAT)XDK_FMT_LIN_A8B8G8R8, n);
-            depth = surf ? ms_surface(w, h, D3DFMT_D24S8, n) : NULL;
+            depth = !surf ? NULL : g_ao_depth ? ao_depth_surface(w, h, n, &dsrv) : ms_surface(w, h, D3DFMT_D24S8, n);
             if (!depth)
                 hr = E_FAIL;
         } else if (SUCCEEDED(hr)) {
             hr = tex->lpVtbl->GetSurfaceLevel(tex, 0, &surf);
-            if (SUCCEEDED(hr))
+            if (SUCCEEDED(hr) && g_ao_depth) {
+                depth = ao_depth_surface(w, h, 1, &dsrv);
+                if (!depth)
+                    hr = E_FAIL;
+            } else if (SUCCEEDED(hr))
                 hr = g_dev->lpVtbl->CreateDepthStencilSurface(g_dev, w, h, D3DFMT_D24S8, D3DMULTISAMPLE_NONE, &depth);
         }
         if (FAILED(hr) || !surf || !depth) {
+            if (dsrv)
+                ID3D11ShaderResourceView_Release(dsrv);
             if (depth)
                 depth->lpVtbl->Release(depth);
             if (surf)
@@ -7706,9 +7999,12 @@ static HRESULT bb_rebuild(unsigned w, unsigned h)
         g_bb.surf->lpVtbl->Release(g_bb.surf);
         g_bb.tex->lpVtbl->Release(g_bb.tex);
     }
+    if (g_bb.dsrv)
+        ID3D11ShaderResourceView_Release(g_bb.dsrv);
     g_bb.tex = tex;                     /* NULL at xbox_d3d8's own size: its back buffer again */
     g_bb.surf = surf;
     g_bb.depth = depth;
+    g_bb.dsrv = dsrv;                   /* step 92 */
     g_bb.ms = n > 1 && tex ? n : 0;
     g_bb.dirty = 0;
     if (g_bb.ms && old)
@@ -8989,6 +9285,11 @@ static void trigger_file(unsigned swap_no)
                 ts.show_fps = atoi(v) != 0;
             } else if (strcmp(k, "scale") == 0) {           /* step 90: render_scale */
                 ts.render_scale = twoc_render_scale_parse(v);
+            } else if (strcmp(k, "aoradius") == 0) {        /* step 92's test aids: at the next pass */
+                if (atof(v) > 0)
+                    g_ao_radius = (float)atof(v);
+            } else if (strcmp(k, "aodenoise") == 0) {
+                g_ao_denoise = atoi(v) > 0 ? atoi(v) : g_ao_denoise;
             } else if (strcmp(k, "pausebg") == 0) {         /* step 90: pause_unfocused */
                 ts.pause_unfocused = atoi(v) != 0;
             } else if (strcmp(k, "preset") == 0) {          /* step 91: as the overlay's Preset */

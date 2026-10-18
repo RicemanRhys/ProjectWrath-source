@@ -3828,6 +3828,7 @@ void d3db_list_flush(uint32_t ret, int end)
             memcpy(g_world_cam, (const void *)XBOX_PTR(0x00242620u), 64);
             memcpy(g_world_cam + 16, (const void *)XBOX_PTR(0x00242398u), 64);
             g_world_cam_ok = 1;
+            d3dh_world_pass(1, g_world_cam + 16);   /* step 92: ambient occlusion */
         } else if (ret == PASS_OVERLAY) {
             d3dh_overlay_pass(1);
         }
@@ -3836,6 +3837,8 @@ void d3db_list_flush(uint32_t ret, int end)
     if (ret == PASS_OVERLAY) {
         d3dh_overlay_pass(0);
         g_world_cam_ok = 0;             /* a frame without a world pass (the pause) has no world camera */
+    } else if (ret == PASS_WORLD) {
+        d3dh_world_pass(0, NULL);       /* step 92 */
     }
     g_pass = 0;
 }
