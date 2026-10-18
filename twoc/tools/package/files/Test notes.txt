@@ -3,14 +3,31 @@ Legion Go test notes (this file goes into the zip "Collect logs.bat" makes)
 
 Legion Space thermal mode:
 Windows power mode:
-Screen refresh rate (Settings):
-Window or full screen:
+Screen refresh rate and resolution (Settings):
 
-First test, on the Legion Go: cast_bug's start, standing still 30 s each (README part C). For each: the
-counter's two numbers, the settings menu's "Measured:" line copied as it is, and anything
-you saw (stutter, slow motion).
+1. The fullscreen start ("Play Crash (fullscreen start test).bat"), plugged in, ten starts to
+   the main menu. For each: fine / froze (and did it unfreeze by itself, or did you alt+tab?) /
+   stuttered / anything else (the window first, a flash):
+    1:
+    2:
+    3:
+    4:
+    5:
+    6:
+    7:
+    8:
+    9:
+   10:
+   Optional, "Play Crash (fullscreen old way).bat", five starts (froze? unfroze by itself?):
+    1:
+    2:
+    3:
+    4:
+    5:
+   Full screen on for the other tests, or the window?
 
-  Round 1, plugged in:
+2. The battery round (cast_bug's start, 30 s standing, README part C). The time you unplugged
+   and the percentage:
    a. Match display ("Play Crash.bat")
       Game:        /s    Shown:        /s
       Measured:
@@ -19,77 +36,45 @@ you saw (stutter, slow motion).
       Game:        /s    Shown:        /s
       Measured:
       Seen:
-   c. Render thread Off ("Play Crash.bat", then Off in the menu)
+   c. Render scale 67% ("Play Crash.bat", then 67% in the menu)
       Game:        /s    Shown:        /s
       Measured:
-      Seen:
-   d. Ack wait ("Play Crash (ack wait test).bat"; optional)
-      Game:        /s    Shown:        /s
-      Measured:
-      Seen:
-   e. Baked draws off ("Play Crash (bake off).bat"; round 1 only, compared with a)
-      Game:        /s    Shown:        /s
-      Measured:
-      Seen:
-
-  Vulkan probe ("Play Crash (Vulkan probe).bat"; optional, plugged in, a minute in the hub):
-      did its second window open (yes / no)?
-
-  Round 2, on battery (a to d, not e). The time you unplugged:
-   a. Match display ("Play Crash.bat")
-      Game:        /s    Shown:        /s
-      Measured:
-      Seen:
-   b. 72 fps ("Play Crash (72 fps test).bat")
-      Game:        /s    Shown:        /s
-      Measured:
-      Seen:
-   c. Render thread Off ("Play Crash.bat", then Off in the menu)
-      Game:        /s    Shown:        /s
-      Measured:
-      Seen:
+      Seen (how soft does it look?):
    d. Ack wait ("Play Crash (ack wait test).bat"; optional)
       Game:        /s    Shown:        /s
       Measured:
       Seen:
    Battery percentage at the end:
 
-Did holding Menu about a second open and close the settings menu? Did View + Menu? Did F1
-(only if a keyboard was attached)? Did the
-controller move around in it? Did a short press of Menu still open the game's pause menu (when
-you let go), and did holding it open only the settings menu, not the pause menu too?
-Did the line "Press F1 to open the settings menu (or hold Start on the controller)" show at the
-bottom for the first seconds, and could you read it?
+3. Standard against High (plugged in, cast_bug's start, 30 s each)
+   a. Anti-aliasing Off
+      Game:        /s    Shown:        /s
+      Measured:
+   b. SMAA
+      Game:        /s    Shown:        /s
+      Measured:
+      Seen (edges, fences, leaves):
+   c. MSAA 2x + SMAA
+      Game:        /s    Shown:        /s
+      Measured:
+      Seen:
+   d. Render scale 125%, Anti-aliasing Off
+      Game:        /s    Shown:        /s
+      Measured:
+      Seen:
 
-The other tests (optional, if there's time). For each: the counter's numbers (or the "Measured:" line), smooth or stutters
-(how often), does the game itself slow down, fan noise / warmth / CPU temperature, plugged
-in or battery.
+4. DXVK (optional; the DXVK-test folder): cast_bug's start, the counter and the Measured line:
 
-1. Match display
-   hub:
-   upstairs:
-   Arctic Antics:
+5. A 10-minute session (where, stutter, warmth, fan, any slowdown):
 
-2. 144 fps
-   hub:
-   upstairs:
-   Arctic Antics:
+6. The small things
+   View + Menu held: did it open and close the settings menu?
+   The startup line at the bottom: could you read it?
+   Pause when in the background: did the game stop and go quiet, and go on again?
+   Skip the title animation off: about how long until the main menu?
 
-3. 72 fps ("Play Crash (72 fps test).bat")
-   hub:
-   upstairs:
-   Arctic Antics:
+Optional: the Vulkan probe ("Play Crash (Vulkan probe).bat"): did its second window open?
+Optional: baked draws off ("Play Crash (bake off).bat") at cast_bug's start:
+      Game:        /s    Shown:        /s
 
-4. 90 fps (what the line under Frame rate says):
-   hub:
-   upstairs:
-
-5. Render thread (upstairs, Match display)
-   Auto (what its line says):
-   Off:
-
-6. Full screen (Alt+Enter), Match display:
-
-7. Battery / Balanced (optional):
-
-Anything else (crashes, sound, controls, picture problems):
+Anything else (crashes, sound crackles, controls, picture problems):

@@ -7,22 +7,37 @@ on a second CPU core) hold up on a handheld. The game files in game_files\ are y
 copy of the disc. There are no saves in this folder: start a new game and name it WOMBAT,
 which opens every warp room (all crystals), so every level in the tests can be reached.
 
-New in this package: the settings menu opens by holding Menu (Start) about a second on
-the controller, or with F1 on a keyboard; View + Menu held still works too. For the first
-8 seconds a line at the bottom of the picture says so. "Baked draws" make the in-between
-frames cheaper to draw (test e compares). Two new launchers: bake off (test e) and the
-Vulkan probe (optional).
+New in this package:
+  - The frozen splash is fixed (the last round: 3 of 12 starts with full screen on froze
+    on the Universal logo until alt+tab, and stuttered after). The desktop froze the same
+    way, 7 starts in 16, and now 0. Starting with full screen on, the game opens in a
+    window and goes full screen once its first frames are on the screen, and full screen
+    stays in Windows' normal way of showing windows (DWM's composition), which never froze.
+    If the screen still stops taking frames, the game does what alt+tab did by itself
+    within about a second and a half. Full screen stays off in this package's settings
+    until the first test below confirms it here.
+  - If the splash still freezes: alt+tab once (then back to the game).
+  - The game draws at the screen's own size (native, 1920 x 1200 or 2560 x 1600, whatever
+    Windows is set to), which held 60 plugged in last round.
+  - Four new settings (part F): Render scale, MSAA + SMAA, Pause when in the background,
+    and Skip the title animation (on in this package).
+  - Two launchers for the first test: fullscreen start test, and fullscreen old way.
 
 What's in the folder
 --------------------
   Play Crash.bat                  starts the game
-  Play Crash (72 fps test).bat    starts the game at 72 fps (the first test's b, and test 3)
+  Play Crash (fullscreen start test).bat     starts the game with full screen on (the
+                                  first test, part C)
+  Play Crash (fullscreen old way).bat        full screen at once, as the last package did,
+                                  with only the new recovery to unfreeze it (the first
+                                  test's comparison, optional)
+  Play Crash (72 fps test).bat    starts the game at 72 fps (test 2)
   Play Crash (ack wait test).bat  an optional test: starts the game with the "ack wait"
-                                  switch on (the first test's d; part C says what it is)
-  Play Crash (bake off).bat       starts the game with "baked draws" off, to compare (the
-                                  first test's e; part C says what it is)
+                                  switch on (test 2's d; part C says what it is)
+  Play Crash (bake off).bat       starts the game with "baked draws" off, to compare (an
+                                  optional test)
   Play Crash (Vulkan probe).bat   an optional one-minute test: a second small window that
-                                  tries Vulkan (part C, after the first test)
+                                  tries Vulkan
   Collect logs.bat                zips the logs and a PC summary to bring back
   crash_twoc.ini                  the game's settings, already set up for the Legion Go
   Test notes.txt                  write what you see here; it goes into the zip
@@ -48,10 +63,10 @@ A. Set up the Legion Go (once)
 2.  Set the screen to 144 Hz: Settings > System > Display > Advanced display >
     "Choose a refresh rate" > 144 Hz (Legion Space's quick settings have the same switch).
     If the list offers "Dynamic", pick 144 instead.
-3.  Leave the screen at its full resolution (2560 x 1600). The game draws at 1280 x 800
-    itself.
-4.  Plug the charger in for the first round of tests, so the numbers don't depend on the
-    battery. (The first test's second round is on battery.)
+3.  Leave the screen's resolution as it was last time (1920 x 1200 then). The game draws
+    at that size ("native"); part F's Render scale draws less on battery.
+4.  Plug the charger in for the first tests, so the numbers don't depend on the battery.
+    (Test 2 is on battery.)
 5.  Power: press the Legion L button to open Legion Space and set the thermal mode to
     Performance. Then Settings > System > Power & battery > Power mode: Best performance.
 6.  In AMD Software (Adrenalin), Gaming > Graphics, make sure these are off (they change
@@ -82,9 +97,11 @@ B. Start the game (on the Legion Go)
 1.  Double-click "Play Crash.bat". A black console window opens, then the game window.
     Leave the console open; it closes by itself when the game ends.
     If Windows says "Windows protected your PC", click "More info", then "Run anyway".
-2.  The game starts in a 1280 x 800 window. Alt+Enter switches to full screen and back.
-3.  The controllers work as an Xbox pad. The main menu opens about 10 seconds after the
-    start; start a new game named WOMBAT. Press Start during the intro to skip it.
+2.  The game starts in a window nearly as big as the screen. Alt+Enter switches to full
+    screen and back.
+3.  The controllers work as an Xbox pad. The main menu opens a few seconds after the
+    logos; start a new game named WOMBAT. Press Start
+    during the intro to skip it.
 4.  The frame-rate counter in the top left corner (on in this package) shows two numbers:
       Game 60/s ........... the game's own speed: 60 is full speed; under that the game
                             itself runs slow (it says "slow" under 57)
@@ -99,6 +116,8 @@ B. Start the game (on the Legion Go)
       Show frame rate ..... the counter in the corner, on or off
       Adaptive frame rate . leave On
       Render thread ....... Auto / On / Off; the line under it says whether it is on
+      Render scale ........ 100% (the screen's size) or less or more (part F)
+      Anti-aliasing ....... Off / FXAA / SMAA / MSAA / MSAA + SMAA (part F)
     Changes apply at once and are saved to crash_twoc.ini when you close the menu.
 6.  To stop: close the game window (or Alt+F4). The black console window should close with
     it within a second or two. If it stays open (still saying "Crash is running"), the
@@ -108,102 +127,83 @@ B. Start the game (on the Legion Go)
 
 C. The tests
 ------------
-First test (the one that matters most): cast_bug's start, standing still 30 seconds, one
-run of the game each. All of it is on the Legion Go. Round 1 plugged in: a to e (d is
-optional). Round 2 on battery: a to d.
+All on the Legion Go. Write what you see in Test notes.txt as you go.
 
-Getting to cast_bug (every run): start a new game named WOMBAT and press Start to skip
-the intro. In the hub, walk Crash onto the round lift in the middle; it takes him up to
-the bonus warp room. Go through its gate to the first pad; the level is cast_bug. When it
-has loaded, put the controller down: Crash stands at the start.
+1. The fullscreen start (the one that matters most; plugged in). Ten times: double-click
+   "Play Crash (fullscreen start test).bat", wait for the main menu (about 15 seconds),
+   then close the game. Each time note whether the Universal logo froze, the picture
+   stuttered, or the window flashed up first (it should show for about a second, then go
+   full screen). If one froze: wait 10 seconds before touching anything (the game should
+   unfreeze itself), and only then alt+tab if it is still frozen; note which.
+   Optional, after the ten: five times "Play Crash (fullscreen old way).bat", the same way.
+   It starts as the last package did (froze 3 in 12); here a freeze should clear by itself
+   within about two seconds. Note any that didn't.
+   If all ten fullscreen starts were fine, turn Fullscreen on in the settings menu for the
+   rest of the tests (it is saved), or keep the window: say which in Test notes.txt.
 
-What to write down in Test notes.txt after the 30 seconds, each time:
-  - the counter's two numbers in the top left corner: "Game N/s" and "Shown N/s"
-  - the Measured line: open the settings menu (hold Menu), and on the Display tab copy
-    the line that starts "Measured:" as it is. Then close the menu.
-  - anything you saw: stutter, Crash in slow motion
+2. The battery round (cast_bug's start, standing still 30 seconds, one run of the game
+   each). Unplug the charger and write down the time and the percentage. Then:
+     a. Match display: start "Play Crash.bat". Go to cast_bug, stand 30 s, write it down.
+        Close the game.
+     b. 72 fps: start "Play Crash (72 fps test).bat" (the settings menu says "72 fps").
+        Go to cast_bug, stand 30 s, write it down. Close the game.
+     c. Render scale 67%: start "Play Crash.bat". Go to cast_bug. Settings menu, Display
+        tab, Render scale: 67%, close the menu. Stand 30 s, write it down. Then set it back
+        to 100% and close the game.
+     d. Ack wait (optional): start "Play Crash (ack wait test).bat". Go to cast_bug, stand
+        30 s, write it down. Close the game.
+   At the end, the battery percentage. Then plug the charger back in.
 
-Round 1, plugged in (charger in, Legion Space on Performance):
-  a. Match display: start "Play Crash.bat". Go to cast_bug, stand 30 s, write it down.
-     Close the game.
-  b. 72 fps: start "Play Crash (72 fps test).bat" (the settings menu says "72 fps"). Go to
-     cast_bug, stand 30 s, write it down. Close the game.
-  c. Render thread Off: start "Play Crash.bat". Go to cast_bug. Open the settings menu,
-     Display tab, Render thread: Off, and close the menu. Stand 30 s, write it down.
-     Then open the menu again, set Render thread back to Auto, close the menu (that
-     saves it), and close the game.
-  d. Ack wait (optional, see below): start "Play Crash (ack wait test).bat". Go to
-     cast_bug, stand 30 s, write it down. Close the game.
-  e. Baked draws off (round 1 only; it is compared with a): start "Play Crash (bake
-     off).bat". Go to cast_bug, stand 30 s, write it down. Close the game.
+   Getting to cast_bug (every run): start a new game named WOMBAT and press Start to skip
+   the intro. In the hub, walk Crash onto the round lift in the middle; it takes him up to
+   the bonus warp room. Go through its gate to the first pad; the level is cast_bug. When
+   it has loaded, put the controller down: Crash stands at the start.
 
-Round 2, on battery: unplug the charger and write down the time you did. Then a, b, c and
-d (optional) again, the same way. Not e. (The log also notes every 10 seconds whether it is plugged
-in and the battery's percentage.)
+   What to write down after the 30 seconds, each time:
+     - the counter's two numbers in the top left corner: "Game N/s" and "Shown N/s"
+     - the Measured line: open the settings menu (hold Menu), and on the Display tab copy
+       the line that starts "Measured:" as it is. Then close the menu.
+     - anything you saw: stutter, Crash in slow motion
 
-What baked draws are: at 144 Hz each game frame is shown 2 or 3 times, each time drawn
-again, a little further along. Until now every one of those drawings worked out every
-draw's settings from scratch; now the first one does, and the others reuse what it set up
-(on in "Play Crash.bat"). On the desktop that takes about a third off the render thread's
-time, with the same picture. e turns it off for one run, so a and e compare the two.
+3. Standard against High (plugged in, cast_bug's start, one run of "Play Crash.bat"). Stand
+   30 s with each of these, changed in the settings menu, writing down the counter, the
+   Measured line and how it looks (edges, the fences and leaves):
+     a. Anti-aliasing Off (as it starts)
+     b. Anti-aliasing SMAA
+     c. Anti-aliasing MSAA 2x + SMAA
+     d. Render scale 125% with Anti-aliasing Off
+   Then set Anti-aliasing back to Off and Render scale to 100%.
 
-The Vulkan probe (optional, about a minute, on the Legion Go, plugged in, after round 1):
-start "Play Crash (Vulkan probe).bat". A second small window, "Crash TWOC - Vulkan probe",
-opens beside the game and shows a colour that keeps changing: that is the probe, testing
-Vulkan (another way to draw that a later version may use). Let the game reach the hub and
-stay a minute, then close the game. Write down only whether the second window opened; the
-rest is in the log, which "Collect logs.bat" takes.
+4. DXVK once (optional; the DXVK-test folder, its own README): cast_bug's start, Match
+   display, Render thread Auto, 30 s, the counter and the Measured line.
+
+5. A 10-minute play session, plugged in, in any levels you like: note stutter, how warm
+   the back gets and fan noise, and whether the game ever slowed down.
+
+6. The small things not tried last time:
+     - View + Menu held about a second: does it open and close the settings menu?
+     - Could you read the startup line at the bottom ("Press F1 ... or hold Start")?
+     - Pause when in the background (part F): turn it on, then press the Windows key or
+       minimise the game: does the game stop and go quiet, and go on when you come back?
+     - Skip the title animation (part F): turn it off, close and start the game again:
+       how long until the main menu (roughly)? Then turn it back on.
+
+What baked draws are (the optional "bake off" launcher): at 144 Hz each game frame is shown
+2 or 3 times, each time drawn again, a little further along. The first drawing works out
+every draw's settings; the others reuse what it set up. Last round it took about a quarter
+off the render thread here. "Play Crash (bake off).bat" turns it off for one run.
+
+The Vulkan probe (optional, about a minute, plugged in): start "Play Crash (Vulkan
+probe).bat". A second small window, "Crash TWOC - Vulkan probe", opens beside the game and
+shows a colour that keeps changing. Let the game reach the hub and stay a minute, then
+close the game. Write down only whether the second window opened; this time it should also
+measure how evenly its frames are shown (the log, which "Collect logs.bat" takes).
 
 What the ack wait test is: one of the game's helper threads (the one that answers the
 game's graphics commands) keeps a CPU core busy all the time, waiting for the next one.
 "Play Crash (ack wait test).bat" makes it rest between commands instead, which gives back
-about half a core. On the desktop that made the game itself a little slower (0.3-0.6 ms
-a frame). On the Legion Go the CPU and the graphics share one power budget, so the
-freed half core might make the rest faster: that is what d finds out. It is only a test;
-play with "Play Crash.bat".
-
-Then, if there's time, the other tests below (optional, also on the Legion Go).
-
-The other tests: for each, get to the place, stand still for 30 seconds, then play
-normally for a minute or two (run, turn the camera, jump). Write down in "Test notes.txt":
-  - the counter's numbers (Game and Shown), or the settings menu's "Measured:" line. The
-    "Now:" line above it is the plan, not a measurement.
-  - Legion Space's FPS counter, if you use it, counts frames shown too (like "Shown"). At
-    144 Hz each game frame is shown 2.4 times, so it divided by 2.4 is the game's own
-    speed: 144 is full speed (60), 100 is 42 and 80 is 33 (Crash in slow motion).
-  - whether motion looks smooth, or stutters / judders (how often: every second, now and
-    then, only when loading)
-  - whether the game itself slows down (Crash moves in slow motion, music stays normal)
-  - fan noise and how warm the back gets (Legion Space's performance overlay shows the CPU
-    temperature and power if you use it: note them)
-  - plugged in or battery, and the Legion Space thermal mode
-Close the game between tests: each start keeps the run before's log in logs\.
-
-Places:
-  - the hub: where a new game starts, after the intro.
-  - the hub's upstairs room: walk Crash onto the round lift in the middle of the hub; it
-    takes him up. It is the heaviest place in the hub.
-  - Arctic Antics: the first level (the first warp room's first pad).
-  - cast_bug (the bonus warp room upstairs, the first pad) and avalanch (warp room 4, the
-    first pad): the two heaviest places the desktop measured. A new game named WOMBAT
-    has every warp room open.
-
-1.  Match display (the setting it starts with). The "Now:" line should say 144.00 fps,
-    2.4 frames each game frame. In the hub, then upstairs, then Arctic Antics.
-2.  144 fps: settings > Display > Frame rate: 144 fps. Same places. It should look the
-    same as test 1 (the display is 144 Hz).
-3.  72 fps: close the game and start it with "Play Crash (72 fps test).bat". The menu
-    shows "72 fps" (one frame every 2 refreshes). Same places.
-4.  90 fps: settings > Display > Frame rate: 90 fps. 144 Hz can't show 90 evenly, so the
-    line under it should say it falls back to 72. Note what it says.
-5.  Render thread Auto against Off: back on Match display, in the heaviest place you can
-    reach (upstairs), compare Render thread: Auto (it should say "on, beside the game's
-    thread (this PC: 8 cores)") with Off. Note the counter and smoothness of each.
-    With Off, the line under Frame rate may show fewer fps ("of 144.00") where the
-    single thread can't keep up.
-6.  Full screen: Alt+Enter, then repeat test 1 in one place. Note any difference.
-7.  If you have time: test 1 and test 5 again on battery (charger out), and with Legion
-    Space's thermal mode on Balanced. Note the mode for each.
+about half a core. Plugged in it made no difference last round; on battery the freed half
+core might help: that is what 2d finds out. It is only a test; play with "Play Crash.bat".
 
 Then bring the logs back (part D).
 
@@ -247,8 +247,31 @@ To take your progress to another PC, copy game_files\UDATA (and UDATA_backups if
 the copies too) into the other folder's game_files\.
 
 
+F. The new settings
+-------------------
+All in the settings menu (Menu held, or F1), saved to crash_twoc.ini.
+  Render scale (Display tab) ......... draws the picture at this share of the render size
+        and shows it at the render size: 25% to 200%. Under 100% the graphics chip has
+        less to draw (softer, cooler, longer on battery: 67% or 75% are good there); over
+        100% it draws more than is shown and scales it down (supersampling: smoother
+        edges, at a cost). Applies at once.
+  Anti-aliasing: MSAA 2x/4x/8x + SMAA (Display tab) ..... MSAA, then SMAA on the finished
+        picture, which also smooths the edges MSAA leaves inside see-through textures
+        (fences, leaves). Applies at once.
+  Pause when in the background (top of the menu, off by default) .... the game waits,
+        silent, while its window is minimised or another window is in front, and goes on
+        when it is in front again. Not while it is starting or going full screen.
+  Skip the title animation (Display tab, on in this package) ......... at each start the
+        game plays its title animation (Crash and the title music) before the main menu;
+        on, the animation runs many times faster, so the menu opens about 20 seconds sooner. The logos and
+        the menu itself are the same. From the next start.
+
+
 If something goes wrong
 -----------------------
+- The Universal logo freezes at the start (the picture stops, the sound goes on): wait 10
+  seconds (the game should get going by itself), then alt+tab once and back to the game.
+  Note it in Test notes.txt either way.
 - At the start, a "Crash TWOC - game files" message: the game checks game_files\ against
   the disc before it starts (default.xbe's size and checksum, and Crashdat's 2,266 files;
   2,267 with default.xbe) and says what is wrong: game_files\ or default.xbe missing,
