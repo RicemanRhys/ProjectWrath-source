@@ -1208,20 +1208,20 @@ void d3d8_BakeCapture(D3D8Baked *b)
     g_bake_cap = b;
 }
 
-HRESULT d3d8_DrawBaked(const D3D8Baked *b, ID3D11ShaderResourceView *const srv[4], const float *vs_consts, BOOL fresh,
-                       const D3DMATRIX *const ff_m[3])
+HRESULT d3d8_DrawBaked(const D3D8Baked *b, ID3D11ShaderResourceView *const srv[4], const float *const *vs_blk,
+                       BOOL fresh, const D3DMATRIX *const ff_m[3])
 {
     ID3D11DeviceContext *ctx = g_device_state.d3d11_context;
     static const float blend_factor[4] = { 1, 1, 1, 1 };
     DWORD s;
 
-    if (!b->gen || b->gen != d3d8_bake_gen || b->ring_gen != g_ring_gen || (b->vsh && !vs_consts))
+    if (!b->gen || b->gen != d3d8_bake_gen || b->ring_gen != g_ring_gen || (b->vsh && !vs_blk))
         return S_FALSE;
     g_d3d_draw_count++;
     d3d8_bind_vs(ctx, b->vs);
     d3d8_bind_layout(ctx, b->il);
     if (b->vsh) {
-        d3d8_vsh_baked_consts(b, vs_consts, fresh);     /* and b1 bound */
+        d3d8_vsh_baked_consts(b, vs_blk, fresh);        /* and b1 bound */
     } else {
         d3d8_bind_vs_cb(ctx, 0, b->vs_cb[0]);
         d3d8_bind_vs_cb(ctx, 1, b->vs_cb[1]);

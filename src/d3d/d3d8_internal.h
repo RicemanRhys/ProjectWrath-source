@@ -627,13 +627,14 @@ void d3d8_BakeReset(void);
 /* The next UP draw is captured into `b` (gen set when it is); NULL: none. */
 void d3d8_BakeCapture(D3D8Baked *b);
 /* `b` drawn again with stage s sampling srv[s]. A vertex program's
- * constants are `vs_consts` (192 float4s); `fresh` says they are not the
- * block given at the last baked draw unchanged (or `ff_m` world, view and
- * projection replace a fixed-function draw's matrices, NULL: as captured).
- * Returns S_FALSE without drawing when the capture no longer holds (draw it
- * the ordinary way). */
-HRESULT d3d8_DrawBaked(const D3D8Baked *b, ID3D11ShaderResourceView *const srv[4], const float *vs_consts, BOOL fresh,
-                       const D3DMATRIX *const ff_m[3]);
+ * constants are `vs_blk` (192 float4s as 12 blocks of 16, twoc step 95:
+ * vs_blk[i] holds c16i-c16i+15); `fresh` says they are not the blocks given
+ * at the last baked draw unchanged (or `ff_m` world, view and projection
+ * replace a fixed-function draw's matrices, NULL: as captured). Returns
+ * S_FALSE without drawing when the capture no longer holds (draw it the
+ * ordinary way). */
+HRESULT d3d8_DrawBaked(const D3D8Baked *b, ID3D11ShaderResourceView *const srv[4], const float *const *vs_blk,
+                       BOOL fresh, const D3DMATRIX *const ff_m[3]);
 
 /* The modules' parts (d3d8_shaders.c, d3d8_combiners.c, d3d8_vsh.c) */
 void *d3d8_bake_alloc(size_t n);
@@ -643,7 +644,7 @@ void d3d8_shaders_bake_reset(void);
 const void *d3d8_combiners_bake(UINT *bytes);
 void d3d8_combiners_baked_upload(const void *consts);
 void d3d8_combiners_bake_reset(void);
-void d3d8_vsh_baked_consts(const D3D8Baked *b, const float *consts, BOOL fresh);
+void d3d8_vsh_baked_consts(const D3D8Baked *b, const float *const *blk, BOOL fresh);
 void d3d8_vsh_bake_reset(void);
 void d3d8_vsh_bake(D3D8Baked *b);
 BOOL d3d8_bake_capturing(void);
