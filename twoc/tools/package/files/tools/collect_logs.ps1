@@ -132,7 +132,7 @@ $sys | Set-Content -Encoding UTF8 (Join-Path $work 'system.txt')
 # 2b. Step 91 (notes 18.94): the System log's crash, power and display-driver events from the last
 #     3 days, newest first, and the active power plan, in events.txt.
 $ev = New-Object System.Collections.Generic.List[string]
-$ev.Add("Collected $(Get-Date -Format 'yyyy-MM-dd HH:mm:ss zzz'). System log events of the last 3 days (wevtutil; its dates are UTC), newest first:")
+$ev.Add("Collected $(Get-Date -Format 'yyyy-MM-dd HH:mm:ss zzz'). System log events of the last 3 days (wevtutil), newest first; each Date is this PC's local time, with UTC beside it:")
 $ev.Add('  Kernel-Power 41: Windows started again without a clean shutdown (a crash, a hang, power lost);')
 $ev.Add('  EventLog 6008: the shutdown before was unexpected; BugCheck 1001: a blue screen and its code;')
 $ev.Add('  source Display (4101: the display driver stopped responding and recovered).')
@@ -143,7 +143,21 @@ try {
          "(EventID=1001 and (Provider[@Name='Microsoft-Windows-WER-SystemErrorReporting'] or Provider[@Name='BugCheck'])) or " +
          "Provider[@Name='Display'] or EventID=4101) and TimeCreated[timediff(@SystemTime) <= 259200000]]]"
     $r = @(& wevtutil.exe qe System "/q:$q" /f:text /rd:true 2>&1 | ForEach-Object { "$_" })
-    if ($r.Count) { foreach ($l in $r) { $ev.Add($l) } } else { $ev.Add('(no such events)') }
+    # Step 94 (notes 18.97): wevtutil's text format prints the local time with a "Z" after it (checked
+    # against Get-WinEvent and the event's own SystemTime on the Legion Go and the desktop), so each
+    # Date line says local, with its UTC offset and the UTC time.
+    foreach ($l in $r) {
+        if ($l -match '^(\s*Date: )(\d{4}-\d\d-\d\dT\d\d:\d\d:\d\d)(\.\d+)?Z\s*$') {
+            $t = [datetime]::ParseExact($Matches[2], 'yyyy-MM-ddTHH:mm:ss', [Globalization.CultureInfo]::InvariantCulture,
+                                        [Globalization.DateTimeStyles]::AssumeLocal)
+            $o = [TimeZoneInfo]::Local.GetUtcOffset($t)
+            $l = '{0}{1} local (UTC{2}{3:hh\:mm}; {4} UTC)' -f $Matches[1], $t.ToString('yyyy-MM-dd HH:mm:ss'),
+                 $(if ($o -lt [TimeSpan]::Zero) { '-' } else { '+' }), $o,
+                 $t.ToUniversalTime().ToString('yyyy-MM-dd HH:mm:ss')
+        }
+        $ev.Add($l)
+    }
+    if (-not $r.Count) { $ev.Add('(no such events)') }
 } catch { $ev.Add("wevtutil failed: $_") }
 # Kernel-Power 41's own fields tell a blue screen (BugcheckCode not 0) from a hang ended with the
 # power button (LongPowerButtonPressDetected) or power lost.
