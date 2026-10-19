@@ -24,6 +24,141 @@ IDirect3DDevice8 *d3d8_GetDevice(void);
 #include <dxgi.h>
 
 /* ================================================================
+ * The time spent inside the D3D11 context's calls (twoc notes 18.98)
+ *
+ * Local measurement aid: while d3d8_ctx_timing is nonzero, each context
+ * call made through the COM macros below (those the draws, uploads,
+ * copies and binds use) is timed with QueryPerformanceCounter and adds its
+ * ticks to d3d8_ctx_ticks and one to d3d8_ctx_calls; otherwise it costs a
+ * load and a branch. The caller turns it on around the work it measures
+ * (twoc: one draw in 16) and reads the sums; the calls themselves are made
+ * exactly as before, in the same order, on the same context.
+ * ================================================================ */
+
+extern int    d3d8_ctx_timing;
+extern LONG64 d3d8_ctx_ticks;
+extern UINT   d3d8_ctx_calls;
+
+static __inline LONG64 d3d8_ctx_t0(void)
+{
+    LARGE_INTEGER q;
+    if (!d3d8_ctx_timing)
+        return 0;
+    QueryPerformanceCounter(&q);
+    return q.QuadPart;
+}
+
+static __inline void d3d8_ctx_t1(LONG64 t0)
+{
+    LARGE_INTEGER q;
+    if (!t0)
+        return;
+    QueryPerformanceCounter(&q);
+    d3d8_ctx_ticks += q.QuadPart - t0;
+    d3d8_ctx_calls++;
+}
+
+#ifndef __cplusplus
+#define D3D8T_VOID(name, params, args) \
+    static __inline void d3d8t_##name params { LONG64 t0_ = d3d8_ctx_t0(); c->lpVtbl->name args; d3d8_ctx_t1(t0_); }
+D3D8T_VOID(VSSetConstantBuffers, (ID3D11DeviceContext *c, UINT a, UINT n, ID3D11Buffer *const *b), (c, a, n, b))
+D3D8T_VOID(PSSetShaderResources, (ID3D11DeviceContext *c, UINT a, UINT n, ID3D11ShaderResourceView *const *v),
+           (c, a, n, v))
+D3D8T_VOID(PSSetShader, (ID3D11DeviceContext *c, ID3D11PixelShader *s, ID3D11ClassInstance *const *ci, UINT n),
+           (c, s, ci, n))
+D3D8T_VOID(PSSetSamplers, (ID3D11DeviceContext *c, UINT a, UINT n, ID3D11SamplerState *const *s), (c, a, n, s))
+D3D8T_VOID(VSSetShader, (ID3D11DeviceContext *c, ID3D11VertexShader *s, ID3D11ClassInstance *const *ci, UINT n),
+           (c, s, ci, n))
+D3D8T_VOID(DrawIndexed, (ID3D11DeviceContext *c, UINT n, UINT a, INT b), (c, n, a, b))
+D3D8T_VOID(Draw, (ID3D11DeviceContext *c, UINT n, UINT a), (c, n, a))
+D3D8T_VOID(Unmap, (ID3D11DeviceContext *c, ID3D11Resource *r, UINT s), (c, r, s))
+D3D8T_VOID(PSSetConstantBuffers, (ID3D11DeviceContext *c, UINT a, UINT n, ID3D11Buffer *const *b), (c, a, n, b))
+D3D8T_VOID(IASetInputLayout, (ID3D11DeviceContext *c, ID3D11InputLayout *l), (c, l))
+D3D8T_VOID(IASetVertexBuffers, (ID3D11DeviceContext *c, UINT a, UINT n, ID3D11Buffer *const *b, const UINT *st,
+                                const UINT *o), (c, a, n, b, st, o))
+D3D8T_VOID(IASetIndexBuffer, (ID3D11DeviceContext *c, ID3D11Buffer *b, DXGI_FORMAT f, UINT o), (c, b, f, o))
+D3D8T_VOID(IASetPrimitiveTopology, (ID3D11DeviceContext *c, D3D11_PRIMITIVE_TOPOLOGY t), (c, t))
+D3D8T_VOID(OMSetRenderTargets, (ID3D11DeviceContext *c, UINT n, ID3D11RenderTargetView *const *v,
+                                ID3D11DepthStencilView *d), (c, n, v, d))
+D3D8T_VOID(OMSetBlendState, (ID3D11DeviceContext *c, ID3D11BlendState *b, const FLOAT f[4], UINT m), (c, b, f, m))
+D3D8T_VOID(OMSetDepthStencilState, (ID3D11DeviceContext *c, ID3D11DepthStencilState *d, UINT r), (c, d, r))
+D3D8T_VOID(RSSetState, (ID3D11DeviceContext *c, ID3D11RasterizerState *r), (c, r))
+D3D8T_VOID(RSSetViewports, (ID3D11DeviceContext *c, UINT n, const D3D11_VIEWPORT *v), (c, n, v))
+D3D8T_VOID(CopySubresourceRegion, (ID3D11DeviceContext *c, ID3D11Resource *d, UINT ds, UINT x, UINT y, UINT z,
+                                   ID3D11Resource *s, UINT ss, const D3D11_BOX *b), (c, d, ds, x, y, z, s, ss, b))
+D3D8T_VOID(CopyResource, (ID3D11DeviceContext *c, ID3D11Resource *d, ID3D11Resource *s), (c, d, s))
+D3D8T_VOID(UpdateSubresource, (ID3D11DeviceContext *c, ID3D11Resource *d, UINT ds, const D3D11_BOX *b,
+                               const void *p, UINT rp, UINT dp), (c, d, ds, b, p, rp, dp))
+D3D8T_VOID(ClearRenderTargetView, (ID3D11DeviceContext *c, ID3D11RenderTargetView *v, const FLOAT k[4]), (c, v, k))
+D3D8T_VOID(ClearDepthStencilView, (ID3D11DeviceContext *c, ID3D11DepthStencilView *v, UINT f, FLOAT d, UINT8 s),
+           (c, v, f, d, s))
+D3D8T_VOID(ResolveSubresource, (ID3D11DeviceContext *c, ID3D11Resource *d, UINT ds, ID3D11Resource *s, UINT ss,
+                                DXGI_FORMAT f), (c, d, ds, s, ss, f))
+#undef D3D8T_VOID
+
+static __inline HRESULT d3d8t_Map(ID3D11DeviceContext *c, ID3D11Resource *r, UINT s, D3D11_MAP t, UINT f,
+                                  D3D11_MAPPED_SUBRESOURCE *m)
+{
+    LONG64 t0_ = d3d8_ctx_t0();
+    HRESULT hr = c->lpVtbl->Map(c, r, s, t, f, m);
+    d3d8_ctx_t1(t0_);
+    return hr;
+}
+
+#undef ID3D11DeviceContext_VSSetConstantBuffers
+#undef ID3D11DeviceContext_PSSetShaderResources
+#undef ID3D11DeviceContext_PSSetShader
+#undef ID3D11DeviceContext_PSSetSamplers
+#undef ID3D11DeviceContext_VSSetShader
+#undef ID3D11DeviceContext_DrawIndexed
+#undef ID3D11DeviceContext_Draw
+#undef ID3D11DeviceContext_Map
+#undef ID3D11DeviceContext_Unmap
+#undef ID3D11DeviceContext_PSSetConstantBuffers
+#undef ID3D11DeviceContext_IASetInputLayout
+#undef ID3D11DeviceContext_IASetVertexBuffers
+#undef ID3D11DeviceContext_IASetIndexBuffer
+#undef ID3D11DeviceContext_IASetPrimitiveTopology
+#undef ID3D11DeviceContext_OMSetRenderTargets
+#undef ID3D11DeviceContext_OMSetBlendState
+#undef ID3D11DeviceContext_OMSetDepthStencilState
+#undef ID3D11DeviceContext_RSSetState
+#undef ID3D11DeviceContext_RSSetViewports
+#undef ID3D11DeviceContext_CopySubresourceRegion
+#undef ID3D11DeviceContext_CopyResource
+#undef ID3D11DeviceContext_UpdateSubresource
+#undef ID3D11DeviceContext_ClearRenderTargetView
+#undef ID3D11DeviceContext_ClearDepthStencilView
+#undef ID3D11DeviceContext_ResolveSubresource
+#define ID3D11DeviceContext_VSSetConstantBuffers(c, a, n, b) d3d8t_VSSetConstantBuffers(c, a, n, b)
+#define ID3D11DeviceContext_PSSetShaderResources(c, a, n, v) d3d8t_PSSetShaderResources(c, a, n, v)
+#define ID3D11DeviceContext_PSSetShader(c, s, ci, n) d3d8t_PSSetShader(c, s, ci, n)
+#define ID3D11DeviceContext_PSSetSamplers(c, a, n, s) d3d8t_PSSetSamplers(c, a, n, s)
+#define ID3D11DeviceContext_VSSetShader(c, s, ci, n) d3d8t_VSSetShader(c, s, ci, n)
+#define ID3D11DeviceContext_DrawIndexed(c, n, a, b) d3d8t_DrawIndexed(c, n, a, b)
+#define ID3D11DeviceContext_Draw(c, n, a) d3d8t_Draw(c, n, a)
+#define ID3D11DeviceContext_Map(c, r, s, t, f, m) d3d8t_Map(c, r, s, t, f, m)
+#define ID3D11DeviceContext_Unmap(c, r, s) d3d8t_Unmap(c, r, s)
+#define ID3D11DeviceContext_PSSetConstantBuffers(c, a, n, b) d3d8t_PSSetConstantBuffers(c, a, n, b)
+#define ID3D11DeviceContext_IASetInputLayout(c, l) d3d8t_IASetInputLayout(c, l)
+#define ID3D11DeviceContext_IASetVertexBuffers(c, a, n, b, st, o) d3d8t_IASetVertexBuffers(c, a, n, b, st, o)
+#define ID3D11DeviceContext_IASetIndexBuffer(c, b, f, o) d3d8t_IASetIndexBuffer(c, b, f, o)
+#define ID3D11DeviceContext_IASetPrimitiveTopology(c, t) d3d8t_IASetPrimitiveTopology(c, t)
+#define ID3D11DeviceContext_OMSetRenderTargets(c, n, v, d) d3d8t_OMSetRenderTargets(c, n, v, d)
+#define ID3D11DeviceContext_OMSetBlendState(c, b, f, m) d3d8t_OMSetBlendState(c, b, f, m)
+#define ID3D11DeviceContext_OMSetDepthStencilState(c, d, r) d3d8t_OMSetDepthStencilState(c, d, r)
+#define ID3D11DeviceContext_RSSetState(c, r) d3d8t_RSSetState(c, r)
+#define ID3D11DeviceContext_RSSetViewports(c, n, v) d3d8t_RSSetViewports(c, n, v)
+#define ID3D11DeviceContext_CopySubresourceRegion(c, d, ds, x, y, z, s, ss, b) \
+    d3d8t_CopySubresourceRegion(c, d, ds, x, y, z, s, ss, b)
+#define ID3D11DeviceContext_CopyResource(c, d, s) d3d8t_CopyResource(c, d, s)
+#define ID3D11DeviceContext_UpdateSubresource(c, d, ds, b, p, rp, dp) d3d8t_UpdateSubresource(c, d, ds, b, p, rp, dp)
+#define ID3D11DeviceContext_ClearRenderTargetView(c, v, k) d3d8t_ClearRenderTargetView(c, v, k)
+#define ID3D11DeviceContext_ClearDepthStencilView(c, v, f, d, s) d3d8t_ClearDepthStencilView(c, v, f, d, s)
+#define ID3D11DeviceContext_ResolveSubresource(c, d, ds, s, ss, f) d3d8t_ResolveSubresource(c, d, ds, s, ss, f)
+#endif /* !__cplusplus */
+
+/* ================================================================
  * D3D11 device accessors (implemented in d3d8_device.c)
  * ================================================================ */
 

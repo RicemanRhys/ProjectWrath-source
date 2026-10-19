@@ -33,6 +33,11 @@ UINT d3d8_GetNumLights(void) { return 0; }
 /* What the draws last bound (d3d8_states.c, not linked here). */
 D3D8Bound g_d3d8_bound;
 
+/* The context calls' timing (d3d8_states.c, not linked here; twoc notes 18.98). */
+int    d3d8_ctx_timing;
+LONG64 d3d8_ctx_ticks;
+UINT   d3d8_ctx_calls;
+
 /* Baked draws' parts from d3d8_states.c, d3d8_device.c and d3d8_vsh.c
  * (twoc notes 18.90), not linked here. */
 UINT d3d8_bake_gen = 1;

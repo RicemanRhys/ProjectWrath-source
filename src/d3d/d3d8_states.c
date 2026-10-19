@@ -41,6 +41,11 @@ static BOOL g_sampler_last_ok[4];
 /* What the draws last bound (d3d8_internal.h). */
 D3D8Bound g_d3d8_bound;
 
+/* The context calls' time while the caller measures (d3d8_internal.h). */
+int    d3d8_ctx_timing;
+LONG64 d3d8_ctx_ticks;
+UINT   d3d8_ctx_calls;
+
 void d3d8_bound_reset(void)
 {
     /* An address nothing has: every next bind is made. */

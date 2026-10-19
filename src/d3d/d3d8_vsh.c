@@ -1027,7 +1027,9 @@ static void kring_bind(UINT off)
     if (g_d3d8_bound.vs_cb[1] != g_kring || g_d3d8_bound.vs_cb1_first != first) {
         g_d3d8_bound.vs_cb[1] = g_kring;
         g_d3d8_bound.vs_cb1_first = first;
+        LONG64 t0 = d3d8_ctx_t0();      /* timed as the context's other calls (d3d8_internal.h) */
         ID3D11DeviceContext1_VSSetConstantBuffers1(g_ctx1, 1, 1, &g_kring, &first, &num);
+        d3d8_ctx_t1(t0);
     }
 }
 

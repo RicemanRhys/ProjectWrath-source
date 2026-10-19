@@ -32,6 +32,11 @@ IDirect3DDevice8      *xbox_GetD3DDevice(void)  { return NULL; }
 static DWORD g_palette[256];
 const DWORD *d3d8_GetPalette(DWORD stage) { (void)stage; return g_palette; }
 
+/* The context calls' timing (d3d8_states.c, not linked here; twoc notes 18.98). */
+int    d3d8_ctx_timing;
+LONG64 d3d8_ctx_ticks;
+UINT   d3d8_ctx_calls;
+
 static int failures = 0;
 
 #define CHECK(name, cond) \
