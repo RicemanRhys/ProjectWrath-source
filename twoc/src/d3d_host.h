@@ -66,6 +66,9 @@ typedef struct {
      * state repeats, those that repeat whole (state, vertices, indices,
      * constants, textures). */
     unsigned rpt_frames, rpt_draws, rpt_state, rpt_all;
+    /* Step 95 (cut 2): program draws recorded, and the blocks of 16
+     * registers they copied (the rest shared with the program draw before). */
+    unsigned k_draws, k_copied;
     /* Step 61: frame interpolation. Frames drawn as sub-frames (`interp_k`
      * each, the last), and those held instead: a camera step or turn over the
      * limit, too few draws matched, no frame before, or another reason (the
@@ -168,12 +171,18 @@ typedef struct {
  * program reads, in ascending order (d3dh_vs_inputs). `fresh` (step 67):
  * the constants SetVertexShaderConstant wrote since the program draw
  * before, bit n = cn; a skinned draw's own bones (the rest of its palette
- * holds earlier draws' leftovers). */
+ * holds earlier draws' leftovers). Step 95 (cut 2): the same registers as
+ * 12 blocks of 16, blk[b] holding c16b-c16b+15: the bridge points them into
+ * `consts`; a recording keeps a block of its own only where it differs from
+ * the program draw before's in the frame and shares that draw's otherwise,
+ * and has `consts` NULL once recorded (the replay side reads blk). */
+#define D3DH_KBLOCKS 12
 typedef struct {
     uint32_t key, n_insns;
     const uint32_t *code;
     const float *consts;
     uint32_t fresh[6];
+    const float *blk[D3DH_KBLOCKS];
 } d3dh_vprog_t;
 
 /* One draw from client memory, translated by d3d_bridge.c. `prim` is

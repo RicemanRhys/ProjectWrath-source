@@ -3950,9 +3950,7 @@ static void mirror_draw_vp(const char *path, uint32_t xdk_prim, uint32_t n, cons
         skip(SKIP_VS_PROGRAM, MEM32(dev() + DEV_VS_HANDLE));
         return;
     }
-    consts = (float *)d3dh_rec_alloc(VS_CONSTS * 16);      /* step 84: built where the recording keeps it */
-    if (!consts)
-        consts = consts_own;
+    consts = consts_own;                /* step 95: the recording copies the blocks that changed (cut 2) */
     vp_constants(consts);
     if (g_vsdump) {
         vs_dump_once(path, &p, consts, base, stride, idx, n, -1);
@@ -3973,6 +3971,8 @@ static void mirror_draw_vp(const char *path, uint32_t xdk_prim, uint32_t n, cons
     hv.n_insns = p.n_insns;
     hv.code = p.code;
     hv.consts = consts;
+    for (i = 0; i < D3DH_KBLOCKS; i++)  /* step 95: as 12 blocks of 16 registers */
+        hv.blk[i] = consts + 64 * i;
     inputs = d3dh_vs_inputs(&hv);
     if (!inputs || !n) {
         skip(SKIP_VS_PROGRAM, p.hash);
@@ -5225,7 +5225,18 @@ static void mirror_swap(void)
                 if (st.replay_checked)
                     log_block_printf(&lb, "[D3DB] host replay check: %u frames compared, %u differ\n",
                                      st.replay_checked, st.replay_check_diff);
-                if (st.bake_captured || st.bake_plain) {    /* step 87 */
+                if (st.k_draws) {           /* step 95 (cut 2): the program draws' constants recorded */
+                static unsigned lkd, lkc;
+                unsigned kd = st.k_draws - lkd;
+                if (kd)
+                    log_block_printf(&lb, "[D3DB] host recorded constants: %u program draws, %.2f of their 12 blocks"
+                                     " of 16 registers copied a draw (%.0f KB a frame), the rest shared with the"
+                                     " program draw before\n", kd, (double)(st.k_copied - lkc) / kd,
+                                     f ? (st.k_copied - lkc) * 0.25 / f : 0.0);
+                lkd = st.k_draws;
+                lkc = st.k_copied;
+            }
+            if (st.bake_captured || st.bake_plain) {    /* step 87 */
                     static unsigned lbc, lbd, lbp;
                     log_block_printf(&lb, "[D3DB] host baked draws: %u captured at first passes, %u drawn from their"
                                      " capture, %u drawn the ordinary way in later passes\n", st.bake_captured - lbc,

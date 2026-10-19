@@ -1982,6 +1982,7 @@ typedef struct {
     unsigned rc_n, rc_cap;
     ra_chunk_t *ra_head, *ra_cur;       /* its arena */
     size_t ra_bytes;                    /* allocated this frame */
+    const float *kprev[D3DH_KBLOCKS];   /* step 95: the last program draw's constant blocks in its arena (cut 2) */
     uint32_t targets[64];               /* Data of targets drawn, cleared or copied into this frame */
     unsigned targets_n;
     int overflow;                       /* more than 64: every texture fetched at the replay */
@@ -2966,10 +2967,33 @@ int d3dh_vs_consts(const d3dh_vprog_t *p, uint32_t mask[6])
     return r;
 }
 
-/* Does register k differ from the last upload? */
-static int vs_const_differs(const float *consts, int k)
+/* Step 95 (cut 2): register r of a program draw's constants, from its
+ * blocks of 16 (d3dh_vprog_t.blk). */
+#define VREG(p, r) ((p)->blk[(r) >> 4] + 4 * ((r) & 15))
+
+/* Its 192 registers into `out`, in order. */
+static void vk_gather(const d3dh_vprog_t *p, float *out)
 {
-    const uint64_t *a = (const uint64_t *)&g_vs_consts[4 * k], *b = (const uint64_t *)&consts[4 * k];
+    unsigned b;
+
+    for (b = 0; b < D3DH_KBLOCKS; b++)
+        memcpy(out + 64 * b, p->blk[b], 64 * sizeof(float));
+}
+
+/* `p`'s constants at `k` (192 registers, its own copy). */
+static void vk_point(d3dh_vprog_t *p, float *k)
+{
+    unsigned b;
+
+    p->consts = k;
+    for (b = 0; b < D3DH_KBLOCKS; b++)
+        p->blk[b] = k + 64 * b;
+}
+
+/* Does register k differ from the last upload? */
+static int vs_const_differs(const d3dh_vprog_t *p, int k)
+{
+    const uint64_t *a = (const uint64_t *)&g_vs_consts[4 * k], *b = (const uint64_t *)VREG(p, k);
     return a[0] != b[0] || a[1] != b[1];
 }
 
@@ -3006,7 +3030,7 @@ static int vs_bind(const d3dh_vprog_t *p)
                 _BitScanForward(&b, m);
                 m &= m - 1;
                 k = 32 * w + (int)b;
-                if (vs_const_differs(p->consts, k)) {
+                if (vs_const_differs(p, k)) {
                     if (lo < 0)
                         lo = k;
                     hi = k;
@@ -3014,11 +3038,17 @@ static int vs_bind(const d3dh_vprog_t *p)
             }
         }
     }
-    if (lo >= 0) {
-        memcpy(&g_vs_consts[4 * lo], &p->consts[4 * lo], 16 * (size_t)(hi - lo + 1));
-        g_dev->lpVtbl->SetVertexShaderConstant(g_dev, lo, &p->consts[4 * lo], (DWORD)(hi - lo + 1));
+    while (lo >= 0 && lo <= hi) {       /* step 95: the span a run of blocks next to each other at a time */
+        int e = lo | 15;
+        while (e < hi && p->blk[(e + 1) >> 4] == p->blk[e >> 4] + 64)
+            e += 16;
+        e = e < hi ? e : hi;
+        memcpy(&g_vs_consts[4 * lo], VREG(p, lo), 16 * (size_t)(e - lo + 1));
+        g_dev->lpVtbl->SetVertexShaderConstant(g_dev, lo, VREG(p, lo), (DWORD)(e - lo + 1));
         g_vs_consts_valid = 1;
-        g_st.vs_const_uploads++;
+        if (e == hi)
+            g_st.vs_const_uploads++;
+        lo = e + 1;
     }
     g_dev->lpVtbl->SetVertexShader(g_dev, h);
     return 0;
@@ -3056,10 +3086,10 @@ static int draw_exec(const d3dh_draw_t *d, IDirect3DBaseTexture8 *const *pin, co
         }
         if (d->vprog) {                 /* c96 is x_clip's row of (W V P) transposed, c99 w's */
             vp = *d->vprog;
-            memcpy(k4, d->vprog->consts, sizeof(k4));
+            vk_gather(d->vprog, k4);
             for (r = 0; r < 4; r++)
                 k4[4 * 96 + r] += d->hud_dx * k4[4 * 99 + r];
-            vp.consts = k4;
+            vk_point(&vp, k4);
             m.vprog = &vp;
         }
         m.hud_dx = 0.0f;
@@ -3249,12 +3279,13 @@ static unsigned g_bk_plan, g_bk_pass;   /* the frame's passes, those done */
 static int draw_baked(const rcmd_t *c, const d3dh_draw_t *d, int moved)
 {
     static float k4[192 * 4];
+    static const float *kb4[D3DH_KBLOCKS];
     const bake_t *bk = &g_bk[c - g_ps->rc];
     const uint8_t *pinned = c->u.draw.pinned;
     IDirect3DBaseTexture8 *const *pin = c->u.draw.pin;
     ID3D11ShaderResourceView *srv[4];
     const D3DMATRIX *m3[3], *const *ffm = NULL;
-    const float *k = NULL;
+    const float *const *k = NULL;
     d3dh_ff_t ff;
     LARGE_INTEGER t0, t1;
     unsigned s;
@@ -3281,12 +3312,14 @@ static int draw_baked(const rcmd_t *c, const d3dh_draw_t *d, int moved)
             goto plain;
     }
     if (d->vprog) {
-        k = d->vprog->consts;
+        k = d->vprog->blk;              /* step 95: its blocks of 16 registers */
         if (d->hud_dx != 0.0f) {        /* step 65: as draw_exec moves it */
-            memcpy(k4, k, sizeof(k4));
+            vk_gather(d->vprog, k4);
             for (s = 0; s < 4; s++)
                 k4[4 * 96 + s] += d->hud_dx * k4[4 * 99 + s];
-            k = k4;
+            for (s = 0; s < D3DH_KBLOCKS; s++)
+                kb4[s] = k4 + 64 * s;
+            k = kb4;
             moved = 1;
         }
         if (bk->moved)                  /* the ring's block holds the first sub-frame's registers */
@@ -3441,8 +3474,11 @@ static void rpt_draw(const d3dh_draw_t *d)
     }
     if (d->vprog)
         h = rpt_hash(h, d->vprog, 2 * sizeof(uint32_t));   /* key, n_insns */
-    if (d->ff)                          /* the lights and the material: not the matrices */
-        h = rpt_hash(h, &d->ff->n_lights, sizeof(*d->ff) - offsetof(d3dh_ff_t, n_lights));
+    if (d->ff) {                        /* the lights in use and the material: not the matrices */
+        unsigned nl = d->ff->n_lights < D3DH_MAX_LIGHTS ? d->ff->n_lights : D3DH_MAX_LIGHTS;
+        h = rpt_hash(h, &d->ff->n_lights, sizeof(d->ff->n_lights) + nl * sizeof(d->ff->light[0]));
+        h = rpt_hash(h, d->ff->material, sizeof(d->ff->material));
+    }
     ha = h;
     if (d->hold) {                      /* the same cached block holds the same bytes */
         const void *pv[2] = { d->hold, d->verts };
@@ -3452,7 +3488,8 @@ static void rpt_draw(const d3dh_draw_t *d)
         ha = rpt_hash(ha, d->verts, (size_t)d->vert_count * d->stride);
     ha = rpt_hash(ha, d->indices, (size_t)d->index_count * sizeof(uint16_t));
     if (d->vprog)
-        ha = rpt_hash(ha, d->vprog->consts, 192 * 16);
+        for (s = 0; s < D3DH_KBLOCKS; s++)
+            ha = rpt_hash(ha, d->vprog->blk[s], 64 * sizeof(float));
     else if (d->ff)
         ha = rpt_hash(ha, d->ff->world, 3 * 16 * sizeof(float));
     for (s = 0; s < 4; s++)
@@ -3572,9 +3609,43 @@ static int draw_cmd(const rcmd_t *c, const d3dh_draw_t *d, int moved)
     if (g_bk[c - g_ps->rc].b.gen)
         g_st.bake_captured++;
     dk_end(TWOC_DK_CAPTURED, timed, tk, tc, ms);
-    if (g_rpt_mode)                     /* step 95: as recorded */
-        rpt_draw(&c->u.draw.d);
     return r;
+}
+
+/* Step 95 (cut 2): a program draw's 192 constant registers into the
+ * recording a block of 16 at a time. A program draw's registers are mostly
+ * those of the program draw before (cast_bug's start, avalanch, upstairs:
+ * 1-3 of the 12 blocks change), and all 192 (3 KB) went into the frame's
+ * arena for each (4.8 of the 7.5 MB a game frame recorded at cast_bug's
+ * start, notes 18.97); now a block that compares equal to the one the
+ * program draw before in this frame recorded is that one, shared, and only
+ * the others are copied. The replay side reads them by block (VREG,
+ * vk_gather; xbox_d3d8 takes the blocks into its constants ring); a
+ * sub-frame that changes registers in place puts them back after its draw,
+ * before any other draw reads them (ic_draw). `v->consts` stays the
+ * bridge's own copy until the draw is recorded (ic_record reads it), then
+ * NULL. Returns -1 out of memory. */
+static int rec_consts(d3dh_vprog_t *v, const d3dh_vprog_t *src)
+{
+    fslot_t *f = g_rs;
+    unsigned b;
+
+    for (b = 0; b < D3DH_KBLOCKS; b++) {
+        const float *k = src->blk[b];
+        if (f->kprev[b] && memcmp(f->kprev[b], k, 64 * sizeof(float)) == 0) {
+            v->blk[b] = f->kprev[b];
+        } else {
+            float *n = (float *)ra_alloc(64 * sizeof(float));
+            if (!n)
+                return -1;
+            memcpy(n, k, 64 * sizeof(float));
+            v->blk[b] = f->kprev[b] = n;
+            g_stg.k_copied++;
+        }
+    }
+    g_stg.k_draws++;
+    v->consts = src->consts;
+    return 0;
 }
 
 /* Record a draw. Called with g_lock held. Returns 0, or -1 (out of memory:
@@ -3610,10 +3681,10 @@ static int rec_draw(const d3dh_draw_t *d)
         d3dh_vprog_t *v = (d3dh_vprog_t *)ra_dup(d->vprog, sizeof(d3dh_vprog_t));
         if (v) {
             v->code = (const uint32_t *)ra_dup(d->vprog->code, (size_t)d->vprog->n_insns * 16);
-            v->consts = (const float *)ra_keep(d->vprog->consts, 192 * 16);
+            bad |= rec_consts(v, d->vprog) != 0;    /* step 95 */
         }
         o->vprog = v;
-        bad |= !v || !v->code || !v->consts;
+        bad |= !v || !v->code;
     }
     for (s = 0; s < 4; s++) {
         if (!d->tex[s])
@@ -3667,6 +3738,8 @@ static int rec_draw(const d3dh_draw_t *d)
         o->camera = d->camera ? (const float *)ra_dup(d->camera, 32 * sizeof(float)) : NULL;
         ic_record(c);
     }
+    if (o->vprog)                       /* step 95: the bridge's copy is gone after this: the blocks only */
+        ((d3dh_vprog_t *)o->vprog)->consts = NULL;
     return 0;
 }
 
@@ -3709,6 +3782,8 @@ static void replay_pass(int interp)
         const rcmd_t *c = &g_ps->rc[i];
         switch (c->kind) {
         case RC_DRAW:
+            if (g_rpt_mode && g_bk_mode == BK_CAPTURE)
+                rpt_draw(&c->u.draw.d);     /* step 95: as recorded, before a sub-frame moves anything */
             if (interp)
                 ic_draw(c);
             else
@@ -3754,6 +3829,7 @@ static void slot_free(fslot_t *f)
         g_ra_pool = f->ra_head;
         f->ra_head = f->ra_cur = NULL;
     }
+    memset((void *)f->kprev, 0, sizeof(f->kprev));  /* step 95 */
     rc = f->rc;
     cap = f->rc_cap;
     f->rc = g_rc_pool;
@@ -5369,7 +5445,12 @@ static void ic_rec_dump(unsigned swap_no)
             fwrite(d->ff ? d->ff->world : zero, 4, 16, f);
             fwrite(d->ff ? d->ff->view : zero, 4, 16, f);
             fwrite(d->ff ? d->ff->proj : zero, 4, 16, f);
-            fwrite(d->vprog ? d->vprog->consts : zero, 4, 768, f);
+            if (d->vprog) {               /* step 95: from its blocks */
+                unsigned q;
+                for (q = 0; q < D3DH_KBLOCKS; q++)
+                    fwrite(d->vprog->blk[q], 4, 64, f);
+            } else
+                fwrite(zero, 4, 768, f);
             fwrite(slot >= 0 ? g_vs[slot].cmask : (const uint32_t *)zero, 4, 6, f);
         } else {
             fwrite(r, 4, 12, f);
@@ -6320,7 +6401,7 @@ static void ic_draw(const rcmd_t *c)
         float v[4];
     } keep[4 + 4 + IC_BONE_REGS];
     unsigned n_keep;
-    float *k4 = k4_copy;
+    float *kb[D3DH_KBLOCKS];            /* step 95: the registers this draw writes, by block */
     const d3dh_draw_t *d = &c->u.draw.d;
     const iobj_t *o = NULL, *p = NULL;
     const float *pb = NULL;
@@ -6329,10 +6410,11 @@ static void ic_draw(const rcmd_t *c)
     int i, j, n, cam_on, w_move = 0, b_move = 0, in_place = 0;
 
     REPLAY_SIDE();
+#define KREG(r) (kb[(r) >> 4] + 4 * ((r) & 15))
 #define IC_KEEP(r) do {                                                         \
         if (in_place) {                                                         \
             keep[n_keep].reg = (unsigned)(r);                                   \
-            memcpy(keep[n_keep++].v, &k4[4 * (r)], 4 * sizeof(float));         \
+            memcpy(keep[n_keep++].v, KREG(r), 4 * sizeof(float));              \
         }                                                                       \
     } while (0)
 
@@ -6351,7 +6433,8 @@ static void ic_draw(const rcmd_t *c)
                 w_move = fabs(o->w[i] - p->w[i]) > 1e-5 * (1.0 + fabs(o->w[i]));
             if (o->bones >= 0 && p->bones >= 0) {
                 pb = g_ibone[g_ip] + p->bones;
-                b_move = memcmp(pb, d->vprog->consts + 4 * IC_BONE_BASE, IC_BONE_REGS * 4 * sizeof(float)) != 0;
+                for (i = 0; i < IC_BONE_REGS && !b_move; i++)   /* step 95: from the blocks */
+                    b_move = memcmp(pb + 4 * i, VREG(d->vprog, IC_BONE_BASE + i), 4 * sizeof(float)) != 0;
             }
         }
     }
@@ -6383,7 +6466,7 @@ static void ic_draw(const rcmd_t *c)
     m = *d;
     n_keep = 0;
     if (c->u.draw.cls == IC_VP) {
-        const float *s = d->vprog->consts;
+        const d3dh_vprog_t *s = d->vprog;
         double wvp[16], t1[16], t2[16];
         /* Step 76: the registers that change are changed in the recording
          * itself, each kept first and put back after the draw, instead of
@@ -6391,21 +6474,21 @@ static void ic_draw(const rcmd_t *c)
          * (the camera's position, c96-c99, the bones, each read before it is
          * written), so only a camera-position register among c96-c99 or the
          * bones, where a later write would read an earlier one, takes the
-         * copy. */
+         * copy. Step 95: the recording's registers are blocks, some shared
+         * with the draws around this one; each changed in place is put back
+         * after the draw, before another reads it. */
         in_place = 1;
         for (n = 0; n < c->u.draw.n_cpos; n++)
             if ((c->u.draw.cpos[n] >= 96 && c->u.draw.cpos[n] < 100) ||
                 (c->u.draw.cpos[n] >= IC_BONE_BASE && c->u.draw.cpos[n] < IC_BONE_BASE + IC_BONE_REGS))
                 in_place = 0;
-        if (in_place) {
-            k4 = (float *)s;
-        } else {
-            k4 = k4_copy;
-            memcpy(k4, s, sizeof(k4_copy));
-        }
+        if (!in_place)
+            vk_gather(s, k4_copy);
+        for (j = 0; j < D3DH_KBLOCKS; j++)
+            kb[j] = in_place ? (float *)s->blk[j] : k4_copy + 64 * j;
         for (j = 0; j < 4; j++)         /* c(96+j) is column j of WVP */
             for (i = 0; i < 4; i++)
-                wvp[4 * i + j] = s[4 * (96 + j) + i];
+                wvp[4 * i + j] = VREG(s, 96 + j)[i];
         if (w_move) {                   /* W(t) W^-1 WVP */
             double wi[16], l[16];
             if (m4_inv(o->w, wi) == 0) {
@@ -6421,14 +6504,14 @@ static void ic_draw(const rcmd_t *c)
             memcpy(wvp, t2, sizeof(wvp));
             for (n = 0; n < c->u.draw.n_cpos; n++) {
                 IC_KEEP(c->u.draw.cpos[n]);
-                memcpy(&k4[4 * c->u.draw.cpos[n]], g_isub[c->u.draw.cam].pos, 3 * sizeof(float));
+                memcpy(KREG(c->u.draw.cpos[n]), g_isub[c->u.draw.cam].pos, 3 * sizeof(float));
             }
             g_st.interp_cpos += c->u.draw.n_cpos;
         }
         for (j = 0; j < 4; j++) {
             IC_KEEP(96 + j);
             for (i = 0; i < 4; i++)
-                k4[4 * (96 + j) + i] = (float)wvp[4 * i + j];
+                KREG(96 + j)[i] = (float)wvp[4 * i + j];
         }
         if (b_move) {                   /* the bones at t */
             int bi, moved = 0;
@@ -6437,10 +6520,12 @@ static void ic_draw(const rcmd_t *c)
             for (i = 0; i < 3; i++)
                 os[i] = g_imatch ? o->pos[i] - p->pos[i] : 0.0;
             for (bi = 0; bi < IC_BONE_REGS / 3; bi++) {
-                const float *ba = pb + 12 * bi, *bb = s + 4 * (IC_BONE_BASE + 3 * bi);
-                float *bo = k4 + 4 * (IC_BONE_BASE + 3 * bi);
+                const float *ba = pb + 12 * bi;
+                float bb[12], bo[12];   /* step 95: its 3 registers (they may straddle two blocks) */
                 aff_t a, b, r;
                 double dx, dy, dz;
+                for (i = 0; i < 3; i++)
+                    memcpy(bb + 4 * i, VREG(s, IC_BONE_BASE + 3 * bi + i), 4 * sizeof(float));
                 if (!(o->bmask >> bi & 1) || memcmp(ba, bb, 12 * sizeof(float)) == 0)
                     continue;
                 if (gt) {                       /* step 66: blended in its skeleton's frame */
@@ -6462,10 +6547,12 @@ static void ic_draw(const rcmd_t *c)
                     rl[12] = rl[13] = rl[14] = 0;
                     rl[15] = 1;
                     m4_mul(gt, rl, mt);
-                    for (i = 0; i < 3; i++)
-                        IC_KEEP(IC_BONE_BASE + 3 * bi + i);
                     for (i = 0; i < 12; i++)
                         bo[i] = (float)mt[i];
+                    for (i = 0; i < 3; i++) {
+                        IC_KEEP(IC_BONE_BASE + 3 * bi + i);
+                        memcpy(KREG(IC_BONE_BASE + 3 * bi + i), bo + 4 * i, 4 * sizeof(float));
+                    }
                     moved = 1;
                     g_st.interp_skel_bones++;
                     continue;
@@ -6486,19 +6573,23 @@ static void ic_draw(const rcmd_t *c)
                     continue;           /* a bone that jumped, or a register not read */
                 }
                 aff_lerp(&a, &b, g_it, &r);
-                for (i = 0; i < 3; i++)
-                    IC_KEEP(IC_BONE_BASE + 3 * bi + i);
                 for (i = 0; i < 3; i++) {
                     for (j = 0; j < 3; j++)
                         bo[4 * i + j] = (float)r.r[3 * j + i];
                     bo[4 * i + 3] = (float)r.t[i];
+                }
+                for (i = 0; i < 3; i++) {
+                    IC_KEEP(IC_BONE_BASE + 3 * bi + i);
+                    memcpy(KREG(IC_BONE_BASE + 3 * bi + i), bo + 4 * i, 4 * sizeof(float));
                 }
                 moved = 1;
             }
             g_st.interp_bones += moved;
         }
         vp = *d->vprog;
-        vp.consts = k4;
+        vp.consts = in_place ? NULL : k4_copy;
+        for (j = 0; j < D3DH_KBLOCKS; j++)
+            vp.blk[j] = kb[j];
         m.vprog = &vp;
         g_st.interp_vp++;
     } else {
@@ -6525,9 +6616,10 @@ static void ic_draw(const rcmd_t *c)
     draw_cmd(c, &m, 1);
     while (n_keep) {                    /* step 76: the recording as it was, for the next sub-frame */
         n_keep--;
-        memcpy(&k4[4 * keep[n_keep].reg], keep[n_keep].v, 4 * sizeof(float));
+        memcpy(KREG(keep[n_keep].reg), keep[n_keep].v, 4 * sizeof(float));
     }
 #undef IC_KEEP
+#undef KREG
 }
 
 /* After the frame's last sub-frame: this frame becomes the frame before
@@ -6935,14 +7027,13 @@ static int hud_box(const d3dh_draw_t *d, double *b)
     b[2] = b[3] = -1e30;
     if (d->vprog) {
         int slot = vs_slot(d->vprog), r, k;
-        const float *k4 = d->vprog->consts;
         if (slot < 0)
             return 0;
         for (r = 0; r < 4; r++)         /* m: rows c96-c99 (x, y, z, w of clip space) */
             for (k = 0; k < 4; k++)
-                m[4 * r + k] = k4[4 * (96 + r) + k];
+                m[4 * r + k] = VREG(d->vprog, 96 + r)[k];
         if (g_vs[slot].rel_bones) {     /* skinned: where its first bone puts it */
-            double q[4] = { k4[4 * 124 + 3], k4[4 * 125 + 3], k4[4 * 126 + 3], 1.0 };
+            double q[4] = { VREG(d->vprog, 124)[3], VREG(d->vprog, 125)[3], VREG(d->vprog, 126)[3], 1.0 };
             double cx = m[0] * q[0] + m[1] * q[1] + m[2] * q[2] + m[3] * q[3];
             double cy = m[4] * q[0] + m[5] * q[1] + m[6] * q[2] + m[7] * q[3];
             double cw = m[12] * q[0] + m[13] * q[1] + m[14] * q[2] + m[15] * q[3];
@@ -7143,6 +7234,7 @@ static void rc_forget(unsigned first)
     if (!first) {
         g_rs->ra_cur = NULL;
         g_rs->ra_bytes = 0;
+        memset((void *)g_rs->kprev, 0, sizeof(g_rs->kprev));    /* step 95 */
         g_rs->targets_n = 0;
         g_rs->overflow = 0;
     }
@@ -9832,6 +9924,7 @@ static DWORD WINAPI rt_main(LPVOID p)
             f->rc_n = f->up_n = 0;
             f->ra_cur = NULL;
             f->ra_bytes = 0;
+            memset((void *)f->kprev, 0, sizeof(f->kprev));  /* step 95 */
             slot_free(f);
             LeaveCriticalSection(&g_lock);
             rt_let_go(f);
@@ -10340,6 +10433,8 @@ void d3dh_stats(d3dh_stats_t *out)
     out->tex_snap_bytes += g->tex_snap_bytes;
     out->rec_ms += g->rec_ms;
     out->rec_draws += g->rec_draws;
+    out->k_draws += g->k_draws;         /* step 95 */
+    out->k_copied += g->k_copied;
     out->overlay_passes += g->overlay_passes;
     out->overlay_draws += g->overlay_draws;
     out->overlay_world_cam += g->overlay_world_cam;
