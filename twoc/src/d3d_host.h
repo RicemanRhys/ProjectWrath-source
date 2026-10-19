@@ -52,6 +52,20 @@ typedef struct {
     unsigned replay_checked, replay_check_diff;     /* step 60: RECOMP_D3D_BRIDGE_REPLAY_CHECK */
     unsigned bake_captured, baked_draws, bake_plain;    /* step 87: first passes' captures, draws drawn from */
                                                         /* them, later passes' draws drawn the ordinary way */
+    /* Step 95: the draws by kind (TWOC_DK_*): all of them, those whose D3D11
+     * context calls were timed (one draw in 16), the calls and their ms in
+     * those, and the untimed ones' draw-call ms; the presents' ms in
+     * IDXGISwapChain1::Present; one QueryPerformanceCounter call's cost (ns,
+     * taken off each timed call). */
+#define TWOC_DK 4
+    unsigned dk_draws[TWOC_DK], dk_timed[TWOC_DK], dk_calls[TWOC_DK];
+    double dk_ctx_ms[TWOC_DK], dk_ms[TWOC_DK];
+    double present_ms, ctx_qpc_ns;
+    /* Step 95: capturing frames' first-pass draws looked up against the game
+     * frame before's (one pair of frames in 32): frames, draws, those whose
+     * state repeats, those that repeat whole (state, vertices, indices,
+     * constants, textures). */
+    unsigned rpt_frames, rpt_draws, rpt_state, rpt_all;
     /* Step 61: frame interpolation. Frames drawn as sub-frames (`interp_k`
      * each, the last), and those held instead: a camera step or turn over the
      * limit, too few draws matched, no frame before, or another reason (the

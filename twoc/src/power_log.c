@@ -450,6 +450,74 @@ static int game_text(char *buf, size_t cap)
     return n;
 }
 
+/* Step 95: the CPU's clock against the run's level. The level is the
+ * highest average of 60 one-second readings so far, from 30 s after the
+ * start (the boot's boost and loads left out); a drop is 10 readings in a
+ * row more than 10% under it (a line), and it is over after 10 readings in
+ * a row within 5% of it again (another line). The Legion Go's firmware
+ * power limit (notes 18.97) cut the clock 14% about 2.5 minutes into play
+ * with the temperature falling, inside one speed class, so the class lines
+ * never showed it. */
+typedef struct {
+    double ring[60], sum, level, level_load, low, run_sum, run_load, run_min;
+    unsigned n, i, level_at, run, since, down;
+} cdrop_t;
+
+/* One reading (`tick` seconds in); 1 with a line in `buf`. */
+static int clock_step(cdrop_t *c, unsigned tick, double mhz, double load, char *buf, size_t cap)
+{
+    if (tick < 30)
+        return 0;
+    c->sum += mhz - (c->n == 60 ? c->ring[c->i] : 0.0);
+    c->ring[c->i] = mhz;
+    c->i = (c->i + 1) % 60;
+    if (c->n < 60)
+        c->n++;
+    if (c->n == 60 && c->sum / 60.0 > c->level) {
+        c->level = c->sum / 60.0;
+        c->level_at = tick;
+        c->level_load = load;
+    }
+    if (c->level <= 0)
+        return 0;
+    if (!c->down) {
+        if (mhz < 0.9 * c->level) {
+            c->run_min = c->run && c->run_min < mhz ? c->run_min : mhz;
+            c->run_sum += mhz;
+            c->run_load += load;
+            if (++c->run < 10)
+                return 0;
+            c->down = 1;
+            c->since = tick;
+            c->low = c->run_min;
+            snprintf(buf, cap, "CPU clock down: %.0f MHz on average over the last 10 s, %.0f%% under the run's level of"
+                     " %.0f MHz (its highest 60-s average, to +%u s; load %.0f%% then, %.0f%% now)", c->run_sum / c->run,
+                     100.0 * (1.0 - c->run_sum / c->run / c->level), c->level, c->level_at, c->level_load,
+                     c->run_load / c->run);
+            c->run = 0;
+            c->run_sum = c->run_load = 0;
+            return 1;
+        }
+        c->run = 0;
+        c->run_sum = c->run_load = 0;
+        return 0;
+    }
+    if (mhz < c->low)
+        c->low = mhz;
+    if (mhz < 0.95 * c->level) {
+        c->run = 0;
+        return 0;
+    }
+    if (++c->run < 10)
+        return 0;
+    c->down = 0;
+    c->run = 0;
+    snprintf(buf, cap, "CPU clock back up: within 5%% of the run's level (%.0f MHz) for 10 s, after %u s down (the"
+             " lowest reading %.0f MHz, %.0f%% under it); load %.0f%%", c->level, tick - c->since, c->low,
+             100.0 * (1.0 - c->low / c->level), load);
+    return 1;
+}
+
 static DWORD WINAPI sampler(void *arg)
 {
     sample_t s, was;
@@ -457,14 +525,21 @@ static DWORD WINAPI sampler(void *arg)
     char t[64], t2[64], what[512], line[1300], g[200];
     int cand = SPEED_UNKNOWN, cand_n = 0, logged = SPEED_UNKNOWN, held = 0, k;
     ULONGLONG last_speed = 0;
-    unsigned tick = 0, fake_at = 0;
+    unsigned tick = 0, fake_at = 0, clock_fake = 0;
+    cdrop_t clk;
     HMODULE m;
 
     (void)arg;
+    memset(&clk, 0, sizeof(clk));
     if (getenv("RECOMP_DEV_POWER_FAKE")) {  /* test aid: the power mode read as another for 15 s from N s on */
         fake_at = (unsigned)atoi(getenv("RECOMP_DEV_POWER_FAKE"));
         fprintf(stderr, "[POWER] RECOMP_DEV_POWER_FAKE: the power mode reads as another from +%u s for 15 s (a test)\n",
                 fake_at);
+    }
+    if (getenv("RECOMP_DEV_CLOCK_FAKE")) {  /* step 95, test aid: the CPU's MHz read 15% low for 20 s from N s on */
+        clock_fake = (unsigned)atoi(getenv("RECOMP_DEV_CLOCK_FAKE"));
+        fprintf(stderr, "[POWER] RECOMP_DEV_CLOCK_FAKE: the CPU's MHz read 15%% low from +%u s for 20 s (a test)\n",
+                clock_fake);
     }
     SetThreadPriority(GetCurrentThread(), THREAD_PRIORITY_BELOW_NORMAL);
     {
@@ -525,6 +600,8 @@ static DWORD WINAPI sampler(void *arg)
             s.throttle = was.throttle;
             memcpy(s.zone, was.zone, sizeof(s.zone));
         }
+        if (clock_fake && s.cpu_ok && tick >= clock_fake && tick < clock_fake + 20)
+            s.mhz *= 0.85;              /* test aid */
         if (s.cpu_ok)
             acc_add(&acc_f, s.mhz);
         AcquireSRWLockExclusive(&g_lock);
@@ -532,6 +609,13 @@ static DWORD WINAPI sampler(void *arg)
         if (s.cpu_ok)
             acc_add(&g_acc_b, s.mhz);
         ReleaseSRWLockExclusive(&g_lock);
+        if (s.cpu_ok && clock_step(&clk, tick, s.mhz, s.util_pct, line, sizeof(line))) {     /* step 95 */
+            char tt[160], ln[1300];
+            game_text(g, sizeof(g));
+            temp_text(&s, tt, sizeof(tt));
+            snprintf(ln, sizeof(ln), "%s; %s; %s, %s", line, g, ac_name(s.ac), tt);
+            out_line(ln, 1);
+        }
 
         /* A change: the power mode, the effective mode, the plan, the source. */
         k = 0;

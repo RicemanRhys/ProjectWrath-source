@@ -35,6 +35,13 @@
  * RECOMP_DEV_POWER_FAKE=N (a test aid) reads the power mode as another one
  * from N s after the sampler starts, for 15 s, so the change lines can be
  * seen without changing the PC's settings.
+ *
+ * Step 95: "CPU clock down" when the CPU's MHz stay more than 10% under the
+ * run's level (its highest 60-s average, from 30 s in) for 10 readings in a
+ * row, and "CPU clock back up" once they are within 5% of it for 10 again:
+ * a power limit's cut can stay inside one speed class (notes 18.97).
+ * RECOMP_DEV_CLOCK_FAKE=N (a test aid) reads the MHz 15% low for 20 s from N
+ * s on.
  */
 #ifndef TWOC_POWER_LOG_H
 #define TWOC_POWER_LOG_H

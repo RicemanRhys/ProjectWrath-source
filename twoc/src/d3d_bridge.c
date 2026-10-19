@@ -5159,6 +5159,54 @@ static void mirror_swap(void)
                 last_draws = st.draws;
                 last_draw_ms = st.draw_ms;
             }
+            {   /* step 95: the draws' D3D11 calls by kind (one draw in 16 timed) and Present (d3d_host.c) */
+                static const char *const nm[TWOC_DK] = { "drawn once", "first passes (captured)",
+                                                         "drawn from their capture", "later passes the ordinary way" };
+                static unsigned ld[TWOC_DK], lt[TWOC_DK], lc[TWOC_DK];
+                static double lm[TWOC_DK], lx[TWOC_DK], lp;
+                char kb[1024];
+                int kn = 0, k;
+                unsigned all = 0;
+                double ms_all = 0, ms_ctx = 0, gf = n > last_swaps ? (double)(n - last_swaps) : 0.0;
+                kb[0] = 0;
+                for (k = 0; k < TWOC_DK; k++) {
+                    unsigned d = st.dk_draws[k] - ld[k], t = st.dk_timed[k] - lt[k], c = st.dk_calls[k] - lc[k];
+                    double us = d > t ? 1000.0 * (st.dk_ms[k] - lm[k]) / (d - t) : 0.0;
+                    double cus = t ? 1000.0 * (st.dk_ctx_ms[k] - lx[k]) / t : 0.0;
+                    if (d && kn < (int)sizeof(kb) - 160)
+                        kn += snprintf(kb + kn, sizeof(kb) - kn, "%s%s %u (%.2f us a draw, D3D11 %.2f us of it in %.1f"
+                                       " calls, %.0f%%)", kn ? "; " : "", nm[k], d, us, cus, t ? (double)c / t : 0.0,
+                                       us > 0 ? 100.0 * cus / us : 0.0);
+                    all += d;
+                    ms_all += us * d / 1000.0;
+                    ms_ctx += cus * d / 1000.0;
+                    ld[k] = st.dk_draws[k];
+                    lt[k] = st.dk_timed[k];
+                    lc[k] = st.dk_calls[k];
+                    lm[k] = st.dk_ms[k];
+                    lx[k] = st.dk_ctx_ms[k];
+                }
+                if (all && gf > 0)
+                    log_block_printf(&lb, "[D3DB] host D3D11 in the draws (one draw in 16 timed, %.1f ns of timing taken"
+                                     " off each call): %s; the draws %.2f ms a game frame, %.2f ms of it in D3D11 calls"
+                                     " (%.0f%%); Present %.2f ms a game frame\n", st.ctx_qpc_ns, kb, ms_all / gf,
+                                     ms_ctx / gf, ms_all > 0 ? 100.0 * ms_ctx / ms_all : 0.0,
+                                     (st.present_ms - lp) / gf);
+                lp = st.present_ms;
+            }
+            if (st.rpt_draws) {         /* step 95: what reusing captures across game frames could take */
+                static unsigned lf, ld, ls, la;
+                unsigned d = st.rpt_draws - ld;
+                if (d)
+                    log_block_printf(&lb, "[D3DB] host first passes repeating the game frame before: %u frames looked up,"
+                                     " %u draws; the same state %u (%.1f%%), the same in everything (vertices, indices,"
+                                     " constants, textures too) %u (%.1f%%)\n", st.rpt_frames - lf, d, st.rpt_state - ls,
+                                     100.0 * (st.rpt_state - ls) / d, st.rpt_all - la, 100.0 * (st.rpt_all - la) / d);
+                lf = st.rpt_frames;
+                ld = st.rpt_draws;
+                ls = st.rpt_state;
+                la = st.rpt_all;
+            }
             if (st.replay_frames) {     /* step 60: record and replay */
                 static unsigned lf, lc, lp, lr;
                 static double lms, lrec, lby;

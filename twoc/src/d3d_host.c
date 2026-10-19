@@ -164,6 +164,7 @@
 #include <stdlib.h>
 #include <string.h>
 #include <math.h>
+#include <stddef.h>
 
 #include "d3d8_internal.h"      /* xbox_d3d8, and its D3D11 accessors */
 #include <dxgi1_3.h>
@@ -1203,6 +1204,7 @@ static DWORD WINAPI win_thread(LPVOID p)
 
 static void set_antialiasing(int aa);
 static void set_ao(int mode, int strength);     /* step 92 */
+static void dk_calibrate(void);                 /* step 95 */
 
 int d3dh_create(unsigned width, unsigned height, unsigned host_w, unsigned host_h, double wide, int dpi_aware,
                 unsigned interval, double frame_hz, const char *dump_prefix)
@@ -1219,6 +1221,7 @@ int d3dh_create(unsigned width, unsigned height, unsigned host_w, unsigned host_
     InitializeCriticalSection(&g_lock);
     InitializeCriticalSection(&g_rec);  /* step 79 */
     QueryPerformanceFrequency(&g_qpf);
+    dk_calibrate();                     /* step 95 */
     {   /* step 78 */
         const char *e = getenv("RECOMP_D3D_BRIDGE_THREADCHECK");
         g_tcheck = e && *e && strcmp(e, "0") != 0;
@@ -3319,23 +3322,258 @@ plain:
     return r;
 }
 
+/* ── Step 95: what the draws cost in D3D11, and what repeats (notes 18.98) ──
+ *
+ * One draw in 16 (of every kind) has the D3D11 context calls inside it
+ * timed: xbox_d3d8 times each call while d3d8_ctx_timing is set (its COM
+ * macros, d3d8_internal.h), and the draw's kind gets the calls and their
+ * ticks; the other 15 give the kind its draw-call ms (draw_exec's and
+ * draw_baked's own timing, without the timing's cost). What a timed call's
+ * two reads add to it (one QueryPerformanceCounter call, measured once) is
+ * taken off each. Kinds (TWOC_DK_*): a frame
+ * drawn once (or a draw at once, unrecorded), a first pass's draw captured,
+ * a later pass's drawn from its capture, and one drawn the ordinary way
+ * there. The interval line (d3d_bridge.c) gives each kind's us a draw and
+ * the D3D11 calls' share and ms a game frame.
+ *
+ * And what reusing a first pass's captures across game frames could take
+ * (cut 3): every 32nd capturing frame keeps a hash of each of its first
+ * pass's draws (`state`: the states, shaders, layout, target, viewport and
+ * what the capture is made from, without the vertices, indices, constants
+ * or textures; `all`: with them), and the next game frame, when it captures
+ * too, looks each of its draws up in them. A program draw's vertices from
+ * the bridge's vertex cache repeat when they are the same cached block. */
+enum { TWOC_DK_ONCE, TWOC_DK_CAPTURED, TWOC_DK_BAKED, TWOC_DK_PLAIN };
+static unsigned g_dk_n;                 /* draws, for one in 16 */
+#define RPT_SLOTS 16384u                /* each set's; at most half of it filled */
+static uint64_t g_rpt_set[2][RPT_SLOTS];
+static unsigned g_rpt_n, g_rpt_seq, g_rpt_ref_swap;
+static int g_rpt_mode;                  /* this pass's: 0 none, 1 the frame kept, 2 looked up */
+
+static uint64_t rpt_hash(uint64_t h, const void *p, size_t n)
+{
+    const uint8_t *b = (const uint8_t *)p;
+    const uint64_t k = 0x9E3779B97F4A7C15ull;
+    uint64_t a[4], v[4];
+    int i;
+
+    a[0] = h;
+    a[1] = h ^ 0xC2B2AE3D27D4EB4Full;
+    a[2] = h + k;
+    a[3] = ~h;
+    while (n >= 32) {                   /* four lanes, so the multiplies overlap */
+        memcpy(v, b, 32);
+        for (i = 0; i < 4; i++) {
+            a[i] = (a[i] ^ v[i]) * k;
+            a[i] ^= a[i] >> 31;
+        }
+        b += 32;
+        n -= 32;
+    }
+    h = a[0] ^ (a[1] << 17 | a[1] >> 47) ^ (a[2] << 31 | a[2] >> 33) ^ (a[3] << 47 | a[3] >> 17);
+    while (n) {
+        size_t m = n < 8 ? n : 8;
+        v[0] = 0;
+        memcpy(v, b, m);
+        h = (h ^ v[0] ^ ((uint64_t)m << 56)) * k;
+        h ^= h >> 29;
+        b += m;
+        n -= m;
+    }
+    return h;
+}
+
+/* 1: `h` was in set `s` already. */
+static int rpt_set(int s, uint64_t h, int insert)
+{
+    unsigned i = (unsigned)(h ^ h >> 32) & (RPT_SLOTS - 1);
+
+    h |= 1;                             /* 0 is an empty slot */
+    for (;;) {
+        if (g_rpt_set[s][i] == h)
+            return 1;
+        if (!g_rpt_set[s][i]) {
+            if (insert)
+                g_rpt_set[s][i] = h;
+            return 0;
+        }
+        i = (i + 1) & (RPT_SLOTS - 1);
+    }
+}
+
+static void rpt_draw(const d3dh_draw_t *d)
+{
+    uint64_t h = 0x243F6A8885A308D3ull, ha;
+    uint32_t w[16];
+    unsigned s;
+
+    w[0] = d->prim;
+    w[1] = d->stride;
+    w[2] = d->fvf;
+    w[3] = d->indices != NULL;
+    w[4] = d->n_rs;
+    w[5] = d->vp_x;
+    w[6] = d->vp_y;
+    w[7] = d->vp_w;
+    w[8] = d->vp_h;
+    memcpy(&w[9], &d->vp_minz, 4);
+    memcpy(&w[10], &d->vp_maxz, 4);
+    w[11] = (uint32_t)d->pillar | (uint32_t)d->world_list << 1 | (d->ff != NULL) << 2 | (d->ps != NULL) << 3;
+    w[12] = d->target.data;
+    w[13] = d->target.width;
+    w[14] = d->target.height;
+    w[15] = d->target.format;
+    h = rpt_hash(h, w, sizeof(w));
+    h = rpt_hash(h, d->rs, d->n_rs * sizeof(d3dh_state_t));
+    for (s = 0; s < 4; s++) {
+        uint32_t t[4] = { d->n_tss[s], 0, 0, 0 };
+        if (d->tex[s]) {
+            t[1] = d->tex[s]->format | 1u << 31;
+            t[2] = d->tex[s]->cube;
+            t[3] = d->tex[s]->levels;
+        }
+        h = rpt_hash(h, t, sizeof(t));
+        h = rpt_hash(h, d->tss[s], d->n_tss[s] * sizeof(d3dh_state_t));
+    }
+    if (d->ps) {
+        h = rpt_hash(h, &d->ps->token, sizeof(d->ps->token));
+        h = rpt_hash(h, d->ps->rs, d->ps->n_rs * sizeof(d3dh_state_t));
+    }
+    if (d->vprog)
+        h = rpt_hash(h, d->vprog, 2 * sizeof(uint32_t));   /* key, n_insns */
+    if (d->ff)                          /* the lights and the material: not the matrices */
+        h = rpt_hash(h, &d->ff->n_lights, sizeof(*d->ff) - offsetof(d3dh_ff_t, n_lights));
+    ha = h;
+    if (d->hold) {                      /* the same cached block holds the same bytes */
+        const void *pv[2] = { d->hold, d->verts };
+        ha = rpt_hash(ha, pv, sizeof(pv));
+        ha = rpt_hash(ha, &d->vert_count, sizeof(d->vert_count));
+    } else
+        ha = rpt_hash(ha, d->verts, (size_t)d->vert_count * d->stride);
+    ha = rpt_hash(ha, d->indices, (size_t)d->index_count * sizeof(uint16_t));
+    if (d->vprog)
+        ha = rpt_hash(ha, d->vprog->consts, 192 * 16);
+    else if (d->ff)
+        ha = rpt_hash(ha, d->ff->world, 3 * 16 * sizeof(float));
+    for (s = 0; s < 4; s++)
+        if (d->tex[s]) {
+            uint32_t t[4] = { d->tex[s]->key, d->tex[s]->data, d->tex[s]->sig, d->tex[s]->pal_sig };
+            ha = rpt_hash(ha, t, sizeof(t));
+        }
+    ha = rpt_hash(ha, &d->hud_dx, sizeof(d->hud_dx));
+    if (g_rpt_mode == 1) {
+        if (g_rpt_n < RPT_SLOTS / 2) {
+            rpt_set(0, h, 1);
+            rpt_set(1, ha, 1);
+            g_rpt_n++;
+        }
+        return;
+    }
+    g_st.rpt_draws++;
+    g_st.rpt_state += rpt_set(0, h, 0);
+    g_st.rpt_all += rpt_set(1, ha, 0);
+}
+
+/* At a capturing pass's start: whether this frame is kept, looked up or neither. */
+static void rpt_frame(void)
+{
+    int was = g_rpt_mode;
+
+    g_rpt_mode = 0;
+    if (++g_rpt_seq % 32 == 0) {
+        memset(g_rpt_set, 0, sizeof(g_rpt_set));
+        g_rpt_n = 0;
+        g_rpt_ref_swap = g_ps->swap_no;
+        g_rpt_mode = 1;
+    } else if (was == 1 && g_ps->swap_no == g_rpt_ref_swap + 1) {
+        g_rpt_mode = 2;
+        g_st.rpt_frames++;
+    }
+}
+
+/* A draw's D3D11 calls timed (one in 16): its kind's sums. */
+static int dk_start(LONG64 *tk, UINT *tc, double *ms)
+{
+    *ms = g_st.draw_ms;
+    if ((++g_dk_n & 15) != 0)
+        return 0;
+    *tk = d3d8_ctx_ticks;
+    *tc = d3d8_ctx_calls;
+    d3d8_ctx_timing = 1;
+    return 1;
+}
+
+static void dk_end(int kind, int timed, LONG64 tk, UINT tc, double ms)
+{
+    g_st.dk_draws[kind]++;
+    if (!timed) {
+        g_st.dk_ms[kind] += g_st.draw_ms - ms;
+        return;
+    }
+    d3d8_ctx_timing = 0;
+    g_st.dk_timed[kind]++;
+    g_st.dk_calls[kind] += d3d8_ctx_calls - tc;
+    g_st.dk_ctx_ms[kind] += (double)(d3d8_ctx_ticks - tk) * 1000.0 / (double)g_qpf.QuadPart -
+                            (d3d8_ctx_calls - tc) * g_st.ctx_qpc_ns * 1e-6;
+}
+
+/* Step 95: what timing a call adds to it: from one QueryPerformanceCounter's
+ * read to the next's, back to back, is one call's cost (the median of 9 runs
+ * of 4,000). */
+static void dk_calibrate(void)
+{
+    double ns[9], t;
+    LARGE_INTEGER a, b, q;
+    int i, j;
+
+    for (i = 0; i < 9; i++) {
+        QueryPerformanceCounter(&a);
+        for (j = 0; j < 2000; j++) {
+            QueryPerformanceCounter(&q);
+            QueryPerformanceCounter(&q);
+        }
+        QueryPerformanceCounter(&b);
+        ns[i] = (double)(b.QuadPart - a.QuadPart) * 1e9 / (double)g_qpf.QuadPart / 4000.0;
+    }
+    for (i = 1; i < 9; i++)
+        for (j = i; j > 0 && ns[j] < ns[j - 1]; j--) {
+            t = ns[j];
+            ns[j] = ns[j - 1];
+            ns[j - 1] = t;
+        }
+    g_st.ctx_qpc_ns = ns[4];
+}
+
 /* A recorded draw in this pass: drawn the ordinary way (captured, at a
  * frame's first pass) or from its capture. `moved`: `d` is a copy whose
  * matrices or constants the pass moved. */
 static int draw_cmd(const rcmd_t *c, const d3dh_draw_t *d, int moved)
 {
-    int r;
+    unsigned plain = g_st.bake_plain;
+    LONG64 tk = 0;
+    UINT tc = 0;
+    double ms;
+    int r, timed = dk_start(&tk, &tc, &ms);    /* step 95 */
 
-    if (g_bk_mode == BK_BAKED)
-        return draw_baked(c, d, moved);
-    if (g_bk_mode == BK_OFF)
-        return draw_exec(d, c->u.draw.pin, c->u.draw.pinned, (D3D8UpKept *)&c->u.draw.kept);
+    if (g_bk_mode == BK_BAKED) {
+        r = draw_baked(c, d, moved);
+        dk_end(g_st.bake_plain != plain ? TWOC_DK_PLAIN : TWOC_DK_BAKED, timed, tk, tc, ms);
+        return r;
+    }
+    if (g_bk_mode == BK_OFF) {
+        r = draw_exec(d, c->u.draw.pin, c->u.draw.pinned, (D3D8UpKept *)&c->u.draw.kept);
+        dk_end(TWOC_DK_ONCE, timed, tk, tc, ms);
+        return r;
+    }
     g_bk[c - g_ps->rc].moved = (uint8_t)moved;
     d3d8_BakeCapture(&g_bk[c - g_ps->rc].b);
     r = draw_exec(d, c->u.draw.pin, c->u.draw.pinned, (D3D8UpKept *)&c->u.draw.kept);
     d3d8_BakeCapture(NULL);
     if (g_bk[c - g_ps->rc].b.gen)
         g_st.bake_captured++;
+    dk_end(TWOC_DK_CAPTURED, timed, tk, tc, ms);
+    if (g_rpt_mode)                     /* step 95: as recorded */
+        rpt_draw(&c->u.draw.d);
     return r;
 }
 
@@ -3461,6 +3699,7 @@ static void replay_pass(int interp)
             if (g_bk_cap >= g_ps->rc_n) {
                 d3d8_BakeReset();
                 g_bk_mode = BK_CAPTURE;
+                rpt_frame();            /* step 95 */
             }
         } else if (g_bk_cap >= g_ps->rc_n) {
             g_bk_mode = BK_BAKED;
@@ -6635,8 +6874,14 @@ int d3dh_draw_up(const d3dh_draw_t *d)
         g_stg.rec_ms += (double)(t1.QuadPart - t0.QuadPart) * 1000.0 / (double)g_qpf.QuadPart;
         g_stg.rec_draws++;
     } else {
+        LONG64 tk = 0;
+        UINT tc = 0;
+        double ms;
+        int timed;
         side_set(SIDE_NOW);
+        timed = dk_start(&tk, &tc, &ms);    /* step 95 */
         r = draw_exec(d, NULL, NULL, NULL);
+        dk_end(TWOC_DK_ONCE, timed, tk, tc, ms);
     }
     side_set(side);
     if (d->overlay)                     /* step 65 */
@@ -8977,7 +9222,12 @@ static int present_one(double t_s, unsigned swap_no, unsigned interval, unsigned
             g_first_present_q = p0.QuadPart;
     }
     hr = IDXGISwapChain1_Present(g_flip, interval, 0);
-    InterlockedExchange64(&g_present_since, 0);
+    {   /* step 95: the time inside Present */
+        LARGE_INTEGER p1;
+        LONG64 p0 = InterlockedExchange64(&g_present_since, 0);
+        QueryPerformanceCounter(&p1);
+        g_st.present_ms += (double)(p1.QuadPart - p0) * 1000.0 / (double)g_qpf.QuadPart;
+    }
     g_st.presents++;
     meas_present(swap_no);              /* step 82 */
     {   /* How many DWM compositions apart consecutive presents land: the
