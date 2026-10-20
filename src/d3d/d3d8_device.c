@@ -195,6 +195,19 @@ UINT                 d3d8_GetNumLights(void) {
  * D3D11 initialization helpers
  * ================================================================ */
 
+/* Local (twoc step 97): the graphics card the next CreateDevice uses. Never
+ * set (NULL), the device is made on D3D11's default adapter, as before. */
+static IDXGIAdapter *g_preferred_adapter;
+
+void d3d8_SetPreferredAdapter(IDXGIAdapter *adapter)
+{
+    if (adapter)
+        IDXGIAdapter_AddRef(adapter);
+    if (g_preferred_adapter)
+        IDXGIAdapter_Release(g_preferred_adapter);
+    g_preferred_adapter = adapter;
+}
+
 static HRESULT d3d11_create_device_and_swap_chain(
     D3D8DeviceState *state,
     D3DPRESENT_PARAMETERS *pp)
@@ -223,8 +236,8 @@ static HRESULT d3d11_create_device_and_swap_chain(
     scd.SwapEffect = DXGI_SWAP_EFFECT_DISCARD;
 
     hr = D3D11CreateDeviceAndSwapChain(
-        NULL,
-        D3D_DRIVER_TYPE_HARDWARE,
+        g_preferred_adapter,
+        g_preferred_adapter ? D3D_DRIVER_TYPE_UNKNOWN : D3D_DRIVER_TYPE_HARDWARE,
         NULL,
         create_flags,
         NULL, 0,

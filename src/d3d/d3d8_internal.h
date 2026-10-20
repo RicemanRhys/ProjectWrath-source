@@ -170,6 +170,10 @@ ID3D11RenderTargetView *d3d8_GetDefaultRTV(void);
 HWND                 d3d8_GetHWND(void);
 UINT                 d3d8_GetBackbufferWidth(void);
 UINT                 d3d8_GetBackbufferHeight(void);
+/* Local (twoc step 97): the adapter the next CreateDevice is made on (kept
+ * with a reference); NULL, also when never called, is D3D11's default
+ * adapter as before. */
+void                 d3d8_SetPreferredAdapter(IDXGIAdapter *adapter);
 
 /* Presentation-only gamma. End restores the saved backbuffer even if Present fails. */
 void d3d8_gamma_set(const D3DGAMMARAMP *ramp);
