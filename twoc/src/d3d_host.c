@@ -180,6 +180,7 @@
 #include "vk_probe.h"
 #include "power_log.h"
 #include "gpu.h"
+#include "restart.h"
 
 #define WIN_CLASS          "TwocD3DBridge"
 #define WIN_TITLE           "Crash TWOC - D3D bridge (host)"
@@ -9171,6 +9172,7 @@ static struct {
     LARGE_INTEGER freq, t0, last;
     unsigned frames;
     twoc_about_t about;                 /* step 93: the About tab, collected at each opening */
+    char end_note[256];                 /* step 97: why Restart now didn't restart ("" none) */
 } g_ovs;
 
 /* Step 82: what is measured, for the overlay's Frame rate line and the
@@ -9348,6 +9350,7 @@ static void ovl_end(void)
         g_ovs.muted = 0;
     }
     g_ovs.active = 0;
+    g_ovs.end_note[0] = 0;              /* step 97: a refused restart's reason, for this opening only */
     InterlockedIncrement(&g_ovl_closes);        /* before the gate opens: it masks what is held */
     InterlockedExchange(&g_ovl_session, 0);
     if (g_ovs.dirty) {
@@ -9396,6 +9399,8 @@ static int ovl_draw(ID3D11Texture2D *dst, int running)
     in.ms_samples = g_bb.ms;
     in.ao = (int)g_ao_mode;             /* step 92 */
     in.about = &g_ovs.about;            /* step 93 */
+    in.end_note = g_ovs.end_note[0] ? g_ovs.end_note : NULL;   /* step 97 */
+    in.ending = twoc_ending();
     if (ic_possible()) {                /* step 61/77 */
         in.interp_fps = fp_step_fps(0);
         in.interp_per = fp_step_per(0);
@@ -9493,6 +9498,27 @@ static void counter_draw(ID3D11Texture2D *dst, float msg_alpha)
     }
 }
 
+/* Step 97: Quit game or Restart now, asked for in the menu: the settings written first if the player
+ * changed one (as closing the menu does), then the clean end on a thread of its own (restart.h). A restart
+ * that can't happen leaves the game running and says why in the menu. No lock held. */
+static void ovl_end_game(int restart)
+{
+    char err[256];
+
+    if (twoc_ending())
+        return;
+    if (g_ovs.dirty) {
+        int sv = twoc_settings_save(&g_ovs.s);
+        g_ovs.dirty = 0;
+        g_ovs.note = sv == 0 ? "Saved to crash_twoc.ini." : sv > 0 ? "Not saved: safe settings (crash_twoc.ini is ignored this run)."
+                                                           : "crash_twoc.ini couldn't be written.";
+    }
+    if (twoc_end_begin(restart, restart ? ovl_restart_why() : "Yes to its question", g_hwnd, err, sizeof(err)) != 0)
+        snprintf(g_ovs.end_note, sizeof(g_ovs.end_note), "%s", err);
+    else
+        g_ovs.end_note[0] = 0;
+}
+
 /* What the frame asked for, with no lock held. */
 static void ovl_after(int r)
 {
@@ -9500,6 +9526,8 @@ static void ovl_after(int r)
         overlay_apply(&g_ovs.was, &g_ovs.s);
         g_ovs.dirty = 1;
     }
+    if (r & (OVL_QUIT | OVL_RESTART))   /* step 97 */
+        ovl_end_game((r & OVL_RESTART) != 0);
     if (r & OVL_CLOSE)
         InterlockedExchange(&g_ovl_open, 0);
 }

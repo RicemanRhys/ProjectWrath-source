@@ -21,7 +21,12 @@ set RECOMP_WATCHDOG_SECS=
 rem The power log (notes 18.94): Windows' power mode, the plan, the CPU's speed and a temperature,
 rem also written to this file line by line straight to the disk, so it survives the PC crashing.
 set RECOMP_POWER_LOG=run_twoc.power.log
+rem Restart now (notes 18.100): the settings menu's restart ends the game with code 75, and this
+rem window starts it again (every "Play Crash (...)" launcher comes through here); at most 10 times.
+set "TWOC_LAUNCHER=Play Crash.bat"
+set restarts=0
 
+:run
 rem The log of the run before is kept in logs\, named by the time it ended.
 if not exist logs mkdir logs
 if exist run_twoc.err.log (
@@ -50,10 +55,24 @@ rem By its full path: cmd doesn't look in the current folder when NoDefaultCurre
 set code=%errorlevel%
 rem The log's last line: the exit code and when the process was gone (none: it never finished exiting).
 >>run_twoc.err.log echo [BAT] crash_twoc.exe ended with code %code% at %date% %time%
+if not "%code%"=="75" goto ended
+set /a restarts+=1
+if %restarts% GTR 10 (
+    echo.
+    echo The game asked to start again 10 times from this window, so not again.
+    echo Start it again yourself with "Play Crash.bat".
+    pause
+    goto done
+)
+echo The game is starting again (Restart now in its settings menu)...
+goto run
+
+:ended
 if not "%code%"=="0" (
     echo.
     echo The game ended with code %code%. Its log is run_twoc.err.log in this folder;
     echo "Collect logs.bat" zips it up to bring back.
     pause
 )
+:done
 endlocal

@@ -172,6 +172,26 @@ extern "C" void twoc_audio_set_hrtf(int on)
     fprintf(stderr, "[AUDIO] 3D placement (HRTF) %s\n", on ? "on" : "off");
 }
 
+/* Step 97: the game quitting from the menu (Quit game, Restart now, restart.c): the APU's voices silenced at
+ * its next frames, a moment for XAudio2's queue (a few buffers of 256 samples) to play that out, and a mute
+ * the menu left (its marker) lifted on this thread, so the process ends without a click and Windows keeps
+ * no mute of ours. */
+extern "C" void twoc_audio_close(void)
+{
+    mcpx_apu_set_voice_gain(1, 0.0f);
+    mcpx_apu_set_voice_gain(0, 0.0f);
+    Sleep(100);
+    if (GetFileAttributesA(marker_path()) != INVALID_FILE_ATTRIBUTES) {
+        HRESULT hr = CoInitializeEx(NULL, COINIT_MULTITHREADED);
+        ISimpleAudioVolume *vol = session(&hr);
+        if (vol) {
+            if (SUCCEEDED(vol->SetMute(FALSE, NULL)))
+                DeleteFileA(marker_path());
+            vol->Release();
+        }
+    }
+}
+
 extern "C" void twoc_audio_startup(void)
 {
     if (GetFileAttributesA(marker_path()) == INVALID_FILE_ATTRIBUTES)

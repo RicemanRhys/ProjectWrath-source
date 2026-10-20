@@ -46,6 +46,7 @@
 #include "saves.h"
 #include "gamefiles.h"
 #include "cpu_info.h"
+#include "restart.h"
 
 /*
  * If xboxrecomp.h is not an umbrella header in your setup, include
@@ -325,6 +326,12 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance,
     (void)hPrevInstance;
     (void)lpCmdLine;
     (void)nCmdShow;
+
+    /* Step 97: what a restart from the menu starts again with (the command
+     * line, working folder and environment before the settings below add to
+     * it); a copy started by the copy before waits here until that is gone
+     * (restart.h). */
+    twoc_restart_init();
 
     wt_out = clear_write_through(STD_OUTPUT_HANDLE);
     wt_err = clear_write_through(STD_ERROR_HANDLE);

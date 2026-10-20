@@ -78,6 +78,8 @@ static volatile LONG g_guest_busy;      /* opens under way + save files open */
 static volatile LONG g_guest_gen;       /* save-folder opens so far */
 static volatile LONG g_copying;
 static DWORD g_dev_copy_ms;             /* RECOMP_DEV_SAVE_COPY_DELAY_MS: test only, 0 */
+static volatile LONG g_closing;         /* step 97: the game is quitting: the worker takes on nothing new */
+static volatile LONG g_working;         /* ... the worker is doing something (a copy, a restore, a list) */
 
 /* ── small helpers ─────────────────────────────────────────── */
 
@@ -746,11 +748,16 @@ static DWORD WINAPI worker(void *arg)
         const char *why;
 
         EnterCriticalSection(&g_cs);
-        due = g_due;
+        due = g_closing ? 0 : g_due;
         LeaveCriticalSection(&g_cs);
         WaitForSingleObject(g_wake, !due ? INFINITE : due > now ? (DWORD)(due - now) : 0);
 
         EnterCriticalSection(&g_cs);
+        if (g_closing) {                /* step 97: quitting (saves_quiesce): nothing new */
+            LeaveCriticalSection(&g_cs);
+            continue;
+        }
+        InterlockedExchange(&g_working, 1);
         rq = g_rq;
         g_rq = 0;
         memcpy(name, g_rq_name, sizeof(name));
@@ -790,8 +797,42 @@ static DWORD WINAPI worker(void *arg)
         LeaveCriticalSection(&g_cs);
         if (why)
             do_backup(why);
+        InterlockedExchange(&g_working, 0);
     }
     return 0;
+}
+
+int saves_quiesce(unsigned ms, char *what, size_t cap)
+{
+    ULONGLONG t0 = GetTickCount64(), due = 0, now;
+    int busy = 0, guest = 0;
+
+    if (!g_init || !g_on) {
+        snprintf(what, cap, "save backups off this run");
+        return 1;
+    }
+    EnterCriticalSection(&g_cs);
+    InterlockedExchange(&g_closing, 1);
+    due = g_due;
+    LeaveCriticalSection(&g_cs);
+    SetEvent(g_wake);
+    while ((g_working || g_copying || g_guest_busy) && GetTickCount64() - t0 < ms) {
+        busy |= g_working || g_copying;
+        guest |= g_guest_busy != 0;
+        Sleep(10);
+    }
+    now = GetTickCount64();
+    if (g_working || g_copying || g_guest_busy) {
+        snprintf(what, cap, "%s still under way after %u ms (left)", g_guest_busy ? "the game's own save" : "a backup",
+                 ms);
+        return 0;
+    }
+    snprintf(what, cap, "%s%s%s", busy ? "a backup in progress finished first" : guest ? "" : "no backup in progress",
+             guest ? (busy ? "; the game's save written first" : "the game's save written first") : "",
+             due ? "; the backup due after the last save is left for the next start's" : "");
+    if (busy || guest)
+        snprintf(what + strlen(what), cap - strlen(what), " (%llu ms)", now - t0);
+    return 1;
 }
 
 /* ── the start ─────────────────────────────────────────────── */

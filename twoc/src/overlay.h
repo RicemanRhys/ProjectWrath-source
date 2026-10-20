@@ -51,9 +51,16 @@ typedef struct {
     int fast_title_now;                 /* step 90: this run's title animation sped up */
     int ao;                             /* step 92: the ambient occlusion in effect (TWOC_AO_*) */
     const twoc_about_t *about;          /* step 93: the About tab's lines (collected at the opening) */
+    const char *end_note;               /* step 97: why a restart didn't happen, or NULL */
+    int ending;                         /* step 97: the game is quitting or restarting (restart.h) */
 } ovl_info_t;
 
-enum { OVL_CHANGED = 1, OVL_CLOSE = 2 };
+/* Step 97: OVL_RESTART "Restart now" (a setting from the next start), OVL_QUIT "Quit game", each after
+ * its question; d3d_host.c saves the settings and ends the game cleanly (restart.h). */
+enum { OVL_CHANGED = 1, OVL_CLOSE = 2, OVL_RESTART = 4, OVL_QUIT = 8 };
+
+/* Step 97: the settings waiting for a restart, as the menu names them ("Graphics card, Speakers"), "" none. */
+const char *ovl_restart_why(void);
 
 /* Once, on the presenting thread. Returns 0 on success. */
 int ovl_init(ID3D11Device *dev, ID3D11DeviceContext *ctx);

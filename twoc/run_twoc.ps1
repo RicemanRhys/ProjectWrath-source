@@ -54,6 +54,11 @@
 #   ... -File twoc\run_twoc.ps1 -HostOnly -Widescreen -RenderSize 1920x1080 -Seconds 900   # 16:9 at 1080p
 #   ... -File twoc\run_twoc.ps1 -HostOnly -Widescreen -RenderSize native -Fullscreen -Seconds 900
 #
+# Restart now (notes 18.100): the settings menu's restart ends the game with code 75 (TWOC_LAUNCHER tells the
+# exe this script answers it), and the script starts it again with the same switches, for what is left of
+# -Seconds (the watchdog counts the whole run; not again with under 10 s left); the run before's logs are kept
+# as run_twoc.err.before_restart_N.log (and .out). At most 10 restarts.
+#
 # Logs go to run_twoc.out.log and run_twoc.err.log in the repo root (gitignored). The BMPs are named
 # shot000.bmp, shot001.bmp ...; the executor writes the first eight frames that contain geometry and one
 # more about every 10 seconds. Build first: cmake --build twoc\build --config Release --parallel
@@ -102,19 +107,36 @@ if ($DumpDir) {
 
 $out = Join-Path $repo 'run_twoc.out.log'
 $err = Join-Path $repo 'run_twoc.err.log'
+$env:TWOC_LAUNCHER = 'run_twoc.ps1'
 Write-Host "Running for $Seconds s from $repo (logs: run_twoc.out.log, run_twoc.err.log)"
-$p = Start-Process -FilePath $exe -WorkingDirectory $repo -NoNewWindow -PassThru `
-        -RedirectStandardOutput $out -RedirectStandardError $err
-$null = $p.Handle    # keeps the exit code readable after WaitForExit (Windows PowerShell 5.1 quirk)
 $t0 = Get-Date
-# Hard limit: the watchdog should end the process at $Seconds; kill it if it has not by then.
-if (-not $p.WaitForExit(($Seconds + 30) * 1000)) {
-    $p.Kill()
-    Write-Host "Hard limit ($($Seconds + 30) s) reached; process killed."
-} else {
+$restarts = 0
+while ($true) {
+    $left = $Seconds - [int]((Get-Date) - $t0).TotalSeconds
+    $env:RECOMP_WATCHDOG_SECS = "$left"
+    $p = Start-Process -FilePath $exe -WorkingDirectory $repo -NoNewWindow -PassThru `
+            -RedirectStandardOutput $out -RedirectStandardError $err
+    $null = $p.Handle    # keeps the exit code readable after WaitForExit (Windows PowerShell 5.1 quirk)
+    # Hard limit: the watchdog should end the process at $Seconds; kill it if it has not by then.
+    if (-not $p.WaitForExit(($left + 30) * 1000)) {
+        $p.Kill()
+        Write-Host "Hard limit ($($Seconds + 30) s) reached; process killed."
+        break
+    }
     $p.WaitForExit()
     $took = [int]((Get-Date) - $t0).TotalSeconds
+    if ($p.ExitCode -eq 75) {
+        $restarts++
+        $left = $Seconds - $took
+        if ($restarts -gt 10) { Write-Host "The game asked to start again 10 times; not again."; break }
+        if ($left -lt 10) { Write-Host "The game asked to start again (Restart now) with $left s of -Seconds left; not started."; break }
+        Move-Item -Force $err (Join-Path $repo "run_twoc.err.before_restart_$restarts.log")
+        Move-Item -Force $out (Join-Path $repo "run_twoc.out.before_restart_$restarts.log")
+        Write-Host "The game asked to start again (Restart now in its settings menu, exit code 75) after $took s: starting it again for the $left s left (logs before it: run_twoc.*.before_restart_$restarts.log)."
+        continue
+    }
     if ($p.ExitCode -eq 3) { Write-Host "Watchdog ended the run after $took s (exit code 3, the normal end)." }
     else { Write-Host "Exited with code $($p.ExitCode)." }
+    break
 }
 if ($DumpDir) { Write-Host ("Framebuffer dumps: {0} executor, {1} host file(s) in {2}" -f (Get-ChildItem $DumpDir -Filter 'shot*').Count, (Get-ChildItem $DumpDir -Filter 'host*').Count, (Resolve-Path $DumpDir)) }

@@ -25,6 +25,7 @@
 #ifndef TWOC_SAVES_H
 #define TWOC_SAVES_H
 
+#include <stddef.h>
 #include <stdint.h>
 
 #ifdef __cplusplus
@@ -70,6 +71,13 @@ void saves_backup_now(void);
 void saves_restore_at_next_start(const char *name);
 void saves_cancel_restore(void);
 void saves_open_folder(void);
+
+/* Step 97: the game is quitting (the menu's Quit game or Restart now): the
+ * worker takes on nothing new, and this waits up to `ms` for a copy, a
+ * restore's scheduling or the game's own save write under way to finish
+ * (step 83: never quit during one). Returns 1 when nothing is left under
+ * way; `what` says what it waited for, for the log. */
+int saves_quiesce(unsigned ms, char *what, size_t cap);
 
 #ifdef __cplusplus
 }

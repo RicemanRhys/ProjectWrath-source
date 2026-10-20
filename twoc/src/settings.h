@@ -227,6 +227,8 @@ void twoc_audio_set_volume(int percent);
 void twoc_audio_mute(int on);
 /* At the start: lift a mute the overlay left when the process ended. */
 void twoc_audio_startup(void);
+/* Step 97: the game quitting from the menu: its voices silenced and played out, a mute of ours lifted. */
+void twoc_audio_close(void);
 /* The music (stream != 0) or effects volume, 0-100, in the APU's voice
  * processor; -1 (never set) is 100. */
 void twoc_audio_set_kind(int stream, int percent);

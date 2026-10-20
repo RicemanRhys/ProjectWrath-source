@@ -129,6 +129,8 @@ set(GAME_SOURCES
     src/gpu.c
     # The processor (hybrid or not) and the process's power throttling, opted out (step 97)
     src/cpu_info.c
+    # The F1 menu's Quit game and Restart now: a clean end, the launcher's code 75 or a start of its own (step 97)
+    src/restart.c
     # Vulkan, stage 1: a probe behind RECOMP_VULKAN=probe (notes 18.89); volk loads
     # vulkan-1.dll at run time, so the exe imports nothing new
     src/vk_probe.c
