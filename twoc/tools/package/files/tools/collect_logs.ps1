@@ -1,13 +1,20 @@
-# Collect logs.bat (Legion Go package, twoc/tools/package): zips the game's logs (with the power
+# Collect logs.bat (the test packages, twoc/tools/package): zips the game's logs (with the power
 # logs, notes 18.94), the settings, the tester's notes, a system summary (CPU, GPU, Windows, power,
 # the display's modes and refresh rate), the System log's crash and power events (events.txt) and
-# vrrprobe's display test into LegionGo_logs_<time>.zip next to "Play Crash.bat".
+# vrrprobe's display test into <Target>_logs_<time>.zip next to "Play Crash.bat" (the target from
+# PACKAGE.txt's "Target:" line, notes 18.100: LegionGo or Nitro5).
 # Windows PowerShell 5.1; ASCII only (5.1 reads a script without a BOM as the ANSI code page).
 $ErrorActionPreference = 'Continue'
 $pkg   = Split-Path -Parent $PSScriptRoot
 $stamp = Get-Date -Format 'yyyy-MM-dd_HH-mm-ss'
 $work  = Join-Path $env:TEMP "twoc_logs_$stamp"
-$zip   = Join-Path $pkg "LegionGo_logs_$stamp.zip"
+$target = 'LegionGo'
+$pk = Join-Path $pkg 'PACKAGE.txt'
+if (Test-Path -LiteralPath $pk) {
+    $m = Select-String -LiteralPath $pk -Pattern '^Target: (\w+)' | Select-Object -First 1
+    if ($m) { $target = $m.Matches[0].Groups[1].Value }
+}
+$zip   = Join-Path $pkg "${target}_logs_$stamp.zip"
 New-Item -ItemType Directory -Force -Path $work | Out-Null
 
 $sys = New-Object System.Collections.Generic.List[string]

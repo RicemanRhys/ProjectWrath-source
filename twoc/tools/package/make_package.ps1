@@ -1,7 +1,14 @@
-# The Legion Go package (notes 18.83): a folder that runs the game on another Windows PC.
+# The test packages (notes 18.83; step 97, notes 18.100: two targets): a folder that runs the game on another
+# Windows PC.
 #
 #   powershell -NoProfile -ExecutionPolicy Bypass -File twoc\tools\package\make_package.ps1
-#       [-Out DIR] [-Exe crash_twoc.exe] [-GameFiles DIR] [-Save UDATA_DIR] [-Force] [-Pgo]
+#       [-Target LegionGo | Nitro5] [-Out DIR] [-Exe crash_twoc.exe] [-GameFiles DIR] [-Save UDATA_DIR] [-Force] [-Pgo]
+#
+# -Target (step 97): LegionGo (the default; Desktop\Crash\LegionGoPackage) or Nitro5 (the Acer Nitro 5 laptop;
+# Desktop\Crash\Nitro5Package). Each has its own crash_twoc.ini, README.txt and Test notes.txt in
+# targets\<Target>\; the launchers and tools in files\ are shared, less those a target leaves out (Nitro5: the
+# Vulkan probe's). Two packages of one exe: -Pgo for the first, then -Exe twoc\build_pgo\Release\crash_twoc.exe
+# for the second (PACKAGE.txt reads PGO from that build's CMakeCache.txt).
 #
 # -Pgo (step 95, notes 18.98): the exe built with profile-guided optimisation in a build folder of its own
 # (twoc\build_pgo; twoc\build, the ordinary build, untouched): linked instrumented (TWOC_PGO=GEN), trained by
@@ -9,7 +16,7 @@
 # room, ~6 minutes with the menu, intro and hub on the way; needs Git Bash, the repo's .venv and this PC's display),
 # then linked again with the counts (TWOC_PGO=USE). /fp stays precise. PACKAGE.txt says so.
 #
-# Makes DIR (default: Desktop\Crash\LegionGoPackage) with:
+# Makes DIR (default: Desktop\Crash\<Target>Package) with:
 #   crash_twoc.exe and the Visual C++ runtime DLLs it imports (vcruntime140.dll, vcruntime140_1.dll,
 #     copied app-local from Visual Studio's redist folder); every other DLL it imports is part of
 #     Windows 10/11 (checked here with dumpbin /dependents; the list goes into PACKAGE.txt)
@@ -20,7 +27,7 @@
 #     Play Crash (bake off).bat, Play Crash (Vulkan probe).bat (notes 18.90),
 #     Play Crash (fullscreen start test).bat, Play Crash (fullscreen old way).bat (notes 18.93),
 #     Play Crash (safe settings).bat (notes 18.96: RECOMP_IGNORE_INI=1, the defaults, the ini untouched),
-#     Collect logs.bat, crash_twoc.ini (the Legion Go's settings), README.txt, Test notes.txt
+#     Collect logs.bat; from targets\<Target>\: crash_twoc.ini (the device's settings), README.txt, Test notes.txt
 #     (text files written with CRLF line ends)
 #   THIRD_PARTY_LICENSES.txt (twoc/, from third_party_licenses.py)
 #   PACKAGE.txt: the build (commits, exe hash, link-time code generation), the imported DLLs and
@@ -32,7 +39,8 @@
 # Build first: cmake --build twoc\build --config Release --parallel
 # Then smoke-test a scratch copy (never the package itself): smoke_test.ps1 (notes 18.91).
 param(
-    [string]$Out = (Join-Path ([Environment]::GetFolderPath('Desktop')) 'Crash\LegionGoPackage'),
+    [ValidateSet('LegionGo', 'Nitro5')][string]$Target = 'LegionGo',
+    [string]$Out,
     [string]$Exe,
     [string]$GameFiles,
     [string]$Save,
@@ -43,6 +51,13 @@ $ErrorActionPreference = 'Stop'
 $here = $PSScriptRoot
 $twoc = Split-Path -Parent (Split-Path -Parent $here)
 $repo = Split-Path -Parent $twoc
+if (-not $Out) { $Out = Join-Path ([Environment]::GetFolderPath('Desktop')) "Crash\${Target}Package" }
+$targetDir = Join-Path $here "targets\$Target"
+foreach ($f in 'crash_twoc.ini', 'README.txt', 'Test notes.txt') {
+    if (-not (Test-Path (Join-Path $targetDir $f))) { throw "No $f in $targetDir" }
+}
+$leaveOut = @{ 'LegionGo' = @(); 'Nitro5' = @('Play Crash (Vulkan probe).bat') }[$Target]
+$targetName = @{ 'LegionGo' = 'Legion Go'; 'Nitro5' = 'Acer Nitro 5' }[$Target]
 if ($Pgo -and $Exe) { throw '-Pgo builds its own exe: leave -Exe out' }
 if (-not $Exe) { $Exe = Join-Path $twoc 'build\Release\crash_twoc.exe' }
 if (-not $GameFiles) { $GameFiles = Join-Path $repo 'game_files' }
@@ -199,7 +214,10 @@ function Put-Text([string]$from, [string]$to) {
     [IO.File]::WriteAllText($to, $t, (New-Object Text.UTF8Encoding($false)))
 }
 $files = Join-Path $here 'files'
-foreach ($f in Get-ChildItem -File $files) { Put-Text $f.FullName (Join-Path $Out $f.Name) }
+foreach ($f in Get-ChildItem -File $files) {
+    if ($leaveOut -notcontains $f.Name) { Put-Text $f.FullName (Join-Path $Out $f.Name) }
+}
+foreach ($f in Get-ChildItem -File $targetDir) { Put-Text $f.FullName (Join-Path $Out $f.Name) }     # step 97
 Put-Text (Join-Path $files 'tools\collect_logs.ps1') (Join-Path $Out 'tools\collect_logs.ps1')
 # Every third-party component's licence (notes 18.96; twoc/tools/package/third_party_licenses.py writes it).
 Put-Text (Join-Path $twoc 'THIRD_PARTY_LICENSES.txt') (Join-Path $Out 'THIRD_PARTY_LICENSES.txt')
@@ -219,9 +237,14 @@ $cache = Join-Path (Split-Path -Parent (Split-Path -Parent $Exe)) 'CMakeCache.tx
 $ltcg = if (-not (Test-Path $cache)) { "unknown (no CMakeCache.txt beside the exe's folder)" }
         elseif (Select-String -Quiet -Pattern '^TWOC_LTCG:BOOL=ON' $cache) { 'on (TWOC_LTCG=ON)' }
         else { 'off (TWOC_LTCG=OFF)' }
+# Step 97: an exe given with -Exe from a PGO build (an earlier -Pgo run's twoc\build_pgo) says so.
+if (-not $Pgo -and (Test-Path $cache) -and (Select-String -Quiet -Pattern '^TWOC_PGO:STRING=USE' $cache)) {
+    $pgoLine = "on (TWOC_PGO=USE: $(Split-Path -Leaf (Split-Path -Parent (Split-Path -Parent $Exe))), trained by an earlier -Pgo run)"
+}
 $gf = Get-ChildItem -Recurse -File (Join-Path $Out 'game_files')
 $pkg = @(
-    "Crash TWOC, Legion Go package, made $(Get-Date -Format 'yyyy-MM-dd HH:mm:ss zzz') by twoc\tools\package\make_package.ps1",
+    "Crash TWOC, $targetName package, made $(Get-Date -Format 'yyyy-MM-dd HH:mm:ss zzz') by twoc\tools\package\make_package.ps1",
+    "Target: $Target",
     "",
     "Build: twoc $head$dirty",
     "       xboxrecomp $xr",

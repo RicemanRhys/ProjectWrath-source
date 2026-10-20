@@ -1,5 +1,5 @@
 @echo off
-rem Crash TWOC (Legion Go package, twoc/tools/package): starts the game from this folder.
+rem Crash TWOC (the test packages, twoc/tools/package): starts the game from this folder.
 rem The game finds game_files\ in the working directory and crash_twoc.ini next to the exe,
 rem so this folder can be anywhere. The switches are the ones run_twoc.ps1 -HostOnly sets on the
 rem desktop (notes 18.40): the host renderer alone. The title animation is sped up by
@@ -9,7 +9,7 @@ setlocal
 cd /d "%~dp0"
 if not exist "game_files\default.xbe" (
     echo game_files\default.xbe is missing from "%~dp0".
-    echo Copy the whole LegionGoPackage folder, game_files included.
+    echo Copy the whole package folder, game_files included.
     pause
     exit /b 1
 )
