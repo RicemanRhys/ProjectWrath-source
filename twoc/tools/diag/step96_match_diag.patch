@@ -1,0 +1,88 @@
+diff --git a/twoc/src/d3d_host.c b/twoc/src/d3d_host.c
+index c6f4c7c..bbed630 100644
+--- a/twoc/src/d3d_host.c
++++ b/twoc/src/d3d_host.c
+@@ -4380,6 +4380,18 @@ static int g_ir = 0, g_ic = 1, g_ip = 2;    /* recorded, replayed, the frame bef
+ static int g_iprev_ok;                  /* the frame before was recorded for this */
+ static uint32_t *g_ikey[ITABS];         /* each draw's kind, for matching (the frame before's sorted) */
+ static unsigned g_ikey_n[ITABS], g_ikey_cap[ITABS];
++static uint32_t *g_dkey[3][ITABS];      /* DIAG: strict, loose without target, loose without counts */
++static unsigned g_dkey_cap[ITABS];
++static int g_mlog = -1;
++static unsigned g_dmatch(uint32_t *a, unsigned na, uint32_t *b, unsigned nb)
++{
++    unsigned i = 0, j = 0, m = 0;
++    while (i < na && j < nb)
++        if (a[i] == b[j]) { m++; i++; j++; } else if (a[i] < b[j]) i++; else j++;
++    return m;
++}
++static unsigned g_dm[3];
++static int g_dmok;
+ static int g_ipair[IC_CAMS];            /* this frame's camera -> the frame before's, -1 none */
+ static struct {
+     int on;
+@@ -4824,6 +4836,25 @@ static void ic_record(rcmd_t *c)
+             g_ikey_cap[cur] = cap;
+         }
+     }
++    if (g_dkey_cap[cur] < g_ikey_cap[cur]) {
++        int v;
++        for (v = 0; v < 3; v++)
++            g_dkey[v][cur] = (uint32_t *)realloc(g_dkey[v][cur], g_ikey_cap[cur] * sizeof(uint32_t));
++        g_dkey_cap[cur] = g_ikey_cap[cur];
++    }
++    if (g_ikey_n[cur] < g_ikey_cap[cur]) {
++        unsigned s2;
++        uint32_t a = 2166136261u, b;
++        a = fnv(a, d->vprog ? d->vprog->key : d->fvf | 0x80000000u);
++        a = fnv(a, d->ps ? d->ps->token : 0);
++        for (s2 = 0; s2 < 4; s2++)
++            a = d->tex[s2] ? fnv(fnv(fnv(a, d->tex[s2]->format | d->tex[s2]->levels << 8 | d->tex[s2]->cube << 12),
++                                     d->tex[s2]->width), d->tex[s2]->height) : fnv(a, 0);
++        b = fnv(a, d->target.data);
++        g_dkey[0][cur][g_ikey_n[cur]] = key;
++        g_dkey[1][cur][g_ikey_n[cur]] = fnv(fnv(fnv(a, d->prim), d->vert_count), d->index_count);
++        g_dkey[2][cur][g_ikey_n[cur]] = fnv(b, d->prim);
++    }
+     if (g_ikey_n[cur] < g_ikey_cap[cur])
+         g_ikey[cur][g_ikey_n[cur]++] = lk;      /* step 96: the cut test's, by texture shape */
+     if (!d->camera || d->overlay)       /* step 65: the HUD, title cards and pause menu: as recorded */
+@@ -6722,6 +6753,19 @@ static int ic_begin(unsigned swap_no, int ovl, int need)
+     of = g_ikey_n[cur] > g_ikey_n[prv] ? g_ikey_n[cur] : g_ikey_n[prv];
+     if (of)
+         frac = (double)matched / of;
++    if (g_mlog < 0)
++        g_mlog = getenv("RECOMP_DIAG_MATCHLOG") ? atoi(getenv("RECOMP_DIAG_MATCHLOG")) : 0;
++    g_dm[0] = g_dm[1] = g_dm[2] = 0;
++    g_dmok = 0;
++    if (g_mlog > 0 && swap_no % (unsigned)g_mlog == 0 && g_ikey_n[cur] && g_dkey_cap[cur] && g_dkey_cap[prv]) {
++        unsigned v;
++        for (v = 0; v < 3; v++) {
++            qsort(g_dkey[v][cur], g_ikey_n[cur], sizeof(uint32_t), cmp_u32);
++            qsort(g_dkey[v][prv], g_ikey_n[prv], sizeof(uint32_t), cmp_u32);
++            g_dm[v] = g_dmatch(g_dkey[v][cur], g_ikey_n[cur], g_dkey[v][prv], g_ikey_n[prv]);
++        }
++        g_dmok = 1;
++    }
+     /* Only cameras 3D draws used take part: each frame starts with the
+      * frame before's camera still in place (the render-target passes and 2D
+      * draw under it), and paired by value it took the main camera's pair. */
+@@ -6791,12 +6835,17 @@ static int ic_begin(unsigned swap_no, int ovl, int need)
+         g_st.interp_cut_draws += of;
+         why = "too few draws matched";
+     }
++    if (g_dmok)
++        fprintf(stderr, "[DIAG] match swap %u draws %u (before %u): strict %.1f%%, shape %.1f%%, shape no target %.1f%%,"
++                " shape no counts %.1f%%; step %.3f turn %.2f %s\n", swap_no, g_ikey_n[cur], g_ikey_n[prv],
++                100.0 * g_dm[0] / g_ikey_n[cur], 100.0 * frac, 100.0 * g_dm[1] / g_ikey_n[cur],
++                100.0 * g_dm[2] / g_ikey_n[cur], step > 1e8 ? -1.0 : step, turn, why ? why : "interpolated");
+     if (why) {
+         if (g_subdump_cuts && logged < 40) {
+             g_subdump_from = swap_no;
+             g_subdump_to = swap_no + 2;
+         }
+-        if (++logged <= 40)
++        if (++logged <= 1000000)
+             fprintf(stderr, "[D3DB] host interpolation: guest swap %u shown as it is (%s: %.2f units, %.1f deg, %.0f%%"
+                     " of %u draws matched)\n", swap_no, why, step > 1e8 ? 0.0 : step, turn, 100.0 * frac, of);
+         return 0;
