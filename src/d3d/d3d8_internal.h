@@ -31,7 +31,7 @@ IDirect3DDevice8 *d3d8_GetDevice(void);
  * copies and binds use) is timed with QueryPerformanceCounter and adds its
  * ticks to d3d8_ctx_ticks and one to d3d8_ctx_calls; otherwise it costs a
  * load and a branch. The caller turns it on around the work it measures
- * (twoc: one draw in 16) and reads the sums; the calls themselves are made
+ * (twoc: one draw in 32) and reads the sums; the calls themselves are made
  * exactly as before, in the same order, on the same context.
  * ================================================================ */
 
