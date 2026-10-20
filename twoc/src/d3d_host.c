@@ -179,6 +179,7 @@
 #include "pads.h"
 #include "vk_probe.h"
 #include "power_log.h"
+#include "gpu.h"
 
 #define WIN_CLASS          "TwocD3DBridge"
 #define WIN_TITLE           "Crash TWOC - D3D bridge (host)"
@@ -1413,6 +1414,7 @@ int d3dh_create(unsigned width, unsigned height, unsigned host_w, unsigned host_
         return -1;
     }
 
+    twoc_gpu_start();                   /* step 97: the adapters listed, and the one asked for (gpu.h) */
     EnterCriticalSection(&g_lock);
     d3d = xbox_Direct3DCreate8(0);
     memset(&pp, 0, sizeof(pp));
@@ -1469,6 +1471,7 @@ int d3dh_create(unsigned width, unsigned height, unsigned host_w, unsigned host_
         fprintf(stderr, "[D3DB] host: xbox_d3d8 CreateDevice failed 0x%08lX\n", (unsigned long)hr);
         return -1;
     }
+    twoc_gpu_device_made(d3d8_GetD3D11Device(), g_hwnd);
     {   /* step 58 */
         int aa = twoc_aa_parse(getenv("RECOMP_ANTIALIASING"));
         if (aa != TWOC_AA_OFF)

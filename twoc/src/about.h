@@ -12,6 +12,8 @@
  *   - the graphics card (DXGI's adapter of the bridge's D3D11 device), its
  *     memory, and the driver's version (the user-mode driver's, as Device
  *     Manager shows it; NVIDIA's own number beside it);
+ *   - step 97: how that card was chosen (Automatic or the Display tab's
+ *     Graphics card, gpu.h) and the card the window's display is on;
  *   - the display mode of the window's monitor and its refresh rate;
  *   - Windows' edition, version and build (RtlGetVersion, the registry's
  *     DisplayVersion and UBR);
@@ -35,6 +37,8 @@ typedef struct {
     char sdl[96];
     char gpu[192];
     char driver[96];
+    char gpu_choice[192];               /* step 97: Automatic, or chosen */
+    char gpu_display[192];              /* step 97: the display's card */
     char display[160];
     char windows[160];
     char files[600];
