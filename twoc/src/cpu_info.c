@@ -22,7 +22,7 @@ typedef struct {
 #define PT_EXECUTION_SPEED 0x1
 #define PT_CLASS 4                      /* PROCESS_INFORMATION_CLASS ProcessPowerThrottling */
 /* The opt-out without RECOMP_CPU_THROTTLING (=windows: Windows' rules; =optout: the opt-out). */
-#define OPT_OUT_DEFAULT 0
+#define OPT_OUT_DEFAULT 1
 typedef BOOL(WINAPI *procinfo_t)(HANDLE, int, LPVOID, DWORD);
 
 const char *twoc_cpu_text(void) { return g_cpu; }
