@@ -57,6 +57,18 @@
  * #include "xinput_xbox.h"
  */
 
+/* ── The high-performance graphics card (step 97) ──────────────
+ *
+ * On a laptop with hybrid graphics (an Intel or AMD iGPU beside an NVIDIA
+ * or AMD GPU), these two exports ask the drivers to make D3D11's default
+ * adapter the high-performance GPU for this exe: NVIDIA's Optimus reads
+ * NvOptimusEnablement, AMD's switchable graphics
+ * AmdPowerXpressRequestHighPerformance. Windows' own per-app Graphics
+ * setting still wins over them, and with one GPU they do nothing. The F1
+ * menu's Graphics card choice (gpu.h) names an adapter outright instead. */
+__declspec(dllexport) DWORD NvOptimusEnablement = 0x00000001;
+__declspec(dllexport) int AmdPowerXpressRequestHighPerformance = 1;
+
 /* ── Global register state (defined in xbox_memory_layout.c) ── */
 
 /* RECOMP_TLS is not optional here. The runtime defines these thread-local, and
