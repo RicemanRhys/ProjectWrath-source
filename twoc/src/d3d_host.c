@@ -7096,7 +7096,13 @@ static void ic_draw(const rcmd_t *c)
 
 /* After the frame's last sub-frame: this frame becomes the frame before
  * (step 78: its tables; the set recorded into next was emptied at the
- * handover). */
+ * handover). Step 96 (notes 18.99): called before the frame's slot is freed.
+ * With the render thread the game thread waits for that slot and then
+ * takes the set that is neither its frame's nor g_ip for its next frame;
+ * called after, g_ip was still the frame before last's, the game took this
+ * frame's set, emptied it and recorded into it, and the next frame was
+ * compared with that: 1-2% of its draws matched, shown as it is every 5-10 s
+ * standing still (the race's chance). */
 static void ic_end(void)
 {
     REPLAY_SIDE();
@@ -10010,17 +10016,17 @@ static int replay_frame(fslot_t *f)
             ic_sub(g_interp_t0 ? fr.t0[0] : fr.t[0]);
             replay_pass(1);             /* the first sub-frame */
             if (fr.n == 1) {
+                ic_end();               /* step 96: before the slot is free (ic_end) */
                 replay_done();
-                ic_end();
             }
         } else {
+            if (f->interp)
+                ic_end();               /* step 96: before replay_run frees the slot (ic_end) */
             if (g_replay_check)
                 replay_check(0, swap_no);
             replay_run();
             if (g_replay_check)
                 replay_check(1, swap_no);
-            if (f->interp)
-                ic_end();
         }
         LeaveCriticalSection(&g_lock);
     } else if (g_ps) {
@@ -10038,8 +10044,8 @@ static int replay_frame(fslot_t *f)
                     replay_pass(0);     /* t = 1: the frame as recorded */
                 }
                 if (sub == fr.n) {
+                    ic_end();           /* step 96: before the slot is free (ic_end) */
                     replay_done();
-                    ic_end();
                 }
                 LeaveCriticalSection(&g_lock);
             }
