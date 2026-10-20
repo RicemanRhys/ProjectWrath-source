@@ -357,7 +357,8 @@ static unsigned g_vs_held_interval;
  * rate check): the limiter paces for the rest of the run. */
 static volatile LONG g_vs_broken;
 #define VSYNC_FAST_WINDOW_S 2.0         /* ... measured over windows this long */
-#define VSYNC_FAST_RATIO 1.25           /* ... two running over this many times the rate the interval allows */
+#define VSYNC_FAST_RATIO 1.25           /* ... two with the game over this many times the rate the interval allows */
+static double g_game_ups_now;           /* step 97: the game's updates a second (g_meas's), 0 not measured */
 static LONGLONG g_vs_retry;             /* the QPC tick to try vsync pacing again */
 static SRWLOCK g_why_lock = SRWLOCK_INIT;
 static char g_pace_why[192];            /* step 63: why the pacing is what it is ("" vsync as it should be) */
@@ -8218,23 +8219,26 @@ static void pace(int mid, double slots)
             /* Step 97: vsync that doesn't hold the presents back. Through Windows' copy to another card's
              * display (the desktop's Radeon iGPU chosen, its frames shown on the RTX 4080's monitor) the
              * frame-latency object let 151 presents a second through at interval 4 on 240 Hz, 60 wanted:
-             * the game ran 2.5 times its speed. Two windows of VSYNC_FAST_WINDOW_S running faster than
-             * VSYNC_FAST_RATIO times the rate the interval allows: the limiter for the rest of the run. */
+             * the game ran 2.5 times its speed. The game's own rate is what is checked (interpolated
+             * frames present at every refresh, but a game frame always spans the interval): two windows of
+             * VSYNC_FAST_WINDOW_S with the game faster than VSYNC_FAST_RATIO times the display's rate over
+             * the interval, and the limiter paces for the rest of the run. */
             if (win_iv != g_interval || !win_q) {
                 win_iv = g_interval;
                 win_q = now.QuadPart;
                 win_n = 0;
                 fast = 0;
             } else if (++win_n, (double)(now.QuadPart - win_q) >= VSYNC_FAST_WINDOW_S * (double)freq.QuadPart) {
-                double rate = win_n * (double)freq.QuadPart / (double)(now.QuadPart - win_q);
+                double rate = g_game_ups_now;
                 double hz = d3dh_display_hz(), allowed = g_interval ? hz / g_interval : 0;
                 fast = allowed > 0 && rate > allowed * VSYNC_FAST_RATIO ? fast + 1 : 0;
                 win_q = now.QuadPart;
                 win_n = 0;
                 if (fast >= 2) {
                     char why[200];
-                    snprintf(why, sizeof(why), "the display's vsync doesn't hold the presents here (%.0f a second "
-                             "at interval %u of %.2f Hz): the frame limiter paces", rate, g_interval, hz);
+                    snprintf(why, sizeof(why), "the display's vsync doesn't hold the presents here (the game at %.0f "
+                             "updates a second at interval %u of %.2f Hz): the frame limiter paces", rate, g_interval,
+                             hz);
                     fprintf(stderr, "[D3DB] host: %s at %.3f Hz for the rest of the run (a graphics card that isn't"
                             " the display's? notes 18.100)\n", why, 60000.0 / 1001.0);
                     InterlockedExchange(&g_vs_broken, 1);
@@ -9293,6 +9297,7 @@ static void meas_present(unsigned swap_no)
         g_meas.shown = (double)(g_meas.pres[0] - g_meas.pres[MEAS_N - 1]) / dt;
         g_meas.ok = 1;
     }
+    g_game_ups_now = g_meas.ok ? g_meas.game : 0;   /* step 97: pace's check */
     meas_held(swap_no);                 /* step 96 */
     if (g_show_fps == 2)
         meas_detail();                  /* step 93 */
