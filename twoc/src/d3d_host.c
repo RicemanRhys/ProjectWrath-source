@@ -3379,10 +3379,10 @@ plain:
 
 /* ── Step 95: what the draws cost in D3D11, and what repeats (notes 18.98) ──
  *
- * One draw in 16 (of every kind) has the D3D11 context calls inside it
+ * One draw in 32 (of every kind) has the D3D11 context calls inside it
  * timed: xbox_d3d8 times each call while d3d8_ctx_timing is set (its COM
  * macros, d3d8_internal.h), and the draw's kind gets the calls and their
- * ticks; the other 15 give the kind its draw-call ms (draw_exec's and
+ * ticks; the other 31 give the kind its draw-call ms (draw_exec's and
  * draw_baked's own timing, without the timing's cost). What a timed call's
  * two reads add to it (one QueryPerformanceCounter call, measured once) is
  * taken off each. Kinds (TWOC_DK_*): a frame
@@ -3392,12 +3392,14 @@ plain:
  * the D3D11 calls' share and ms a game frame.
  *
  * And what reusing a first pass's captures across game frames could take
- * (cut 3): every 32nd capturing frame keeps a hash of each of its first
+ * (cut 3): every 64th capturing frame keeps a hash of each of its first
  * pass's draws (`state`: the states, shaders, layout, target, viewport and
  * what the capture is made from, without the vertices, indices, constants
  * or textures; `all`: with them), and the next game frame, when it captures
  * too, looks each of its draws up in them. A program draw's vertices from
- * the bridge's vertex cache repeat when they are the same cached block. */
+ * the bridge's vertex cache repeat when they are the same cached block.
+ * (One in 16 and every 32nd at first: ~0.15-0.3 ms of the render thread a
+ * game frame at 240 Hz here, against the ~0.1 asked; halved.) */
 enum { TWOC_DK_ONCE, TWOC_DK_CAPTURED, TWOC_DK_BAKED, TWOC_DK_PLAIN, TWOC_DK_AGAIN };
 static unsigned g_dk_n;                 /* draws, for one in 16 */
 #define RPT_SLOTS 16384u                /* each set's; at most half of it filled */
@@ -3539,7 +3541,7 @@ static void rpt_frame(void)
     int was = g_rpt_mode;
 
     g_rpt_mode = 0;
-    if (++g_rpt_seq % 32 == 0) {
+    if (++g_rpt_seq % 64 == 0) {
         memset(g_rpt_set, 0, sizeof(g_rpt_set));
         g_rpt_n = 0;
         g_rpt_ref_swap = g_ps->swap_no;
@@ -3550,11 +3552,11 @@ static void rpt_frame(void)
     }
 }
 
-/* A draw's D3D11 calls timed (one in 16): its kind's sums. */
+/* A draw's D3D11 calls timed (one in 32): its kind's sums. */
 static int dk_start(LONG64 *tk, UINT *tc, double *ms)
 {
     *ms = g_st.draw_ms;
-    if ((++g_dk_n & 15) != 0)
+    if ((++g_dk_n & 31) != 0)
         return 0;
     *tk = d3d8_ctx_ticks;
     *tc = d3d8_ctx_calls;

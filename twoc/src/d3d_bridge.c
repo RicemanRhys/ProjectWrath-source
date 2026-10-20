@@ -5159,7 +5159,7 @@ static void mirror_swap(void)
                 last_draws = st.draws;
                 last_draw_ms = st.draw_ms;
             }
-            {   /* step 95: the draws' D3D11 calls by kind (one draw in 16 timed) and Present (d3d_host.c) */
+            {   /* step 95: the draws' D3D11 calls by kind (one draw in 32 timed) and Present (d3d_host.c) */
                 static const char *const nm[TWOC_DK] = { "drawn once", "first passes (captured)",
                                                          "drawn from their capture", "later passes the ordinary way",
                                                          "first passes from the frame before's capture" };
@@ -5188,7 +5188,7 @@ static void mirror_swap(void)
                     lx[k] = st.dk_ctx_ms[k];
                 }
                 if (all && gf > 0)
-                    log_block_printf(&lb, "[D3DB] host D3D11 in the draws (one draw in 16 timed, %.1f ns of timing taken"
+                    log_block_printf(&lb, "[D3DB] host D3D11 in the draws (one draw in 32 timed, %.1f ns of timing taken"
                                      " off each call): %s; the draws %.2f ms a game frame, %.2f ms of it in D3D11 calls"
                                      " (%.0f%%); Present %.2f ms a game frame\n", st.ctx_qpc_ns, kb, ms_all / gf,
                                      ms_ctx / gf, ms_all > 0 ? 100.0 * ms_ctx / ms_all : 0.0,

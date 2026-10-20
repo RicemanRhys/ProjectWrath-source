@@ -57,7 +57,7 @@ typedef struct {
     unsigned bake_geom;                 /* first passes' draws drawn with the frame before's vertices and indices */
                                         /* where the rings held them (cut 3) */
     /* Step 95: the draws by kind (TWOC_DK_*): all of them, those whose D3D11
-     * context calls were timed (one draw in 16), the calls and their ms in
+     * context calls were timed (one draw in 32), the calls and their ms in
      * those, and the untimed ones' draw-call ms; the presents' ms in
      * IDXGISwapChain1::Present; one QueryPerformanceCounter call's cost (ns,
      * taken off each timed call). */
@@ -66,7 +66,7 @@ typedef struct {
     double dk_ctx_ms[TWOC_DK], dk_ms[TWOC_DK];
     double present_ms, ctx_qpc_ns;
     /* Step 95: capturing frames' first-pass draws looked up against the game
-     * frame before's (one pair of frames in 32): frames, draws, those whose
+     * frame before's (one pair of frames in 64): frames, draws, those whose
      * state repeats, those that repeat whole (state, vertices, indices,
      * constants, textures). */
     unsigned rpt_frames, rpt_draws, rpt_state, rpt_all;
