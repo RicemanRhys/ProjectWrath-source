@@ -5161,7 +5161,8 @@ static void mirror_swap(void)
             }
             {   /* step 95: the draws' D3D11 calls by kind (one draw in 16 timed) and Present (d3d_host.c) */
                 static const char *const nm[TWOC_DK] = { "drawn once", "first passes (captured)",
-                                                         "drawn from their capture", "later passes the ordinary way" };
+                                                         "drawn from their capture", "later passes the ordinary way",
+                                                         "first passes from the frame before's capture" };
                 static unsigned ld[TWOC_DK], lt[TWOC_DK], lc[TWOC_DK];
                 static double lm[TWOC_DK], lx[TWOC_DK], lp;
                 char kb[1024];
@@ -5238,12 +5239,19 @@ static void mirror_swap(void)
             }
             if (st.bake_captured || st.bake_plain) {    /* step 87 */
                     static unsigned lbc, lbd, lbp;
+                    static unsigned lba, lbf, lbg;
                     log_block_printf(&lb, "[D3DB] host baked draws: %u captured at first passes, %u drawn from their"
-                                     " capture, %u drawn the ordinary way in later passes\n", st.bake_captured - lbc,
-                                     st.baked_draws - lbd, st.bake_plain - lbp);
+                                     " capture, %u drawn the ordinary way in later passes; of the first passes' draws"
+                                     " %u drawn from the frame before's capture (%u in a state it had), %u with its"
+                                     " vertices and indices where the rings held them\n",
+                                     st.bake_captured - lbc, st.baked_draws - lbd, st.bake_plain - lbp,
+                                     st.bake_again - lba, st.bake_again_found - lbf, st.bake_geom - lbg);
+                    lbg = st.bake_geom;
                     lbc = st.bake_captured;
                     lbd = st.baked_draws;
                     lbp = st.bake_plain;
+                    lba = st.bake_again;
+                    lbf = st.bake_again_found;
                 }
                 lf = st.replay_frames;
                 lc = st.replay_cmds;

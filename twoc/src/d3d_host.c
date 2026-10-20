@@ -372,6 +372,8 @@ static LARGE_INTEGER g_qpf;                 /* step 60: QueryPerformanceFrequenc
 static int g_replay;                    /* step 60, RECOMP_D3D_BRIDGE_REPLAY: passes at each present, 0 off */
 static int g_replay_check;              /* RECOMP_D3D_BRIDGE_REPLAY_CHECK: drawn at once too, and compared */
 static int g_bake = 1;                  /* step 87, RECOMP_D3D_BRIDGE_BAKE: baked draws ("Step 87: baked draws"), on */
+static int g_bake_again = 1;            /* step 95 (cut 3), RECOMP_D3D_BRIDGE_BAKE_AGAIN: first passes from the frame */
+                                        /* before's captures, on */
 static volatile LONG g_interp_want;     /* step 61: RECOMP_FRAMERATE=display / the overlay, taken at a frame's end */
 static int g_interp;                    /* step 61: frames recorded and drawn as interpolated sub-frames */
 static unsigned g_subdump_from, g_subdump_to;   /* RECOMP_D3D_BRIDGE_SUBDUMP=A-B: each sub-frame of those swaps */
@@ -1285,6 +1287,14 @@ int d3dh_create(unsigned width, unsigned height, unsigned host_w, unsigned host_
         fprintf(stderr, "[D3DB] host baked draws: %s (RECOMP_D3D_BRIDGE_BAKE%s)\n",
                 g_bake ? "on: a frame drawn more than once is translated at its first pass, its other passes drawn"
                          " from that" : "off: every pass translated", e && *e ? "" : " unset: on");
+        e = getenv("RECOMP_D3D_BRIDGE_BAKE_AGAIN");     /* step 95 (cut 3): 0 | 1 */
+        if (e && *e)
+            g_bake_again = strcmp(e, "0") != 0;
+        if (g_bake)
+            fprintf(stderr, "[D3DB] host first passes from the frame before's captures: %s (RECOMP_D3D_BRIDGE_BAKE_AGAIN%s)"
+                    "\n", g_bake_again ? "on: a draw in a state the game frame before captured is drawn from that"
+                    " capture with its own vertices and constants" : "off: every first pass translated",
+                    e && *e ? "" : " unset: on");
         e = getenv("RECOMP_FRAMERATE");                 /* step 61; step 77: display or N Hz */
         if (twoc_framerate_parse(e))
             d3dh_set_framerate(twoc_framerate_parse(e));
@@ -3006,9 +3016,11 @@ static int vs_const_differs(const d3dh_vprog_t *p, int k)
  * highest that differs, is copied whole, so g_vs_consts stays what xbox_d3d8
  * holds. Returns 0, or -1 if the host has no shader for it. Called with
  * g_lock held. */
+static void vs_consts_up(const d3dh_vprog_t *p, int i);
+
 static int vs_bind(const d3dh_vprog_t *p)
 {
-    int i = vs_find(p->key), lo = -1, hi = -1, k, w;
+    int i = vs_find(p->key);
     DWORD h;
 
     REPLAY_SIDE();
@@ -3016,6 +3028,18 @@ static int vs_bind(const d3dh_vprog_t *p)
         i = vs_slot(p);                 /* (step 79: never on the render thread: the game side's table) */
     if (i < 0 || !(h = vs_make(i, p)))
         return -1;
+    vs_consts_up(p, i);
+    g_dev->lpVtbl->SetVertexShader(g_dev, h);
+    return 0;
+}
+
+/* Step 95: vs_bind's constants: those of program slot i's registers that
+ * differ from the last upload put into xbox_d3d8 (a draw from the frame
+ * before's capture takes them this way too, cut 3). */
+static void vs_consts_up(const d3dh_vprog_t *p, int i)
+{
+    int lo = -1, hi = -1, k, w;
+
     if (!g_vs_consts_valid) {
         lo = 0;
         hi = 191;
@@ -3050,8 +3074,6 @@ static int vs_bind(const d3dh_vprog_t *p)
             g_st.vs_const_uploads++;
         lo = e + 1;
     }
-    g_dev->lpVtbl->SetVertexShader(g_dev, h);
-    return 0;
 }
 
 /* A draw on the host, now: the body of d3dh_draw_up (step 60: also each
@@ -3376,7 +3398,7 @@ plain:
  * or textures; `all`: with them), and the next game frame, when it captures
  * too, looks each of its draws up in them. A program draw's vertices from
  * the bridge's vertex cache repeat when they are the same cached block. */
-enum { TWOC_DK_ONCE, TWOC_DK_CAPTURED, TWOC_DK_BAKED, TWOC_DK_PLAIN };
+enum { TWOC_DK_ONCE, TWOC_DK_CAPTURED, TWOC_DK_BAKED, TWOC_DK_PLAIN, TWOC_DK_AGAIN };
 static unsigned g_dk_n;                 /* draws, for one in 16 */
 #define RPT_SLOTS 16384u                /* each set's; at most half of it filled */
 static uint64_t g_rpt_set[2][RPT_SLOTS];
@@ -3581,6 +3603,347 @@ static void dk_calibrate(void)
     g_st.ctx_qpc_ns = ns[4];
 }
 
+/* ── Step 95, cut 3: a first pass's draws from the frame before's captures ──
+ *
+ * At cast_bug's start 98% of a capturing frame's first-pass draws had the
+ * state of a draw the game frame before captured (avalanch 51%, upstairs
+ * 56%: their fixed-function lights; the counter above), and a first pass's
+ * draw cost ~1.4-1.6 us here against ~0.1-0.2 drawn from a capture (the
+ * D3D11 line): the translation (each render and stage state set one by one
+ * through xbox_d3d8, which builds and looks up its D3D11 objects, samplers
+ * and constants from them) was made again for the same result. Now each
+ * first-pass draw's state is keyed (a 128-bit hash of everything the
+ * translation reads but the vertices, indices, constants, matrices and
+ * textures: the primitive, stride, FVF or program, the render and stage
+ * states, the pixel shader, the lights in use and the material, the
+ * viewport and its pillarbox, the target, the textures' formats and kinds,
+ * the anisotropy and the frame's settings), and a draw whose key the
+ * capturing frame before had is drawn from that capture with its own
+ * vertices and indices put in the rings, its program's registers set as an
+ * ordinary draw sets them (vs_bind's compare, so the constants ring is
+ * written as rarely, with the same bytes) or its fixed-function matrices
+ * given, and its textures fetched as every pass does (xbox_d3d8's
+ * d3d8_DrawBakedAgain), and captured for this frame's later passes; the
+ * rest are drawn and captured the ordinary way. And its vertices and
+ * indices, if the frame before drew the same ones (the same cached vertex
+ * block, counts, stride, primitive and index bytes: the geometry table,
+ * ag_gkey), are drawn from where the rings still hold them: most of a first
+ * pass's cost after the translation was uploading them again (10.4 MB of
+ * vertices a game frame at cast_bug's start). A key is a 128-bit hash,
+ * trusted as the texture cache trusts its signatures. Pre-transformed draws
+ * (their vertices are made for each pass) and HUD draws moved to the
+ * screen's edges always take the ordinary way. The same pixels: every
+ * object the capture binds is the one the same state's translation gives
+ * (xbox_d3d8's caches are by description, and a capture whose objects went
+ * is refused), its constants are this draw's, and its vertices and indices
+ * are the bytes it would upload. */
+typedef struct {
+    uint64_t a[4];
+    unsigned n;
+} khash_t;
+
+static __inline uint64_t kh_round(uint64_t l, uint64_t w)
+{
+    l += w * 0xC2B2AE3D27D4EB4Full;
+    return (l << 31 | l >> 33) * 0x9E3779B97F4A7C15ull;
+}
+
+/* A field into the key: xxHash64's round on four lanes, 32 bytes a stripe
+ * (the last padded with zeros), its length first. */
+static void kh_add(khash_t *k, const void *p, size_t n)
+{
+    const uint8_t *b = (const uint8_t *)p;
+    uint64_t a0 = kh_round(k->a[0], (uint64_t)n), a1 = k->a[1], a2 = k->a[2], a3 = k->a[3], w[4];
+
+    for (; n >= 32; b += 32, n -= 32) {
+        memcpy(w, b, 32);
+        a0 = kh_round(a0, w[0]);
+        a1 = kh_round(a1, w[1]);
+        a2 = kh_round(a2, w[2]);
+        a3 = kh_round(a3, w[3]);
+    }
+    if (n) {
+        w[0] = w[1] = w[2] = w[3] = 0;
+        memcpy(w, b, n);
+        a0 = kh_round(a0, w[0]);
+        a1 = kh_round(a1, w[1]);
+        a2 = kh_round(a2, w[2]);
+        a3 = kh_round(a3, w[3]);
+    }
+    k->a[0] = a0;
+    k->a[1] = a1;
+    k->a[2] = a2;
+    k->a[3] = a3;
+    k->n++;
+}
+
+static uint64_t kh_mix(uint64_t h)
+{
+    h ^= h >> 33;
+    h *= 0xC2B2AE3D27D4EB4Full;
+    h ^= h >> 29;
+    h *= 0x165667B19E3779F9ull;
+    return h ^ h >> 32;
+}
+
+/* A draw's state key; 0 when it never takes this way. */
+static int ag_key(const d3dh_draw_t *d, uint64_t key[2])
+{
+    khash_t k = { { 0x9E3779B185EBCA87ull, 0xC2B2AE3D27D4EB4Full, 0x27D4EB2F165667C5ull, 0x165667B19E3779F9ull }, 0 };
+    uint32_t w[20];
+    unsigned s;
+
+    if (d->hud_dx != 0.0f || (!d->vprog && (d->fvf & D3DFVF_POSITION_MASK) == D3DFVF_XYZRHW))
+        return 0;
+    w[0] = d->prim;
+    w[1] = d->stride;
+    w[2] = d->fvf;
+    w[3] = d->indices != NULL;
+    w[4] = d->vp_x;
+    w[5] = d->vp_y;
+    w[6] = d->vp_w;
+    w[7] = d->vp_h;
+    memcpy(&w[8], &d->vp_minz, 4);
+    memcpy(&w[9], &d->vp_maxz, 4);
+    w[10] = (uint32_t)d->pillar | (d->ff != NULL) << 2 | (d->ps != NULL) << 3 | (d->vprog != NULL) << 4;
+    w[11] = d->target.data;
+    w[12] = d->target.width;
+    w[13] = d->target.height;
+    w[14] = d->target.format;
+    w[15] = (uint32_t)g_aniso;
+    w[16] = g_ps->set_gen;
+    w[17] = d->vprog ? d->vprog->key : 0;
+    w[18] = d->vprog ? d->vprog->n_insns : 0;
+    w[19] = 0;
+    kh_add(&k, w, sizeof(w));
+    kh_add(&k, d->rs, d->n_rs * sizeof(d3dh_state_t));
+    for (s = 0; s < 4; s++) {
+        uint32_t t[4] = { 0, 0, 0, 0 };
+        if (d->tex[s]) {
+            t[0] = 1;
+            t[1] = d->tex[s]->format;
+            t[2] = d->tex[s]->cube;
+            t[3] = d->tex[s]->levels;
+        }
+        kh_add(&k, t, sizeof(t));
+        kh_add(&k, d->tss[s], d->n_tss[s] * sizeof(d3dh_state_t));
+    }
+    if (d->ps) {
+        kh_add(&k, &d->ps->token, sizeof(d->ps->token));
+        kh_add(&k, d->ps->rs, d->ps->n_rs * sizeof(d3dh_state_t));
+    }
+    if (d->ff) {
+        unsigned nl = d->ff->n_lights < D3DH_MAX_LIGHTS ? d->ff->n_lights : D3DH_MAX_LIGHTS;
+        kh_add(&k, &d->ff->n_lights, sizeof(d->ff->n_lights) + nl * sizeof(d->ff->light[0]));
+        kh_add(&k, d->ff->material, sizeof(d->ff->material));
+    }
+    key[0] = kh_mix(k.a[0] + (k.a[1] << 1 | k.a[1] >> 63) + (k.a[2] << 7 | k.a[2] >> 57) +
+                    (k.a[3] << 12 | k.a[3] >> 52) + k.n);
+    key[1] = kh_mix(k.a[3] ^ (k.a[2] << 17 | k.a[2] >> 47) ^ (k.a[1] << 29 | k.a[1] >> 35) ^
+                    (k.a[0] << 41 | k.a[0] >> 23) ^ (uint64_t)k.n * 0x27D4EB2F165667C5ull);
+    return 1;
+}
+
+/* The capturing frames' tables, this one's (g_ag_cur) and the one
+ * before's: [0] captures by state key (the first of a key), [1] where draws'
+ * vertices and indices went in the rings (`kept`) by their geometry: a
+ * cached vertex block (the entry holds a reference, so that a block at that
+ * address is these vertices while it lasts: the cache makes a new block
+ * when a held one's guest bytes change), the counts, stride, primitive and
+ * the indices' 128-bit hash. A first pass's draw with the geometry the
+ * frame before had draws from there while the rings still hold it
+ * (xbox_d3d8 checks their generation): nothing uploaded. */
+typedef struct {
+    uint64_t key[2];
+    D3D8Baked b;                        /* [0] */
+    d3dh_hold_t *hold;                  /* [1]: a reference */
+    D3D8UpKept kept;
+} again_t;
+static again_t *g_ag[2][2];             /* [table][frame] */
+static unsigned g_ag_n[2][2], g_ag_cap[2][2];
+static int32_t *g_ag_ix[2][2];          /* open addressing, entry + 1 (0 empty), 2-4 slots an entry */
+static unsigned g_ag_ixcap[2][2];
+static int g_ag_cur;
+
+/* A capturing frame's first pass begins (with d3d8_BakeReset: the frame
+ * before's captures are the other table's, and xbox_d3d8 keeps their
+ * memory through this frame). */
+static void ag_empty(int k, int t)
+{
+    unsigned i;
+
+    for (i = 0; i < g_ag_n[k][t]; i++)
+        if (k)
+            d3dh_hold_release(g_ag[k][t][i].hold);
+    g_ag_n[k][t] = 0;
+    if (g_ag_ix[k][t])
+        memset(g_ag_ix[k][t], 0, g_ag_ixcap[k][t] * sizeof(int32_t));
+}
+
+static void ag_frame(void)
+{
+    g_ag_cur ^= 1;
+    ag_empty(0, g_ag_cur);
+    ag_empty(1, g_ag_cur);
+}
+
+/* A draw's geometry key: its cached vertex block (where in it), its counts,
+ * stride and primitive, its indices' bytes. 0 when its vertices aren't a
+ * cached block. */
+static int ag_gkey(const d3dh_draw_t *d, uint64_t key[2])
+{
+    khash_t k = { { 0x9E3779B185EBCA87ull, 0xC2B2AE3D27D4EB4Full, 0x27D4EB2F165667C5ull, 0x165667B19E3779F9ull }, 0 };
+    struct {
+        const void *hold, *verts;
+        uint32_t vert_count, prim_count, index_count, stride, prim, indexed;
+    } g;
+
+    if (!d->hold || !d->verts)
+        return 0;
+    memset(&g, 0, sizeof(g));
+    g.hold = d->hold;
+    g.verts = d->verts;
+    g.vert_count = d->vert_count;
+    g.prim_count = d->prim_count;
+    g.index_count = d->index_count;
+    g.stride = d->stride;
+    g.prim = d->prim;
+    g.indexed = d->indices != NULL;
+    kh_add(&k, &g, sizeof(g));
+    if (d->indices)
+        kh_add(&k, d->indices, (size_t)d->index_count * sizeof(uint16_t));
+    key[0] = kh_mix(k.a[0] + (k.a[1] << 1 | k.a[1] >> 63) + (k.a[2] << 7 | k.a[2] >> 57) +
+                    (k.a[3] << 12 | k.a[3] >> 52) + k.n);
+    key[1] = kh_mix(k.a[3] ^ (k.a[2] << 17 | k.a[2] >> 47) ^ (k.a[1] << 29 | k.a[1] >> 35) ^
+                    (k.a[0] << 41 | k.a[0] >> 23) ^ (uint64_t)k.n * 0x27D4EB2F165667C5ull);
+    return 1;
+}
+
+static int32_t *ag_slot(int k, int t, const uint64_t key[2])
+{
+    unsigned m = g_ag_ixcap[k][t] - 1, i = (unsigned)key[0] & m;
+    int32_t *ix = g_ag_ix[k][t];
+    const again_t *a = g_ag[k][t];
+
+    while (ix[i] && (a[ix[i] - 1].key[0] != key[0] || a[ix[i] - 1].key[1] != key[1]))
+        i = (i + 1) & m;
+    return &ix[i];
+}
+
+/* The frame before's entry of table k for this key, NULL none. */
+static const again_t *ag_find(int k, const uint64_t key[2])
+{
+    int t = g_ag_cur ^ 1;
+    int32_t *e;
+
+    if (!g_ag_n[k][t] || !g_ag_ix[k][t])
+        return NULL;
+    e = ag_slot(k, t, key);
+    return *e ? &g_ag[k][t][*e - 1] : NULL;
+}
+
+/* This frame's entry of table k for this key (the first of a key kept): the
+ * capture `b` ([0]) or the vertex block `hold` held and `kept` ([1]). */
+static void ag_keep(int k, const uint64_t key[2], const D3D8Baked *b, d3dh_hold_t *hold, const D3D8UpKept *kept)
+{
+    int t = g_ag_cur;
+    int32_t *e;
+    again_t *a;
+
+    if (g_ag_n[k][t] == g_ag_cap[k][t]) {   /* the entries, and an index of 2-4 slots an entry */
+        unsigned cap = g_ag_cap[k][t] ? 2 * g_ag_cap[k][t] : 2048, i;
+        again_t *n = (again_t *)realloc(g_ag[k][t], cap * sizeof(again_t));
+        int32_t *x = (int32_t *)calloc(2 * cap, sizeof(int32_t));
+        if (!n || !x) {
+            if (n)
+                g_ag[k][t] = n;
+            free(x);
+            return;
+        }
+        g_ag[k][t] = n;
+        free(g_ag_ix[k][t]);
+        g_ag_ix[k][t] = x;
+        g_ag_ixcap[k][t] = 2 * cap;
+        g_ag_cap[k][t] = cap;
+        for (i = 0; i < g_ag_n[k][t]; i++)
+            *ag_slot(k, t, g_ag[k][t][i].key) = (int32_t)i + 1;
+    }
+    e = ag_slot(k, t, key);
+    if (*e)
+        return;
+    a = &g_ag[k][t][g_ag_n[k][t]];
+    a->key[0] = key[0];
+    a->key[1] = key[1];
+    if (b)
+        a->b = *b;
+    a->hold = hold;
+    if (hold)
+        InterlockedIncrement((volatile LONG *)&hold->refs);
+    if (kept)
+        a->kept = *kept;
+    *e = (int32_t)++g_ag_n[k][t];
+}
+
+/* A first pass's draw from `old`, the frame before's capture of a draw in
+ * its state, into `now`: 0 drawn, -1 not (the caller draws and captures it
+ * the ordinary way). Called with g_lock held. */
+static int draw_again(const rcmd_t *c, const d3dh_draw_t *d, const D3D8Baked *old, D3D8Baked *now)
+{
+    const uint8_t *pinned = c->u.draw.pinned;
+    IDirect3DBaseTexture8 *const *pin = c->u.draw.pin;
+    ID3D11ShaderResourceView *srv[4];
+    const D3DMATRIX *m3[3], *const *ffm = NULL;
+    LARGE_INTEGER t0, t1;
+    unsigned s;
+
+    REPLAY_SIDE();
+    QueryPerformanceCounter(&t0);
+    if (bind_target(&d->target) != 0)
+        return -1;
+    for (s = 0; s < 4; s++) {           /* as draw_baked fetches them */
+        IDirect3DBaseTexture8 *t;
+        if (!d->tex[s])
+            t = NULL;
+        else if (pinned[s] == PIN_TARGET) {
+            t = tex_target(d->tex[s]);
+            if (!t)
+                t = pin[s];
+        } else
+            t = pinned[s] ? pin[s] : tex_get(g_tc_now, d->tex[s]);
+        srv[s] = t ? d3d8_base_srv(t) : NULL;
+        if (t && !srv[s])
+            return -1;
+    }
+    if (d->ff) {
+        m3[0] = (const D3DMATRIX *)d->ff->world;
+        m3[1] = (const D3DMATRIX *)d->ff->view;
+        m3[2] = (const D3DMATRIX *)d->ff->proj;
+        ffm = m3;
+    }
+    if (d->vprog) {                     /* its constants as an ordinary draw sets them (vs_bind) */
+        int i = vs_find(d->vprog->key);
+        if (i < 0)
+            return -1;
+        vs_consts_up(d->vprog, i);
+    }
+    if (d3d8_DrawBakedAgain(old, now, srv, ffm, (D3DPRIMITIVETYPE)d->prim, d->prim_count, d->vert_count,
+                            d->indices, d->verts, d->stride, (D3D8UpKept *)&c->u.draw.kept) != S_OK)
+        return -1;
+    target_drawn();
+    g_st.draws++;
+    g_st.bake_again++;
+    if (d->indices)
+        g_st.indexed_draws++;
+    if (d->vprog)
+        g_st.vp_draws++;
+    if (d->target.data)
+        g_st.rt_draws++;
+    g_frame_work = 1;
+    QueryPerformanceCounter(&t1);
+    g_st.draw_ms += (double)(t1.QuadPart - t0.QuadPart) * 1000.0 / (double)g_qpf.QuadPart;
+    return 0;
+}
+
 /* A recorded draw in this pass: drawn the ordinary way (captured, at a
  * frame's first pass) or from its capture. `moved`: `d` is a copy whose
  * matrices or constants the pass moved. */
@@ -3602,12 +3965,43 @@ static int draw_cmd(const rcmd_t *c, const d3dh_draw_t *d, int moved)
         dk_end(TWOC_DK_ONCE, timed, tk, tc, ms);
         return r;
     }
-    g_bk[c - g_ps->rc].moved = (uint8_t)moved;
-    d3d8_BakeCapture(&g_bk[c - g_ps->rc].b);
-    r = draw_exec(d, c->u.draw.pin, c->u.draw.pinned, (D3D8UpKept *)&c->u.draw.kept);
-    d3d8_BakeCapture(NULL);
-    if (g_bk[c - g_ps->rc].b.gen)
-        g_st.bake_captured++;
+    {
+        bake_t *bk = &g_bk[c - g_ps->rc];
+        D3D8UpKept *kp = (D3D8UpKept *)&c->u.draw.kept;
+        uint64_t key[2], gk[2];
+        int keyed = g_bake_again && ag_key(d, key), gkeyed = g_bake_again && ag_gkey(d, gk);
+        bk->moved = (uint8_t)moved;
+        if (gkeyed && !kp->gen) {       /* step 95 (cut 3): the frame before's vertices and indices */
+            const again_t *g = ag_find(1, gk);
+            if (g && g->kept.gen) {
+                *kp = g->kept;          /* where the rings hold them, if they still do (xbox_d3d8 checks) */
+                g_st.bake_geom++;
+            }
+        }
+        if (keyed) {                    /* step 95 (cut 3): the frame before's capture of this state */
+            const again_t *old = ag_find(0, key);
+            if (old) {
+                g_st.bake_again_found++;
+                if (draw_again(c, d, &old->b, &bk->b) == 0) {
+                    ag_keep(0, key, &bk->b, NULL, NULL);
+                    if (gkeyed)
+                        ag_keep(1, gk, NULL, d->hold, kp);
+                    dk_end(TWOC_DK_AGAIN, timed, tk, tc, ms);
+                    return 0;
+                }
+            }
+        }
+        d3d8_BakeCapture(&bk->b);
+        r = draw_exec(d, c->u.draw.pin, c->u.draw.pinned, kp);
+        d3d8_BakeCapture(NULL);
+        if (bk->b.gen) {
+            g_st.bake_captured++;
+            if (keyed)
+                ag_keep(0, key, &bk->b, NULL, NULL);
+        }
+        if (gkeyed && kp->gen)
+            ag_keep(1, gk, NULL, d->hold, kp);
+    }
     dk_end(TWOC_DK_CAPTURED, timed, tk, tc, ms);
     return r;
 }
@@ -3773,6 +4167,7 @@ static void replay_pass(int interp)
                 d3d8_BakeReset();
                 g_bk_mode = BK_CAPTURE;
                 rpt_frame();            /* step 95 */
+                ag_frame();             /* step 95 (cut 3) */
             }
         } else if (g_bk_cap >= g_ps->rc_n) {
             g_bk_mode = BK_BAKED;
@@ -3859,6 +4254,10 @@ static void replay_done(void)
                 if (g_ps->rc[i].u.draw.pin[s])
                     g_ps->rc[i].u.draw.pin[s]->lpVtbl->Release(g_ps->rc[i].u.draw.pin[s]);
     rc_unhold(g_ps, 0, g_ps->rc_n);     /* step 84 */
+    if (g_bk_plan <= 1 && (g_ag_n[1][0] || g_ag_n[1][1])) {    /* step 95: a frame drawn once: the holds let go */
+        ag_empty(1, 0);
+        ag_empty(1, 1);
+    }
     g_bk_plan = g_bk_pass = 0;          /* step 87: its captures go with it */
     g_st.replay_frames++;
     g_st.replay_cmds += g_ps->rc_n;

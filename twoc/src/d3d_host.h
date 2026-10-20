@@ -52,12 +52,16 @@ typedef struct {
     unsigned replay_checked, replay_check_diff;     /* step 60: RECOMP_D3D_BRIDGE_REPLAY_CHECK */
     unsigned bake_captured, baked_draws, bake_plain;    /* step 87: first passes' captures, draws drawn from */
                                                         /* them, later passes' draws drawn the ordinary way */
+    unsigned bake_again, bake_again_found;  /* step 95 (cut 3): first passes' draws drawn from the frame before's */
+                                            /* capture; those whose state the frame before had (some refused) */
+    unsigned bake_geom;                 /* first passes' draws drawn with the frame before's vertices and indices */
+                                        /* where the rings held them (cut 3) */
     /* Step 95: the draws by kind (TWOC_DK_*): all of them, those whose D3D11
      * context calls were timed (one draw in 16), the calls and their ms in
      * those, and the untimed ones' draw-call ms; the presents' ms in
      * IDXGISwapChain1::Present; one QueryPerformanceCounter call's cost (ns,
      * taken off each timed call). */
-#define TWOC_DK 4
+#define TWOC_DK 5
     unsigned dk_draws[TWOC_DK], dk_timed[TWOC_DK], dk_calls[TWOC_DK];
     double dk_ctx_ms[TWOC_DK], dk_ms[TWOC_DK];
     double present_ms, ctx_qpc_ns;
