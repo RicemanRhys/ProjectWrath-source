@@ -95,6 +95,57 @@ try {
         Add "  $($c.NumberOfCores) cores, $($c.NumberOfLogicalProcessors) logical processors, max $($c.MaxClockSpeed) MHz, now $($c.CurrentClockSpeed) MHz, load $($c.LoadPercentage)%"
     }
 } catch { Add "CPU query failed: $_" }
+# Step 97 (notes 18.100): the cores by kind, as the game reads them (GetSystemCpuSetInformation's EfficiencyClass:
+# more than one class is a hybrid CPU, performance and efficiency cores), and the game's own [CPU] lines (the
+# process's power throttling) from its last run.
+try {
+    Add-Type -TypeDefinition @'
+using System;
+using System.Collections.Generic;
+using System.Runtime.InteropServices;
+public static class TwocCpuSets {
+    [DllImport("kernel32.dll", SetLastError = true)]
+    static extern bool GetSystemCpuSetInformation(IntPtr info, uint len, out uint ret, IntPtr proc, uint flags);
+    public static string[] Describe() {
+        uint len;
+        GetSystemCpuSetInformation(IntPtr.Zero, 0, out len, IntPtr.Zero, 0);
+        if (len == 0) return new string[] { "GetSystemCpuSetInformation: nothing returned" };
+        IntPtr b = Marshal.AllocHGlobal((int)len);
+        try {
+            if (!GetSystemCpuSetInformation(b, len, out len, IntPtr.Zero, 0)) return new string[] { "GetSystemCpuSetInformation failed" };
+            var threads = new SortedDictionary<int, int>();
+            var cores = new SortedDictionary<int, HashSet<int>>();
+            int off = 0;
+            while (off + 8 <= len) {
+                int size = Marshal.ReadInt32(b, off), type = Marshal.ReadInt32(b, off + 4);
+                if (size == 0) break;
+                if (type == 0) {        // CpuSetInformation: Id, Group (12), LogicalProcessorIndex, CoreIndex (15), ..., EfficiencyClass (18)
+                    int grp = Marshal.ReadInt16(b, off + 12), core = Marshal.ReadByte(b, off + 15), cls = Marshal.ReadByte(b, off + 18);
+                    if (!threads.ContainsKey(cls)) { threads[cls] = 0; cores[cls] = new HashSet<int>(); }
+                    threads[cls]++;
+                    cores[cls].Add(grp << 8 | core);
+                }
+                off += size;
+            }
+            var r = new List<string>();
+            r.Add(threads.Count > 1 ? "hybrid: " + threads.Count + " kinds of core" : "one kind of core");
+            foreach (var k in threads.Keys)
+                r.Add(string.Format("  efficiency class {0}: {1} cores, {2} threads", k, cores[k].Count, threads[k]));
+            return r.ToArray();
+        } finally { Marshal.FreeHGlobal(b); }
+    }
+}
+'@
+    Section 'CPU cores by kind (the higher efficiency class is the faster core)'
+    foreach ($l in [TwocCpuSets]::Describe()) { Add $l }
+} catch { Add "CPU set query failed: $_" }
+try {
+    $err = Join-Path $pkg 'run_twoc.err.log'
+    if (Test-Path -LiteralPath $err) {
+        Section "The game's processor lines (its last run, run_twoc.err.log)"
+        foreach ($m in Select-String -LiteralPath $err -Pattern '^\[(CPU|GPU)\]' | Select-Object -First 12) { Add $m.Line }
+    }
+} catch { Add "the game's [CPU] lines: $_" }
 try {
     Section 'GPU'
     foreach ($g in Get-CimInstance Win32_VideoController) {

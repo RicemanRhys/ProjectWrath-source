@@ -45,6 +45,7 @@
 #include "pads.h"
 #include "saves.h"
 #include "gamefiles.h"
+#include "cpu_info.h"
 
 /*
  * If xboxrecomp.h is not an umbrella header in your setup, include
@@ -340,6 +341,9 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance,
      * anything reads them. No file: nothing set. The game's volume is set
      * only when one was asked for (Windows remembers it otherwise). */
     twoc_settings_load();
+    /* Step 97: the processor logged, and the process opted out of Windows'
+     * power throttling (cpu_info.h). */
+    twoc_cpu_start();
     twoc_audio_startup();
     if (getenv("RECOMP_VOLUME") && *getenv("RECOMP_VOLUME"))
         twoc_audio_set_volume(atoi(getenv("RECOMP_VOLUME")));

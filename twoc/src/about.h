@@ -14,6 +14,9 @@
  *     Manager shows it; NVIDIA's own number beside it);
  *   - step 97: how that card was chosen (Automatic or the Display tab's
  *     Graphics card, gpu.h) and the card the window's display is on;
+ *   - step 97: the processor (its cores, threads, and performance and
+ *     efficiency cores when it has both) and the process's power
+ *     throttling (cpu_info.h);
  *   - the display mode of the window's monitor and its refresh rate;
  *   - Windows' edition, version and build (RtlGetVersion, the registry's
  *     DisplayVersion and UBR);
@@ -39,6 +42,8 @@ typedef struct {
     char driver[96];
     char gpu_choice[192];               /* step 97: Automatic, or chosen */
     char gpu_display[192];              /* step 97: the display's card */
+    char cpu[256];                      /* step 97: the processor, its cores, hybrid or not (cpu_info.h) */
+    char cpu_power[192];                /* step 97: the process's power throttling */
     char display[160];
     char windows[160];
     char files[600];

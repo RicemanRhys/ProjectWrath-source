@@ -14,6 +14,7 @@
 #include "build_info.h"
 #include "gamefiles.h"
 #include "gpu.h"
+#include "cpu_info.h"
 #include "pads.h"
 
 /* When the exe was linked: its PE header's time stamp, in local time. */
@@ -149,10 +150,13 @@ void twoc_about_collect(twoc_about_t *a, void *dev, HWND hwnd, double display_hz
     gpu_lines(a, dev);
     twoc_gpu_about(dev, hwnd, a->gpu_choice, sizeof(a->gpu_choice), a->gpu_display, sizeof(a->gpu_display));
     display_line(a, hwnd, display_hz);
+    snprintf(a->cpu, sizeof(a->cpu), "%s", twoc_cpu_text());
+    snprintf(a->cpu_power, sizeof(a->cpu_power), "%s", twoc_cpu_power_text());
     windows_line(a);
     snprintf(a->files, sizeof(a->files), "%s", twoc_game_files_result());
     if (!logged++)
         fprintf(stderr, "[ABOUT] build %s; link-time %s; SDL %s\n[ABOUT] graphics %s, driver %s; display %s\n"
-                "[ABOUT] graphics card %s; the display's card %s\n[ABOUT] %s; game files %s\n", a->build, a->ltcg,
-                a->sdl, a->gpu, a->driver, a->display, a->gpu_choice, a->gpu_display, a->windows, a->files);
+                "[ABOUT] graphics card %s; the display's card %s\n[ABOUT] processor %s; power throttling %s\n"
+                "[ABOUT] %s; game files %s\n", a->build, a->ltcg, a->sdl, a->gpu, a->driver, a->display,
+                a->gpu_choice, a->gpu_display, a->cpu, a->cpu_power, a->windows, a->files);
 }

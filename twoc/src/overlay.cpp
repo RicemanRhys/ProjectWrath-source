@@ -1453,9 +1453,10 @@ static void tab_saves(void)
 static void tab_about(const ovl_info_t *in)
 {
     static const char *const names[] = { "Build", "Link-time build", "SDL", "Graphics card", "Driver",
-                                         "Chosen by", "Display's card", "Display", "Windows", "Game files" };
+                                         "Chosen by", "Display's card", "Display", "Processor",
+                                         "Power throttling", "Windows", "Game files" };
     const twoc_about_t *a = in->about;
-    const char *vals[10];
+    const char *vals[12];
     int i;
 
     ImGui::SeparatorText("Crash Bandicoot: The Wrath of Cortex, PC port");
@@ -1471,8 +1472,10 @@ static void tab_about(const ovl_info_t *in)
     vals[5] = a->gpu_choice;            /* step 97 */
     vals[6] = a->gpu_display;
     vals[7] = a->display;
-    vals[8] = a->windows;
-    vals[9] = a->files;
+    vals[8] = a->cpu;                   /* step 97 */
+    vals[9] = a->cpu_power;
+    vals[10] = a->windows;
+    vals[11] = a->files;
     if (ImGui::BeginTable("##about", 2, ImGuiTableFlags_SizingStretchProp | ImGuiTableFlags_RowBg)) {
         ImGui::TableSetupColumn("##k", ImGuiTableColumnFlags_WidthFixed, ImGui::GetFontSize() * 7.5f);
         ImGui::TableSetupColumn("##v", ImGuiTableColumnFlags_WidthStretch);
