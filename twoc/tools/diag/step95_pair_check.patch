@@ -1,0 +1,532 @@
+diff --git a/twoc/src/d3d_host.c b/twoc/src/d3d_host.c
+index d286a35..0fad0e4 100644
+--- a/twoc/src/d3d_host.c
++++ b/twoc/src/d3d_host.c
+@@ -6669,6 +6669,518 @@ static void ic_pair(void)
+         }
+ }
+ 
++static unsigned *g_iord_o;                /* the frame before's objects, by key */
++static unsigned g_iord_cap_o;
++static const iobj_t *g_iord_of_o;
++
++static int cmp_iord_o(const void *a, const void *b)
++{
++    unsigned i = *(const unsigned *)a, j = *(const unsigned *)b;
++    uint32_t x = g_iord_of_o[i].key, y = g_iord_of_o[j].key;
++    return x < y ? -1 : x > y ? 1 : (i > j) - (i < j);
++}
++
++/* Step 63: the frame before's unskinned objects by W's origin x. */
++static unsigned *g_ixord_o;
++static unsigned g_ixord_cap_o;
++
++static int cmp_ixord_o(const void *a, const void *b)
++{
++    double x = g_iord_of_o[*(const unsigned *)a].w[12], y = g_iord_of_o[*(const unsigned *)b].w[12];
++    return x < y ? -1 : x > y;
++}
++
++/* Step 63: whether the frame before had an object of this key (g_iord_o
++ * sorted by key). */
++static int ic_kind_before_o(uint32_t key)
++{
++    const iobj_t *po = g_iord_of_o;
++    unsigned lo = 0, hi = g_iobj_n[g_ip];
++
++    while (lo < hi) {
++        unsigned mid = (lo + hi) / 2;
++        if (po[g_iord_o[mid]].key < key)
++            lo = mid + 1;
++        else
++            hi = mid;
++    }
++    return lo < g_iobj_n[g_ip] && po[g_iord_o[lo]].key == key;
++}
++
++static void ic_replaced_o(void)
++{
++    unsigned cur = (unsigned)g_ic, prv = (unsigned)g_ip, n = g_iobj_n[prv], m = 0, i, j;
++    iobj_t *po = g_iobj[prv];
++
++    if (n > g_ixord_cap_o) {
++        unsigned *o = (unsigned *)realloc(g_ixord_o, n * sizeof(unsigned));
++        if (!o)
++            return;
++        g_ixord_o = o;
++        g_ixord_cap_o = n;
++    }
++    for (i = 0; i < n; i++)
++        if (po[i].bones < 0)
++            g_ixord_o[m++] = i;
++    if (!m)
++        return;
++    qsort(g_ixord_o, m, sizeof(unsigned), cmp_ixord_o);
++    for (i = 0; i < g_iobj_n[cur]; i++) {
++        iobj_t *o = &g_iobj[cur][i];
++        double tol = 0.5 * sqrt(o->w[0] * o->w[0] + o->w[1] * o->w[1] + o->w[2] * o->w[2]);
++        double d_other = tol * tol, d_same = 1e300;
++        unsigned lo = 0, hi = m, other = (unsigned)-1;
++        if (o->bones >= 0 || !(tol > 0))
++            continue;
++        while (lo < hi) {
++            unsigned mid = (lo + hi) / 2;
++            if (po[g_ixord_o[mid]].w[12] < o->w[12] - tol)
++                lo = mid + 1;
++            else
++                hi = mid;
++        }
++        for (j = lo; j < m && po[g_ixord_o[j]].w[12] <= o->w[12] + tol; j++) {
++            const iobj_t *p = &po[g_ixord_o[j]];
++            double dx = o->w[12] - p->w[12], dy = o->w[13] - p->w[13], dz = o->w[14] - p->w[14];
++            double dd = dx * dx + dy * dy + dz * dz;
++            if (p->key == o->key) {
++                if (dd < d_same)
++                    d_same = dd;
++            } else if (dd < d_other) {  /* taken or not: a letter and its drop shadow both replace theirs */
++                d_other = dd;
++                other = g_ixord_o[j];
++            }
++        }
++        if (other != (unsigned)-1 && 4 * d_other < d_same && d_same > 0.04 * tol * tol && ic_kind_before_o(o->key)) {
++            o->used = 2;
++            po[other].used = 1;
++            g_st.interp_obj_swap++;
++        }
++    }
++}
++
++static unsigned *g_icord_o;
++static unsigned g_icord_cap_o;
++static unsigned *g_iord2_o;
++static unsigned g_iord2_cap_o;
++static int g_iloose_o;
++static const iobj_t *g_icord_of_o;
++
++static uint32_t ic_mkey_o(const iobj_t *o)
++{
++    return g_iloose_o ? o->lkey : o->key;
++}
++
++static int cmp_icord_o(const void *a, const void *b)
++{
++    unsigned i = *(const unsigned *)a, j = *(const unsigned *)b;
++    uint32_t x = ic_mkey_o(&g_icord_of_o[i]), y = ic_mkey_o(&g_icord_of_o[j]);
++    return x < y ? -1 : x > y ? 1 : (i > j) - (i < j);
++}
++
++/* One pass of ic_match_o, key by key (ic_mkey_o): [a, b) this frame's objects
++ * of a key in g_icord_o (nc of them), [pa, pb) the frame before's in `pord`
++ * (np). 0 if out of memory. */
++static int ic_match_keys_o(unsigned nc, const unsigned *pord, unsigned np)
++{
++    unsigned cur = (unsigned)g_ic, prv = (unsigned)g_ip, i, a, b, pa;
++    iobj_t *co = g_iobj[cur], *po = g_iobj[prv];
++
++    for (a = 0, pa = 0; a < nc; a = b) {
++        unsigned pb, round;
++        uint32_t key = ic_mkey_o(&co[g_icord_o[a]]);
++        for (b = a; b < nc && ic_mkey_o(&co[g_icord_o[b]]) == key; b++)
++            ;
++        while (pa < np && ic_mkey_o(&po[pord[pa]]) < key)
++            pa++;
++        for (pb = pa; pb < np && ic_mkey_o(&po[pord[pb]]) == key; pb++)
++            ;
++        if (pb == pa)
++            continue;
++        if (!ic_grow((void **)&g_icand, &g_icand_cap, (b - a) * IC_CANDS, sizeof(icand_t)))
++            return 0;
++        /* Rounds: the objects left without one propose again among those
++         * left (exact ties, e.g. meshes built in world space, all at the
++         * origin, go by their places in the draw order). */
++        for (round = 0; round < 16; round++) {
++            unsigned nn = 0, got = 0, k;
++            for (i = a; i < b; i++) {   /* each object's IC_CANDS nearest unused of the frame before */
++                unsigned c = g_icord_o[i], j, m = 0;
++                icand_t best[IC_CANDS];
++                if (co[c].used == 2 || g_ipick[c] >= 0)     /* step 63: replaced another in place; or paired */
++                    continue;
++                for (j = pa; j < pb; j++) {
++                    unsigned p = pord[j], rd = i - a > j - pa ? (i - a) - (j - pa) : (j - pa) - (i - a);
++                    double dd = ic_dist(&co[c], &po[p]);
++                    if (!round && !g_iloose_o && dd < g_inear[c]) {   /* step 63: the nearest, taken or not */
++                        g_inear[c] = dd;
++                        g_inear_i[c] = (int32_t)p;
++                    }
++                    if (po[p].used)
++                        continue;
++                    if (m < IC_CANDS || dd < best[m - 1].dd || (dd == best[m - 1].dd && rd < best[m - 1].rd)) {
++                        unsigned q = m < IC_CANDS ? m++ : m - 1;
++                        while (q > 0 && (best[q - 1].dd > dd || (best[q - 1].dd == dd && best[q - 1].rd > rd))) {
++                            best[q] = best[q - 1];
++                            q--;
++                        }
++                        best[q].dd = dd;
++                        best[q].rd = rd;
++                        best[q].c = c;
++                        best[q].p = p;
++                    }
++                }
++                for (k = 0; k < m; k++)
++                    g_icand[nn++] = best[k];
++            }
++            if (!nn)
++                break;
++            qsort(g_icand, nn, sizeof(icand_t), cmp_icand);
++            for (k = 0; k < nn; k++) {  /* nearest first */
++                icand_t *x = &g_icand[k];
++                if (g_ipick[x->c] >= 0 || po[x->p].used)
++                    continue;
++                g_ipick[x->c] = (int32_t)x->p;
++                g_ipick_dd[x->c] = x->dd;
++                g_ipick_loose[x->c] = (uint8_t)g_iloose_o;
++                po[x->p].used = 3;      /* matched; marked 1 once it is the partner */
++                got++;
++            }
++            if (!got)
++                break;
++        }
++        pa = pb;
++    }
++    return 1;
++}
++
++/* Each of this frame's objects' partner (g_ipick), its distance and its
++ * nearest of the frame before's (g_inear): a key's candidate pairs nearest
++ * first. Step 68: then those left by their loose key (lkey: their textures
++ * by shape), so an object whose texture is a flipbook (H2 Oh No's caustics
++ * on the sub's missile, the clock, the fruit: a texture each frame, so a
++ * key each frame, never paired) is paired with its last frame's. 0 if out
++ * of memory. */
++static int ic_match_o(void)
++{
++    unsigned cur = (unsigned)g_ic, prv = (unsigned)g_ip, nc = g_iobj_n[cur], np = g_iobj_n[prv], i;
++    iobj_t *co = g_iobj[cur], *po = g_iobj[prv];
++    int ok = 1;
++
++    if (!ic_grow((void **)&g_icord_o, &g_icord_cap_o, nc, sizeof(unsigned)) ||
++        !ic_grow((void **)&g_iord2_o, &g_iord2_cap_o, np, sizeof(unsigned)) ||
++        !ic_grow((void **)&g_ipick_loose, &g_ipick_loose_cap, nc, 1))
++        return 0;
++    if (nc > g_ipick_cap) {             /* four arrays of one capacity */
++        unsigned c = g_ipick_cap ? g_ipick_cap : 256;
++        void *x, *y, *w, *z;
++        while (c < nc)
++            c *= 2;
++        if ((x = realloc(g_ipick, c * sizeof(int32_t))) != NULL)
++            g_ipick = (int32_t *)x;
++        if ((y = realloc(g_ipick_dd, c * sizeof(double))) != NULL)
++            g_ipick_dd = (double *)y;
++        if ((w = realloc(g_inear, c * sizeof(double))) != NULL)
++            g_inear = (double *)w;
++        if ((z = realloc(g_inear_i, c * sizeof(int32_t))) != NULL)
++            g_inear_i = (int32_t *)z;
++        if (!x || !y || !w || !z)
++            return 0;
++        g_ipick_cap = c;
++    }
++    for (i = 0; i < nc; i++) {
++        g_icord_o[i] = i;
++        g_ipick[i] = -1;
++        g_ipick_dd[i] = 1e300;
++        g_inear[i] = 1e300;
++        g_inear_i[i] = -1;
++        g_ipick_loose[i] = 0;
++    }
++    g_iloose_o = 0;
++    g_icord_of_o = co;
++    qsort(g_icord_o, nc, sizeof(unsigned), cmp_icord_o);
++    ok = ic_match_keys_o(nc, g_iord_o, np);
++    if (ok) {                           /* those left on both sides, by loose key */
++        unsigned nc2 = 0, np2 = 0;
++        for (i = 0; i < nc; i++)
++            if (g_ipick[i] < 0 && co[i].used != 2)
++                g_icord_o[nc2++] = i;
++        for (i = 0; i < np; i++)
++            if (!po[i].used)
++                g_iord2_o[np2++] = i;
++        if (nc2 && np2) {
++            g_iloose_o = 1;
++            g_icord_of_o = po;
++            qsort(g_iord2_o, np2, sizeof(unsigned), cmp_icord_o);
++            g_icord_of_o = co;
++            qsort(g_icord_o, nc2, sizeof(unsigned), cmp_icord_o);
++            ok = ic_match_keys_o(nc2, g_iord2_o, np2);
++        }
++    }
++    g_iloose_o = 0;
++    for (i = 0; i < np; i++)
++        if (po[i].used == 3)
++            po[i].used = 0;
++    return ok;
++}
++
++static void ic_pair_o(void)
++{
++    unsigned cur = (unsigned)g_ic, prv = (unsigned)g_ip, n = g_iobj_n[prv], i, j;
++    iobj_t *po = g_iobj[prv], *co = g_iobj[cur];
++    int matched;
++    LARGE_INTEGER t0, t1;
++
++    REPLAY_SIDE();
++    if (!g_iobj_n[cur])
++        return;
++    QueryPerformanceCounter(&t0);
++    if (n > g_iord_cap_o) {
++        unsigned *o = (unsigned *)realloc(g_iord_o, n * sizeof(unsigned));
++        if (!o)
++            return;
++        g_iord_o = o;
++        g_iord_cap_o = n;
++    }
++    for (i = 0; i < n; i++) {
++        g_iord_o[i] = i;
++        po[i].used = 0;
++    }
++    g_iord_of_o = po;
++    qsort(g_iord_o, n, sizeof(unsigned), cmp_iord_o);
++    ic_replaced_o();                      /* step 63 */
++    matched = g_imatch && ic_match_o();
++    for (i = 0; i < g_iobj_n[cur]; i++) {
++        iobj_t *o = &co[i];
++        unsigned lo = 0, hi = n, best = (unsigned)-1, a1i = (unsigned)-1;
++        double bd = 1e300, a1 = 1e300, rel;
++        o->lbest = -1;
++        o->lwhat = "replaced";
++        if (o->used == 2) {             /* step 63: replaced another in place, drawn as it is */
++            g_st.interp_obj++;
++            continue;
++        }
++        if (matched) {
++            best = g_ipick[i] >= 0 ? (unsigned)g_ipick[i] : (unsigned)-1;
++            bd = g_ipick_dd[i];
++            a1 = g_inear[i];
++            a1i = g_inear_i[i] >= 0 ? (unsigned)g_inear_i[i] : (unsigned)-1;
++        } else {
++            while (lo < hi) {
++                unsigned mid = (lo + hi) / 2;
++                if (po[g_iord_o[mid]].key < o->key)
++                    lo = mid + 1;
++                else
++                    hi = mid;
++            }
++            for (j = lo; j < n && po[g_iord_o[j]].key == o->key; j++) {
++                const iobj_t *p = &po[g_iord_o[j]];
++                double dd = ic_dist(o, p);
++                if (dd < a1) {          /* step 63: the nearest, taken or not */
++                    a1 = dd;
++                    a1i = g_iord_o[j];
++                }
++                if (p->used)
++                    continue;
++                if (dd < bd) {
++                    bd = dd;
++                    best = g_iord_o[j];
++                }
++            }
++        }
++        g_st.interp_obj++;
++        o->lnear = a1 < 1e299 ? (float)sqrt(a1) : -1.0f;
++        if (best == (unsigned)-1) {
++            g_st.interp_obj_new++;
++            o->lwhat = "new";
++            continue;
++        }
++        o->lbest = (int32_t)best;
++        for (j = 0; j < 3; j++)         /* the snap goes by W's origin and the first bone's, as before */
++            o->vel[j] = o->pos[j] - po[best].pos[j];
++        bd = o->vel[0] * o->vel[0] + o->vel[1] * o->vel[1] + o->vel[2] * o->vel[2];
++        /* Step 63: a partner over half the object's own size (W's first
++         * axis) away, taken because one of its kind under half as far was
++         * already another's, is a guess: the pause menu's highlighted line
++         * pulses and changes colour together, and its letters took the
++         * same glyph two to four letters off. It snaps. Skinned meshes
++         * (W = I) keep the snap alone. */
++        rel = 1e300;
++        if (o->bones < 0 && a1i != best && 4 * a1 < bd)
++            rel = 0.25 * (o->w[0] * o->w[0] + o->w[1] * o->w[1] + o->w[2] * o->w[2]);
++        if (bd > rel) {
++            g_st.interp_obj_snap++;
++            o->lwhat = "snap-guess";
++            o->lstep = o->loff = (float)sqrt(bd);
++            continue;
++        }
++        if (!g_imatch && bd > g_isnap * g_isnap) {     /* step 62's snap, as before */
++            g_st.interp_obj_snap++;
++            o->lwhat = "snap";
++            o->lstep = o->loff = (float)sqrt(bd);
++            continue;
++        }
++        o->hv = 1;                      /* step 68: its partner known: its step (vel) is the motion to expect next */
++        o->prev = (int32_t)best;        /* for now; step 68: a skeleton's snap is decided below, whole */
++        po[best].used = 1;
++        o->lwhat = matched && g_ipick_loose[i] ? "pair-texture" : "pair";
++    }
++    ic_groups();                        /* step 66 */
++    /* Step 68: the snap. A step over g_isnap snaps only if it is a jump from
++     * the object's own motion too: from where it would be had it gone on as
++     * in the frame before (its partner's vel). A projectile flying on, the
++     * ball rolling fast, are interpolated; a teleport or a respawn snaps as
++     * before. A skeleton (step 66) snaps whole, by its frame G's step: by
++     * their first bones (often a limb's), some of Crash's draws took a 1.7-2
++     * unit step every fourth frame rolling fast in Medieval Madness, snapped
++     * while the rest were interpolated, and came apart from the ball for
++     * those sub-frames. */
++    for (i = 0; i < g_igrp_n; i++) {
++        igrp_t *gr = &g_igrp[i];
++        const iobj_t *p = &po[co[gr->holder].prev];
++        double ex, ey, ez;
++        gr->step[0] = gr->gb[3] - gr->ga[3];
++        gr->step[1] = gr->gb[7] - gr->ga[7];
++        gr->step[2] = gr->gb[11] - gr->ga[11];
++        ex = gr->step[0] - (p->hv ? p->vel[0] : 0.0);
++        ey = gr->step[1] - (p->hv ? p->vel[1] : 0.0);
++        ez = gr->step[2] - (p->hv ? p->vel[2] : 0.0);
++        gr->sd = gr->step[0] * gr->step[0] + gr->step[1] * gr->step[1] + gr->step[2] * gr->step[2];
++        gr->rd = p->hv ? ex * ex + ey * ey + ez * ez : gr->sd;
++    }
++    for (i = 0; i < g_iobj_n[cur]; i++) {
++        iobj_t *o = &co[i];
++        const iobj_t *p;
++        double sd, rd, ex, ey, ez;
++        if (o->prev < 0 || !g_imatch)
++            continue;
++        p = &po[o->prev];
++        if (o->grp >= 0) {              /* its skeleton's step */
++            const igrp_t *gr = &g_igrp[o->grp];
++            memcpy(o->vel, gr->step, sizeof(o->vel));
++            sd = gr->sd;
++            rd = gr->rd;
++        } else {
++            ex = o->vel[0] - (p->hv ? p->vel[0] : 0.0);
++            ey = o->vel[1] - (p->hv ? p->vel[1] : 0.0);
++            ez = o->vel[2] - (p->hv ? p->vel[2] : 0.0);
++            sd = o->vel[0] * o->vel[0] + o->vel[1] * o->vel[1] + o->vel[2] * o->vel[2];
++            rd = p->hv ? ex * ex + ey * ey + ez * ez : sd;
++        }
++        o->lstep = (float)sqrt(sd);
++        o->loff = (float)sqrt(rd);
++        if (sd > g_isnap * g_isnap && rd > g_isnap * g_isnap) {
++            g_st.interp_obj_snap++;
++            o->lwhat = "snap";
++            o->prev = -1;
++            o->grp = -1;
++            continue;
++        }
++        if (strcmp(o->lwhat, "pair-texture") == 0)
++            g_st.interp_obj_loose++;
++        if (sd > g_isnap * g_isnap) {
++            g_st.interp_obj_motion++;
++            o->lwhat = "pair-motion";
++        }
++    }
++    QueryPerformanceCounter(&t1);
++    g_st.pair_ms += (double)(t1.QuadPart - t0.QuadPart) * 1000.0 / (double)g_qpf.QuadPart;
++    if (g_ipairlog && g_irec_this)      /* RECOMP_D3D_BRIDGE_PAIRLOG=1: each recorded frame's objects */
++        for (i = 0; i < g_iobj_n[cur]; i++) {
++            const iobj_t *o = &co[i];
++            fprintf(stderr, "[D3DB] pairlog swap %u obj %u key %08X (kind %08X mesh %08X) pos %.3f %.3f %.3f prev %d "
++                    "step %.3f off its motion %.3f near %.3f size %.3f skeleton %d %s\n", g_ipair_swap, i, o->key,
++                    o->kind, o->mesh, o->pos[0], o->pos[1], o->pos[2], o->lbest, o->lbest < 0 ? -1.0 : o->lstep,
++                    o->lbest < 0 ? -1.0 : o->loff, o->lnear, sqrt(o->w[0] * o->w[0] + o->w[1] * o->w[1] + o->w[2] * o->w[2]),
++                    o->grp, o->lwhat);
++        }
++}
++
++
++/* TMP step 95: TMP_PAIRCHECK=1, the old pairing (the sorts by key and by x,
++ * step 94's code, above as *_o) beside the new (cut 4): each paired frame
++ * paired the old way, its results kept, the frames' objects and the
++ * counters put back, then paired the new way, and both compared: every
++ * object of both frames (its partner, the decision, its steps, nearest and
++ * skeleton: the pair log's fields and the rest of the object), the
++ * skeletons, the pairing's counters. */
++static int g_tmp_pc = -1;
++static unsigned g_pc_frames, g_pc_diff;
++static void ic_pair_check(void)
++{
++    static iobj_t *sc, *sp, *oc, *op;
++    static igrp_t *og;
++    static unsigned capc1, capc2, capp1, capp2, capg;
++    unsigned cur = (unsigned)g_ic, prv = (unsigned)g_ip, nc = g_iobj_n[cur], np = g_iobj_n[prv], ng, k;
++    unsigned s0[8], s1[8], s2[8];
++    int dc, dp, dg, ds;
++#define PC_STATS(a) do { a[0] = g_st.interp_obj; a[1] = g_st.interp_obj_new; a[2] = g_st.interp_obj_snap; \
++        a[3] = g_st.interp_obj_swap; a[4] = g_st.interp_obj_loose; a[5] = g_st.interp_obj_motion;              \
++        a[6] = g_st.interp_skel; a[7] = 0; } while (0)
++
++    if (g_tmp_pc < 0) {
++        const char *e = getenv("TMP_PAIRCHECK");
++        g_tmp_pc = e && *e == '1';
++        if (g_tmp_pc)
++            fprintf(stderr, "[TMP] pair check: each paired frame paired the old way (sorts) and the new (groupings),"
++                    " the objects, skeletons and counters compared\n");
++    }
++    if (!g_tmp_pc || !nc) {
++        ic_pair();
++        return;
++    }
++    if (!ic_grow((void **)&sc, &capc1, nc, sizeof(iobj_t)) || !ic_grow((void **)&oc, &capc2, nc, sizeof(iobj_t)) ||
++        !ic_grow((void **)&sp, &capp1, np ? np : 1, sizeof(iobj_t)) ||
++        !ic_grow((void **)&op, &capp2, np ? np : 1, sizeof(iobj_t))) {
++        ic_pair();
++        return;
++    }
++    memcpy(sc, g_iobj[cur], nc * sizeof(iobj_t));
++    memcpy(sp, g_iobj[prv], np * sizeof(iobj_t));
++    PC_STATS(s0);
++    ic_pair_o();
++    memcpy(oc, g_iobj[cur], nc * sizeof(iobj_t));
++    memcpy(op, g_iobj[prv], np * sizeof(iobj_t));
++    ng = g_igrp_n;
++    if (!ic_grow((void **)&og, &capg, ng ? ng : 1, sizeof(igrp_t))) {
++        ic_pair();
++        return;
++    }
++    memcpy(og, g_igrp, ng * sizeof(igrp_t));
++    PC_STATS(s1);
++    memcpy(g_iobj[cur], sc, nc * sizeof(iobj_t));
++    memcpy(g_iobj[prv], sp, np * sizeof(iobj_t));
++    g_st.interp_obj = s0[0];
++    g_st.interp_obj_new = s0[1];
++    g_st.interp_obj_snap = s0[2];
++    g_st.interp_obj_swap = s0[3];
++    g_st.interp_obj_loose = s0[4];
++    g_st.interp_obj_motion = s0[5];
++    g_st.interp_skel = s0[6];
++    ic_pair();
++    PC_STATS(s2);
++    dc = memcmp(g_iobj[cur], oc, nc * sizeof(iobj_t)) != 0;
++    dp = memcmp(g_iobj[prv], op, np * sizeof(iobj_t)) != 0;
++    dg = ng != g_igrp_n || memcmp(g_igrp, og, ng * sizeof(igrp_t)) != 0;
++    ds = memcmp(s1, s2, sizeof(s1)) != 0;
++    g_pc_frames++;
++    if (dc || dp || dg || ds) {
++        g_pc_diff++;
++        if (g_pc_diff <= 10) {
++            for (k = 0; k < nc && !memcmp(&g_iobj[cur][k], &oc[k], sizeof(iobj_t)); k++)
++                ;
++            fprintf(stderr, "[TMP] pair check: swap %u differs (this frame's objects %d, the frame before's %d,"
++                    " skeletons %d, counters %d); first object %u: prev %d / %d, %s / %s\n", g_ipair_swap, dc, dp,
++                    dg, ds, k, k < nc ? oc[k].prev : -9, k < nc ? g_iobj[cur][k].prev : -9,
++                    k < nc ? oc[k].lwhat : "-", k < nc ? g_iobj[cur][k].lwhat : "-");
++        }
++    }
++    if (g_pc_frames % 600 == 0)
++        fprintf(stderr, "[TMP] pair check: %u frames compared (%u objects this one), %u differ\n", g_pc_frames, nc,
++                g_pc_diff);
++#undef PC_STATS
++}
++
+ /* At the present: how many sub-frames this frame gets (1: shown as it is),
+  * the cameras paired. `ovl`: the overlay opens or holds the game this
+  * present (one frame). Called with g_lock held. */
+@@ -6791,7 +7303,7 @@ static int ic_begin(unsigned swap_no, int ovl, int need)
+     g_imc = mc;
+     g_st.interp_matched += frac;
+     g_ipair_swap = swap_no;
+-    ic_pair();
++    ic_pair_check();                    /* TMP step 95 */
+     return 1;
+ }
+ 

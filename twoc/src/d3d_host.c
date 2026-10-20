@@ -4422,9 +4422,6 @@ static iobj_t *g_iobj[ITABS];
 static unsigned g_iobj_n[ITABS], g_iobj_cap[ITABS];
 static float *g_ibone[ITABS];           /* IC_BONE_REGS float4s an object */
 static unsigned g_ibone_n[ITABS], g_ibone_cap[ITABS];
-static unsigned *g_iord;                /* the frame before's objects, by key */
-static unsigned g_iord_cap;
-static const iobj_t *g_iord_of;
 
 static void m4_mul(const double *a, const double *b, double *o)
 {
@@ -5858,11 +5855,111 @@ static void ic_rec_dump(unsigned swap_no)
     fclose(f);
 }
 
-static int cmp_iord(const void *a, const void *b)
+/* ── Step 95, cut 4: a frame's objects grouped by key, once (notes 18.98) ──
+ *
+ * Pairing sorted the frame before's objects by key (qsort reading each
+ * object through its index) at every interpolated frame, this frame's again
+ * for ic_match, the leftovers by their loose keys, and the unskinned by W's
+ * x for ic_replaced: about 5% of the render thread's samples at cast_bug
+ * (notes 18.90), 1.05 ms a game frame on the Legion Go (18.97). Now a
+ * frame's objects are grouped by key in a hash table when it is paired
+ * (each group's objects in draw order), and that grouping is the frame
+ * before's at the next frame's pairing (seeded from the last frame's); the
+ * leftovers are grouped by loose key the same way, and the x order sorts
+ * the x values beside their objects' indices (qsort makes the same
+ * comparisons on the same values, so gives the same order, ties as before).
+ * The pairs are the same: a key's matching looks only at that key's
+ * objects, whichever key goes first, and inside a key each side is in draw
+ * order, as the sorted lists had it (ic_match_keys). */
+typedef struct {
+    uint32_t key;
+    unsigned start, count;
+} ikgrp_t;
+typedef struct {
+    unsigned *mem;                      /* the objects, a group after another, each group in draw order */
+    ikgrp_t *grp;
+    unsigned ng;
+    int32_t *slot;                      /* the hash: group + 1, 0 empty; nslot of them (a power of 2) */
+    unsigned nslot;
+    unsigned *gid;                      /* scratch: each object's group */
+    unsigned cap_mem, cap_grp, cap_slot, cap_gid;
+    unsigned n, stamp;                  /* a set's grouping: the set's objects and stamp it was made for */
+    int ok;
+} igroup_t;
+static igroup_t g_igk[ITABS];           /* each table set's objects by key */
+static igroup_t g_igl[2];               /* a pairing's leftovers by loose key: this frame's, the frame before's */
+static unsigned g_iobj_stamp[ITABS];    /* bumped when a set is emptied (ic_clear) */
+
+static int ic_grow(void **p, unsigned *cap, unsigned need, size_t sz);
+
+static int ig_find(const igroup_t *g, uint32_t key)
 {
-    unsigned i = *(const unsigned *)a, j = *(const unsigned *)b;
-    uint32_t x = g_iord_of[i].key, y = g_iord_of[j].key;
-    return x < y ? -1 : x > y ? 1 : (i > j) - (i < j);
+    unsigned m = g->nslot - 1, i;
+
+    if (!g->nslot)
+        return -1;
+    for (i = (key * 2654435761u) & m; g->slot[i]; i = (i + 1) & m)
+        if (g->grp[g->slot[i] - 1].key == key)
+            return g->slot[i] - 1;
+    return -1;
+}
+
+/* `n` objects of `ob` (indices `idx`, ascending; NULL: 0 to n - 1) grouped
+ * by their key (`loose`: their loose key). 0 out of memory. */
+static int ig_build(igroup_t *g, const iobj_t *ob, const unsigned *idx, unsigned n, int loose)
+{
+    unsigned ns, i, k, need = n ? n : 1;
+
+    g->ok = 0;
+    g->ng = 0;
+    for (ns = 64; ns < 2 * n; ns *= 2)
+        ;
+    if (!ic_grow((void **)&g->slot, &g->cap_slot, ns, sizeof(int32_t)) ||
+        !ic_grow((void **)&g->grp, &g->cap_grp, need, sizeof(ikgrp_t)) ||
+        !ic_grow((void **)&g->mem, &g->cap_mem, need, sizeof(unsigned)) ||
+        !ic_grow((void **)&g->gid, &g->cap_gid, need, sizeof(unsigned)))
+        return 0;
+    g->nslot = ns;
+    memset(g->slot, 0, ns * sizeof(int32_t));
+    for (k = 0; k < n; k++) {
+        uint32_t key = loose ? ob[idx ? idx[k] : k].lkey : ob[idx ? idx[k] : k].key;
+        unsigned j = (key * 2654435761u) & (ns - 1);
+        while (g->slot[j] && g->grp[g->slot[j] - 1].key != key)
+            j = (j + 1) & (ns - 1);
+        if (!g->slot[j]) {
+            g->grp[g->ng].key = key;
+            g->grp[g->ng].count = 0;
+            g->slot[j] = (int32_t)++g->ng;
+        }
+        g->gid[k] = (unsigned)g->slot[j] - 1;
+        g->grp[g->gid[k]].count++;
+    }
+    for (i = 0, k = 0; i < g->ng; i++) {
+        g->grp[i].start = k;
+        k += g->grp[i].count;
+        g->grp[i].count = 0;
+    }
+    for (k = 0; k < n; k++) {
+        ikgrp_t *e = &g->grp[g->gid[k]];
+        g->mem[e->start + e->count++] = idx ? idx[k] : k;
+    }
+    g->ok = 1;
+    return 1;
+}
+
+/* Set t's objects by key: grouped when it was the frame paired (it is the
+ * frame before's now), or now. NULL out of memory. */
+static const igroup_t *ig_set(int t)
+{
+    igroup_t *g = &g_igk[t];
+
+    if (!(g->ok && g->n == g_iobj_n[t] && g->stamp == g_iobj_stamp[t])) {
+        if (!ig_build(g, g_iobj[t], NULL, g_iobj_n[t], 0))
+            return NULL;
+        g->n = g_iobj_n[t];
+        g->stamp = g_iobj_stamp[t];
+    }
+    return g;
 }
 
 /* Step 63: how far apart two objects of one key are: W's origins, plus
@@ -5894,31 +5991,26 @@ static double ic_dist(const iobj_t *o, const iobj_t *p)
     return dd;
 }
 
-/* Step 63: the frame before's unskinned objects by W's origin x. */
-static unsigned *g_ixord;
-static unsigned g_ixord_cap;
+/* Step 63: the frame before's unskinned objects by W's origin x (step 95:
+ * the x beside each index, so the sort reads no object). */
+typedef struct {
+    double x;
+    unsigned i;
+} ixo_t;
+static ixo_t *g_ixo;
+static unsigned g_ixo_cap;
 
-static int cmp_ixord(const void *a, const void *b)
+static int cmp_ixo(const void *a, const void *b)
 {
-    double x = g_iord_of[*(const unsigned *)a].w[12], y = g_iord_of[*(const unsigned *)b].w[12];
+    double x = ((const ixo_t *)a)->x, y = ((const ixo_t *)b)->x;
     return x < y ? -1 : x > y;
 }
 
-/* Step 63: whether the frame before had an object of this key (g_iord
- * sorted by key). */
+/* Step 63: whether the frame before had an object of this key (step 95: its
+ * grouping, ig_set). */
 static int ic_kind_before(uint32_t key)
 {
-    const iobj_t *po = g_iord_of;
-    unsigned lo = 0, hi = g_iobj_n[g_ip];
-
-    while (lo < hi) {
-        unsigned mid = (lo + hi) / 2;
-        if (po[g_iord[mid]].key < key)
-            lo = mid + 1;
-        else
-            hi = mid;
-    }
-    return lo < g_iobj_n[g_ip] && po[g_iord[lo]].key == key;
+    return ig_find(&g_igk[g_ip], key) >= 0;
 }
 
 /* Step 63: an unskinned object where the frame before had one of another
@@ -5939,19 +6031,21 @@ static void ic_replaced(void)
     unsigned cur = (unsigned)g_ic, prv = (unsigned)g_ip, n = g_iobj_n[prv], m = 0, i, j;
     iobj_t *po = g_iobj[prv];
 
-    if (n > g_ixord_cap) {
-        unsigned *o = (unsigned *)realloc(g_ixord, n * sizeof(unsigned));
+    if (n > g_ixo_cap) {
+        ixo_t *o = (ixo_t *)realloc(g_ixo, n * sizeof(ixo_t));
         if (!o)
             return;
-        g_ixord = o;
-        g_ixord_cap = n;
+        g_ixo = o;
+        g_ixo_cap = n;
     }
     for (i = 0; i < n; i++)
-        if (po[i].bones < 0)
-            g_ixord[m++] = i;
+        if (po[i].bones < 0) {
+            g_ixo[m].x = po[i].w[12];
+            g_ixo[m++].i = i;
+        }
     if (!m)
         return;
-    qsort(g_ixord, m, sizeof(unsigned), cmp_ixord);
+    qsort(g_ixo, m, sizeof(ixo_t), cmp_ixo);
     for (i = 0; i < g_iobj_n[cur]; i++) {
         iobj_t *o = &g_iobj[cur][i];
         double tol = 0.5 * sqrt(o->w[0] * o->w[0] + o->w[1] * o->w[1] + o->w[2] * o->w[2]);
@@ -5961,13 +6055,13 @@ static void ic_replaced(void)
             continue;
         while (lo < hi) {
             unsigned mid = (lo + hi) / 2;
-            if (po[g_ixord[mid]].w[12] < o->w[12] - tol)
+            if (g_ixo[mid].x < o->w[12] - tol)
                 lo = mid + 1;
             else
                 hi = mid;
         }
-        for (j = lo; j < m && po[g_ixord[j]].w[12] <= o->w[12] + tol; j++) {
-            const iobj_t *p = &po[g_ixord[j]];
+        for (j = lo; j < m && g_ixo[j].x <= o->w[12] + tol; j++) {
+            const iobj_t *p = &po[g_ixo[j].i];
             double dx = o->w[12] - p->w[12], dy = o->w[13] - p->w[13], dz = o->w[14] - p->w[14];
             double dd = dx * dx + dy * dy + dz * dz;
             if (p->key == o->key) {
@@ -5975,7 +6069,7 @@ static void ic_replaced(void)
                     d_same = dd;
             } else if (dd < d_other) {  /* taken or not: a letter and its drop shadow both replace theirs */
                 d_other = dd;
-                other = g_ixord[j];
+                other = g_ixo[j].i;
             }
         }
         if (other != (unsigned)-1 && 4 * d_other < d_same && d_same > 0.04 * tol * tol && ic_kind_before(o->key)) {
@@ -6234,30 +6328,16 @@ typedef struct {
 } icand_t;
 static icand_t *g_icand;
 static unsigned g_icand_cap;
-static unsigned *g_icord;               /* this frame's objects by key */
+static unsigned *g_icord;               /* this frame's objects left for the loose keys (step 95) */
 static unsigned g_icord_cap;
-static unsigned *g_iord2;               /* the frame before's by loose key */
+static unsigned *g_iord2;               /* the frame before's left */
 static unsigned g_iord2_cap;
-static int g_iloose;                    /* the pass: by key (0) or loose key (1) */
 static uint8_t *g_ipick_loose;          /* each of this frame's objects: paired by its loose key */
 static unsigned g_ipick_loose_cap;
 static int32_t *g_ipick;                /* each of this frame's objects: its partner, -1 none */
 static double *g_ipick_dd, *g_inear;    /* ... its distance (ic_dist), the nearest of its key's, taken or not */
 static int32_t *g_inear_i;
 static unsigned g_ipick_cap;
-static const iobj_t *g_icord_of;
-
-static uint32_t ic_mkey(const iobj_t *o)
-{
-    return g_iloose ? o->lkey : o->key;
-}
-
-static int cmp_icord(const void *a, const void *b)
-{
-    unsigned i = *(const unsigned *)a, j = *(const unsigned *)b;
-    uint32_t x = ic_mkey(&g_icord_of[i]), y = ic_mkey(&g_icord_of[j]);
-    return x < y ? -1 : x > y ? 1 : (i > j) - (i < j);
-}
 
 static int cmp_icand(const void *a, const void *b)
 {
@@ -6286,41 +6366,39 @@ static int ic_grow(void **p, unsigned *cap, unsigned need, size_t sz)
     return 1;
 }
 
-/* One pass of ic_match, key by key (ic_mkey): [a, b) this frame's objects
- * of a key in g_icord (nc of them), [pa, pb) the frame before's in `pord`
- * (np). 0 if out of memory. */
-static int ic_match_keys(unsigned nc, const unsigned *pord, unsigned np)
+/* One pass of ic_match, key by key: `cg` this frame's objects by key (or
+ * loose key), `pg` the frame before's (step 95: groupings, each group in
+ * draw order, keys in any order: a key's matching looks only at its own
+ * objects). 0 if out of memory. */
+static int ic_match_keys(const igroup_t *cg, const igroup_t *pg, int loose)
 {
-    unsigned cur = (unsigned)g_ic, prv = (unsigned)g_ip, i, a, b, pa;
+    unsigned cur = (unsigned)g_ic, prv = (unsigned)g_ip, gi, i;
     iobj_t *co = g_iobj[cur], *po = g_iobj[prv];
 
-    for (a = 0, pa = 0; a < nc; a = b) {
-        unsigned pb, round;
-        uint32_t key = ic_mkey(&co[g_icord[a]]);
-        for (b = a; b < nc && ic_mkey(&co[g_icord[b]]) == key; b++)
-            ;
-        while (pa < np && ic_mkey(&po[pord[pa]]) < key)
-            pa++;
-        for (pb = pa; pb < np && ic_mkey(&po[pord[pb]]) == key; pb++)
-            ;
-        if (pb == pa)
+    for (gi = 0; gi < cg->ng; gi++) {
+        const unsigned *cm = cg->mem + cg->grp[gi].start, *pm;
+        unsigned cn = cg->grp[gi].count, pn, round;
+        int pgi = ig_find(pg, cg->grp[gi].key);
+        if (pgi < 0)
             continue;
-        if (!ic_grow((void **)&g_icand, &g_icand_cap, (b - a) * IC_CANDS, sizeof(icand_t)))
+        pm = pg->mem + pg->grp[pgi].start;
+        pn = pg->grp[pgi].count;
+        if (!ic_grow((void **)&g_icand, &g_icand_cap, cn * IC_CANDS, sizeof(icand_t)))
             return 0;
         /* Rounds: the objects left without one propose again among those
          * left (exact ties, e.g. meshes built in world space, all at the
          * origin, go by their places in the draw order). */
         for (round = 0; round < 16; round++) {
             unsigned nn = 0, got = 0, k;
-            for (i = a; i < b; i++) {   /* each object's IC_CANDS nearest unused of the frame before */
-                unsigned c = g_icord[i], j, m = 0;
+            for (i = 0; i < cn; i++) {  /* each object's IC_CANDS nearest unused of the frame before */
+                unsigned c = cm[i], j, m = 0;
                 icand_t best[IC_CANDS];
                 if (co[c].used == 2 || g_ipick[c] >= 0)     /* step 63: replaced another in place; or paired */
                     continue;
-                for (j = pa; j < pb; j++) {
-                    unsigned p = pord[j], rd = i - a > j - pa ? (i - a) - (j - pa) : (j - pa) - (i - a);
+                for (j = 0; j < pn; j++) {
+                    unsigned p = pm[j], rd = i > j ? i - j : j - i;
                     double dd = ic_dist(&co[c], &po[p]);
-                    if (!round && !g_iloose && dd < g_inear[c]) {   /* step 63: the nearest, taken or not */
+                    if (!round && !loose && dd < g_inear[c]) {  /* step 63: the nearest, taken or not */
                         g_inear[c] = dd;
                         g_inear_i[c] = (int32_t)p;
                     }
@@ -6350,14 +6428,13 @@ static int ic_match_keys(unsigned nc, const unsigned *pord, unsigned np)
                     continue;
                 g_ipick[x->c] = (int32_t)x->p;
                 g_ipick_dd[x->c] = x->dd;
-                g_ipick_loose[x->c] = (uint8_t)g_iloose;
+                g_ipick_loose[x->c] = (uint8_t)loose;
                 po[x->p].used = 3;      /* matched; marked 1 once it is the partner */
                 got++;
             }
             if (!got)
                 break;
         }
-        pa = pb;
     }
     return 1;
 }
@@ -6367,12 +6444,14 @@ static int ic_match_keys(unsigned nc, const unsigned *pord, unsigned np)
  * first. Step 68: then those left by their loose key (lkey: their textures
  * by shape), so an object whose texture is a flipbook (H2 Oh No's caustics
  * on the sub's missile, the clock, the fruit: a texture each frame, so a
- * key each frame, never paired) is paired with its last frame's. 0 if out
- * of memory. */
+ * key each frame, never paired) is paired with its last frame's. Step 95:
+ * by the frames' groupings (this frame's made now is the next frame's frame
+ * before's). 0 if out of memory. */
 static int ic_match(void)
 {
     unsigned cur = (unsigned)g_ic, prv = (unsigned)g_ip, nc = g_iobj_n[cur], np = g_iobj_n[prv], i;
     iobj_t *co = g_iobj[cur], *po = g_iobj[prv];
+    const igroup_t *cg, *pg;
     int ok = 1;
 
     if (!ic_grow((void **)&g_icord, &g_icord_cap, nc, sizeof(unsigned)) ||
@@ -6397,17 +6476,17 @@ static int ic_match(void)
         g_ipick_cap = c;
     }
     for (i = 0; i < nc; i++) {
-        g_icord[i] = i;
         g_ipick[i] = -1;
         g_ipick_dd[i] = 1e300;
         g_inear[i] = 1e300;
         g_inear_i[i] = -1;
         g_ipick_loose[i] = 0;
     }
-    g_iloose = 0;
-    g_icord_of = co;
-    qsort(g_icord, nc, sizeof(unsigned), cmp_icord);
-    ok = ic_match_keys(nc, g_iord, np);
+    cg = ig_set(cur);
+    pg = ig_set(prv);
+    if (!cg || !pg)
+        return 0;
+    ok = ic_match_keys(cg, pg, 0);
     if (ok) {                           /* those left on both sides, by loose key */
         unsigned nc2 = 0, np2 = 0;
         for (i = 0; i < nc; i++)
@@ -6416,16 +6495,10 @@ static int ic_match(void)
         for (i = 0; i < np; i++)
             if (!po[i].used)
                 g_iord2[np2++] = i;
-        if (nc2 && np2) {
-            g_iloose = 1;
-            g_icord_of = po;
-            qsort(g_iord2, np2, sizeof(unsigned), cmp_icord);
-            g_icord_of = co;
-            qsort(g_icord, nc2, sizeof(unsigned), cmp_icord);
-            ok = ic_match_keys(nc2, g_iord2, np2);
-        }
+        if (nc2 && np2)
+            ok = ig_build(&g_igl[0], co, g_icord, nc2, 1) && ig_build(&g_igl[1], po, g_iord2, np2, 1) &&
+                 ic_match_keys(&g_igl[0], &g_igl[1], 1);
     }
-    g_iloose = 0;
     for (i = 0; i < np; i++)
         if (po[i].used == 3)
             po[i].used = 0;
@@ -6440,6 +6513,7 @@ static void ic_pair(void)
 {
     unsigned cur = (unsigned)g_ic, prv = (unsigned)g_ip, n = g_iobj_n[prv], i, j;
     iobj_t *po = g_iobj[prv], *co = g_iobj[cur];
+    const igroup_t *pg;
     int matched;
     LARGE_INTEGER t0, t1;
 
@@ -6447,24 +6521,16 @@ static void ic_pair(void)
     if (!g_iobj_n[cur])
         return;
     QueryPerformanceCounter(&t0);
-    if (n > g_iord_cap) {
-        unsigned *o = (unsigned *)realloc(g_iord, n * sizeof(unsigned));
-        if (!o)
-            return;
-        g_iord = o;
-        g_iord_cap = n;
-    }
-    for (i = 0; i < n; i++) {
-        g_iord[i] = i;
+    for (i = 0; i < n; i++)
         po[i].used = 0;
-    }
-    g_iord_of = po;
-    qsort(g_iord, n, sizeof(unsigned), cmp_iord);
+    pg = ig_set(prv);                   /* step 95: the frame before's by key, grouped when it was paired */
+    if (!pg)
+        return;
     ic_replaced();                      /* step 63 */
     matched = g_imatch && ic_match();
     for (i = 0; i < g_iobj_n[cur]; i++) {
         iobj_t *o = &co[i];
-        unsigned lo = 0, hi = n, best = (unsigned)-1, a1i = (unsigned)-1;
+        unsigned best = (unsigned)-1, a1i = (unsigned)-1;
         double bd = 1e300, a1 = 1e300, rel;
         o->lbest = -1;
         o->lwhat = "replaced";
@@ -6478,25 +6544,20 @@ static void ic_pair(void)
             a1 = g_inear[i];
             a1i = g_inear_i[i] >= 0 ? (unsigned)g_inear_i[i] : (unsigned)-1;
         } else {
-            while (lo < hi) {
-                unsigned mid = (lo + hi) / 2;
-                if (po[g_iord[mid]].key < o->key)
-                    lo = mid + 1;
-                else
-                    hi = mid;
-            }
-            for (j = lo; j < n && po[g_iord[j]].key == o->key; j++) {
-                const iobj_t *p = &po[g_iord[j]];
+            int gi = ig_find(pg, o->key);       /* step 95: its key's, in draw order */
+            for (j = 0; gi >= 0 && j < pg->grp[gi].count; j++) {
+                unsigned q = pg->mem[pg->grp[gi].start + j];
+                const iobj_t *p = &po[q];
                 double dd = ic_dist(o, p);
                 if (dd < a1) {          /* step 63: the nearest, taken or not */
                     a1 = dd;
-                    a1i = g_iord[j];
+                    a1i = q;
                 }
                 if (p->used)
                     continue;
                 if (dd < bd) {
                     bd = dd;
-                    best = g_iord[j];
+                    best = q;
                 }
             }
         }
@@ -7038,6 +7099,7 @@ static void ic_end(void)
 /* Step 78: the recording set emptied. */
 static void ic_clear(int i)
 {
+    g_iobj_stamp[i]++;                  /* step 95: its grouping by key is gone */
     g_icam_n[i] = 0;
     g_ikey_n[i] = 0;
     g_iobj_n[i] = 0;
