@@ -25,6 +25,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <math.h>
 
 #include "imgui.h"
 #include "imgui_impl_dx11.h"
@@ -60,6 +61,26 @@ static int g_sv_shown;                  /* step 83: the Saves tab shown since th
 #define RESET_ASK "Reset the Display settings?"     /* step 93: the reset button's question */
 static bool g_reset_shut;               /* step 93: the overlay opened again: the question isn't left open */
 static bool g_reset_open;               /* ... the question is up (last frame) */
+
+/* Step 97: Quit game's and Restart now's questions (the reset's way: the safe answer first, B closes), and
+ * the window's steady height. */
+#define QUIT_ASK "Quit the game?"
+#define RESTART_ASK "Restart the game?"
+static bool g_quit_open, g_restart_open;   /* up (last frame) */
+static bool g_q_shut;                   /* the overlay opened again: neither is left open */
+static char g_restart_text[320];        /* the restart question's words */
+static unsigned g_pend_seen;            /* the settings waiting for a restart when last looked at */
+static char g_gpu_seen[128];            /* ... the graphics card chosen then */
+static int g_pend_init;                 /* 0: not looked at since the overlay opened */
+static char g_pend_list[160];           /* "Graphics card, Speakers" (ovl_restart_why) */
+static bool g_measure;                  /* the tabs drawn off-screen, every optional row shown, to measure them */
+static float g_tab_h[N_TABS];           /* ... their heights */
+static int g_meas_need = 1;             /* measure them again (opened, another scale or size) */
+static float g_child_h;                 /* the tabs' height in the window: the tallest's, or the room there is */
+static float g_fixed_h;                 /* the window's height outside the tabs' child, from the frame before */
+#define TAB_MARGIN_ROWS 2.0f            /* rows the measure may have missed (a line that wraps one more) */
+#define TAB_MIN_ROWS 8.0f               /* the least the tabs get before the whole menu is made smaller */
+static int g_end_kind;                  /* OVL_QUIT or OVL_RESTART once asked for (the status line's word) */
 
 static void capture_end(void)
 {
@@ -111,7 +132,7 @@ static int pad_nav(const ovl_info_t *in)
         if (press & OVL_PAD_B)
             r |= OVL_CLOSE;
     }
-    if (g_reset_open)
+    if (g_reset_open || g_quit_open || g_restart_open)
         press &= ~(OVL_PAD_LB | OVL_PAD_RB);    /* step 93: the question answered first, on its own tab */
     if (press & OVL_PAD_LB)
         g_tab_want = (g_tab_cur + N_TABS - 1) % N_TABS;
@@ -217,6 +238,10 @@ extern "C" void ovl_opened(void)
     g_sv_shown = 0;                     /* step 83: the backups listed again */
     g_reset_shut = true;                /* step 93 */
     g_reset_open = false;
+    g_q_shut = true;                    /* step 97 */
+    g_quit_open = g_restart_open = false;
+    g_pend_init = 0;
+    g_meas_need = 1;
     if (g_ready) {
         ImGui::GetIO().ClearInputKeys();
         ImGui::GetIO().ClearInputMouse();
@@ -438,9 +463,9 @@ static void pad_view(const pads_info_t *p)
     ImGui::Unindent();
 }
 
-/* Step 57: the Controls tab. The child scrolls when the lists don't fit
- * above `room`, the picture's height the window may take. */
-static int tab_controls(twoc_settings_t *s, float room)
+/* Step 57: the Controls tab. Step 97: it scrolls in the window's tabs'
+ * child, as every tab does (it had a scrolling child of its own). */
+static int tab_controls(twoc_settings_t *s)
 {
     static const int pad_order[XIN_COUNT] = { XIN_A, XIN_B, XIN_X, XIN_Y, XIN_BLACK, XIN_WHITE, XIN_LT, XIN_RT,
                                               XIN_START, XIN_BACK, XIN_LSTICK, XIN_RSTICK, XIN_LS, XIN_RS,
@@ -449,14 +474,14 @@ static int tab_controls(twoc_settings_t *s, float room)
                                               XIN_Y, XIN_START, XIN_BACK, XIN_BLACK, XIN_WHITE, XIN_LT, XIN_RT,
                                               XIN_LS, XIN_RS, XIN_UP, XIN_DOWN, XIN_LEFT, XIN_RIGHT,
                                               KIN_RUP, KIN_RDOWN, KIN_RLEFT, KIN_RRIGHT };
-    const ImGuiStyle &st = ImGui::GetStyle();
-    float fs = ImGui::GetFontSize(), maxh;
+    float fs = ImGui::GetFontSize();
     int r = 0, i, slot, got, style, npads;
     pads_info_t pads[12];
     unsigned char has[SRC_COUNT] = { 0 };
     char lbl[160];
 
-    if (g_cap == CAP_PAD && (got = controls_capture_pad(g_cap_idx >= XIN_BUTTONS)) >= 0) {
+    if (g_measure) {                    /* step 97: measured, not used: a binding's wait isn't touched */
+    } else if (g_cap == CAP_PAD && (got = controls_capture_pad(g_cap_idx >= XIN_BUTTONS)) >= 0) {
         if (got >= XIN_COUNT)           /* step 70: an extra button presses this Xbox button */
             controls_assign_extra(&s->controls, got, g_cap_idx);
         else
@@ -474,13 +499,6 @@ static int tab_controls(twoc_settings_t *s, float room)
         if (pads[i].read)
             for (got = 0; got < SRC_COUNT; got++)
                 has[got] |= pads[i].has[got];
-
-    maxh = room - ImGui::GetCursorPosY() - ImGui::GetFrameHeightWithSpacing() - st.WindowPadding.y -
-           st.ItemSpacing.y * 2;
-    if (maxh < ImGui::GetFrameHeightWithSpacing() * 4)
-        maxh = ImGui::GetFrameHeightWithSpacing() * 4;
-    ImGui::SetNextWindowSizeConstraints(ImVec2(0, 0), ImVec2(FLT_MAX, maxh));
-    ImGui::BeginChild("##controls", ImVec2(0, 0), ImGuiChildFlags_AutoResizeY | ImGuiChildFlags_NavFlattened);
 
     /* Step 70: which pads, and how they read. */
     ImGui::SeparatorText("Controllers");
@@ -635,7 +653,6 @@ static int tab_controls(twoc_settings_t *s, float room)
     }
     more("WASD and the arrows move; Space or K jumps, J or E spins, L or Left Shift crouches and slides (and "
          "body slams in the air), Enter or P pauses.");
-    ImGui::EndChild();
     return r;
 }
 
@@ -803,8 +820,9 @@ static int tab_display(twoc_settings_t *s, const ovl_info_t *in)
             snprintf(line + strlen(line), sizeof(line) - strlen(line), " %s from the next start.",
                      s->gpu[0] ? s->gpu : "Automatic");
         help(line);
-        if (twoc_gpu_note()[0] && _stricmp(s->gpu, twoc_gpu_asked()) == 0)
-            amber(twoc_gpu_note());
+        if ((twoc_gpu_note()[0] && _stricmp(s->gpu, twoc_gpu_asked()) == 0) || g_measure)
+            amber(twoc_gpu_note()[0] ? twoc_gpu_note() : "The graphics card chosen before isn't on this PC now: "
+                  "Automatic is used.");
     }
     {
         bool f = s->fullscreen != 0;
@@ -855,7 +873,7 @@ static int tab_display(twoc_settings_t *s, const ovl_info_t *in)
                 r |= OVL_CHANGED;
             more("Pulls the HUD at the edges in from them by this share of the picture's width.");
         }
-        if (s->hud && !wide)
+        if (s->hud && (!wide || g_measure))
             help("Now: as the game draws it (the picture is 4:3).");
     }
     {   /* step 91: the render size by aspect ratio, a custom one, and what it draws */
@@ -939,7 +957,7 @@ static int tab_display(twoc_settings_t *s, const ovl_info_t *in)
              "by shape, the chosen one marked). In a window the window takes that size in real pixels; "
              "fullscreen shows it over the whole screen, keeping its shape. A window opened without a render "
              "size is scaled by Windows until the next start. Applied at once.");
-        if (custom) {
+        if (custom || g_measure) {      /* step 97: measured with the fields */
             ImGui::SetNextItemWidth(fs * 6.5f);
             if (ImGui::InputInt("##cw", &cw, 16, 160))
                 cw = cw < TWOC_RENDER_SIZE_MIN ? TWOC_RENDER_SIZE_MIN : cw > TWOC_RENDER_SIZE_MAX ? TWOC_RENDER_SIZE_MAX : cw;
@@ -1249,6 +1267,8 @@ static int tab_display(twoc_settings_t *s, const ovl_info_t *in)
          "Render thread Off, Show frame rate Off, the startup message on, Skip the title animation off, "
          "Anisotropic filtering Off, Anti-aliasing Off, Ambient occlusion Off, HUD in the centre. Fullscreen, "
          "the aspect ratio, the graphics card, sound, controls and saves stay as they are. Asks first.");
+    if (g_measure)                      /* step 97: measured: the question's state isn't touched */
+        return r;
     ImGui::SetNextWindowPos(ImGui::GetMainViewport()->GetCenter(), ImGuiCond_Appearing, ImVec2(0.5f, 0.5f));
     g_reset_open = false;
     if (ImGui::BeginPopupModal(RESET_ASK, NULL, ImGuiWindowFlags_AlwaysAutoResize | ImGuiWindowFlags_NoSavedSettings)) {
@@ -1360,7 +1380,7 @@ static void tab_saves(void)
     float fs = ImGui::GetFontSize();
     char lbl[96];
 
-    if (!g_sv_shown) {                  /* the tab just opened */
+    if (!g_sv_shown && !g_measure) {    /* the tab just opened (step 97: not when measured) */
         saves_refresh();
         g_sv_shown = 1;
     }
@@ -1491,13 +1511,180 @@ static void tab_about(const ovl_info_t *in)
     help("The same lines are in the log ([ABOUT]). Third-party parts and their licences: THIRD_PARTY_LICENSES.txt next to the game.");
 }
 
-static int build(twoc_settings_t *s, const ovl_info_t *in, float room)
+/* Step 97: one tab's contents, into the window's child for it or (g_measure) the measuring window. */
+static int tab_body(int t, twoc_settings_t *s, const ovl_info_t *in)
+{
+    switch (t) {
+    case 0:
+        return tab_display(s, in);
+    case 1:
+        return tab_audio(s);
+    case 2:
+        return tab_controls(s);
+    case 3:
+        tab_saves();
+        return 0;
+    default:
+        tab_about(in);
+        return 0;
+    }
+}
+
+/* Step 97: every tab drawn off-screen into a window as wide as the menu, each with the rows its settings
+ * can add shown (the HUD margin, the frame rate's rows at 72 fps, ambient occlusion's Strength and Half
+ * resolution, the custom render size, the notes), to find the tallest. */
+static void measure(const twoc_settings_t *s, const ovl_info_t *in, float width)
+{
+    twoc_settings_t m = *s;
+    int t;
+
+    m.hud = 1;
+    if (!m.framerate)
+        m.framerate = 72;
+    if (m.ao == TWOC_AO_OFF)
+        m.ao = TWOC_AO_GTAO;
+    g_measure = true;
+    ImGui::SetNextWindowPos(ImVec2(-100000.0f, -100000.0f), ImGuiCond_Always);
+    ImGui::SetNextWindowSize(ImVec2(width, 0.0f), ImGuiCond_Always);
+    ImGui::Begin("##measure", NULL, ImGuiWindowFlags_NoDecoration | ImGuiWindowFlags_NoInputs | ImGuiWindowFlags_NoNav |
+                                        ImGuiWindowFlags_NoFocusOnAppearing | ImGuiWindowFlags_NoBringToFrontOnFocus |
+                                        ImGuiWindowFlags_NoSavedSettings | ImGuiWindowFlags_NoBackground);
+    for (t = 0; t < N_TABS; t++) {
+        float y0;
+        ImGui::PushID(t);
+        y0 = ImGui::GetCursorPosY();
+        tab_body(t, &m, in);
+        g_tab_h[t] = ImGui::GetCursorPosY() - y0;
+        ImGui::PopID();
+    }
+    ImGui::End();
+    g_measure = false;
+}
+
+/* Step 97: the settings that apply only at the next start and differ from this run's (the Graphics card,
+ * Skip the title animation, Speakers, a save backup to restore), as a mask; their names into g_pend_list. */
+enum { PEND_GPU = 1, PEND_TITLE = 2, PEND_SPEAKERS = 4, PEND_RESTORE = 8 };
+
+static unsigned pending(const twoc_settings_t *s, const ovl_info_t *in, char *restore_when, size_t cap)
+{
+    static const char *const names[4] = { "Graphics card", "Skip the title animation", "Speakers",
+                                          "Save restore" };
+    const char *e = getenv("RECOMP_SPEAKERS");
+    saves_state_t st;
+    unsigned m = 0, i;
+
+    if (_stricmp(s->gpu, twoc_gpu_asked()) != 0)
+        m |= PEND_GPU;
+    if (!s->fast_title != !in->fast_title_now)
+        m |= PEND_TITLE;
+    if ((s->speakers > 0) != (e && strcmp(e, "5.1") == 0))
+        m |= PEND_SPEAKERS;
+    saves_state(&st);
+    restore_when[0] = 0;
+    if (st.pending[0]) {
+        m |= PEND_RESTORE;
+        snprintf(restore_when, cap, "%.10s %.2s:%.2s", st.pending, st.pending + 11, st.pending + 14);
+    }
+    g_pend_list[0] = 0;
+    for (i = 0; i < 4; i++)
+        if (m & (1u << i))
+            snprintf(g_pend_list + strlen(g_pend_list), sizeof(g_pend_list) - strlen(g_pend_list), "%s%s",
+                     g_pend_list[0] ? ", " : "", names[i]);
+    return m;
+}
+
+extern "C" const char *ovl_restart_why(void)
+{
+    return g_pend_list;
+}
+
+/* Step 97: a question as the reset's: `yes` / `no`, the second focused first, B (or the overlay closing)
+ * for it. Returns 1 the frame `yes` is chosen; *open: it is up. */
+static int ask(const char *id, const char *text, const char *yes, const char *no, bool *open)
 {
     int r = 0;
 
+    *open = false;
+    ImGui::SetNextWindowPos(ImGui::GetMainViewport()->GetCenter(), ImGuiCond_Appearing, ImVec2(0.5f, 0.5f));
+    if (ImGui::BeginPopupModal(id, NULL, ImGuiWindowFlags_AlwaysAutoResize | ImGuiWindowFlags_NoSavedSettings)) {
+        bool done = g_q_shut;           /* the overlay closed with it open */
+        float bw = ImGui::GetFontSize() * 7;
+        *open = !g_q_shut;
+        ImGui::PushTextWrapPos(ImGui::GetFontSize() * 24);
+        ImGui::TextUnformatted(text);
+        ImGui::PopTextWrapPos();
+        ImGui::Spacing();
+        if (ImGui::Button(yes, ImVec2(bw, 0))) {
+            r = 1;
+            done = true;
+        }
+        ImGui::SameLine();
+        if (ImGui::Button(no, ImVec2(bw, 0)) || ImGui::IsKeyPressed(ImGuiKey_GamepadFaceRight, false))
+            done = true;                /* B on the pad, as it closes a list */
+        ImGui::SetItemDefaultFocus();   /* the safe answer first: the other is a step away */
+        if (done)
+            ImGui::CloseCurrentPopup();
+        ImGui::EndPopup();
+    }
+    return r;
+}
+
+/* Step 97: the rows at the bottom, in the same place on every tab: Resume and Quit game (how to drive the
+ * menu in a "(?)" after them), and a status row (a restart waiting, with its button; why one didn't happen;
+ * the last save's outcome). */
+static int footer(const ovl_info_t *in, unsigned pend)
+{
+    float fh = ImGui::GetFrameHeightWithSpacing();
+    int r = 0;
+
+    ImGui::Spacing();
+    ImGui::BeginDisabled(in->ending != 0);
+    if (ImGui::Button(in->pad ? "Resume  (F1, B, Start held)" : "Resume  (F1 or Esc)"))
+        r |= OVL_CLOSE;
+    ImGui::SameLine();
+    if (ImGui::Button("Quit game"))
+        ImGui::OpenPopup(QUIT_ASK);
+    ImGui::EndDisabled();
+    more("Controller: D-pad or left stick to move, A to choose, B to close a list or this menu, LB / RB for the "
+         "tabs; Start (Menu, Options) held about a second, or View + Menu held, opens and closes this menu. "
+         "Keyboard: F1 opens and closes it, the arrows move, Enter chooses, Esc closes. A long tab scrolls: the "
+         "D-pad goes down it, the mouse wheel scrolls it. Quit game asks first, then closes the game as "
+         "closing its window does, after saving these settings.");
+    ImGui::BeginChild("##status", ImVec2(0, fh), ImGuiChildFlags_NavFlattened,
+                      ImGuiWindowFlags_NoScrollbar | ImGuiWindowFlags_NoScrollWithMouse);
+    ImGui::AlignTextToFramePadding();
+    if (in->ending) {
+        ImGui::TextColored(k_amber, "%s", g_end_kind == OVL_RESTART ? "Restarting..." : "Closing the game...");
+    } else if (in->end_note) {
+        ImGui::TextColored(k_amber, "%s", in->end_note);
+    } else if (pend && !twoc_settings_ignored()) {
+        if (ImGui::Button("Restart now"))
+            r |= OVL_RESTART;
+        ImGui::SameLine();
+        ImGui::AlignTextToFramePadding();
+        ImGui::TextColored(k_amber, "Changes waiting for a restart: %s", g_pend_list);
+        if (ImGui::IsItemHovered())     /* a long list runs past the edge: all of it on hover */
+            ImGui::SetTooltip("Changes waiting for a restart: %s", g_pend_list);
+    } else if (in->save_note) {
+        ImGui::TextDisabled("%s", in->save_note);
+    } else {
+        ImGui::TextUnformatted("");
+    }
+    ImGui::EndChild();
+    return r;
+}
+
+static int build(twoc_settings_t *s, const ovl_info_t *in)
+{
+    static const char *const tab_names[N_TABS] = { "Display", "Audio", "Controls", "Saves", "About" };
+    char restore_when[32], id[16];
+    unsigned pend;
+    float y0;
+    int r = 0, t;
+
     if (twoc_settings_ignored()) {      /* step 93: the safe-settings launcher */
         ImGui::PushTextWrapPos(ImGui::GetContentRegionAvail().x + ImGui::GetCursorPosX());
-        ImGui::TextColored(ImVec4(1.0f, 0.8f, 0.3f, 1.0f), "Safe settings: crash_twoc.ini is ignored this run and "
+        ImGui::TextColored(k_amber, "Safe settings: crash_twoc.ini is ignored this run and "
                            "won't be written. Every setting starts at its default; changes here last until the "
                            "game closes. Start the game the usual way for your own settings again.");
         ImGui::PopTextWrapPos();
@@ -1522,51 +1709,70 @@ static int build(twoc_settings_t *s, const ovl_info_t *in, float room)
              "under this menu, and goes on when it is in front again. Not while it is starting or switching to "
              "fullscreen. Applied at once.");
     }
+    /* Step 97: the tab bar picks the tab only; its contents go in a child of the same height on every tab
+     * (g_child_h), each tab with its own (so its own scroll), flattened into the window for the controller's
+     * and the keyboard's navigation. */
     if (ImGui::BeginTabBar("##tabs")) {
         /* step 82: LB and RB pick the tab before or after */
-#define TAB_FLAGS(i) (g_tab_want == (i) ? ImGuiTabItemFlags_SetSelected : ImGuiTabItemFlags_None)
-        if (ImGui::BeginTabItem("Display", NULL, TAB_FLAGS(0))) {
-            g_tab_cur = 0;
-            r |= tab_display(s, in);
-            ImGui::EndTabItem();
-        }
-        if (ImGui::BeginTabItem("Audio", NULL, TAB_FLAGS(1))) {
-            g_tab_cur = 1;
-            r |= tab_audio(s);
-            ImGui::EndTabItem();
-        }
-        if (ImGui::BeginTabItem("Controls", NULL, TAB_FLAGS(2))) {
-            g_tab_cur = 2;
-            r |= tab_controls(s, room);
-            ImGui::EndTabItem();
-        }
-        if (ImGui::BeginTabItem("Saves", NULL, TAB_FLAGS(3))) {     /* step 83 */
-            g_tab_cur = 3;
-            tab_saves();
-            ImGui::EndTabItem();
-        } else
-            g_sv_shown = 0;
-        if (ImGui::BeginTabItem("About", NULL, TAB_FLAGS(4))) {     /* step 93 */
-            g_tab_cur = 4;
-            tab_about(in);
-            ImGui::EndTabItem();
-        }
-#undef TAB_FLAGS
+        for (t = 0; t < N_TABS; t++)
+            if (ImGui::BeginTabItem(tab_names[t], NULL,
+                                    g_tab_want == t ? ImGuiTabItemFlags_SetSelected : ImGuiTabItemFlags_None)) {
+                g_tab_cur = t;
+                ImGui::EndTabItem();
+            }
         g_tab_want = -1;
         ImGui::EndTabBar();
     }
+    if (g_tab_cur != 3)
+        g_sv_shown = 0;                 /* step 83: the backups listed again when the tab is next shown */
+    y0 = ImGui::GetCursorPosY();
+    snprintf(id, sizeof(id), "##tab%d", g_tab_cur);
+    ImGui::BeginChild(id, ImVec2(0, g_child_h), ImGuiChildFlags_NavFlattened);
+    r |= tab_body(g_tab_cur, s, in);
+    ImGui::EndChild();
+    (void)y0;
 
-    ImGui::Spacing();
-    if (ImGui::Button(in->pad ? "Resume  (F1, B, Start held)" : "Resume  (F1 or Esc)"))
-        r |= OVL_CLOSE;
-    if (in->save_note) {
-        ImGui::SameLine();
-        ImGui::TextDisabled("%s", in->save_note);
+    /* Step 97: a setting from the next start just changed: ask whether to restart now (never with the safe
+     * settings, which can't keep the change). */
+    pend = twoc_settings_ignored() ? 0 : pending(s, in, restore_when, sizeof(restore_when));
+    if (!g_pend_init) {
+        g_pend_seen = pend;
+        snprintf(g_gpu_seen, sizeof(g_gpu_seen), "%s", s->gpu);
+        g_pend_init = 1;
+    } else if (!in->ending) {
+        unsigned fresh = pend & ~g_pend_seen;
+        if ((pend & PEND_GPU) && _stricmp(g_gpu_seen, s->gpu) != 0)
+            fresh |= PEND_GPU;          /* another card than the one asked about */
+        g_pend_seen = pend;
+        snprintf(g_gpu_seen, sizeof(g_gpu_seen), "%s", s->gpu);
+        if (fresh && !g_quit_open && !g_reset_open && !g_restart_open) {
+            char what[200];
+            if (fresh & PEND_GPU) {
+                int k = s->gpu[0] ? twoc_gpu_find(s->gpu) : -1;
+                snprintf(what, sizeof(what), "use %s", !s->gpu[0] ? "Automatic (the card Windows picks)"
+                                                      : k >= 0 ? twoc_gpu_at(k)->name : s->gpu);
+            } else if (fresh & PEND_TITLE) {
+                snprintf(what, sizeof(what), s->fast_title ? "skip the title animation"
+                                                           : "play the title animation again");
+            } else if (fresh & PEND_SPEAKERS) {
+                snprintf(what, sizeof(what), "use %s", s->speakers > 0 ? "5.1 surround" : "stereo");
+            } else {
+                snprintf(what, sizeof(what), "restore the save backup of %s", restore_when);
+            }
+            snprintf(g_restart_text, sizeof(g_restart_text), "Restart the game to %s? Unsaved progress will be "
+                     "lost.", what);
+            ImGui::OpenPopup(RESTART_ASK);
+            fprintf(stderr, "[OVL] asks: %s\n", g_restart_text);
+        }
     }
-    if (in->pad)                        /* step 82 */
-        help("Controller: D-pad or left stick to move, A to choose, B to close, LB / RB for the tabs. "
-             "Start (Menu, Options) held about a second, or View + Menu held, opens and closes this menu. "
-             "Keyboard: F1.");
+    r |= footer(in, pend);
+    if (ask(QUIT_ASK, "Quit the game? Unsaved progress will be lost.", "Yes", "No", &g_quit_open))
+        r |= OVL_QUIT;
+    if (ask(RESTART_ASK, g_restart_text, "Restart now", "Later", &g_restart_open))
+        r |= OVL_RESTART;
+    g_q_shut = false;
+    if (r & (OVL_QUIT | OVL_RESTART))
+        g_end_kind = r & OVL_RESTART ? OVL_RESTART : OVL_QUIT;
     return r;
 }
 
@@ -1592,15 +1798,18 @@ extern "C" int ovl_frame(ID3D11RenderTargetView *rtv, unsigned w, unsigned h, fl
     ImGuiIO &io = ImGui::GetIO();
     io.DisplaySize = ImVec2((float)w, (float)h);
     io.DeltaTime = dt > 0.0f ? dt : 1.0f / 60.0f;
-    /* The panel shrinks to fit the picture's height (the game's 480 lines in
-     * a window): g_fit, measured from the last frame, starts again at 1 when
-     * the size or the scale changes. */
+    /* The panel shrinks to fit the picture's height (the game's 480 lines in a window), from the last frame's
+     * measure, starting again at 1 when the size or the scale changes. Step 97: only as far as the tabs keep
+     * TAB_MIN_ROWS rows; a taller tab scrolls inside the window instead, which stays the same size on every
+     * tab: the tallest tab's height, or all the picture has room for. */
     static float fit = 1.0f, last_scale = -1.0f;
     static unsigned last_h;
     if (scale != last_scale || h != last_h) {
         fit = 1.0f;
         last_scale = scale;
         last_h = h;
+        g_meas_need = 1;
+        g_fixed_h = 0;
     }
     if (scale * fit != g_scale) {
         ImGuiStyle &st = ImGui::GetStyle();
@@ -1608,10 +1817,32 @@ extern "C" int ovl_frame(ID3D11RenderTargetView *rtv, unsigned w, unsigned h, fl
         st.ScaleAllSizes(scale * fit);
         st.FontScaleDpi = scale * fit;
         g_scale = scale * fit;
+        g_meas_need = 1;
+        g_fixed_h = 0;
     }
     r = pad_nav(info);                  /* step 82 */
     ImGui_ImplDX11_NewFrame();
     ImGui::NewFrame();
+    bool settling = g_fixed_h == 0;     /* step 97: this frame measures the window: not shown (it would jump) */
+    {   /* step 97: the tabs' height */
+        float fs = ImGui::GetFontSize(), fh = ImGui::GetFrameHeightWithSpacing(), room = (float)h * 0.96f;
+        float want = 0, avail;
+        int t;
+        if (g_meas_need) {
+            measure(s, info, fs * 34);
+            g_meas_need = 0;
+        }
+        for (t = 0; t < N_TABS; t++)
+            want = g_tab_h[t] > want ? g_tab_h[t] : want;
+        want += fh * TAB_MARGIN_ROWS;
+        if (!g_fixed_h)                 /* before the first frame at this scale: the header, tab row and footer */
+            g_fixed_h = fh * 9.0f;
+        avail = room - g_fixed_h;
+        g_child_h = want < avail ? want : avail;
+        if (g_child_h < fh * TAB_MIN_ROWS)
+            g_child_h = fh * TAB_MIN_ROWS;
+        g_child_h = floorf(g_child_h);  /* whole pixels: a fraction moved the window a pixel a frame */
+    }
     if (info->running)                  /* step 57: the running game at the left, undimmed, to watch a change */
         ImGui::SetNextWindowPos(ImVec2(io.DisplaySize.x * 0.02f, io.DisplaySize.y * 0.5f), ImGuiCond_Always,
                                 ImVec2(0.0f, 0.5f));
@@ -1626,11 +1857,43 @@ extern "C" int ovl_frame(ID3D11RenderTargetView *rtv, unsigned w, unsigned h, fl
                                : "Crash TWOC - settings (paused)###settings", NULL,
                  ImGuiWindowFlags_NoResize | ImGuiWindowFlags_NoMove | ImGuiWindowFlags_NoCollapse |
                      ImGuiWindowFlags_NoSavedSettings);
-    r |= build(s, info, (float)h * 0.96f);
+    r |= build(s, info);
     {
-        float wh = ImGui::GetWindowSize().y, room = (float)h * 0.96f;
-        if (wh > room && fit > 0.4f)
-            fit *= room / wh;
+        float wh = ImGui::GetWindowSize().y, room = (float)h * 0.96f, fh = ImGui::GetFrameHeightWithSpacing();
+        float fixed = ImGui::GetCursorPosY() + ImGui::GetStyle().WindowPadding.y - g_child_h;
+        if (fixed > 0 && fabsf(fixed - g_fixed_h) > 1.5f) {
+            g_fixed_h = ceilf(fixed);   /* the window's height outside the tabs, for the next frame (only a
+                                         * real change: rounding alone had it and the tabs swap a pixel) */
+            settling = true;            /* this frame was drawn at the old one: not shown */
+        }
+        {   /* or its contents changed height (the auto-fit follows a frame later), or its size is catching up */
+            static float last_content, last_wh;
+            float content = fixed + g_child_h;
+            if (ImGui::IsWindowAppearing() || fabsf(content - last_content) > 0.5f || fabsf(wh - last_wh) > 0.5f)
+                settling = true;
+            last_content = content;
+            last_wh = wh;
+        }
+        if (g_fixed_h + fh * TAB_MIN_ROWS > room && fit > 0.4f)
+            fit *= room / (g_fixed_h + fh * TAB_MIN_ROWS);
+        {   /* test only: the window's place and size whenever they or the tab change */
+            static int on = -1, tab = -1;
+            static ImVec2 pos, size;
+            ImVec2 p = ImGui::GetWindowPos(), z = ImGui::GetWindowSize();
+            if (on < 0)
+                on = getenv("RECOMP_DEV_OVL_RECT") && *getenv("RECOMP_DEV_OVL_RECT");
+            if (on && (tab != g_tab_cur || p.x != pos.x || p.y != pos.y || z.x != size.x || z.y != size.y)) {
+                fprintf(stderr, "[OVL] rect: tab %d at %.1f,%.1f size %.1f x %.1f%s (picture %ux%u, scale %.3f, "
+                        "tabs' child %.1f, tallest tab %.1f)\n", g_tab_cur, p.x, p.y, z.x, z.y,
+                        settling ? " not shown" : "", w, h, g_scale, g_child_h,
+                        g_tab_h[0] > g_tab_h[2] ? (g_tab_h[0] > g_tab_h[3] ? g_tab_h[0] : g_tab_h[3])
+                                                : (g_tab_h[2] > g_tab_h[3] ? g_tab_h[2] : g_tab_h[3]));
+                tab = g_tab_cur;
+                pos = p;
+                size = z;
+            }
+        }
+        (void)wh;
     }
     ImGui::End();
     ImGui::Render();
@@ -1643,7 +1906,8 @@ extern "C" int ovl_frame(ID3D11RenderTargetView *rtv, unsigned w, unsigned h, fl
     }
     ctx->OMGetRenderTargets(1, &old_rtv, &old_dsv);
     ctx->OMSetRenderTargets(1, &rtv, NULL);
-    ImGui_ImplDX11_RenderDrawData(ImGui::GetDrawData());
+    if (!settling)
+        ImGui_ImplDX11_RenderDrawData(ImGui::GetDrawData());
     ctx->OMSetRenderTargets(1, &old_rtv, old_dsv);
     if (old_rtv)
         old_rtv->Release();
