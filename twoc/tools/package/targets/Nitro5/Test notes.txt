@@ -1,0 +1,50 @@
+Acer Nitro 5 test notes (this file goes into the zip "Collect logs.bat" makes)
+==========================================================================
+
+Windows power mode (Settings > System > Power & battery):
+NitroSense mode (Turbo / Performance / none):
+Windows' Graphics setting for crash_twoc.exe (High performance? README part A step 6):
+NVIDIA Control Panel setting (if there is one):
+Screen refresh rate and resolution (Settings > System > Display):
+
+About tab (README part B step 3), copy the lines or take a photo:
+   Graphics card:
+   Driver:
+   Chosen by:
+   Display's card:
+   Processor:
+   Power throttling:
+
+1. cast_bug's start, standing 30 s, plugged in, Match display (all the corner's lines):
+
+2. The hub, walking 30 s:  Game:        /s    Shown:        /s
+   Anything that looks wrong:
+
+3. cast_bug's start at 72 fps, 30 s (all the corner's lines):
+   Did the line under Frame rate say it is even (each frame held 2 refreshes)?
+
+4. On battery, cast_bug's start, 30 s (all the corner's lines):
+
+5. Ten full-screen starts ("Play Crash (fullscreen start test).bat"), for each: fine / froze (did
+   it start again by itself, or did you alt+tab?) / stuttered / anything else:
+    1:
+    2:
+    3:
+    4:
+    5:
+    6:
+    7:
+    8:
+    9:
+   10:
+
+6. "Collect logs.bat" run afterwards (yes / no):
+
+Optional:
+   Restart now with the NVIDIA card picked by name: did the game come back with the same card?
+   Then Automatic and Restart now: fine?
+   Quit game (No first, then Yes): did the game and the black window close?
+   Switching tabs: did the menu keep its size and place?
+   Safe settings launcher: the small window, the orange line, no restart questions?
+
+Warmth, fan noise, anything else (crashes, sound crackles, controls, picture problems):
