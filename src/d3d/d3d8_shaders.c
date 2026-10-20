@@ -1288,6 +1288,30 @@ void d3d8_shaders_bake(D3D8Baked *b)
     b->gen = d3d8_bake_gen;
 }
 
+/* Twoc step 95 (cut 3): `b`, a copy of a capture from the game frame before
+ * (d3d8_DrawBakedAgain), made this frame's: a fixed-function draw's
+ * transform block made again with `ff_m`'s matrices (the rest of it is the
+ * draw's states', as captured) and its lighting block, and the pixel
+ * constants, copied into this frame's memory (the frame before's is gone at
+ * the next capturing frame). 0 out of memory. */
+int d3d8_shaders_bake_again(D3D8Baked *b, const D3DMATRIX *const ff_m[3])
+{
+    if (!b->vsh) {
+        VSTransformConstants x = *(const VSTransformConstants *)b->ff_xf;
+        if (ff_m && !(x.flags & 0x01))
+            ff_xf_matrices(&x, ff_m[0], ff_m[1], ff_m[2]);
+        b->ff_xf = bake_block(&x, sizeof(x), &g_xf_captured);
+        b->ff_lt = bake_block(b->ff_lt, sizeof(VSLightingConstants), &g_lt_captured);
+        if (!b->ff_xf || !b->ff_lt)
+            return 0;
+    }
+    if (b->ps_cb == g_ps_cb)
+        b->ps_consts = bake_block(b->ps_consts, sizeof(PSConstants), &g_ps_captured);
+    else
+        b->ps_consts = d3d8_combiners_bake_again(b->ps_consts);
+    return b->ps_consts != NULL;
+}
+
 /* One constant buffer filled with `n` bytes from `p`. */
 static void cb_fill(ID3D11Buffer *cb, const void *p, size_t n)
 {

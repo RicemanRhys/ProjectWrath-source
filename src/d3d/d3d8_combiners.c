@@ -1245,6 +1245,23 @@ const void *d3d8_combiners_bake(UINT *bytes)
     return p;
 }
 
+/* Twoc step 95 (cut 3): a capture's combiner constants from the game frame
+ * before, copied into this frame's bake memory (the frame's last capture's
+ * when the same). */
+const void *d3d8_combiners_bake_again(const void *old)
+{
+    void *p;
+
+    if (g_cb_captured && memcmp(g_cb_captured, old, sizeof(g_cb_held)) == 0)
+        return g_cb_captured;
+    p = d3d8_bake_alloc(sizeof(g_cb_held));
+    if (p) {
+        memcpy(p, old, sizeof(g_cb_held));
+        g_cb_captured = p;
+    }
+    return p;
+}
+
 /* A baked draw's combiner constants into the buffer, unless it holds them. */
 void d3d8_combiners_baked_upload(const void *consts)
 {

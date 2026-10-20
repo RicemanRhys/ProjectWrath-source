@@ -1136,14 +1136,18 @@ HRESULT d3d8_DrawIndexedPrimitiveUPKept(D3DPRIMITIVETYPE PrimitiveType, UINT Num
 }
 
 /* The bake's memory: chunks kept from frame to frame, emptied at
- * d3d8_BakeReset. */
+ * d3d8_BakeReset. Twoc step 95 (cut 3): two sets in turn, a capturing
+ * frame's and the one before's, so a capture from the frame before stays
+ * readable while this one draws it again (d3d8_DrawBakedAgain). */
 typedef struct bake_chunk {
     struct bake_chunk *next;
     size_t used, cap;
     double data[1];
 } bake_chunk;
 #define BAKE_CHUNK (256u * 1024u)
-static bake_chunk *g_bake_head, *g_bake_cur;
+static bake_chunk *g_bake_heads[2], *g_bake_cur;
+static int g_bake_set;
+#define g_bake_head g_bake_heads[g_bake_set]
 
 void *d3d8_bake_alloc(size_t n)
 {
@@ -1184,11 +1188,20 @@ void d3d8_BakeReset(void)
      * cast_bug): one that may not hold this frame's uploads after the last
      * frame's (with a quarter more and 1 MB) starts over at its next upload,
      * here at the frame's start. */
-    if ((UINT64)g_up_ring_offset + g_up_frame_bytes + g_up_frame_bytes / 4 + (1u << 20) > UP_RING_BUFFER_SIZE)
+    /* Twoc step 95: by a slowly falling peak of the frames' uploads rather
+     * than the last frame's alone. Draws drawn again from where the rings
+     * held them the frame before (twoc's cut 3) upload little most frames and
+     * all of it after the rings start over, so the last frame alone let a
+     * ring fill up in the middle of a frame now and then. */
+    static UINT up_peak, ib_peak;
+    up_peak = g_up_frame_bytes > up_peak - up_peak / 256 ? g_up_frame_bytes : up_peak - up_peak / 256;
+    ib_peak = g_ib_frame_bytes > ib_peak - ib_peak / 256 ? g_ib_frame_bytes : ib_peak - ib_peak / 256;
+    if ((UINT64)g_up_ring_offset + up_peak + up_peak / 4 + (1u << 20) > UP_RING_BUFFER_SIZE)
         g_up_ring_offset = UP_RING_BUFFER_SIZE;
-    if ((UINT64)g_ib_ring_offset + g_ib_frame_bytes + g_ib_frame_bytes / 4 + (1u << 20) > IB_RING_BUFFER_SIZE)
+    if ((UINT64)g_ib_ring_offset + ib_peak + ib_peak / 4 + (1u << 20) > IB_RING_BUFFER_SIZE)
         g_ib_ring_offset = IB_RING_BUFFER_SIZE;
     g_up_frame_bytes = g_ib_frame_bytes = 0;
+    g_bake_set ^= 1;                    /* the frame before's set kept (cut 3) */
     for (c = g_bake_head; c; c = c->next)
         c->used = 0;
     g_bake_cur = g_bake_head;
@@ -1208,12 +1221,12 @@ void d3d8_BakeCapture(D3D8Baked *b)
     g_bake_cap = b;
 }
 
+static void baked_draw(ID3D11DeviceContext *ctx, const D3D8Baked *b, ID3D11ShaderResourceView *const srv[4]);
+
 HRESULT d3d8_DrawBaked(const D3D8Baked *b, ID3D11ShaderResourceView *const srv[4], const float *const *vs_blk,
                        BOOL fresh, const D3DMATRIX *const ff_m[3])
 {
     ID3D11DeviceContext *ctx = g_device_state.d3d11_context;
-    static const float blend_factor[4] = { 1, 1, 1, 1 };
-    DWORD s;
 
     if (!b->gen || b->gen != d3d8_bake_gen || b->ring_gen != g_ring_gen || (b->vsh && !vs_blk))
         return S_FALSE;
@@ -1227,6 +1240,17 @@ HRESULT d3d8_DrawBaked(const D3D8Baked *b, ID3D11ShaderResourceView *const srv[4
         d3d8_bind_vs_cb(ctx, 1, b->vs_cb[1]);
     }
     d3d8_shaders_baked_upload(b, ff_m); /* the fixed-function and pixel constants */
+    baked_draw(ctx, b, srv);
+    return S_OK;
+}
+
+/* A baked draw's pixel shader, its states, samplers, views and viewport
+ * bound and the draw made (d3d8_DrawBaked, d3d8_DrawBakedAgain). */
+static void baked_draw(ID3D11DeviceContext *ctx, const D3D8Baked *b, ID3D11ShaderResourceView *const srv[4])
+{
+    static const float blend_factor[4] = { 1, 1, 1, 1 };
+    DWORD s;
+
     d3d8_bind_ps(ctx, b->ps);
     d3d8_bind_ps_cb(ctx, b->ps_cb);
     if (g_d3d8_bound.bs != b->bs) {     /* as d3d8_states_apply binds them */
@@ -1257,6 +1281,82 @@ HRESULT d3d8_DrawBaked(const D3D8Baked *b, ID3D11ShaderResourceView *const srv[4
         ID3D11DeviceContext_DrawIndexed(ctx, b->count, b->start, b->base);
     else
         ID3D11DeviceContext_Draw(ctx, b->count, b->start);
+}
+
+HRESULT d3d8_DrawBakedAgain(const D3D8Baked *old, D3D8Baked *now, ID3D11ShaderResourceView *const srv[4],
+                            const D3DMATRIX *const ff_m[3], D3DPRIMITIVETYPE pt, UINT prim_count, UINT nverts,
+                            const void *idx, const void *verts, UINT stride, D3D8UpKept *kept)
+{
+    ID3D11DeviceContext *ctx = g_device_state.d3d11_context;
+    D3D11_PRIMITIVE_TOPOLOGY topology;
+    UINT count, vb_offset, ib_offset = 0;
+    void *converted = NULL;
+
+    if (!old->gen || old->gen != d3d8_bake_gen || !verts || !stride ||
+        stride != old->stride || (idx != NULL) != (old->ib_format != DXGI_FORMAT_UNKNOWN))
+        return S_FALSE;
+    topology = map_primitive_type(pt, prim_count, &count);
+    if (!count || topology != old->topology)
+        return S_FALSE;
+    /* The vertices and indices as the UP draws upload them (with `kept`). */
+    if (kept && kept->gen == g_ring_gen) {
+        vb_offset = kept->vb_offset;
+        ib_offset = kept->ib_offset;
+    } else if (idx) {
+        vb_offset = up_ring_upload(verts, nverts * stride, stride);
+        if (vb_offset == (UINT)-1)
+            return S_FALSE;
+        ib_offset = ib_ring_upload(idx, count * 2);
+        if (ib_offset == (UINT)-1)
+            return S_FALSE;
+        if (kept) {
+            kept->gen = g_ring_gen;
+            kept->vb_offset = vb_offset;
+            kept->ib_offset = ib_offset;
+        }
+    } else {
+        const void *data = verts;
+        UINT n = count;
+        if (pt == D3DPT_TRIANGLEFAN || pt == D3DPT_QUADLIST) {
+            converted = convert_fan_or_quad(pt, verts, prim_count, stride, &n);
+            if (converted)
+                data = converted;
+        }
+        vb_offset = up_ring_upload(data, n * stride, stride);
+        if (converted)
+            free(converted);
+        if (vb_offset == (UINT)-1)
+            return S_FALSE;
+        if (kept) {
+            kept->gen = g_ring_gen;
+            kept->vb_offset = vb_offset;
+        }
+    }
+    *now = *old;
+    now->ring_gen = g_ring_gen;
+    now->count = count;
+    if (idx) {
+        now->start = ib_offset / 2;
+        now->base = (INT)(vb_offset / stride);
+    } else {
+        now->start = vb_offset / stride;
+        now->base = 0;
+    }
+    if (!d3d8_shaders_bake_again(now, ff_m)) {  /* its constant blocks in this frame's memory */
+        now->gen = 0;
+        return S_FALSE;
+    }
+    g_d3d_draw_count++;
+    d3d8_bind_vs(ctx, now->vs);
+    d3d8_bind_layout(ctx, now->il);
+    if (now->vsh) {
+        d3d8_vsh_bake_again(now);       /* as a capturing draw's: the ring's block, `now` told where */
+    } else {
+        d3d8_bind_vs_cb(ctx, 0, now->vs_cb[0]);
+        d3d8_bind_vs_cb(ctx, 1, now->vs_cb[1]);
+    }
+    d3d8_shaders_baked_upload(now, NULL);
+    baked_draw(ctx, now, srv);
     return S_OK;
 }
 

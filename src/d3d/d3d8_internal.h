@@ -636,8 +636,27 @@ void d3d8_BakeCapture(D3D8Baked *b);
 HRESULT d3d8_DrawBaked(const D3D8Baked *b, ID3D11ShaderResourceView *const srv[4], const float *const *vs_blk,
                        BOOL fresh, const D3DMATRIX *const ff_m[3]);
 
+/* Twoc step 95 (cut 3): `old`, a capture made in the game frame before (the
+ * bake's memory holds the last two frames'), of a draw whose translation
+ * the caller knows to be this one's (the same render and stage states,
+ * shaders, lights and material, viewport, target, primitive and stride),
+ * drawn again with this draw's own vertices and indices (put in the rings
+ * as DrawPrimitiveUP / DrawIndexedPrimitiveUP put them, `kept` as theirs:
+ * `idx` 16-bit, NULL not indexed; `nverts` the vertices at `verts`), its
+ * program constants as SetVertexShaderConstant left them (the caller sets
+ * them first, as for an ordinary draw) or its fixed-function matrices
+ * (`ff_m`), and stage s sampling srv[s]; and captured into `now` for this
+ * frame's later passes. Returns S_FALSE without drawing when `old` no
+ * longer holds (draw it the ordinary way). */
+HRESULT d3d8_DrawBakedAgain(const D3D8Baked *old, D3D8Baked *now, ID3D11ShaderResourceView *const srv[4],
+                            const D3DMATRIX *const ff_m[3], D3DPRIMITIVETYPE pt, UINT prim_count, UINT nverts,
+                            const void *idx, const void *verts, UINT stride, D3D8UpKept *kept);
+
 /* The modules' parts (d3d8_shaders.c, d3d8_combiners.c, d3d8_vsh.c) */
 void *d3d8_bake_alloc(size_t n);
+int d3d8_shaders_bake_again(D3D8Baked *b, const D3DMATRIX *const ff_m[3]);
+const void *d3d8_combiners_bake_again(const void *old);
+void d3d8_vsh_bake_again(D3D8Baked *b);
 void d3d8_shaders_bake(D3D8Baked *b);
 void d3d8_shaders_baked_upload(const D3D8Baked *b, const D3DMATRIX *const ff_m[3]);
 void d3d8_shaders_bake_reset(void);

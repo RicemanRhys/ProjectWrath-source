@@ -1180,6 +1180,49 @@ void d3d8_vsh_baked_consts(const D3D8Baked *b, const float *const *blk, BOOL fre
         memcpy((void *)g_vsh_baked_last, (const void *)blk, sizeof(g_vsh_baked_last));
 }
 
+/* Twoc step 95 (cut 3): a capture from the game frame before drawn again
+ * (d3d8_DrawBakedAgain): the program's constants (g_vsh_constants, as the
+ * caller's SetVertexShaderConstant calls left them) taken as a capturing
+ * draw takes them in d3d8_vsh_prepare_draw: into the ring unless the block
+ * there already holds them, bound in b1, and `b` told where for this
+ * frame's later passes (k_gen 0 without the ring: g_vsh_cb uploaded when
+ * dirty and bound, as before). */
+void d3d8_vsh_bake_again(D3D8Baked *b)
+{
+    ID3D11DeviceContext *ctx = d3d8_GetD3D11Context();
+    D3D11_MAPPED_SUBRESOURCE mapped;
+
+    b->k_gen = 0;
+    if (kring_ready()) {
+        if (!g_kring_cur_ok || g_kring_cur_gen != g_kring_gen) {
+            UINT off = kring_write(&g_vsh_constants);
+            if (off != (UINT)-1) {
+                g_kring_cur = off;
+                g_kring_cur_gen = g_kring_gen;
+                g_kring_cur_ok = TRUE;
+            }
+        }
+        if (g_kring_cur_ok && g_kring_cur_gen == g_kring_gen) {
+            kring_bind(g_kring_cur);
+            g_vsh_constants_dirty = TRUE;
+            g_vsh_baked_last[0] = NULL;
+            b->k_gen = g_kring_cur_gen;
+            b->k_first = g_kring_cur;
+            return;
+        }
+    }
+    if (g_vsh_constants_dirty) {
+        if (SUCCEEDED(ID3D11DeviceContext_Map(ctx, (ID3D11Resource *)g_vsh_cb, 0, D3D11_MAP_WRITE_DISCARD, 0,
+                                              &mapped))) {
+            memcpy(mapped.pData, &g_vsh_constants, sizeof(g_vsh_constants));
+            ID3D11DeviceContext_Unmap(ctx, (ID3D11Resource *)g_vsh_cb, 0);
+        }
+        g_vsh_constants_dirty = FALSE;
+        g_vsh_baked_last[0] = NULL;
+    }
+    d3d8_bind_vs_cb(ctx, 1, g_vsh_cb);
+}
+
 /* The frame's captures begin again (d3d8_BakeReset): a block given before
  * may be at the same address with other constants now. */
 void d3d8_vsh_bake_reset(void)
