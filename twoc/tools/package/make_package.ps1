@@ -90,6 +90,11 @@ if ($Pgo) {
     $junction = Join-Path $h 'root\game_files\Crashdat'
     try {
         Copy-Item -Recurse (Join-Path $twoc 'tools\diag\sweep') $h
+        Copy-Item (Join-Path $here 'pgo_train.sh') $h
+        foreach ($sh in Get-ChildItem $h -Filter '*.sh') {      # bash wants LF (a checkout may have made them CRLF)
+            [IO.File]::WriteAllText($sh.FullName, ([IO.File]::ReadAllText($sh.FullName) -replace "`r`n", "`n"),
+                                    (New-Object Text.UTF8Encoding($false)))
+        }
         New-Item -ItemType Directory -Force -Path (Join-Path $h 'root\game_files\UDATA'), (Join-Path $h 'runs'),
             (Join-Path $h 'pgi') | Out-Null
         Copy-Item (Join-Path $GameFiles 'default.xbe') (Join-Path $h 'root\game_files')
@@ -97,7 +102,7 @@ if ($Pgo) {
         Copy-Item (Join-Path $pb 'Release\crash_twoc.exe'), $pgort (Join-Path $h 'pgi')
         Write-Host "PGO: training (cast_bug, avalanch, upstairs) in $h"
         $t1 = Get-Date
-        & $bash (Join-Path $here 'pgo_train.sh') ($h -replace '\\', '/') (Join-Path $h 'pgi\crash_twoc.exe') $pb $pgosweep
+        & $bash (Join-Path $h 'pgo_train.sh') ($h -replace '\\', '/') (Join-Path $h 'pgi\crash_twoc.exe') $pb $pgosweep
         $trainMin = ((Get-Date) - $t1).TotalMinutes
         if ($LASTEXITCODE) { throw 'the PGO training failed' }
     } finally {
