@@ -17,21 +17,33 @@ which opens every warp room (all crystals), so every level in the tests can be r
 *** hold comfortably, close the game and let it cool down.
 
 New in this package:
-  - Less work a frame for the processor, with the same picture: the render thread (which
-    draws each game frame two or three times at 144 Hz) now reuses the frame before's
-    set-up and its geometry already in the graphics memory for most of the first drawing,
-    and the game thread records about half as much a frame. On the desktop that took about
-    a third off the render thread's time; the game thread gained less.
-  - The logs measure more (for me): how long the graphics driver itself takes inside the
-    draws, how much of a frame repeats the frame before, and a "CPU clock down" line in
-    the power log when the processor's speed drops by more than a tenth for 10 seconds
-    (last time's drop about 2.5 minutes in left no line).
-  - Collect logs: the dates in events.txt are now marked as local time, with the UTC
-    time beside them (they said UTC before, but were local).
-  - The first test is longer this time (part C, test 1): twenty fullscreen starts, then
-    Collect logs; and test 2 is two 10-minute runs standing at cast_bug's start.
+  - Quit game: a button next to Resume at the bottom of the settings menu, on every tab.
+    It asks "Quit the game? Unsaved progress will be lost." with Yes / No (No is first;
+    B means No) and then closes the game cleanly: your settings saved, a save copy that is
+    being made finished first, the sound faded out. With only the controller: D-pad down
+    to it, A, then Left and A for Yes.
+  - Graphics card (Display tab, at the top): Automatic, or a card by name. The Legion Go
+    has one graphics chip, so leave it on Automatic; the About tab says which card draws
+    and which one the screen is on.
+  - Settings that only take effect at the next start (the Graphics card, Skip the title
+    animation, Speakers on the Audio tab, and a save restore on the Saves tab) now ask
+    "Restart the game to ...? Unsaved progress will be lost." with Restart now / Later
+    (Later is first; B means Later). Restart now closes the game and starts it again from
+    this window with your settings kept; Later leaves an orange line at the bottom of the
+    menu, "Changes waiting for a restart: ...", with its own Restart now button.
+  - The settings menu keeps the same size and place on every tab: a tab longer than the
+    screen scrolls inside it (the D-pad moves through it, the mouse wheel and the touch
+    screen scroll it), and the buttons at the bottom stay where they are.
+  - The About tab names the processor (cores, threads) and says the game isn't slowed
+    by Windows' power throttling (the game now asks Windows not to).
+  - The same build as last time otherwise, with one fix from the desktop: Sea Shell's
+    water no longer stops the in-between frames there (it was stuck at 60 / 60).
 
 Still from last time:
+  - Less work a frame for the processor, with the same picture (the render thread reuses
+    the frame before's set-up; the game thread records about half as much), and the logs'
+    measures of the graphics driver's share, the repeats and the "CPU clock down" line.
+  - Collect logs' events.txt dates marked as local time, with the UTC time beside them.
   - "Reset display settings to defaults", a button at the bottom of the Display tab. It
     asks first (Yes / No; works with the controller: D-pad to the button, A, then Left for
     Yes and A, or B for No) and puts every setting on that tab back to the game's own
@@ -51,9 +63,9 @@ Still from last time:
     crash_twoc.ini neither read nor written (the settings menu says so at its top). If the
     game won't start after a settings change, use this.
   - An About tab in the settings menu (the fifth; LB / RB): the build, the graphics chip and
-    its driver, the screen's mode and refresh rate, the Windows version and the game files'
-    check. THIRD_PARTY_LICENSES.txt lists the other people's code inside the game and
-    beside it, with their licences.
+    its driver, the screen's mode and refresh rate, the processor, the Windows version and
+    the game files' check. THIRD_PARTY_LICENSES.txt lists the other people's code inside
+    the game and beside it, with their licences.
   - And from before: the power log (run_twoc.power.log, written straight to the disk,
     and Windows' crash records in Collect logs' zip), the render sizes grouped by shape,
     the frozen-splash fix (if the splash ever freezes: alt+tab once), Render scale, MSAA +
@@ -171,10 +183,11 @@ B. Start the game (on the Legion Go)
     Frame rate "Match display", Anisotropic filtering 4x, Anti-aliasing Off, Render scale
     100%, Render thread Auto, Adaptive frame rate On. The tests below say which of these
     to change, and when to put them back.
-6.  To stop: close the game window (or Alt+F4). The black console window should close with
-    it within a second or two. If it stays open (still saying "Crash is running"), the
-    game's process didn't finish exiting: note that in Test notes.txt, with whether
-    Task Manager > Details still lists crash_twoc.exe. "Collect logs.bat" ends it.
+6.  To stop: Quit game at the bottom of the settings menu (Yes), or close the game window
+    (or Alt+F4). The black console window should close with it within a second or two. If
+    it stays open (still saying "Crash is running"), the game's process didn't finish
+    exiting: note that in Test notes.txt, with whether Task Manager > Details still lists
+    crash_twoc.exe. "Collect logs.bat" ends it.
 
 
 C. The tests
@@ -284,6 +297,17 @@ All on the Legion Go. Write what you see in Test notes.txt as you go.
        orange "Safe settings" line at the top of the settings menu? Close it; then
        "Play Crash.bat" should start with your settings as before.
      - View + Menu held about a second: does it open and close the settings menu?
+     - Quit game with the controller only (D-pad down to it, A; No first, then again and
+       Yes): does the game close, and the black window with it?
+     - Switch tabs with LB / RB: does the menu stay the same size and in the same place?
+       On the Controls tab, does the D-pad scroll down the long list and back up?
+     - Skip the title animation off (Display tab): does it ask "Restart the game to play
+       the title animation again?" Choose Later: is there an orange "Changes waiting for a
+       restart" line at the bottom? Press its Restart now: does the game come back (the
+       title animation plays at its own speed now)? Then switch it on again and Restart now.
+     - The About tab: does it name the processor (AMD Ryzen Z1 Extreme, 8 cores, 16
+       threads) and say "Power throttling: not throttled"? Graphics card: AMD Radeon,
+       "Chosen by: Automatic (the only graphics card)"?
      - Pause when in the background (part F): turn it on, then press the Windows key or
        minimise the game: does the game stop and go quiet, and go on when you come back?
 
@@ -341,10 +365,11 @@ In the settings menu (Menu held, or F1), the "Saves" tab lists the copies (date,
 size, and when each was taken) with three buttons:
   Back up now ........... a copy of the save as it is now
   Restore this one ...... the chosen copy replaces the save at the next start (the game
-                          has its save loaded while it runs). Close the game, start it
-                          again, then load at the Load/Save console. The save in use is
-                          copied first and kept in the list. "Cancel the restore" undoes it
-                          until then.
+                          has its save loaded while it runs). It asks "Restart the game to
+                          restore ...?": Restart now starts the game again (or Later, and
+                          close it yourself), then load at the Load/Save console. The save
+                          in use is copied first and kept in the list. "Cancel the restore"
+                          undoes it until then.
   Open backups folder ... shows the copies in File Explorer
 If a save ever goes wrong (a slot shows the wrong progress, or the game won't load it):
 Restore a copy from before it went wrong, as above.
@@ -379,7 +404,11 @@ All in the settings menu (Menu held, or F1), saved to crash_twoc.ini.
   Skip the title animation (Display tab, on in this package) ......... at each start the
         game plays its title animation (Crash and the title music) before the main menu;
         on, the animation runs many times faster, so the menu opens about 20 seconds sooner. The logos and
-        the menu itself are the same. From the next start.
+        the menu itself are the same. From the next start (it asks whether to restart now).
+  Graphics card (Display tab, Automatic in this package) ..... which graphics chip draws the
+        game; on a PC with two (a laptop's Intel and NVIDIA) it can name one. From the next
+        start: it asks "Restart the game to use ...?" (Restart now / Later).
+  Quit game (bottom of the menu, every tab) ......... asks, then closes the game cleanly.
 
 
 If something goes wrong

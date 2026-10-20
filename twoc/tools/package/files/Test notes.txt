@@ -87,6 +87,14 @@ between tests).
    afterwards with your settings?
    View + Menu held: did it open and close the settings menu?
    Pause when in the background: did the game stop and go quiet, and go on again?
+   Quit game with the controller (No first, then Yes): did the game and the black window close?
+   Switching tabs (LB / RB): did the menu keep its size and place? Controls tab: did the D-pad
+   scroll down the list and back up?
+   Skip the title animation off: did it ask to restart? Later: the orange line at the bottom?
+   Its Restart now: did the game come back, with the title animation at its own speed?
+   (Then on again, Restart now.)
+   About tab: the processor line, "Power throttling: not throttled", Graphics card "Chosen by:
+   Automatic (the only graphics card)"?
 
 Optional: DXVK (the DXVK-test folder), cast_bug's start:
       Game:        /s    Shown:        /s
