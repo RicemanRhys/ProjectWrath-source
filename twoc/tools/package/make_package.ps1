@@ -1,7 +1,13 @@
 # The Legion Go package (notes 18.83): a folder that runs the game on another Windows PC.
 #
 #   powershell -NoProfile -ExecutionPolicy Bypass -File twoc\tools\package\make_package.ps1
-#       [-Out DIR] [-Exe crash_twoc.exe] [-GameFiles DIR] [-Save UDATA_DIR] [-Force]
+#       [-Out DIR] [-Exe crash_twoc.exe] [-GameFiles DIR] [-Save UDATA_DIR] [-Force] [-Pgo]
+#
+# -Pgo (step 95, notes 18.98): the exe built with profile-guided optimisation in a build folder of its own
+# (twoc\build_pgo; twoc\build, the ordinary build, untouched): linked instrumented (TWOC_PGO=GEN), trained by
+# pgo_train.sh through the sweep harness (a scratch copy in %TEMP%: cast_bug's start gliding, avalanch, the upstairs
+# room, ~6 minutes with the menu, intro and hub on the way; needs Git Bash, the repo's .venv and this PC's display),
+# then linked again with the counts (TWOC_PGO=USE). /fp stays precise. PACKAGE.txt says so.
 #
 # Makes DIR (default: Desktop\Crash\LegionGoPackage) with:
 #   crash_twoc.exe and the Visual C++ runtime DLLs it imports (vcruntime140.dll, vcruntime140_1.dll,
@@ -30,15 +36,17 @@ param(
     [string]$Exe,
     [string]$GameFiles,
     [string]$Save,
-    [switch]$Force
+    [switch]$Force,
+    [switch]$Pgo
 )
 $ErrorActionPreference = 'Stop'
 $here = $PSScriptRoot
 $twoc = Split-Path -Parent (Split-Path -Parent $here)
 $repo = Split-Path -Parent $twoc
+if ($Pgo -and $Exe) { throw '-Pgo builds its own exe: leave -Exe out' }
 if (-not $Exe) { $Exe = Join-Path $twoc 'build\Release\crash_twoc.exe' }
 if (-not $GameFiles) { $GameFiles = Join-Path $repo 'game_files' }
-$Exe = (Resolve-Path $Exe).Path
+if (-not $Pgo) { $Exe = (Resolve-Path $Exe).Path }
 $GameFiles = (Resolve-Path $GameFiles).Path
 if (-not (Test-Path (Join-Path $GameFiles 'default.xbe'))) { throw "No default.xbe in $GameFiles" }
 if (-not (Test-Path (Join-Path $GameFiles 'Crashdat'))) { throw "No Crashdat\ in $GameFiles" }
@@ -52,6 +60,66 @@ $dumpbin = Get-ChildItem (Join-Path $vs 'VC\Tools\MSVC\*\bin\Hostx64\x64\dumpbin
 $crt = Get-ChildItem (Join-Path $vs 'VC\Redist\MSVC\*\x64\Microsoft.VC*.CRT') -Directory |
        Where-Object { $_.FullName -match '\\\d+\.\d+\.\d+\\' } | Sort-Object FullName | Select-Object -Last 1
 if (-not $dumpbin -or -not $crt) { throw 'dumpbin or the VC redist CRT folder not found' }
+
+# -Pgo (step 95): instrumented, trained, linked again, in twoc\build_pgo.
+$pgoLine = 'off'
+if ($Pgo) {
+    $msvcBin = Split-Path -Parent $dumpbin.FullName
+    $pgort = Join-Path $msvcBin 'pgort140.dll'
+    $pgosweep = Join-Path $msvcBin 'pgosweep.exe'
+    if (-not (Test-Path $pgort) -or -not (Test-Path $pgosweep)) { throw "pgort140.dll or pgosweep.exe not in $msvcBin" }
+    $git = (Get-Command git -ErrorAction Stop).Source        # Git for Windows: ...\Git\cmd\git.exe
+    $bash = Join-Path (Split-Path -Parent (Split-Path -Parent $git)) 'bin\bash.exe'
+    if (-not (Test-Path $bash)) { throw "Git Bash not found beside $git" }
+    if (-not (Test-Path (Join-Path $repo '.venv\Scripts\python.exe'))) { throw 'The repo''s .venv (the harness''s Python) not found' }
+    $pb = Join-Path $twoc 'build_pgo'
+    $pgd = Join-Path $pb 'crash_twoc.pgd'
+    $cfg = @('-S', $twoc, '-B', $pb, "-DTWOC_PGO_PGD=$pgd")
+    $sdl = Join-Path $twoc 'build\_deps\sdl3-src'      # SDL from the ordinary build's download (no network)
+    if (Test-Path (Join-Path $sdl 'CMakeLists.txt')) { $cfg += "-DFETCHCONTENT_SOURCE_DIR_SDL3=$sdl" }
+    $t0 = Get-Date
+    Write-Host 'PGO: the instrumented build (twoc\build_pgo)'
+    & cmake @cfg -DTWOC_PGO=GEN | Out-Null
+    if ($LASTEXITCODE) { throw 'cmake configure (GEN) failed' }
+    & cmake --build $pb --config Release --parallel | Out-Null
+    if ($LASTEXITCODE) { throw 'the instrumented build failed' }
+    Get-ChildItem $pb -Filter '*.pgc' | Remove-Item
+    # The harness: a scratch copy of the sweep folder, its own root\game_files (default.xbe, an empty UDATA, Crashdat
+    # as a junction), the instrumented exe beside pgort140.dll; a path without spaces for the harness's arguments.
+    $h = Join-Path $env:TEMP ('twoc_pgo_' + [guid]::NewGuid().ToString('N').Substring(0, 8))
+    $junction = Join-Path $h 'root\game_files\Crashdat'
+    try {
+        Copy-Item -Recurse (Join-Path $twoc 'tools\diag\sweep') $h
+        New-Item -ItemType Directory -Force -Path (Join-Path $h 'root\game_files\UDATA'), (Join-Path $h 'runs'),
+            (Join-Path $h 'pgi') | Out-Null
+        Copy-Item (Join-Path $GameFiles 'default.xbe') (Join-Path $h 'root\game_files')
+        New-Item -ItemType Junction -Path $junction -Target (Join-Path $GameFiles 'Crashdat') | Out-Null
+        Copy-Item (Join-Path $pb 'Release\crash_twoc.exe'), $pgort (Join-Path $h 'pgi')
+        Write-Host "PGO: training (cast_bug, avalanch, upstairs) in $h"
+        $t1 = Get-Date
+        & $bash (Join-Path $here 'pgo_train.sh') ($h -replace '\\', '/') (Join-Path $h 'pgi\crash_twoc.exe') $pb $pgosweep
+        $trainMin = ((Get-Date) - $t1).TotalMinutes
+        if ($LASTEXITCODE) { throw 'the PGO training failed' }
+    } finally {
+        $tl = Join-Path $pb 'pgo_train_logs'                                # the training's logs, kept
+        New-Item -ItemType Directory -Force -Path $tl | Out-Null
+        Get-ChildItem (Join-Path $h 'runs') -Filter 'pgt_*' -ErrorAction SilentlyContinue |
+            Where-Object { $_.Extension -in '.txt', '.log' } | Copy-Item -Destination $tl
+        if (Test-Path $junction) { [IO.Directory]::Delete($junction) }     # the link only, never what it points to
+        if ((Test-Path $h) -and -not (Test-Path $junction)) { Remove-Item -Recurse -Force $h }
+    }
+    $pgc = @(Get-ChildItem $pb -Filter '*.pgc')
+    if ($pgc.Count -lt 3) { throw "PGO: $($pgc.Count) count files from the training, 3 expected" }
+    Write-Host 'PGO: linking again with the counts'
+    & cmake @cfg -DTWOC_PGO=USE | Out-Null
+    if ($LASTEXITCODE) { throw 'cmake configure (USE) failed' }
+    & cmake --build $pb --config Release --parallel | Out-Null
+    if ($LASTEXITCODE) { throw 'the PGO build failed' }
+    $Exe = (Resolve-Path (Join-Path $pb 'Release\crash_twoc.exe')).Path
+    $pgoLine = ('on (twoc\build_pgo: trained {0:N1} min on cast_bug, avalanch and the upstairs room, {1} count files;' +
+                ' {2:N1} min in all)') -f $trainMin, $pgc.Count, ((Get-Date) - $t0).TotalMinutes
+    Write-Host "PGO: $pgoLine"
+}
 
 # A stale exe is the easiest mistake: say so if a source file is newer.
 $exeTime = (Get-Item $Exe).LastWriteTime
@@ -154,6 +222,7 @@ $pkg = @(
     "       xboxrecomp $xr",
     "crash_twoc.exe: $((Get-Item $Exe).Length) bytes, built $($exeTime.ToString('yyyy-MM-dd HH:mm:ss')), SHA-256 $hash",
     "                link-time code generation: $ltcg",
+    "                profile-guided optimisation: $pgoLine",
     ("game_files: {0} files, {1:N0} MB{2}" -f $gf.Count, (($gf | Measure-Object Length -Sum).Sum / 1MB), $(if ($Save) { ", with a save copied in from $Save" } else { ', no saves' })),
     "",
     "DLLs the exe imports (dumpbin /dependents) and where they come from:"

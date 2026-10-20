@@ -28,6 +28,18 @@ if(MSVC AND TWOC_LTCG)
     set(CMAKE_INTERPROCEDURAL_OPTIMIZATION_RELEASE ON)
 endif()
 
+# Profile-guided optimisation (step 95, notes 18.98), for make_package.ps1
+# -Pgo in a build folder of its own: TWOC_PGO=GEN links the exe instrumented
+# (/GENPROFILE, its counts database TWOC_PGO_PGD), the training runs write
+# .pgc files beside that, and TWOC_PGO=USE links it again optimised by them
+# (/USEPROFILE). Needs link-time code generation. /fp stays precise. Empty
+# (the default): an ordinary build.
+set(TWOC_PGO "" CACHE STRING "Profile-guided optimisation: empty, GEN (instrumented) or USE")
+set(TWOC_PGO_PGD "" CACHE FILEPATH "The PGO counts database (.pgd) for TWOC_PGO")
+if(TWOC_PGO AND NOT (MSVC AND TWOC_LTCG))
+    message(FATAL_ERROR "TWOC_PGO needs MSVC and TWOC_LTCG")
+endif()
+
 # Common definitions
 add_compile_definitions(
     WIN32_LEAN_AND_MEAN
@@ -210,6 +222,11 @@ if(MSVC)
     target_link_options(${PROJECT_NAME} PRIVATE
         /LARGEADDRESSAWARE
     )
+    if(TWOC_PGO STREQUAL "GEN")     # step 95: profile-guided optimisation (above)
+        target_link_options(${PROJECT_NAME} PRIVATE $<$<CONFIG:Release>:/GENPROFILE:PGD=${TWOC_PGO_PGD}>)
+    elseif(TWOC_PGO STREQUAL "USE")
+        target_link_options(${PROJECT_NAME} PRIVATE $<$<CONFIG:Release>:/USEPROFILE:PGD=${TWOC_PGO_PGD}>)
+    endif()
     # The generated code files can be very large. Increase object file section limit.
     # /MP: compile the five ~190K-line generated files in parallel.
     target_compile_options(${PROJECT_NAME} PRIVATE /bigobj /MP)
