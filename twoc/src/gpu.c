@@ -18,11 +18,13 @@ static twoc_gpu_t g_gpu[TWOC_GPU_MAX];
 static int g_n;
 static char g_asked[128];               /* "" Automatic */
 static char g_note[256];
+static char g_used[128];                /* the card the device was made on */
 
 int twoc_gpu_count(void) { return g_n; }
 const twoc_gpu_t *twoc_gpu_at(int i) { return i >= 0 && i < g_n ? &g_gpu[i] : NULL; }
 const char *twoc_gpu_asked(void) { return g_asked; }
 const char *twoc_gpu_note(void) { return g_note; }
+const char *twoc_gpu_in_use(void) { return g_used; }
 
 void twoc_gpu_label(const twoc_gpu_t *g, char *buf, size_t cap)
 {
@@ -220,6 +222,7 @@ void twoc_gpu_device_made(void *dev, HWND hwnd)
     int used, disp;
 
     where(dev, hwnd, &used, &disp, name, sizeof(name));
+    snprintf(g_used, sizeof(g_used), "%s", used >= 0 ? g_gpu[used].name : name);
     fprintf(stderr, "[GPU] the device is on %s%s%s; the window's display is on %s%s%s\n",
             used >= 0 ? "graphics card " : "", used >= 0 ? "" : name[0] ? name : "an adapter not listed",
             used >= 0 ? g_gpu[used].name : "",

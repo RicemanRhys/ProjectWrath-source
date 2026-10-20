@@ -40,6 +40,8 @@
  *   music_volume   = 0-100                    RECOMP_MUSIC_VOLUME (stream voices: music, ambience, speech)
  *   effects_volume = 0-100                    RECOMP_EFFECTS_VOLUME (buffer voices: the sound effects)
  *   speakers       = stereo | 5.1             RECOMP_SPEAKERS (from the next start)
+ *   gpu            = auto | <adapter name>    RECOMP_GPU (step 97: the graphics card, gpu.h; matched by
+ *                                             name; unset or not on this PC: auto; from the next start)
  *   hrtf           = 0 | 1                    RECOMP_HRTF (unset: on)
  *   pause          = 0 | 1                    RECOMP_OVERLAY_PAUSE (unset: on)
  *   keyboard       = 0 | 1                    RECOMP_KEYBOARD (unset: on)
@@ -166,6 +168,7 @@ typedef struct {
     int ao;                             /* step 92: TWOC_AO_* (off also unset) */
     int ao_strength;                    /* step 92: percent, 0-100 (TWOC_AO_STRENGTH_DEFAULT also unset) */
     int ao_half;                        /* step 92: 1 worked out at half the resolution, upsampled (unset: 0) */
+    char gpu[128];                      /* step 97: "" Automatic (also unset), else a graphics card's name */
     twoc_controls_t controls;           /* the controller map and the key bindings */
 } twoc_settings_t;
 
@@ -177,7 +180,8 @@ void twoc_settings_current(twoc_settings_t *s);
  * run without the file has): render size, render scale, pacing, frame rate,
  * adaptive, render thread, the counter, the startup message, skipping the
  * title, anisotropy, anti-aliasing, ambient occlusion, the HUD. Fullscreen,
- * the aspect ratio, audio, controls and saves are left as they are. */
+ * the aspect ratio, the graphics card (step 97), audio, controls and saves
+ * are left as they are. */
 void twoc_settings_display_defaults(twoc_settings_t *s);
 /* Write `s` to crash_twoc.ini. Returns 0 on success, 1 when the file is
  * ignored this run (step 93: RECOMP_IGNORE_INI, the safe settings: the

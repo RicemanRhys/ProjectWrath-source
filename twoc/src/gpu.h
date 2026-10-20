@@ -62,6 +62,8 @@ const twoc_gpu_t *twoc_gpu_at(int i);
 const char *twoc_gpu_asked(void);
 /* "" or, when the name asked for isn't on this PC, the menu's note about it. */
 const char *twoc_gpu_note(void);
+/* The name of the card the device was made on ("" before it was). */
+const char *twoc_gpu_in_use(void);
 /* The card the device is on now and the window's display's card, as About's lines. */
 void twoc_gpu_about(void *dev, HWND hwnd, char *used, size_t used_cap, char *display, size_t display_cap);
 /* The adapter whose name is `name` (case and outer spaces aside), or -1. */

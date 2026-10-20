@@ -32,6 +32,7 @@
 #include "overlay.h"
 #include "pads.h"
 #include "saves.h"
+#include "gpu.h"
 
 /* xboxrecomp apu.h: the output's channels (2 or 6) and the device's */
 extern "C" int mcpx_apu_output_channels(int *device_channels);
@@ -363,6 +364,16 @@ static void help(const char *text)
 {
     ImGui::PushTextWrapPos(ImGui::GetContentRegionAvail().x + ImGui::GetCursorPosX());
     ImGui::TextDisabled("%s", text);
+    ImGui::PopTextWrapPos();
+}
+
+/* Step 97: a line in the menu's amber, wrapped, for something to notice. */
+static const ImVec4 k_amber(1.0f, 0.8f, 0.3f, 1.0f);
+
+static void amber(const char *text)
+{
+    ImGui::PushTextWrapPos(ImGui::GetContentRegionAvail().x + ImGui::GetCursorPosX());
+    ImGui::TextColored(k_amber, "%s", text);
     ImGui::PopTextWrapPos();
 }
 
@@ -753,6 +764,48 @@ static int tab_display(twoc_settings_t *s, const ovl_info_t *in)
     char buf[64], line[160];
 
     ImGui::SeparatorText("Display");
+    {   /* step 97: the graphics card the game draws on, from the next start (gpu.h) */
+        int n = twoc_gpu_count(), found = s->gpu[0] ? twoc_gpu_find(s->gpu) : -1;
+        char lbl[192], cur[192];
+        if (!s->gpu[0])
+            snprintf(cur, sizeof(cur), "Automatic");
+        else if (found >= 0)
+            twoc_gpu_label(twoc_gpu_at(found), cur, sizeof(cur));
+        else
+            snprintf(cur, sizeof(cur), "%s (not on this PC)", s->gpu);
+        ImGui::SetNextItemWidth(ImGui::GetFontSize() * 20);
+        if (ImGui::BeginCombo("Graphics card", cur)) {
+            if (ImGui::Selectable("Automatic", !s->gpu[0]) && s->gpu[0]) {
+                s->gpu[0] = 0;
+                r |= OVL_CHANGED;
+            }
+            if (s->gpu[0] && found < 0)     /* the file's card, not here: listed so it shows chosen */
+                ImGui::Selectable(cur, true);
+            for (i = 0; i < n; i++) {
+                const twoc_gpu_t *g = twoc_gpu_at(i);
+                twoc_gpu_label(g, lbl, sizeof(lbl));
+                snprintf(lbl + strlen(lbl), sizeof(lbl) - strlen(lbl), "##gpu%d", i);
+                if (ImGui::Selectable(lbl, found == i) && found != i) {
+                    snprintf(s->gpu, sizeof(s->gpu), "%s", g->name);
+                    r |= OVL_CHANGED;
+                }
+            }
+            ImGui::EndCombo();
+        }
+        more("Which graphics card draws the game. Automatic: the one Windows picks for it (its own Graphics "
+             "setting for crash_twoc.exe, under Settings > System > Display > Graphics, else the driver's "
+             "choice), and the game asks for the high-performance card, so a laptop's NVIDIA or AMD GPU rather "
+             "than its Intel one. A card chosen here is used whatever Windows says; it is remembered by its "
+             "name. On a laptop the screen may hang off another card than the one drawing: Windows copies "
+             "each frame across. From the next start.");
+        snprintf(line, sizeof(line), "Now: %s.", twoc_gpu_in_use()[0] ? twoc_gpu_in_use() : "not known");
+        if (_stricmp(s->gpu, twoc_gpu_asked()) != 0)
+            snprintf(line + strlen(line), sizeof(line) - strlen(line), " %s from the next start.",
+                     s->gpu[0] ? s->gpu : "Automatic");
+        help(line);
+        if (twoc_gpu_note()[0] && _stricmp(s->gpu, twoc_gpu_asked()) == 0)
+            amber(twoc_gpu_note());
+    }
     {
         bool f = s->fullscreen != 0;
         if (ImGui::Checkbox("Fullscreen (borderless)    Alt+Enter", &f)) {
@@ -1195,7 +1248,7 @@ static int tab_display(twoc_settings_t *s, const ovl_info_t *in)
          "Render size Game (480 lines), Render scale 100%, Pacing Auto, Frame rate Game (60), Adaptive On, "
          "Render thread Off, Show frame rate Off, the startup message on, Skip the title animation off, "
          "Anisotropic filtering Off, Anti-aliasing Off, Ambient occlusion Off, HUD in the centre. Fullscreen, "
-         "the aspect ratio, sound, controls and saves stay as they are. Asks first.");
+         "the aspect ratio, the graphics card, sound, controls and saves stay as they are. Asks first.");
     ImGui::SetNextWindowPos(ImGui::GetMainViewport()->GetCenter(), ImGuiCond_Appearing, ImVec2(0.5f, 0.5f));
     g_reset_open = false;
     if (ImGui::BeginPopupModal(RESET_ASK, NULL, ImGuiWindowFlags_AlwaysAutoResize | ImGuiWindowFlags_NoSavedSettings)) {
@@ -1203,7 +1256,7 @@ static int tab_display(twoc_settings_t *s, const ovl_info_t *in)
         bool no = g_reset_shut;         /* the overlay closed with the question open */
         ImGui::PushTextWrapPos(ImGui::GetFontSize() * 24);
         ImGui::TextUnformatted("Every setting on the Display tab goes back to its default. Fullscreen, the "
-                               "aspect ratio, sound, controls and saves stay as they are.");
+                               "aspect ratio, the graphics card, sound, controls and saves stay as they are.");
         ImGui::PopTextWrapPos();
         ImGui::Spacing();
         if (ImGui::Button("Yes", ImVec2(ImGui::GetFontSize() * 6, 0))) {

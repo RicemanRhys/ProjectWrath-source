@@ -50,6 +50,9 @@ static const key_t_ g_fixed[] = {
     { "music_volume", "RECOMP_MUSIC_VOLUME", "0-100: music, ambience and speech (the game's streams)" },
     { "effects_volume", "RECOMP_EFFECTS_VOLUME", "0-100: the sound effects" },
     { "speakers", "RECOMP_SPEAKERS", "stereo or 5.1 (from the next start)" },
+    { "gpu", "RECOMP_GPU",
+      "auto (Windows' choice; the game asks for the high-performance card) or a graphics card's name as the F1"
+      " menu's Display tab lists it (from the next start)" },
     { "hrtf", "RECOMP_HRTF", "1: 3D sounds placed left-right (the Xbox's HRTF), 0: centred" },
     { "pause", "RECOMP_OVERLAY_PAUSE", "1: the game waits while the overlay is open, 0: it runs behind it" },
     { "pause_unfocused", "RECOMP_PAUSE_UNFOCUSED",
@@ -119,7 +122,7 @@ static int binding_ok(size_t i, const char *v)
 /* Keys the command line overrode: the file's own value, which a save keeps
  * unless the player changed that setting in the overlay. g_start is the
  * settings in effect at the start, to tell. */
-static char g_file_val[N_KEYS][64];
+static char g_file_val[N_KEYS][160];
 static int g_overridden[N_KEYS];
 static twoc_settings_t g_start;
 
@@ -374,7 +377,7 @@ int twoc_settings_ignored(void)
 void twoc_settings_load(void)
 {
     FILE *f;
-    char line[256];
+    char line[512];
     int lineno = 0;
 
     keys_init();
@@ -517,6 +520,16 @@ void twoc_settings_current(twoc_settings_t *s)
     s->ao_half = env_on("RECOMP_AO_HALF");
     s->pause_unfocused = env_on("RECOMP_PAUSE_UNFOCUSED");
     s->fast_title = env_on("RECOMP_DEV_FAST_TITLE");
+    v = getenv("RECOMP_GPU");           /* step 97: auto (and unset) is "" */
+    if (v) {
+        while (*v == ' ' || *v == '\t')
+            v++;
+        snprintf(s->gpu, sizeof(s->gpu), "%s", v);
+        for (i = strlen(s->gpu); i > 0 && (s->gpu[i - 1] == ' ' || s->gpu[i - 1] == '\t'); i--)
+            s->gpu[i - 1] = 0;
+        if (_stricmp(s->gpu, "auto") == 0 || _stricmp(s->gpu, "automatic") == 0)
+            s->gpu[0] = 0;
+    }
     keys_init();
     controls_default_pad(&s->controls);
     controls_default_keys(&s->controls);
@@ -613,6 +626,8 @@ static void key_text(const twoc_settings_t *s, size_t i, char *buf, size_t cap)
         snprintf(buf, cap, "1");
     else if (strcmp(k, "fast_title") == 0 && s->fast_title)
         snprintf(buf, cap, "1");
+    else if (strcmp(k, "gpu") == 0)
+        snprintf(buf, cap, "%s", s->gpu[0] ? s->gpu : "auto");     /* step 97 */
     else if (strcmp(k, "controller_input") == 0 && s->controller_input != PADS_SDL)
         snprintf(buf, cap, "%s", pads_mode_name(s->controller_input));     /* sdl, the default: unwritten */
     else if (i >= K_PAD) {              /* a binding: written only when it isn't the default */
@@ -654,7 +669,7 @@ int twoc_settings_save(const twoc_settings_t *s)
     fprintf(f, "# Crash TWOC settings, written by the settings overlay (F1 in the game window).\n"
                "# run_twoc.ps1 switches and RECOMP_* variables win over these. Delete the file for the defaults.\n");
     for (i = 0; i < N_KEYS; i++) {
-        char now[64], then[64];
+        char now[160], then[160];
         const char *v = now;
         key_text(s, i, now, sizeof(now));
         key_text(&g_start, i, then, sizeof(then));
