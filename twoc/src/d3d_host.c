@@ -4325,7 +4325,13 @@ static void replay_run(void)
  * decides whether to interpolate: a step over 2 units or a turn over 30
  * degrees, or under half the frame's draws matched by kind in the frame
  * before (program or FVF, pixel shader, textures, target, sizes), is a cut,
- * and the frame is shown k times as it is. Otherwise sub-frame s of k draws
+ * and the frame is shown k times as it is. Step 96 (notes 18.99): the
+ * textures by their shape, not which they are (ic_key's loose key): Sea
+ * Shell's water and caustics are flipbooks, a texture each frame, and with
+ * enough of them in view every frame read as a cut. Half of the larger of
+ * the two frames' draws, so a frame that lost or gained most of them is
+ * one. A frame shown as it is still becomes the frame before (ic_end): the
+ * next is judged against it. Otherwise sub-frame s of k draws
  * at t = s/k with Cam(t) (position lerped, rotation slerped, row lengths
  * lerped) and P(t) (lerped): a program draw's c96-c99 become
  * (WVP P^-1 Cam Cam(t)^-1 P(t))^T and its camera-position registers Cam(t)'s
@@ -4622,10 +4628,10 @@ static uint32_t fnv(uint32_t h, uint32_t v)
     return h;
 }
 
-/* A draw's kind, for matching it with the frame before's. `loose`: its
- * textures by their shape (format, size, levels) instead of which they are
- * (step 68: a flipbook's frames are a texture each). */
-static uint32_t ic_key(const d3dh_draw_t *d, int loose)
+/* A draw's kind, for matching it with the frame before's. Into `loose`:
+ * the same with its textures by their shape (format, size, levels) instead
+ * of which they are (step 68: a flipbook's frames are a texture each). */
+static uint32_t ic_key(const d3dh_draw_t *d, uint32_t *loose)
 {
     /* Step 84 (notes 18.87): the pixel shader's part, up to 56 states byte
      * by byte (~0.3 us a draw, twice a draw), kept for the last two shaders
@@ -4638,7 +4644,7 @@ static uint32_t ic_key(const d3dh_draw_t *d, int loose)
         d3dh_state_t rs[56];
     } memo[2];
     static unsigned next;
-    uint32_t h = 2166136261u;
+    uint32_t h = 2166136261u, l;
     unsigned s, i;
 
     GAME_SIDE();
@@ -4662,12 +4668,16 @@ static uint32_t ic_key(const d3dh_draw_t *d, int loose)
             memo[k].h1 = h;
         }
     }
-    for (s = 0; s < 4; s++)
-        if (!loose || !d->tex[s])
-            h = fnv(h, d->tex[s] ? d->tex[s]->key : 0);
-        else
-            h = fnv(fnv(fnv(h, d->tex[s]->format | d->tex[s]->levels << 8 | d->tex[s]->cube << 12),
+    for (s = 0, l = h; s < 4; s++)
+        if (!d->tex[s]) {
+            h = fnv(h, 0);
+            l = fnv(l, 0);
+        } else {
+            h = fnv(h, d->tex[s]->key);
+            l = fnv(fnv(fnv(l, d->tex[s]->format | d->tex[s]->levels << 8 | d->tex[s]->cube << 12),
                         d->tex[s]->width), d->tex[s]->height);
+        }
+    *loose = fnv(fnv(fnv(fnv(l, d->target.data), d->prim), d->vert_count), d->index_count);
     h = fnv(h, d->target.data);
     h = fnv(h, d->prim);
     h = fnv(h, d->vert_count);
@@ -4689,15 +4699,14 @@ static int ic_hand(const double *m)
 }
 
 /* Step 62: a draw's object, with its world `w` and its program constants
- * when it has bones (else NULL). */
-static void ic_obj(rcmd_t *c, uint32_t key, const double *w, const float *k4, const uint32_t *cmask,
+ * when it has bones (else NULL); `key` and `lk` its kind (ic_key). */
+static void ic_obj(rcmd_t *c, uint32_t key, uint32_t lk, const double *w, const float *k4, const uint32_t *cmask,
                    const uint32_t *fresh)
 {
     /* The render states kept in the key (below): 14, 19, 20, 22, 52, 55, 56, 168 (ZWRITE, blend, CULL, STENCIL*,
      * COLORWRITE). */
     const d3dh_draw_t *d = &c->u.draw.d;
     unsigned cur = (unsigned)g_ir, i, j;
-    uint32_t lk;
     iobj_t *o;
 
     GAME_SIDE();
@@ -4722,9 +4731,8 @@ static void ic_obj(rcmd_t *c, uint32_t key, const double *w, const float *k4, co
     o = &g_iobj[cur][g_iobj_n[cur]];
     o->kind = key;
     o->mesh = d->mesh;
-    lk = ic_key(d, 1);                  /* step 68: the loose key, through the same steps */
     key = fnv(key, d->mesh);
-    lk = fnv(lk, d->mesh);
+    lk = fnv(lk, d->mesh);              /* step 68: the loose key, through the same steps */
     for (i = 0; i < d->n_rs; i++)       /* a pass that only marks stencil is another object than the model's */
         switch (d->rs[i].state) {       /* step 84: keep[]'s states, as a switch */
         case 14: case 19: case 20: case 22: case 52: case 55: case 56: case 168:
@@ -4804,7 +4812,7 @@ static void ic_record(rcmd_t *c)
 {
     const d3dh_draw_t *d = &c->u.draw.d;
     unsigned ci, cur = (unsigned)g_ir;
-    uint32_t key = ic_key(d, 0);
+    uint32_t lk, key = ic_key(d, &lk);
     icam_t *cam;
 
     GAME_SIDE();
@@ -4817,7 +4825,7 @@ static void ic_record(rcmd_t *c)
         }
     }
     if (g_ikey_n[cur] < g_ikey_cap[cur])
-        g_ikey[cur][g_ikey_n[cur]++] = key;
+        g_ikey[cur][g_ikey_n[cur]++] = lk;      /* step 96: the cut test's, by texture shape */
     if (!d->camera || d->overlay)       /* step 65: the HUD, title cards and pause menu: as recorded */
         return;
     for (ci = g_icam_n[cur]; ci-- > 0;)
@@ -4872,7 +4880,7 @@ static void ic_record(rcmd_t *c)
             }
         }
         cam->draws++;
-        ic_obj(c, key, w, g_vs[slot].rel_bones ? k4 : NULL, g_vs[slot].cmask, d->vprog->fresh);  /* step 62 */
+        ic_obj(c, key, lk, w, g_vs[slot].rel_bones ? k4 : NULL, g_vs[slot].cmask, d->vprog->fresh);  /* step 62 */
     } else if (d->ff && (d->fvf & D3DFVF_POSITION_MASK) != D3DFVF_XYZRHW) {
         double v[16], cm[16], vc[16];
         int i, j;
@@ -4890,7 +4898,7 @@ static void ic_record(rcmd_t *c)
         cam->draws++;
         m4_from(d->ff->world, v);       /* step 62: an affine world is an object's */
         if (v[3] == 0 && v[7] == 0 && v[11] == 0 && v[15] == 1)
-            ic_obj(c, key, v, NULL, NULL, NULL);
+            ic_obj(c, key, lk, v, NULL, NULL, NULL);
     }
 }
 
@@ -6677,7 +6685,7 @@ static void ic_pair(void)
 static int ic_begin(unsigned swap_no, int ovl, int need)
 {
     static unsigned logged;
-    unsigned cur = (unsigned)g_ic, prv = (unsigned)g_ip, i, j, mc = IC_NO_CAM, matched = 0;
+    unsigned cur = (unsigned)g_ic, prv = (unsigned)g_ip, i, j, mc = IC_NO_CAM, matched = 0, of;
     int used[IC_CAMS], k = ic_possible();
     double frac = 1.0, step = 0.0, turn = 0.0;
     const char *why = NULL;
@@ -6709,8 +6717,11 @@ static int ic_begin(unsigned swap_no, int ovl, int need)
             j++;
         }
     }
-    if (g_ikey_n[cur])
-        frac = (double)matched / g_ikey_n[cur];
+    /* Step 96: of the larger of the two frames' draws: matched by texture shape, the loading screen's first frame
+     * (6 of its 12 draws, the hub's 353 before) read as half matched and was drawn in between */
+    of = g_ikey_n[cur] > g_ikey_n[prv] ? g_ikey_n[cur] : g_ikey_n[prv];
+    if (of)
+        frac = (double)matched / of;
     /* Only cameras 3D draws used take part: each frame starts with the
      * frame before's camera still in place (the render-target passes and 2D
      * draw under it), and paired by value it took the main camera's pair. */
@@ -6785,8 +6796,7 @@ static int ic_begin(unsigned swap_no, int ovl, int need)
         }
         if (++logged <= 40)
             fprintf(stderr, "[D3DB] host interpolation: guest swap %u shown as it is (%s: %.2f units, %.1f deg, %.0f%%"
-                    " of %u draws matched)\n", swap_no, why, step > 1e8 ? 0.0 : step, turn, 100.0 * frac,
-                    g_ikey_n[cur]);
+                    " of %u draws matched)\n", swap_no, why, step > 1e8 ? 0.0 : step, turn, 100.0 * frac, of);
         return 0;
     }
     g_st.interp_frames++;
