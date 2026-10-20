@@ -1017,6 +1017,8 @@ static int tab_display(twoc_settings_t *s, const ovl_info_t *in)
              "(auto or vsync). Applied at once.");
         if (!s->framerate)
             snprintf(line, sizeof(line), "Now: the game's 59.94 fps.");
+        else if (in->interp_on && in->interp_held)  /* step 96 */
+            snprintf(line, sizeof(line), "Now: 59.94 fps, each game frame shown as it is: %s.", in->interp_held);
         else if (in->interp_on && in->interp_now > 0 && in->interp_now < in->interp_fps - 0.01)
             snprintf(line, sizeof(line), "Now: %.2f fps of %.2f (fewer while game frames run late).",
                      in->interp_now, in->interp_fps);

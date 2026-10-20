@@ -5263,14 +5263,18 @@ static void mirror_swap(void)
             }
             if (st.interp_frames || st.interp_off) {    /* step 61: frame interpolation */
                 static unsigned lf, ls, lst, ltu, lm, lfi, lo, lvp, lff, lk, lcp, loc;
-                static double lmt;
-                unsigned f = st.interp_frames - lf, subs = st.interp_subs - ls;
+                static double lmt, lcf, lcd;
+                unsigned f = st.interp_frames - lf, subs = st.interp_subs - ls, m = st.interp_cut_match - lm;
+                /* step 96: the frames held for matches, how many of their draws matched (the interpolated
+                 * frames' figure alone read 0.0% while every frame was held) */
                 log_block_printf(&lb, "[D3DB] host interpolation: %.4g frames each game frame; frames interpolated %u"
-                                 " (draws matched %.1f%%), held: camera step %u, turn %u, matches %u, first %u,"
+                                 " (draws matched %.1f%%), held: camera step %u, turn %u, matches %u (draws matched"
+                                 " %.1f%% of %.0f), first %u,"
                                  " other %u; a sub-frame redraws program draws %.0f, fixed-function %.0f, others"
                                  " as they were %.0f (another camera's %.0f), camera-position registers %.0f\n", st.interp_per, f,
                                  f ? 100.0 * (st.interp_matched - lmt) / f : 0.0, st.interp_cut_step - lst,
-                                 st.interp_cut_turn - ltu, st.interp_cut_match - lm, st.interp_cut_first - lfi,
+                                 st.interp_cut_turn - ltu, m, m ? 100.0 * (st.interp_cut_frac - lcf) / m : 0.0,
+                                 m ? (st.interp_cut_draws - lcd) / m : 0.0, st.interp_cut_first - lfi,
                                  st.interp_off - lo, subs ? (double)(st.interp_vp - lvp) / subs : 0.0,
                                  subs ? (double)(st.interp_ff - lff) / subs : 0.0,
                                  subs ? (double)(st.interp_kept - lk) / subs : 0.0,
@@ -5289,6 +5293,8 @@ static void mirror_swap(void)
                 loc = st.interp_other_cam;
                 lcp = st.interp_cpos;
                 lmt = st.interp_matched;
+                lcf = st.interp_cut_frac;
+                lcd = st.interp_cut_draws;
             }
             if (st.interp_adapt_frames || st.interp_adapt_changes) {    /* step 74: adaptive sub-frames */
                 static unsigned la[8], lc, lfr;

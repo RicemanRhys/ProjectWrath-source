@@ -6787,6 +6787,8 @@ static int ic_begin(unsigned swap_no, int ovl, int need)
         why = "the camera turned";
     } else if (frac < g_icut_match) {
         g_st.interp_cut_match++;
+        g_st.interp_cut_frac += frac;   /* step 96 */
+        g_st.interp_cut_draws += of;
         why = "too few draws matched";
     }
     if (why) {
@@ -9134,7 +9136,46 @@ static struct {
     double a_game, a_replay;            /* step 93: g_st.interp_adapt_* at the last sample */
     unsigned a_frames;
     char detail[384];                   /* step 93: the Detailed counter's lines below the two rates */
+    unsigned h_frames, h_cut, h_match;  /* step 96: g_st.interp_* at the last sample */
+    double h_frac, h_draws;
+    char held[128];                     /* ... why most frames since were shown as they are ("": they weren't) */
 } g_meas;
+
+/* Step 96 (notes 18.99): at a sample, whether most game frames since the
+ * last were shown as they are, and why, for the overlay's Now line and the
+ * Detailed counter (Sea Shell's playtest read Game 60 / Shown 60 for
+ * minutes with nothing saying why). A sample where none was judged (the
+ * overlay holding the game, Game (60)) keeps the last. Logged as it changes.
+ * Replay side. */
+static void meas_held(unsigned swap_no)
+{
+    static unsigned logged;
+    unsigned fr = g_st.interp_frames - g_meas.h_frames;
+    unsigned cut = g_st.interp_cut_step + g_st.interp_cut_turn - g_meas.h_cut;
+    unsigned m = g_st.interp_cut_match - g_meas.h_match;
+    double fs = g_st.interp_cut_frac - g_meas.h_frac, ds = g_st.interp_cut_draws - g_meas.h_draws;
+    char was[sizeof(g_meas.held)];
+
+    g_meas.h_frames = g_st.interp_frames;
+    g_meas.h_cut = g_st.interp_cut_step + g_st.interp_cut_turn;
+    g_meas.h_match = g_st.interp_cut_match;
+    g_meas.h_frac = g_st.interp_cut_frac;
+    g_meas.h_draws = g_st.interp_cut_draws;
+    if (!fr && !cut && !m)
+        return;
+    memcpy(was, g_meas.held, sizeof(was));
+    if (m > fr && m >= cut)
+        snprintf(g_meas.held, sizeof(g_meas.held), "too few draws matched, %.0f%% of %.0f", 100.0 * fs / m, ds / m);
+    else if (cut > fr)
+        snprintf(g_meas.held, sizeof(g_meas.held), "the camera cut (moved or turned too far in one frame)");
+    else
+        g_meas.held[0] = 0;
+    if ((!was[0]) != (!g_meas.held[0]) && ++logged <= 200)
+        fprintf(stderr, g_meas.held[0] ? "[D3DB] host interpolation: game frames shown as they are from guest swap"
+                                         " %u (%s)\n"
+                                       : "[D3DB] host interpolation: game frames interpolated again from guest"
+                                         " swap %u%s\n", swap_no, g_meas.held);
+}
 
 /* Step 93: the Detailed counter's lines, at a sample (never a frame): the
  * threads' ms a game frame since the last sample (ia_frame's counters,
@@ -9163,6 +9204,8 @@ static void meas_detail(void)
             unsigned k = ia_k();
             n += snprintf(b + n, cap - n, "\nAdaptive: %.0f fps, step %u of %u%s", fp_step_fps(k), k + 1,
                           g_fp.nsteps, g_iadapt ? "" : " (off)");
+            if (g_meas.held[0] && n < (int)cap)     /* step 96 */
+                n += snprintf(b + n, cap - n, "\nShown as it is: %s", g_meas.held);
         } else {
             n += snprintf(b + n, cap - n, "\nAdaptive: - (Game (60))");
         }
@@ -9201,6 +9244,7 @@ static void meas_present(unsigned swap_no)
         g_meas.shown = (double)(g_meas.pres[0] - g_meas.pres[MEAS_N - 1]) / dt;
         g_meas.ok = 1;
     }
+    meas_held(swap_no);                 /* step 96 */
     if (g_show_fps == 2)
         meas_detail();                  /* step 93 */
 }
@@ -9308,6 +9352,7 @@ static int ovl_draw(ID3D11Texture2D *dst, int running)
     in.rt_cores = g_rt_cores;
     in.rt_auto_cores = RT_AUTO_CORES;
     in.interp_on = g_interp && in.interp_fps > 0;
+    in.interp_held = in.interp_on && g_meas.held[0] ? g_meas.held : NULL;     /* step 96 */
     in.meas_ok = g_meas.ok;             /* step 82 */
     in.game_ups = g_meas.game;
     in.shown_fps = g_meas.shown;

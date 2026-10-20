@@ -39,6 +39,7 @@ typedef struct {
     const char *interp_why;             /* step 63: why interp_fps is 0 */
     double interp_now;                  /* step 74/77: frames a second now (fewer than interp_fps while late) */
     const char *interp_note;            /* step 77: the plan: the rate it shows and whether evenly, and why */
+    const char *interp_held;            /* step 96: why most game frames are shown as they are now, or NULL */
     int rt_on;                          /* step 79: the render thread draws the frames now */
     unsigned rt_cores, rt_auto_cores;   /* ... this PC's processor cores, and the most Auto needs */
     int meas_ok;                        /* step 82: the rates below measured (over the last second) */

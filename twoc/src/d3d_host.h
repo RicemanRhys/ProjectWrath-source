@@ -92,6 +92,9 @@ typedef struct {
     unsigned interp_obj_motion;         /* step 68: stepped over the snap, but on with its own motion */
     unsigned interp_skel, interp_skel_bones;    /* step 66: skeletons a frame; bones blended in one */
     double interp_matched;              /* sum of each interpolated frame's fraction of draws matched */
+    /* Step 96: the frames shown as they are for too few draws matched: the
+     * sum of their fractions matched and of their draws. */
+    double interp_cut_frac, interp_cut_draws;
     /* Step 74: adaptive sub-frames. Game frames by the step allowed then
      * (step 77: [0] the plan's rate, then each lower one: interp_step_fps),
      * changes of it, and the measured frames' sum of time between presents
