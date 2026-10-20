@@ -10,6 +10,7 @@
 #include <string.h>
 
 #include "gpu.h"
+#include "settings.h"
 
 /* xbox_d3d8 (d3d8_internal.h, local): the adapter its next CreateDevice uses. */
 extern void d3d8_SetPreferredAdapter(IDXGIAdapter *adapter);
@@ -165,12 +166,12 @@ void twoc_gpu_start(void)
         fprintf(stderr, "[GPU] Graphics card: \"%s\" (gpu, crash_twoc.ini or RECOMP_GPU) isn't on this PC: Automatic"
                 " instead\n", want);
     } else if (g_n <= 1) {
-        fprintf(stderr, "[GPU] Graphics card: Automatic, with one graphics card: D3D11's default adapter, as "
-                "before\n");
+        fprintf(stderr, "[GPU] Graphics card: Automatic%s, with one graphics card: D3D11's default adapter, as "
+                "before\n", twoc_settings_ignored() ? " (safe settings)" : "");
     } else {
-        fprintf(stderr, "[GPU] Graphics card: Automatic: D3D11's default adapter, which Windows picks (its Graphics "
+        fprintf(stderr, "[GPU] Graphics card: Automatic%s: D3D11's default adapter, which Windows picks (its Graphics "
                 "setting for this exe, else the driver's choice; the exe asks for the high-performance card)%s\n",
-                hp_order ? "" : "; DXGI 1.6's GPU order not available");
+                twoc_settings_ignored() ? " (safe settings)" : "", hp_order ? "" : "; DXGI 1.6's GPU order not available");
     }
     if (chosen)
         IDXGIAdapter1_Release(chosen);  /* xbox_d3d8 keeps its own reference */

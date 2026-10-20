@@ -6,5 +6,7 @@ setlocal
 set RECOMP_IGNORE_INI=1
 set RECOMP_FULLSCREEN=
 set RECOMP_FRAMERATE=
+rem The graphics card: Automatic (notes 18.100), whatever crash_twoc.ini or a variable named.
+set RECOMP_GPU=
 call "%~dp0Play Crash.bat"
 endlocal
