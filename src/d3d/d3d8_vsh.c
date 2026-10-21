@@ -118,6 +118,7 @@ static ID3D11DeviceContext1 *g_ctx1;
 static ID3D11Buffer *g_kring;
 static int g_kring_state;               /* 0 not tried, 1 ready, -1 not there */
 static UINT g_kring_off = KRING_SIZE, g_kring_gen = 1, g_kring_frame_bytes;
+static UINT g_kring_peak, g_kring_last; /* twoc step 99: the most bytes a frame put in it, the last frame's */
 static BOOL g_kring_cur_ok;             /* g_vsh_constants is at g_kring_cur in the ring now */
 static UINT g_kring_cur, g_kring_cur_gen;
 
@@ -1232,5 +1233,16 @@ void d3d8_vsh_bake_reset(void)
      * the last frame put in it, and 1 MB). */
     if ((UINT64)g_kring_off + g_kring_frame_bytes + g_kring_frame_bytes / 4 + (1u << 20) > KRING_SIZE)
         g_kring_off = KRING_SIZE;
+    if (g_kring_frame_bytes > g_kring_peak)
+        g_kring_peak = g_kring_frame_bytes;
+    g_kring_last = g_kring_frame_bytes;
     g_kring_frame_bytes = 0;
+}
+
+void d3d8_vsh_mem_stats(UINT *size, UINT *frame, UINT *peak, UINT *gen)
+{
+    *size = g_kring_state == 1 ? KRING_SIZE : 0;
+    *frame = g_kring_last;
+    *peak = g_kring_peak;
+    *gen = g_kring_gen;
 }

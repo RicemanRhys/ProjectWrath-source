@@ -656,6 +656,18 @@ HRESULT d3d8_DrawBakedAgain(const D3D8Baked *old, D3D8Baked *now, ID3D11ShaderRe
                             const D3DMATRIX *const ff_m[3], D3DPRIMITIVETYPE pt, UINT prim_count, UINT nverts,
                             const void *idx, const void *verts, UINT stride, D3D8UpKept *kept);
 
+/* Twoc step 99 (measurement only): the bake's memory and the rings, for the
+ * memory log. Any thread; read without a lock (sizes only). */
+typedef struct {
+    size_t bake_bytes;                  /* the bake's chunks, both sets (never freed) */
+    unsigned bake_chunks;
+    UINT up_size, up_peak, ib_size, ib_peak;    /* the rings and their falling peaks of a frame's uploads */
+    UINT k_size, k_frame, k_peak;       /* the constants ring, the last frame's bytes, the most in a frame */
+    UINT ring_gen, k_gen;               /* how often the rings started over (+1) */
+} D3D8MemStats;
+void d3d8_MemStats(D3D8MemStats *s);
+void d3d8_vsh_mem_stats(UINT *size, UINT *frame, UINT *peak, UINT *gen);
+
 /* The modules' parts (d3d8_shaders.c, d3d8_combiners.c, d3d8_vsh.c) */
 void *d3d8_bake_alloc(size_t n);
 int d3d8_shaders_bake_again(D3D8Baked *b, const D3DMATRIX *const ff_m[3]);

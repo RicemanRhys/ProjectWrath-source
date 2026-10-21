@@ -1160,6 +1160,9 @@ typedef struct bake_chunk {
 #define BAKE_CHUNK (256u * 1024u)
 static bake_chunk *g_bake_heads[2], *g_bake_cur;
 static int g_bake_set;
+static size_t g_bake_bytes;             /* twoc step 99: the chunks' bytes (never freed), for d3d8_MemStats */
+static unsigned g_bake_chunks;
+static UINT up_peak, ib_peak;           /* d3d8_BakeReset's falling peaks (file scope since step 99) */
 #define g_bake_head g_bake_heads[g_bake_set]
 
 void *d3d8_bake_alloc(size_t n)
@@ -1178,6 +1181,8 @@ void *d3d8_bake_alloc(size_t n)
         c->used = 0;
         c->cap = cap;
         c->next = NULL;
+        g_bake_bytes += sizeof(bake_chunk) + cap;
+        g_bake_chunks++;
         if (g_bake_cur) {
             c->next = g_bake_cur->next;
             g_bake_cur->next = c;
@@ -1206,7 +1211,6 @@ void d3d8_BakeReset(void)
      * held them the frame before (twoc's cut 3) upload little most frames and
      * all of it after the rings start over, so the last frame alone let a
      * ring fill up in the middle of a frame now and then. */
-    static UINT up_peak, ib_peak;
     up_peak = g_up_frame_bytes > up_peak - up_peak / 256 ? g_up_frame_bytes : up_peak - up_peak / 256;
     ib_peak = g_ib_frame_bytes > ib_peak - ib_peak / 256 ? g_ib_frame_bytes : ib_peak - ib_peak / 256;
     if ((UINT64)g_up_ring_offset + up_peak + up_peak / 4 + (1u << 20) > UP_RING_BUFFER_SIZE)
@@ -1220,6 +1224,18 @@ void d3d8_BakeReset(void)
     g_bake_cur = g_bake_head;
     g_bake_cap = NULL;
     d3d8_shaders_bake_reset();
+}
+
+void d3d8_MemStats(D3D8MemStats *s)
+{
+    s->bake_bytes = g_bake_bytes;
+    s->bake_chunks = g_bake_chunks;
+    s->up_size = UP_RING_BUFFER_SIZE;
+    s->up_peak = up_peak;
+    s->ib_size = IB_RING_BUFFER_SIZE;
+    s->ib_peak = ib_peak;
+    s->ring_gen = g_ring_gen;
+    d3d8_vsh_mem_stats(&s->k_size, &s->k_frame, &s->k_peak, &s->k_gen);
 }
 
 BOOL d3d8_bake_capturing(void)
