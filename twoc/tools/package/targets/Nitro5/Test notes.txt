@@ -2,7 +2,7 @@ Acer Nitro 5 test notes (this file goes into the zip "Collect logs.bat" makes)
 ==========================================================================
 
 Windows power mode (Settings > System > Power & battery):
-NitroSense mode (Turbo / Performance / none):
+NitroSense mode (Default / Performance / Turbo / none):
 Windows' Graphics setting for crash_twoc.exe (High performance? README part A step 6):
 NVIDIA Control Panel setting (if there is one):
 Screen refresh rate and resolution (Settings > System > Display):

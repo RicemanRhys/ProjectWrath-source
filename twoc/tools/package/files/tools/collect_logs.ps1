@@ -176,7 +176,8 @@ try {
     $pk = Get-ItemProperty 'HKLM:\SYSTEM\CurrentControlSet\Control\Power\User\PowerSchemes' -ErrorAction SilentlyContinue
     foreach ($n in 'ActiveOverlayAcPowerScheme', 'ActiveOverlayDcPowerScheme') {
         $v = $pk.$n
-        if ($v) { $name = $modes[$v]; if (-not $name) { $name = $v }; Add "Power mode ($(if ($n -like '*Ac*') { 'plugged in' } else { 'on battery' })): $name" }
+        # -like ignores case, so '*Ac*' matched the "Ac" of "Active" in both names (both said plugged in, step 98)
+        if ($v) { $name = $modes[$v]; if (-not $name) { $name = $v }; Add "Power mode ($(if ($n -eq 'ActiveOverlayAcPowerScheme') { 'plugged in' } else { 'on battery' })): $name" }
     }
 } catch { Add "power query failed: $_" }
 try {

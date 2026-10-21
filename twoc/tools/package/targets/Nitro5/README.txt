@@ -40,11 +40,18 @@ A. Set up the laptop (once)
 2.  [laptop] Copy it from the stick to the laptop, for example to C:\Games\Nitro5Package.
     Any folder works, spaces in the name too (not C:\Program Files).
 3.  [laptop] Plug the charger in. The first tests are plugged in.
-4.  [laptop] Set Windows' power mode: Settings > System > Power & battery > Power mode >
-    Best performance.
-5.  [laptop] If NitroSense (Acer's app, the "N" key or the Start menu) has a fan or
-    performance mode, set it to Turbo or Performance (whichever it offers). If NitroSense
-    isn't there, skip this step.
+4.  [laptop] Windows' power mode (Settings > System > Power & battery > Power mode):
+    Balanced is enough. Measured on this laptop: plugged in, Balanced and NitroSense
+    Default, the game held full speed (Game 60, Shown 144) for 10 minutes with about a
+    quarter of each game frame to spare, the processor levelling off at 86-90 C. Best
+    performance isn't needed.
+5.  [laptop] NitroSense (Acer's app, the "N" key or the Start menu): Default is enough.
+    Performance (or Turbo) runs the fan faster: cooler, louder (measured only when the
+    laptop was idle). Close NitroSense's window before playing; keep its mode. In one
+    session it took most of a processor thread in the background.
+    If the laptop is already at 85 C or more before the game starts (NitroSense shows it),
+    restart Windows first. Measured once: 85-90 C idle before a restart, 67-72 C after;
+    that hot session ran the game at 100 C and about 12% slower.
 6.  [laptop] Make sure the game uses the NVIDIA GPU, not the Intel one:
       a. Settings > System > Display > Graphics.
       b. "Add desktop app" (or "Browse"), go to the Nitro5Package folder and pick
@@ -81,8 +88,10 @@ B. Start the game [laptop]
       Graphics card ...... must say NVIDIA GeForce RTX 3050 Laptop GPU (not Intel UHD
                            or Intel Iris Xe). If it says Intel: close the game, do part A
                            step 6 again, start again.
-      Display's card ..... most likely the Intel GPU ("Windows copies each frame to it"):
-                           that is normal on this laptop, the screen is wired to it.
+      Display's card ..... says the NVIDIA card ("the same card") in this build. The
+                           screen is really wired to the Intel GPU, and Windows copies each
+                           frame to it. The line is a known mistake on laptops like this
+                           one; nothing to do.
       Processor .......... the i5-12500H, "hybrid: 4 performance cores ..., 8 efficiency
                            cores ...".
       Power throttling ... "not throttled".
@@ -109,8 +118,8 @@ B. Start the game [laptop]
 
 C. The tests [laptop]
 ---------------------
-Write what you see in Test notes.txt as you go. Plugged in, Best performance, unless a test
-says otherwise. Let the laptop cool a few minutes between tests.
+Write what you see in Test notes.txt as you go. Plugged in, Balanced and NitroSense Default,
+unless a test says otherwise. Let the laptop cool a few minutes between tests.
 
 1. cast_bug's start, standing 30 seconds. Start "Play Crash.bat", new game WOMBAT, skip the
    intro. In the hub, walk Crash onto the round lift in the middle; it takes him up to the
