@@ -2088,14 +2088,22 @@ static void *ra_alloc(size_t n)
         c->used = 0;
     } else {
         size_t cap = n > RA_CHUNK ? n : RA_CHUNK;
-        ra_chunk_t *nc = NULL, **pp;
-        AcquireSRWLockExclusive(&g_pool_lock);  /* step 78: a chunk the last replay gave back */
+        ra_chunk_t *nc = NULL, **pp, **best = NULL;
+        /* Step 78: a chunk the last replay gave back. Step 99: the smallest
+         * that fits: with the first that fits, small requests took the
+         * oversize chunks (a load's block over 1 MB) and the next oversize
+         * request made another, one more chunk at each level entry. */
+        AcquireSRWLockExclusive(&g_pool_lock);
         for (pp = &g_ra_pool; *pp; pp = &(*pp)->next)
-            if ((*pp)->cap >= n) {
-                nc = *pp;
-                *pp = nc->next;
-                break;
+            if ((*pp)->cap >= n && (!best || (*pp)->cap < (*best)->cap)) {
+                best = pp;
+                if ((*pp)->cap == cap)
+                    break;
             }
+        if (best) {
+            nc = *best;
+            *best = nc->next;
+        }
         ReleaseSRWLockExclusive(&g_pool_lock);
         if (!nc) {
             nc = (ra_chunk_t *)malloc(sizeof(ra_chunk_t) + cap);
