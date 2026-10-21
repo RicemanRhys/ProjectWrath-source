@@ -151,6 +151,9 @@ try {
     if (Test-Path -LiteralPath $err) {
         Section "The game's processor lines (its last run, run_twoc.err.log)"
         foreach ($m in Select-String -LiteralPath $err -Pattern '^\[(CPU|GPU)\]' | Select-Object -First 12) { Add $m.Line }
+        # step 99: where the game and render threads ran (the kind of core) and each kind's MHz, its last 10 s
+        $m = Select-String -LiteralPath $err -Pattern '^\[D3DB\] host cores:' | Select-Object -Last 1
+        if ($m) { Add "The last 10-s interval's: $($m.Line)" }
     }
 } catch { Add "the game's [CPU] lines: $_" }
 try {

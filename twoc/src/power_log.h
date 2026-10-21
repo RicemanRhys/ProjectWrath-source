@@ -72,6 +72,12 @@ void power_log_brief(char *buf, size_t cap);
  * ms a game frame (below 0: not measured), for the change lines. */
 void power_log_game(double ups);
 void power_log_thread_ms(double game_ms, double render_ms);
+/* Step 99: each kind of core's effective MHz over the interval on a hybrid
+ * CPU ("performance cores 4012 MHz on average (3890-4105), efficiency cores
+ * 3010 MHz ... over 10 readings": the PDH "Processor Information(*)"
+ * counters per logical processor, by its kind from the CPU sets, read only
+ * on a hybrid CPU), or that there is one kind; the averages start again. */
+void power_log_kinds(char *buf, size_t cap);
 
 #ifdef __cplusplus
 }

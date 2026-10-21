@@ -181,6 +181,7 @@
 #include "power_log.h"
 #include "gpu.h"
 #include "restart.h"
+#include "cpu_info.h"
 
 #define WIN_CLASS          "TwocD3DBridge"
 #define WIN_TITLE           "Crash TWOC - D3D bridge (host)"
@@ -10523,6 +10524,7 @@ static DWORD WINAPI rt_main(LPVOID p)
         QueryPerformanceCounter(&g_rt_take);
         wd_rt(WD_R_TAKE, f->swap_no);
         g_st.rt_frames++;
+        twoc_cpu_where(TWOC_WHERE_RENDER);  /* step 99 */
         if (!g_ready) {                 /* the swap chain couldn't be made again (recreate_flip): dropped */
             EnterCriticalSection(&g_lock);
             g_ps = f;

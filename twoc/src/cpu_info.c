@@ -13,6 +13,13 @@ static char g_cpu[256] = "not known";
 static char g_power[192] = "not known";
 static int g_hybrid;
 
+/* Step 99: each logical processor's kind (0 the most performant class ... g_nrank - 1 the least; -1 not known),
+ * by group and number as GetCurrentProcessorNumberEx gives them. */
+#define LP_GROUPS 4
+static signed char g_rank[LP_GROUPS][64];
+static int g_nrank;
+static unsigned g_fake_p;               /* RECOMP_DEV_CPU_CLASSES: the first N read as performance cores */
+
 /* ProcessPowerThrottling (processthreadsapi.h, Windows 10 1709 on), declared here so the build needs no
  * particular SDK target; GetProcessInformation / SetProcessInformation are found at run time. */
 typedef struct {
@@ -82,9 +89,11 @@ static void describe(const BYTE *buf, ULONG len, const char *name)
     unsigned threads = 0, cores = 0, nclass = 0, k;
     struct { unsigned cls, threads, cores; } cl[4];
     static unsigned core_key[256];      /* (group << 8 | core index) of each core seen */
+    static unsigned char lp_cls[LP_GROUPS][64];
     ULONG off = 0;
 
     memset(cl, 0, sizeof(cl));
+    memset(g_rank, -1, sizeof(g_rank));
     while (buf && off + 8 <= len) {
         const SYSTEM_CPU_SET_INFORMATION *ci = (const SYSTEM_CPU_SET_INFORMATION *)(buf + off);
         if (ci->Size == 0)
@@ -92,6 +101,12 @@ static void describe(const BYTE *buf, ULONG len, const char *name)
         if (ci->Type == CpuSetInformation) {
             unsigned cls = ci->CpuSet.EfficiencyClass, key = (unsigned)ci->CpuSet.Group << 8 | ci->CpuSet.CoreIndex;
             unsigned j, c;
+            if (g_fake_p)               /* test aid: a hybrid CPU's map on this one */
+                cls = threads < g_fake_p ? 1 : 0;
+            if (ci->CpuSet.Group < LP_GROUPS && ci->CpuSet.LogicalProcessorIndex < 64) {
+                lp_cls[ci->CpuSet.Group][ci->CpuSet.LogicalProcessorIndex] = (unsigned char)cls;
+                g_rank[ci->CpuSet.Group][ci->CpuSet.LogicalProcessorIndex] = 0;
+            }
             threads++;
             for (c = 0; c < nclass && cl[c].cls != cls; c++)
                 ;
@@ -127,6 +142,16 @@ static void describe(const BYTE *buf, ULONG len, const char *name)
                      cl[k].cores == 1 ? "" : "s", cl[k].threads, cl[k].threads == 1 ? "" : "s", cl[k].cls);
         }
     }
+    g_nrank = nclass ? (int)nclass : 0;
+    {                                   /* step 99: each logical processor's place in that order */
+        unsigned gr, i;
+        for (gr = 0; gr < LP_GROUPS; gr++)
+            for (i = 0; i < 64; i++)
+                if (g_rank[gr][i] >= 0)
+                    for (k = 0; k < nclass; k++)
+                        if (cl[k].cls == lp_cls[gr][i])
+                            g_rank[gr][i] = (signed char)k;
+    }
     if (threads)
         snprintf(g_cpu, sizeof(g_cpu), "%s; %u cores, %u threads%s%s", name, cores, threads,
                  g_hybrid ? "; hybrid: " : " (one kind of core)", classes);
@@ -147,6 +172,11 @@ void twoc_cpu_start(void)
     BYTE *buf = NULL;
 
     brand(name, sizeof(name));
+    if (getenv("RECOMP_DEV_CPU_CLASSES") && atoi(getenv("RECOMP_DEV_CPU_CLASSES")) > 0) {     /* step 99, a test aid */
+        g_fake_p = (unsigned)atoi(getenv("RECOMP_DEV_CPU_CLASSES"));
+        fprintf(stderr, "[CPU] RECOMP_DEV_CPU_CLASSES=%u: the first %u logical processors read as performance cores,"
+                " the rest as efficiency cores (a test)\n", g_fake_p, g_fake_p);
+    }
     if (sets && !sets(NULL, 0, &len, GetCurrentProcess(), 0) && GetLastError() == ERROR_INSUFFICIENT_BUFFER &&
         (buf = (BYTE *)malloc(len)) != NULL && sets(buf, len, &len, GetCurrentProcess(), 0))
         describe(buf, len, name);
@@ -176,4 +206,83 @@ void twoc_cpu_start(void)
     }
     throttle_text(get, g_power, sizeof(g_power), &c1, &s1);
     fprintf(stderr, "[CPU] power throttling: %s (before: %s)\n", g_power, before);
+}
+
+/* Step 99: the game and render threads' samples since the last interval line, by logical processor. */
+static volatile LONG g_lp[2][LP_GROUPS * 64];
+
+int twoc_cpu_ranks(void) { return g_nrank; }
+
+int twoc_cpu_rank_of(unsigned group, unsigned number)
+{
+    return group < LP_GROUPS && number < 64 ? g_rank[group][number] : -1;
+}
+
+void twoc_cpu_where(int who)
+{
+    PROCESSOR_NUMBER pn;
+
+    GetCurrentProcessorNumberEx(&pn);
+    if (pn.Group < LP_GROUPS && pn.Number < 64)
+        InterlockedIncrement(&g_lp[who & 1][pn.Group * 64 + pn.Number]);
+}
+
+/* One thread's samples as text; its counts start again. 0 when it had none. */
+static int where_one(int who, const char *name, char *buf, size_t cap)
+{
+    LONG c[LP_GROUPS * 64];
+    unsigned long n = 0, by_rank[4] = { 0 }, top = 0, top2 = 0;
+    int i, used = 0, ti = -1, ti2 = -1, k = 0;
+
+    for (i = 0; i < LP_GROUPS * 64; i++) {
+        c[i] = InterlockedExchange(&g_lp[who][i], 0);
+        if (!c[i])
+            continue;
+        n += (unsigned long)c[i];
+        used++;
+        if (g_rank[i / 64][i % 64] >= 0 && g_rank[i / 64][i % 64] < 4)
+            by_rank[g_rank[i / 64][i % 64]] += (unsigned long)c[i];
+        if ((unsigned long)c[i] > top) {
+            top2 = top, ti2 = ti;
+            top = (unsigned long)c[i], ti = i;
+        } else if ((unsigned long)c[i] > top2)
+            top2 = (unsigned long)c[i], ti2 = i;
+    }
+    if (!n)
+        return 0;
+    if (g_nrank > 1) {
+        int r;
+        k += snprintf(buf + k, cap - k, "the %s thread on", name);
+        for (r = 0; r < g_nrank && r < 4 && k < (int)cap; r++)
+            k += snprintf(buf + k, cap - k, "%s %s cores %.1f%%", r ? "," : "",
+                          r == 0 ? "performance" : r == g_nrank - 1 ? "efficiency" : "middle", 100.0 * by_rank[r] / n);
+        if (k < (int)cap)
+            k += snprintf(buf + k, cap - k, " of %lu samples", n);
+    } else
+        k += snprintf(buf + k, cap - k, "the %s thread sampled %lu time%s", name, n, n == 1 ? "" : "s");
+    if (k < (int)cap)
+        k += snprintf(buf + k, cap - k, ", on %d logical processor%s (most on %s%d %.0f%%", used, used == 1 ? "" : "s",
+                      ti >= 64 ? "group 1+ " : "CPU ", ti % 64, 100.0 * top / n);
+    if (ti2 >= 0 && k < (int)cap)
+        k += snprintf(buf + k, cap - k, ", then CPU %d %.0f%%", ti2 % 64, 100.0 * top2 / n);
+    if (k < (int)cap)
+        k += snprintf(buf + k, cap - k, ")");
+    return k;
+}
+
+int twoc_cpu_where_text(char *buf, size_t cap)
+{
+    int k = 0, j;
+
+    buf[0] = 0;
+    if (g_nrank <= 1)
+        k += snprintf(buf, cap, "one kind of core (no performance / efficiency split): ");
+    j = where_one(0, "game", buf + k, cap - k);
+    k += j;
+    if (k < (int)cap && j)
+        k += snprintf(buf + k, cap - k, "; ");
+    j = where_one(1, "render", buf + k, cap - k);
+    if (!j && k >= 2 && buf[k - 2] == ';')
+        buf[k -= 2] = 0;
+    return k + j;
 }

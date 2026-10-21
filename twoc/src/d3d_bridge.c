@@ -112,6 +112,7 @@
 #include "d3d_host.h"
 #include "log_block.h"
 #include "power_log.h"
+#include "cpu_info.h"
 
 /* ── Guest D3D layout (notes 18.31, step29_option_b_plan.md section 1) ── */
 
@@ -4968,6 +4969,7 @@ static void mirror_swap(void)
     LONG n = InterlockedIncrement(&g_swaps);
     ULONGLONG now;
 
+    twoc_cpu_where(TWOC_WHERE_GAME);    /* step 99 */
     motion_swap(n);
     drawlog_trigger(n);
     d3dh_present(now_s(), (unsigned)n);
@@ -5018,6 +5020,12 @@ static void mirror_swap(void)
                 power_log_game((n - last_swaps) / dt);
                 power_log_interval(pw, sizeof(pw));
                 log_block_printf(&lb, "[D3DB] host power: %s\n", pw);
+            }
+            {   /* step 99: which kind of core the game and render threads were on, each kind's MHz */
+                char wh[600], kd[300];
+                twoc_cpu_where_text(wh, sizeof(wh));
+                power_log_kinds(kd, sizeof(kd));
+                log_block_printf(&lb, "[D3DB] host cores: %s; %s\n", wh, kd);
             }
             if (st.paced)       /* S7: the frame limiter */
                 log_block_printf(&lb, "[D3DB] host limiter: paced %u (+%u), late %u (+%u), waited %.0f ms this interval"

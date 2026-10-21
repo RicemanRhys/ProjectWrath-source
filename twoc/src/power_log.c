@@ -9,6 +9,7 @@
 #include <string.h>
 
 #include "power_log.h"
+#include "cpu_info.h"
 
 /* CallNtPowerInformation's levels and its ProcessorInformation entry
  * (ntpoapi.h's PROCESSOR_POWER_INFORMATION, not in the user headers). */
@@ -67,6 +68,8 @@ typedef struct {
     double temp_c, passive_pct;
     unsigned throttle;
     char zone[40];
+    int kinds_ok;                       /* step 99: the per-processor counters read (a hybrid CPU) */
+    double kind_mhz[4];                 /* each kind's average effective MHz (0 performance ...) */
 } sample_t;
 
 /* The CPU's effective speed over an interval. */
@@ -79,6 +82,7 @@ static SRWLOCK g_lock = SRWLOCK_INIT;  /* g_now and g_acc_b: held only to copy t
 static sample_t g_now;
 static int g_have;
 static acc_t g_acc_b;                   /* since the bridge's last interval line */
+static acc_t g_kind_b[4];               /* step 99: each kind of core's, likewise */
 static volatile LONG g_eff_mode = -1;
 static volatile double g_ups = -1, g_game_ms = -1, g_render_ms = -1;
 static power_log_hooks_t g_hooks;
@@ -157,6 +161,7 @@ static void WINAPI on_mode(int mode, void *ctx)
 /* PDH: the processor counters, and the thermal zones' (read every 10 s). */
 static PDH_HQUERY g_q, g_qt;
 static PDH_HCOUNTER g_c_perf, g_c_freq, g_c_cap, g_c_util, g_c_temp, g_c_passive, g_c_reasons;
+static PDH_HCOUNTER g_c_iperf, g_c_ifreq;   /* step 99: per logical processor, on a hybrid CPU only */
 static int g_temp_tenths;               /* "High Precision Temperature": tenths of a kelvin */
 
 static void pdh_init(void)
@@ -182,6 +187,10 @@ static void pdh_init(void)
             g_c_cap = NULL;
         if (P.add(g_q, L"\\Processor Information(_Total)\\% Processor Utility", 0, &g_c_util) != ERROR_SUCCESS)
             g_c_util = NULL;
+        if (twoc_cpu_ranks() > 1 &&     /* step 99: each kind of core's MHz (one kind: not split, nothing added) */
+            (P.add(g_q, L"\\Processor Information(*)\\% Processor Performance", 0, &g_c_iperf) != ERROR_SUCCESS ||
+             P.add(g_q, L"\\Processor Information(*)\\Processor Frequency", 0, &g_c_ifreq) != ERROR_SUCCESS))
+            g_c_iperf = g_c_ifreq = NULL;
         P.collect(g_q);                 /* the rates need two readings: the first */
     }
     if (P.open(NULL, 0, &g_qt) == ERROR_SUCCESS) {
@@ -243,6 +252,38 @@ static int read_thermal(sample_t *s)
     if (g_c_reasons && P.array(g_c_reasons, PDH_FMT_DOUBLE, &size, &n, it) == ERROR_SUCCESS && best < n)
         s->throttle = (unsigned)it[best].FmtValue.doubleValue;
     return 1;
+}
+
+/* Step 99: each kind of core's average effective MHz (% Processor Performance x Processor Frequency of each
+ * logical processor "group,number", by its kind from the CPU sets). After the query's collect. */
+static void read_kinds(sample_t *s)
+{
+    static unsigned char bp[32768], bf[32768];
+    PPDH_FMT_COUNTERVALUE_ITEM_W ip = (PPDH_FMT_COUNTERVALUE_ITEM_W)bp, ifr = (PPDH_FMT_COUNTERVALUE_ITEM_W)bf;
+    DWORD sp = sizeof(bp), sf = sizeof(bf), np = 0, nf = 0, i;
+    double sum[4] = { 0 };
+    unsigned cnt[4] = { 0 }, r;
+
+    s->kinds_ok = 0;
+    if (!g_c_iperf || P.array(g_c_iperf, PDH_FMT_DOUBLE | PDH_FMT_NOCAP100, &sp, &np, ip) != ERROR_SUCCESS ||
+        P.array(g_c_ifreq, PDH_FMT_DOUBLE | PDH_FMT_NOCAP100, &sf, &nf, ifr) != ERROR_SUCCESS)
+        return;
+    for (i = 0; i < np; i++) {
+        unsigned g, n;
+        DWORD j;
+        int k;
+        if (!ip[i].szName || swscanf(ip[i].szName, L"%u,%u", &g, &n) != 2 || ip[i].FmtValue.CStatus != PDH_CSTATUS_VALID_DATA)
+            continue;                   /* "_Total", "0,_Total" */
+        for (j = 0; j < nf && (!ifr[j].szName || wcscmp(ifr[j].szName, ip[i].szName) != 0); j++)
+            ;
+        if (j == nf || (k = twoc_cpu_rank_of(g, n)) < 0 || k >= 4)
+            continue;
+        sum[k] += ifr[j].FmtValue.doubleValue * ip[i].FmtValue.doubleValue / 100.0;
+        cnt[k]++;
+    }
+    for (r = 0; r < 4; r++)
+        s->kind_mhz[r] = cnt[r] ? sum[r] / cnt[r] : 0;
+    s->kinds_ok = cnt[0] > 0;
 }
 
 static void read_sample(sample_t *s, int thermal)
@@ -324,6 +365,7 @@ static void read_sample(sample_t *s, int thermal)
             if (!ok2)
                 s->util_pct = -1;
         }
+        read_kinds(s);
     }
     if (thermal)
         s->temp_ok = read_thermal(s);
@@ -409,6 +451,17 @@ static void acc_add(acc_t *a, double v)
         a->hi = v;
     a->sum += v;
     a->n++;
+}
+
+/* Step 99: a reading's kinds of core into the interval's averages (under g_lock). */
+static void kinds_add(const sample_t *s)
+{
+    int r;
+
+    if (s->kinds_ok)
+        for (r = 0; r < 4 && r < twoc_cpu_ranks(); r++)
+            if (s->kind_mhz[r] > 0)
+                acc_add(&g_kind_b[r], s->kind_mhz[r]);
 }
 
 /* A [POWER] line to the log, and through to the disk with RECOMP_POWER_LOG. */
@@ -570,6 +623,7 @@ static DWORD WINAPI sampler(void *arg)
     g_have = 1;
     if (s.cpu_ok)
         acc_add(&g_acc_b, s.mhz);
+    kinds_add(&s);
     ReleaseSRWLockExclusive(&g_lock);
     k = source_text(&s, line, sizeof(line));
     k += snprintf(line + k, sizeof(line) - k, "; ");
@@ -608,6 +662,7 @@ static DWORD WINAPI sampler(void *arg)
         g_now = s;
         if (s.cpu_ok)
             acc_add(&g_acc_b, s.mhz);
+        kinds_add(&s);
         ReleaseSRWLockExclusive(&g_lock);
         if (s.cpu_ok && clock_step(&clk, tick, s.mhz, s.util_pct, line, sizeof(line))) {     /* step 95 */
             char tt[160], ln[1300];
@@ -769,4 +824,32 @@ void power_log_thread_ms(double game_ms, double render_ms)
     g_game_ms = game_ms;
     g_render_ms = render_ms;
     InterlockedExchange(&g_ms_fresh, 1);
+}
+
+void power_log_kinds(char *buf, size_t cap)
+{
+    acc_t a[4];
+    int r, n = 0, any = 0;
+
+    AcquireSRWLockExclusive(&g_lock);
+    memcpy(a, g_kind_b, sizeof(a));
+    memset(g_kind_b, 0, sizeof(g_kind_b));
+    ReleaseSRWLockExclusive(&g_lock);
+    buf[0] = 0;
+    if (twoc_cpu_ranks() <= 1) {
+        snprintf(buf, cap, "the cores' MHz not split (one kind of core)");
+        return;
+    }
+    for (r = 0; r < twoc_cpu_ranks() && r < 4 && n < (int)cap; r++) {
+        const char *kind = r == 0 ? "performance" : r == twoc_cpu_ranks() - 1 ? "efficiency" : "middle";
+        if (!a[r].n) {
+            n += snprintf(buf + n, cap - n, "%s%s cores' MHz not read", r ? ", " : "", kind);
+            continue;
+        }
+        any = 1;
+        n += snprintf(buf + n, cap - n, "%s%s cores %.0f MHz on average (%.0f-%.0f)", r ? ", " : "", kind,
+                      a[r].sum / a[r].n, a[r].lo, a[r].hi);
+    }
+    if (any && n < (int)cap)
+        snprintf(buf + n, cap - n, " over %u readings", a[0].n);
 }
