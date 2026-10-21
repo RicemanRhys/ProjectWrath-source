@@ -9,6 +9,9 @@ tag, minutes = sys.argv[1], float(sys.argv[2])
 PLAY = float(os.environ.get("PLAYSECS", "120"))
 HUB = float(os.environ.get("HUBSECS", "30"))
 LEVELS = [7, 13, 11, 17, 4, 8, 34, 12, 18, 2, 10, 14, 3, 0, 15, 5, 20, 26, 6, 30, 1, 19, 16, 31, 33]
+if os.environ.get("LEVELS"):            # step 99: e.g. LEVELS=34 enters Sea Shell each time; ENTRIES=N stops after N
+    LEVELS = [int(x) for x in os.environ["LEVELS"].split(",")]
+ENTRIES = int(os.environ.get("ENTRIES", "0"))
 errp = os.path.join(HERE, "runs", tag + ".err.log")
 pad = os.path.join(HERE, "runs", tag + ".pad.txt")
 logp = os.path.join(HERE, "runs", tag + ".cycle.txt")
@@ -58,7 +61,17 @@ def wait_log(pat, p0, secs):
 
 k = 0
 first = True
-while time.time() - t0 < minutes * 60:
+menu_at = os.path.getsize(errp)
+while time.time() - t0 < minutes * 60 and (not ENTRIES or k < ENTRIES):
+    txt = open(errp, "rb").read()[menu_at:].decode("latin1")
+    if "MAIN MENU OPEN" in txt:         # step 99: at the title (a game over's QUIT, say): a new game, and go on
+        say("at the main menu: a new game")
+        r = subprocess.run([sys.executable, "newgame2.py", tag], cwd=HERE, capture_output=True, text=True,
+                           env=dict(os.environ, NG_FROM=str(menu_at)))
+        say("new game", (r.stdout.strip().splitlines() or [r.stderr.strip()[-200:]])[-1])
+        menu_at = os.path.getsize(errp)
+        first = True
+        continue
     lv = LEVELS[k % len(LEVELS)]
     k += 1
     p0 = os.path.getsize(errp)
@@ -93,6 +106,8 @@ while time.time() - t0 < minutes * 60:
         say("no hub yet, pause again (attempt %d)" % (attempt + 1))
         press("b", "wait:1", "b", "wait:1")
     else:
+        if "MAIN MENU OPEN" in open(errp, "rb").read()[menu_at:].decode("latin1"):
+            continue                    # step 99: random play reached the title: a new game at the loop's top
         say("FAILED to return to the hub")
         break
     time.sleep(10)

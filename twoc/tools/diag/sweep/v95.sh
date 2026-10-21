@@ -18,7 +18,7 @@ sum() {  # TAG
   local L=runs/$1.err.log
   echo "-- $1: $(grep -a 'Crashdat.levels' $L | tail -1 | sed 's/.*levels.//')"
   grep -a "replay check: [0-9]* frames" $L | tail -1
-  echo "   'differs in' lines: $(grep -ac 'differs in' $L); bad lines: $(grep -ac 'D3DB\] THREADCHECK:\|\[CRASH\]\|frame slots\|watchdog' $L)"
+  echo "   'differs in' lines: $(grep -ac 'differs in' $L); bad lines: $(grep -a 'D3DB\] THREADCHECK:\|\[CRASH\]\|frame slots\|watchdog' $L | grep -avc '^\[MEM\]')"
   grep -a "host baked draws: [0-9]" $L | tail -1
   grep -a "host recorded constants" $L | tail -1
   grep -a "interpolation sub-frames" $L | tail -1 | cut -c1-200

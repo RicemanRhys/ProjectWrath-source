@@ -7,9 +7,12 @@ tag = sys.argv[1]
 errp = os.path.join(HERE, "runs", tag + ".err.log")
 
 
+FROM = int(os.environ.get("NG_FROM", "0"))      # step 99: a second new game looks only past this log offset
+
+
 def seen(s):
     try:
-        return s.encode() in open(errp, "rb").read()
+        return s.encode() in open(errp, "rb").read()[FROM:]
     except OSError:
         return False
 

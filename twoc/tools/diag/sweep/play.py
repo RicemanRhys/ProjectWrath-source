@@ -5,7 +5,7 @@ Crash's position every 0.5 s, grabs the bridge window every GRABEVERY s (default
 summary: frames advanced, the longest stall of the frame counter, distance moved, CRASH lines in the log, whether
 the process is still alive.
 """
-import math, os, struct, subprocess, sys, threading, time
+import ctypes, math, os, struct, subprocess, sys, threading, time
 sys.path.insert(0, r"C:\Users\User\Desktop\Desktop Stuff\Claude Stuff\Crash TWOC decomp\twoc\tools\diag")
 import memsnap  # noqa: E402
 
@@ -19,6 +19,11 @@ errp = os.path.join(out, tag + ".err.log")
 EXE = os.environ.get("TWOC_EXE", "crash_twoc.exe")
 pid = memsnap.find_pid(EXE)
 h = memsnap.attach(pid)
+# step 99: lives kept at 9 (0x56299C, as swim.py) so a death never ends a run at a game over; KEEP_LIVES=0 leaves them
+KEEP = os.environ.get("KEEP_LIVES", "1") != "0"
+memsnap.K32.WriteProcessMemory.argtypes = [ctypes.c_void_p, ctypes.c_void_p, ctypes.c_void_p, ctypes.c_size_t,
+                                           ctypes.POINTER(ctypes.c_size_t)]
+hw = memsnap.K32.OpenProcess(0x0438, False, pid) if KEEP else None    # VM_OPERATION|VM_READ|VM_WRITE|QUERY
 F = 32767
 # (duration, pad line); a cycle of ~16 s
 CYCLE = [
@@ -45,6 +50,9 @@ def grab(name):
 
 
 def sample():
+    if hw:
+        got = ctypes.c_size_t()
+        memsnap.K32.WriteProcessMemory(hw, ctypes.c_void_p(0x56299C + memsnap.OFFSET), b"\x09", 1, ctypes.byref(got))
     fc = memsnap.u32(h, 0x25A660)
     x, y, z = struct.unpack_from("<3f", memsnap.read(h, 0x8F5120 + 0x6C, 12))
     return fc, x, y, z
