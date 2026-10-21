@@ -50,4 +50,8 @@ void ao_stats_take(ao_stats_t *s);
 /* Its textures and shaders given back (the device is going away). */
 void ao_release(void);
 
+/* Step 99: the bytes its textures hold now (an R32F depth, an R32F view depth with 5 mips, three R8 terms at the
+ * working size; 0 before it first ran). Kept until the size changes: turning it off frees nothing. */
+size_t ao_mem_bytes(void);
+
 #endif

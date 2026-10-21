@@ -154,6 +154,13 @@ try {
         # step 99: where the game and render threads ran (the kind of core) and each kind's MHz, its last 10 s
         $m = Select-String -LiteralPath $err -Pattern '^\[D3DB\] host cores:' | Select-Object -Last 1
         if ($m) { Add "The last 10-s interval's: $($m.Line)" }
+        # step 99: memory (the process, the GPU's, the game's own caches, the guest heap): the first and last samples
+        $mem = @(Select-String -LiteralPath $err -Pattern '^\[MEM\]')
+        if ($mem.Count) {
+            Section "The game's memory (its last run: the first and the last [MEM] lines, $($mem.Count) in all)"
+            Add $mem[0].Line
+            if ($mem.Count -gt 1) { Add $mem[$mem.Count - 1].Line }
+        }
     }
 } catch { Add "the game's [CPU] lines: $_" }
 try {

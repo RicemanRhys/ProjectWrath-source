@@ -74,6 +74,13 @@ int twoc_gpu_find(const char *name);
 /* "NVIDIA GeForce RTX 3050 Laptop GPU, 4.0 GB" */
 void twoc_gpu_label(const twoc_gpu_t *g, char *buf, size_t cap);
 
+/* Step 99: the device's adapter's memory for this process (IDXGIAdapter3::QueryVideoMemoryInfo), bytes. */
+typedef struct {
+    unsigned long long local_use, local_budget, nonlocal_use, nonlocal_budget;
+} twoc_vram_t;
+/* 1 when read (after twoc_gpu_device_made; any thread). */
+int twoc_gpu_vram(twoc_vram_t *v);
+
 #ifdef __cplusplus
 }
 #endif

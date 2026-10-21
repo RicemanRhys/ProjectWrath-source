@@ -182,6 +182,7 @@
 #include "gpu.h"
 #include "restart.h"
 #include "cpu_info.h"
+#include "mem_log.h"
 
 #define WIN_CLASS          "TwocD3DBridge"
 #define WIN_TITLE           "Crash TWOC - D3D bridge (host)"
@@ -2055,6 +2056,8 @@ static ra_chunk_t *g_ra_pool;           /* free chunks, the last replayed frame'
 static rcmd_t *g_rc_pool;               /* a free command array */
 static unsigned g_rc_pool_cap;
 static SRWLOCK g_pool_lock = SRWLOCK_INIT;
+static volatile size_t g_ra_total;      /* step 99: the arenas' chunks made so far (bytes, count) */
+static volatile unsigned g_ra_chunks;
 
 static void clear_exec(const d3dh_target_t *target, uint32_t xdk_flags, uint32_t color, float z, uint32_t stencil);
 static int copy_exec(const d3dh_target_t *dst, const int32_t *rects, const int32_t *points, unsigned n);
@@ -2099,6 +2102,8 @@ static void *ra_alloc(size_t n)
             if (!nc)
                 return NULL;
             nc->cap = cap;
+            g_ra_total += sizeof(ra_chunk_t) + cap;     /* step 99: chunks are kept, never freed */
+            g_ra_chunks++;
         }
         nc->used = 0;
         if (c) {
@@ -11053,4 +11058,53 @@ void d3dh_stats(d3dh_stats_t *out)
     out->hud_passes += g->hud_passes;
     out->rt_on = g->rt_on;              /* step 79 */
     out->rt_wait_ms += g->rt_wait_ms;
+}
+
+/* Step 99: the host side's part of the [MEM] line (mem_log.c, on the power
+ * log's thread). Sizes are read without the side's locks: a log line, not a
+ * decision. Bytes held as the host has them; GPU objects as their pixels
+ * (render targets with a depth of 4 bytes, the AO textures), so an estimate
+ * beside the adapter's own figure. */
+void d3dh_mem_text(char *buf, size_t cap)
+{
+    D3D8MemStats ms;
+    size_t tex_b = 0, rc_b = 0, up_b = 0, rt_b = 0, it_b = 0, bk_b, ag_b = 0, ao_b;
+    unsigned tex_n = 0, rt_n = 0, rt_ms = 0, i, k;
+
+    for (i = 0; i < TEX_CACHE_SLOTS; i++)
+        if (g_tc.g[i].live) {
+            tex_n++;
+            tex_b += g_tc.g[i].desc.bytes;
+        }
+    for (i = 0; i < FSLOTS; i++) {
+        rc_b += (size_t)g_slot[i].rc_cap * sizeof(rcmd_t);
+        up_b += (size_t)g_slot[i].up_cap * sizeof(texup_t);
+    }
+    rc_b += (size_t)g_rc_pool_cap * sizeof(rcmd_t);
+    for (i = 0; i < RT_SLOTS; i++)
+        if (g_rt[i].tex) {
+            rt_n++;
+            rt_b += (size_t)g_rt[i].hw * g_rt[i].hh * 8;
+            rt_ms += g_rt[i].ms != NULL;
+        }
+    for (i = 0; i < ITABS; i++)
+        it_b += (size_t)g_ikey_cap[i] * sizeof(uint32_t) + (size_t)g_iobj_cap[i] * sizeof(iobj_t) +
+                (size_t)g_ibone_cap[i] * sizeof(float);
+    bk_b = (size_t)g_bk_cap * sizeof(bake_t);
+    for (i = 0; i < 2; i++)
+        for (k = 0; k < 2; k++)
+            ag_b += (size_t)g_ag_cap[i][k] * sizeof(again_t) + (size_t)g_ag_ixcap[i][k] * sizeof(int32_t);
+    memset(&ms, 0, sizeof(ms));
+    d3d8_MemStats(&ms);
+    ao_b = ao_mem_bytes();
+    snprintf(buf, cap, "textures %u of %u (%.1f MB as the guest's bytes); frame slots' arenas %.1f MB in %u chunks"
+             " (kept, never freed), command arrays %.1f MB, texture copy lists %.1f KB; interpolation tables %.1f MB;"
+             " baked draws %.1f MB, drawn-again tables %.1f MB, xbox_d3d8's bake %.1f MB in %u chunks; vertex ring peak"
+             " %.1f MB of %u, index ring peak %.1f MB of %u, constants ring %.1f MB a frame (most %.1f) of %u, rings"
+             " started over %u + %u; render targets %u (%.1f MB, %u with MSAA surfaces); AO textures %.1f MB",
+             tex_n, TEX_CACHE_SLOTS, tex_b / 1048576.0, g_ra_total / 1048576.0, g_ra_chunks, rc_b / 1048576.0,
+             up_b / 1024.0, it_b / 1048576.0, bk_b / 1048576.0, ag_b / 1048576.0, ms.bake_bytes / 1048576.0,
+             ms.bake_chunks, ms.up_peak / 1048576.0, ms.up_size >> 20, ms.ib_peak / 1048576.0, ms.ib_size >> 20,
+             ms.k_frame / 1048576.0, ms.k_peak / 1048576.0, ms.k_size >> 20, ms.ring_gen - 1, ms.k_gen - 1, rt_n,
+             rt_b / 1048576.0, rt_ms, ao_b / 1048576.0);
 }

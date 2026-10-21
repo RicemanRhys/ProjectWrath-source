@@ -271,6 +271,49 @@ static void where(void *dev, HWND hwnd, int *used, int *disp, int *listed, char 
     }
 }
 
+/* Step 99: the device's adapter, kept for the memory log's QueryVideoMemoryInfo. */
+static IDXGIAdapter3 *volatile g_ad3;
+static SRWLOCK g_ad3_lock = SRWLOCK_INIT;
+
+static void keep_adapter(void *dev)
+{
+    IDXGIDevice *xd = NULL;
+    IDXGIAdapter *ad = NULL;
+    IDXGIAdapter3 *a3 = NULL, *old;
+
+    if (dev && SUCCEEDED(ID3D11Device_QueryInterface((ID3D11Device *)dev, &IID_IDXGIDevice, (void **)&xd))) {
+        if (SUCCEEDED(IDXGIDevice_GetAdapter(xd, &ad)))
+            IDXGIAdapter_QueryInterface(ad, &IID_IDXGIAdapter3, (void **)&a3);
+        if (ad)
+            IDXGIAdapter_Release(ad);
+        IDXGIDevice_Release(xd);
+    }
+    AcquireSRWLockExclusive(&g_ad3_lock);
+    old = g_ad3;
+    g_ad3 = a3;
+    ReleaseSRWLockExclusive(&g_ad3_lock);
+    if (old)
+        IDXGIAdapter3_Release(old);
+}
+
+int twoc_gpu_vram(twoc_vram_t *v)
+{
+    DXGI_QUERY_VIDEO_MEMORY_INFO l, nl;
+    int ok = 0;
+
+    AcquireSRWLockShared(&g_ad3_lock);
+    if (g_ad3 && SUCCEEDED(IDXGIAdapter3_QueryVideoMemoryInfo(g_ad3, 0, DXGI_MEMORY_SEGMENT_GROUP_LOCAL, &l)) &&
+        SUCCEEDED(IDXGIAdapter3_QueryVideoMemoryInfo(g_ad3, 0, DXGI_MEMORY_SEGMENT_GROUP_NON_LOCAL, &nl))) {
+        v->local_use = l.CurrentUsage;
+        v->local_budget = l.Budget;
+        v->nonlocal_use = nl.CurrentUsage;
+        v->nonlocal_budget = nl.Budget;
+        ok = 1;
+    }
+    ReleaseSRWLockShared(&g_ad3_lock);
+    return ok;
+}
+
 void twoc_gpu_device_made(void *dev, HWND hwnd)
 {
     char name[128];
@@ -278,6 +321,7 @@ void twoc_gpu_device_made(void *dev, HWND hwnd)
 
     where(dev, hwnd, &used, &disp, &listed, name, sizeof(name));
     snprintf(g_used, sizeof(g_used), "%s", used >= 0 ? g_gpu[used].name : name);
+    keep_adapter(dev);
     fprintf(stderr, "[GPU] the device is on %s%s%s; the window's display is on %s%s%s\n",
             used >= 0 ? "graphics card " : "", used >= 0 ? "" : name[0] ? name : "an adapter not listed",
             used >= 0 ? g_gpu[used].name : "",

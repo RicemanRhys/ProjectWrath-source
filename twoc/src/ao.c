@@ -933,6 +933,13 @@ int ao_apply(const ao_params_t *p, ID3D11ShaderResourceView *depth, unsigned sam
     return 0;
 }
 
+size_t ao_mem_bytes(void)
+{
+    size_t px = (size_t)g_ao.ww * g_ao.wh;
+
+    return g_ao.fin ? px * 4 + px * 4 * 4 / 3 + px * 3 : 0;
+}
+
 void ao_release(void)
 {
     int i, j;

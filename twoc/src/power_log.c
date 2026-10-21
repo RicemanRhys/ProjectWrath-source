@@ -10,6 +10,7 @@
 
 #include "power_log.h"
 #include "cpu_info.h"
+#include "mem_log.h"
 
 /* CallNtPowerInformation's levels and its ProcessorInformation entry
  * (ntpoapi.h's PROCESSOR_POWER_INFORMATION, not in the user headers). */
@@ -467,7 +468,7 @@ static void kinds_add(const sample_t *s)
 /* A [POWER] line to the log, and through to the disk with RECOMP_POWER_LOG. */
 static void out_line(const char *text, int to_stderr)
 {
-    char line[1400];
+    char line[3300];
     SYSTEMTIME lt;
     int n;
 
@@ -636,6 +637,7 @@ static DWORD WINAPI sampler(void *arg)
     out_line(line, 1);
     if (s.temp_ok < 0)
         out_line("no temperature: Windows has no \"Thermal Zone Information\" counters on this PC (logged once)", 1);
+    mem_log_sample(g_hooks.now_s ? g_hooks.now_s() : 0);     /* step 99: the [MEM] line's first sample */
     logged = cand = speed_class(&s);
     cand_n = 1;
     for (;;) {
@@ -717,7 +719,10 @@ static DWORD WINAPI sampler(void *arg)
             snprintf(line, sizeof(line), "change: %s; %s; now %s, %s, %s", what, g, cpu, ac_name(s.ac), tt);
             out_line(line, 1);
         }
+        if (tick % 10 == 0)             /* step 99: memory, one sample each 10 s */
+            mem_log_sample(g_hooks.now_s ? g_hooks.now_s() : tick);
         if (tick % 10 == 0 && g_file != INVALID_HANDLE_VALUE) {   /* the file's own 10-s line */
+            char mem[3072], ml[3100];
             game_text(g, sizeof(g));
             k = snprintf(line, sizeof(line), "%s; ", g);
             k += source_text(&s, line + k, sizeof(line) - k);
@@ -725,6 +730,9 @@ static DWORD WINAPI sampler(void *arg)
             detail_text(&s, &acc_f, line + k, sizeof(line) - k);
             out_line(line, 0);
             memset(&acc_f, 0, sizeof(acc_f));
+            mem_log_last(mem, sizeof(mem));
+            snprintf(ml, sizeof(ml), "memory %s", mem);
+            out_line(ml, 0);
         }
     }
 }
@@ -748,7 +756,7 @@ void power_log_start(const power_log_hooks_t *hooks)
         fprintf(stderr, "[POWER] lines also to %s, written through to the disk%s\n", v,
                 g_file == INVALID_HANDLE_VALUE ? ": NOT opened" : "");
     }
-    t = CreateThread(NULL, 64 * 1024, sampler, NULL, STACK_SIZE_PARAM_IS_A_RESERVATION, NULL);
+    t = CreateThread(NULL, 256 * 1024, sampler, NULL, STACK_SIZE_PARAM_IS_A_RESERVATION, NULL);
     if (t)
         CloseHandle(t);
     else

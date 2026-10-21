@@ -2112,6 +2112,37 @@ static __declspec(noinline) void heap_watch_lines(void)
     log_block_flush(&lb);
 }
 
+/* Step 99: the [HEAPSTAT] figures in brief, for the [MEM] line (mem_log.c; the power log's thread). */
+void twoc_guest_mem_text(char *buf, size_t cap)
+{
+    xbox_heap_stats_t s;
+    uint32_t cm_live, pool_live, pool_peak, vr_live, vr_peak, vr_free, vr_largest = 0;
+    int i;
+
+    xbox_HeapStats(&s);
+    AcquireSRWLockShared(&g_cm_lock);
+    cm_live = g_cm_live_bytes;
+    ReleaseSRWLockShared(&g_cm_lock);
+    AcquireSRWLockShared(&g_pool_lock);
+    pool_live = g_pool_live;
+    pool_peak = g_pool_peak;
+    ReleaseSRWLockShared(&g_pool_lock);
+    AcquireSRWLockShared(&g_vr_lock);
+    vr_live = g_vr_live_bytes;
+    vr_peak = g_vr_live_peak;
+    vr_free = g_vr_free_bytes;
+    for (i = 0; i < g_vr_free_n; i++)
+        if (g_vr_free[i].size > vr_largest)
+            vr_largest = g_vr_free[i].size;
+    ReleaseSRWLockShared(&g_vr_lock);
+    snprintf(buf, cap, "guest heap used %.1f MB of %.1f, live %.1f MB, largest free %.1f MB, live less zone free %.1f MB;"
+             " contiguous high-water %.1f MB, live %.1f MB; pool live %.1f KB (peak %.1f); VM zone live %.1f MB (peak"
+             " %.1f), largest free %.1f MB", s.used / 1048576.0, s.total / 1048576.0, s.live / 1048576.0,
+             s.largest_free / 1048576.0, (s.live - vr_free) / 1048576.0, xbox_ContiguousAllocatedBytes() / 1048576.0,
+             cm_live / 1048576.0, pool_live / 1024.0, pool_peak / 1024.0, vr_live / 1048576.0, vr_peak / 1048576.0,
+             vr_largest / 1048576.0);
+}
+
 /* ── Step 73: a title that leaves for the dashboard says why ── */
 
 /*

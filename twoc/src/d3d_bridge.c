@@ -113,6 +113,7 @@
 #include "log_block.h"
 #include "power_log.h"
 #include "cpu_info.h"
+#include "mem_log.h"
 
 /* ── Guest D3D layout (notes 18.31, step29_option_b_plan.md section 1) ── */
 
@@ -3308,6 +3309,16 @@ static int vc_block(vcache_t *e, size_t n)
     return 0;
 }
 
+/* Step 99: the [MEM] line's part (mem_log.c, the power log's thread: sizes read without the lock). */
+void d3db_mem_text(char *buf, size_t cap)
+{
+    if (g_vc_on <= 0 || g_vc_on == 3)
+        snprintf(buf, cap, "vertex cache off");
+    else
+        snprintf(buf, cap, "vertex cache %.1f MB (cap %u MB, emptied when full, %ld times so far)",
+                 (double)g_vc_bytes / 1048576.0, (unsigned)(g_vc_max >> 20), (long)g_vc_n[5]);
+}
+
 /* Grow *buf to n bytes, kept in g_vc_bytes. */
 static int vc_reserve(void **buf, size_t *cap, size_t n)
 {
@@ -5026,6 +5037,12 @@ static void mirror_swap(void)
                 twoc_cpu_where_text(wh, sizeof(wh));
                 power_log_kinds(kd, sizeof(kd));
                 log_block_printf(&lb, "[D3DB] host cores: %s; %s\n", wh, kd);
+            }
+            {   /* step 99: memory, the power log thread's latest sample (mem_log.c) */
+                char mem[3072];
+                mem_log_last(mem, sizeof(mem));
+                if (mem[0])
+                    log_block_printf(&lb, "[MEM] %s\n", mem);
             }
             if (st.paced)       /* S7: the frame limiter */
                 log_block_printf(&lb, "[D3DB] host limiter: paced %u (+%u), late %u (+%u), waited %.0f ms this interval"

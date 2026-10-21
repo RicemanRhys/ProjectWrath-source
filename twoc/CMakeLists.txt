@@ -123,6 +123,8 @@ set(GAME_SOURCES
     # The power mode and the CPU's speed, logged from a thread of its own (step 91);
     # powrprof.dll and pdh.dll load at run time, so the exe imports nothing new
     src/power_log.c
+    # Memory: a [MEM] line each 10 s, sampled on the power log's thread (step 99)
+    src/mem_log.c
     # The F1 menu's About tab: the build, the graphics card and driver, the display, Windows (step 93)
     src/about.c
     # The graphics cards: listed at the start, the one the device is made on, the display's (step 97)
