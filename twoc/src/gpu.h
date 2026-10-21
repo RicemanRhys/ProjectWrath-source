@@ -28,7 +28,10 @@
  * it is on and which card drives the window's display. On a laptop with
  * hybrid graphics they can differ (the NVIDIA GPU draws, the Intel GPU
  * drives the screen): the flip-model swap chain still presents there, with
- * Windows copying each frame across.
+ * Windows copying each frame across. The display's card is the display
+ * driver's (the monitor's GDI name -> D3DKMTOpenAdapterFromGdiDisplayName's
+ * adapter LUID, step 99), not DXGI's EnumOutputs, which on such a laptop
+ * lists the Intel's screen under the NVIDIA adapter for a process on it.
  */
 #ifndef TWOC_GPU_H
 #define TWOC_GPU_H

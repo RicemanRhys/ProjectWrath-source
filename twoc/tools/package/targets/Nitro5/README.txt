@@ -88,10 +88,9 @@ B. Start the game [laptop]
       Graphics card ...... must say NVIDIA GeForce RTX 3050 Laptop GPU (not Intel UHD
                            or Intel Iris Xe). If it says Intel: close the game, do part A
                            step 6 again, start again.
-      Display's card ..... says the NVIDIA card ("the same card") in this build. The
-                           screen is really wired to the Intel GPU, and Windows copies each
-                           frame to it. The line is a known mistake on laptops like this
-                           one; nothing to do.
+      Display's card ..... most likely Intel Iris Xe "(Windows copies each frame)": the
+                           screen is wired to the Intel GPU, and Windows copies each frame
+                           from the NVIDIA card to it. That is normal on this laptop.
       Processor .......... the i5-12500H, "hybrid: 4 performance cores ..., 8 efficiency
                            cores ...".
       Power throttling ... "not throttled".

@@ -178,8 +178,55 @@ void twoc_gpu_start(void)
     IDXGIFactory1_Release(f);
 }
 
-/* The adapter (index in the list) of the device, and of the monitor `hwnd` is on; -1 each when not known. */
-static void where(void *dev, HWND hwnd, int *used, int *disp, char *used_name, size_t cap)
+/* gdi32's D3DKMT entries (d3dkmthk.h's structures, declared here: the header wants the WDK's types). */
+typedef struct {
+    WCHAR DeviceName[32];
+    UINT hAdapter;
+    LUID AdapterLuid;
+    UINT VidPnSourceId;
+} kmt_open_gdi_t;
+typedef LONG (APIENTRY *kmt_open_gdi_fn)(kmt_open_gdi_t *);
+typedef LONG (APIENTRY *kmt_close_fn)(const UINT *);
+
+/*
+ * Step 99: the adapter that drives monitor `mon`, as the display driver has it (its GDI name -> the kernel
+ * adapter's LUID). DXGI's EnumOutputs can't be trusted for this: on a hybrid laptop a process on the NVIDIA GPU
+ * gets the Intel's screen listed under the NVIDIA adapter (notes 18.101). -1 when not found.
+ */
+static int display_adapter(HMONITOR mon)
+{
+    static kmt_open_gdi_fn open_fn;
+    static kmt_close_fn close_fn;
+    static int looked;
+    MONITORINFOEXW mi;
+    kmt_open_gdi_t o;
+    int k;
+
+    if (!looked) {
+        HMODULE gdi = GetModuleHandleW(L"gdi32.dll");
+        looked = 1;
+        if (gdi) {
+            open_fn = (kmt_open_gdi_fn)GetProcAddress(gdi, "D3DKMTOpenAdapterFromGdiDisplayName");
+            close_fn = (kmt_close_fn)GetProcAddress(gdi, "D3DKMTCloseAdapter");
+        }
+    }
+    memset(&mi, 0, sizeof(mi));
+    mi.cbSize = sizeof(mi);
+    if (!open_fn || !mon || !GetMonitorInfoW(mon, (MONITORINFO *)&mi))
+        return -1;
+    memset(&o, 0, sizeof(o));
+    wcsncpy(o.DeviceName, mi.szDevice, 31);
+    if (open_fn(&o) != 0)
+        return -1;
+    k = by_luid(o.AdapterLuid);
+    if (close_fn)
+        close_fn(&o.hAdapter);
+    return k;
+}
+
+/* The adapter (index in the list) of the device, and of the monitor `hwnd` is on; -1 each when not known.
+   `listed` gets the adapter DXGI lists the monitor under (EnumOutputs), which can differ. */
+static void where(void *dev, HWND hwnd, int *used, int *disp, int *listed, char *used_name, size_t cap)
 {
     IDXGIDevice *xd = NULL;
     IDXGIAdapter *ad = NULL;
@@ -192,7 +239,7 @@ static void where(void *dev, HWND hwnd, int *used, int *disp, char *used_name, s
     HMONITOR mon = hwnd ? MonitorFromWindow(hwnd, MONITOR_DEFAULTTONEAREST) : NULL;
     UINT i, j;
 
-    *used = *disp = -1;
+    *used = *disp = *listed = -1;
     used_name[0] = 0;
     if (dev && SUCCEEDED(ID3D11Device_QueryInterface((ID3D11Device *)dev, &IID_IDXGIDevice, (void **)&xd))) {
         if (SUCCEEDED(IDXGIDevice_GetAdapter(xd, &ad)) && SUCCEEDED(IDXGIAdapter_GetDesc(ad, &d))) {
@@ -203,40 +250,53 @@ static void where(void *dev, HWND hwnd, int *used, int *disp, char *used_name, s
             IDXGIAdapter_Release(ad);
         IDXGIDevice_Release(xd);
     }
-    if (!mon || FAILED(CreateDXGIFactory1(&IID_IDXGIFactory1, (void **)&f)))
+    if (!mon)
         return;
-    for (i = 0; *disp < 0 && SUCCEEDED(IDXGIFactory1_EnumAdapters1(f, i, &a)); i++) {
-        for (j = 0; *disp < 0 && SUCCEEDED(IDXGIAdapter1_EnumOutputs(a, j, &o)); j++) {
+    *disp = display_adapter(mon);
+    if (FAILED(CreateDXGIFactory1(&IID_IDXGIFactory1, (void **)&f)))
+        return;
+    for (i = 0; *listed < 0 && SUCCEEDED(IDXGIFactory1_EnumAdapters1(f, i, &a)); i++) {
+        for (j = 0; *listed < 0 && SUCCEEDED(IDXGIAdapter1_EnumOutputs(a, j, &o)); j++) {
             if (SUCCEEDED(IDXGIOutput_GetDesc(o, &od)) && od.Monitor == mon &&
                 SUCCEEDED(IDXGIAdapter1_GetDesc1(a, &d1)))
-                *disp = by_luid(d1.AdapterLuid);
+                *listed = by_luid(d1.AdapterLuid);
             IDXGIOutput_Release(o);
         }
         IDXGIAdapter1_Release(a);
     }
     IDXGIFactory1_Release(f);
+    if (*disp < 0) {                    /* no D3DKMT answer: DXGI's, the old way */
+        *disp = *listed;
+        *listed = -2;
+    }
 }
 
 void twoc_gpu_device_made(void *dev, HWND hwnd)
 {
     char name[128];
-    int used, disp;
+    int used, disp, listed;
 
-    where(dev, hwnd, &used, &disp, name, sizeof(name));
+    where(dev, hwnd, &used, &disp, &listed, name, sizeof(name));
     snprintf(g_used, sizeof(g_used), "%s", used >= 0 ? g_gpu[used].name : name);
     fprintf(stderr, "[GPU] the device is on %s%s%s; the window's display is on %s%s%s\n",
             used >= 0 ? "graphics card " : "", used >= 0 ? "" : name[0] ? name : "an adapter not listed",
             used >= 0 ? g_gpu[used].name : "",
             disp >= 0 ? "graphics card " : "", disp >= 0 ? g_gpu[disp].name : "a card not known",
-            used >= 0 && disp >= 0 && used != disp ? " (another card: Windows copies each frame across to it)" : "");
+            used >= 0 && disp >= 0 && used != disp ? " (Windows copies each frame)" : "");
+    if (listed >= 0 && disp >= 0 && listed != disp)     /* step 99: a hybrid laptop's DXGI view */
+        fprintf(stderr, "[GPU] DXGI lists the window's display under graphics card %s; the display driver has it on %s\n",
+                g_gpu[listed].name, g_gpu[disp].name);
+    else if (listed == -2)
+        fprintf(stderr, "[GPU] the display driver's card for the window's display isn't known (D3DKMT): DXGI's outputs "
+                "say which\n");
 }
 
 void twoc_gpu_about(void *dev, HWND hwnd, char *used_buf, size_t used_cap, char *disp_buf, size_t disp_cap)
 {
     char name[128];
-    int used, disp;
+    int used, disp, listed;
 
-    where(dev, hwnd, &used, &disp, name, sizeof(name));
+    where(dev, hwnd, &used, &disp, &listed, name, sizeof(name));
     if (g_asked[0] && !g_note[0])
         snprintf(used_buf, used_cap, "chosen in the Display tab");
     else if (g_note[0])
@@ -249,5 +309,5 @@ void twoc_gpu_about(void *dev, HWND hwnd, char *used_buf, size_t used_cap, char 
     else if (disp == used)
         snprintf(disp_buf, disp_cap, "%s (the same card)", g_gpu[disp].name);
     else
-        snprintf(disp_buf, disp_cap, "%s (another card: Windows copies each frame to it)", g_gpu[disp].name);
+        snprintf(disp_buf, disp_cap, "%s (Windows copies each frame)", g_gpu[disp].name);
 }
