@@ -4407,7 +4407,8 @@ static unsigned g_ikey_n[ITABS], g_ikey_cap[ITABS];
 static int g_ipair[IC_CAMS];            /* this frame's camera -> the frame before's, -1 none */
 static struct {
     int on;
-    float c[16], vfix[16], dp[16], pos[3];
+    double c[16], vfix[16], dp[16];     /* step 100: double, so each draw's matrices are rounded once, as the game's */
+    float pos[3];
 } g_isub[IC_CAMS];                      /* this sub-frame's corrections, by camera */
 static double g_it;                     /* this sub-frame's t */
 static unsigned g_imc = IC_NO_CAM;      /* step 65: the frame's main camera (most 3D draws); only its draws move */
@@ -6877,9 +6878,9 @@ static void ic_sub(double t)
         m4_mul(b->inv_p, vfix, tmp);
         m4_mul(tmp, pi, c);
         for (j = 0; j < 16; j++) {
-            g_isub[i].c[j] = (float)c[j];
-            g_isub[i].vfix[j] = (float)vfix[j];
-            g_isub[i].dp[j] = (float)(pi[j] - b->m[16 + j]);
+            g_isub[i].c[j] = c[j];
+            g_isub[i].vfix[j] = vfix[j];
+            g_isub[i].dp[j] = pi[j] - b->m[16 + j];
         }
         for (j = 0; j < 3; j++)
             g_isub[i].pos[j] = (float)ci[12 + j];
@@ -6997,8 +6998,7 @@ static void ic_draw(const rcmd_t *c)
             }
         }
         if (cam_on) {                   /* ... C: the camera at t */
-            m4_from(g_isub[c->u.draw.cam].c, t1);
-            m4_mul(wvp, t1, t2);
+            m4_mul(wvp, g_isub[c->u.draw.cam].c, t2);
             memcpy(wvp, t2, sizeof(wvp));
             for (n = 0; n < c->u.draw.n_cpos; n++) {
                 IC_KEEP(c->u.draw.cpos[n]);
@@ -7091,17 +7091,16 @@ static void ic_draw(const rcmd_t *c)
         m.vprog = &vp;
         g_st.interp_vp++;
     } else {
-        double v[16], f[16], x[16];
+        double v[16], x[16];
         ff = *d->ff;
         if (cam_on) {
             m4_from(d->ff->view, v);
-            m4_from(g_isub[c->u.draw.cam].vfix, f);
-            m4_mul(v, f, x);
+            m4_mul(v, g_isub[c->u.draw.cam].vfix, x);
             for (i = 0; i < 16; i++)
                 ff.view[i] = (float)x[i];
             if (c->u.draw.cls == IC_FF_PROJ)
                 for (i = 0; i < 16; i++)
-                    ff.proj[i] += g_isub[c->u.draw.cam].dp[i];
+                    ff.proj[i] = (float)((double)d->ff->proj[i] + g_isub[c->u.draw.cam].dp[i]);
         }
         if (w_move) {
             for (i = 0; i < 16; i++)
