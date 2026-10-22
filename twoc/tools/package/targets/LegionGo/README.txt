@@ -48,7 +48,7 @@ Still from last time:
     asks first (Yes / No; works with the controller: D-pad to the button, A, then Left for
     Yes and A, or B for No) and puts every setting on that tab back to the game's own
     default: Render size Game (480 lines), Frame rate Game (60), Render scale 100%,
-    Anti-aliasing and Ambient occlusion Off, Anisotropic filtering Off, Render thread Off,
+    Anti-aliasing and Ambient occlusion Off, Anisotropic filtering Off, Render thread Auto,
     the HUD in the centre, the counter off. Full screen, the aspect ratio, sound, controls
     and saves stay as they are.
   - 72 fps in the Frame rate list: half of 144 Hz, so each frame is held for 2

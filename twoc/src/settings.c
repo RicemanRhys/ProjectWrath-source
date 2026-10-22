@@ -312,7 +312,7 @@ const char *twoc_rt_name(int rt)
 int twoc_rt_parse(const char *v)
 {
     if (!v)
-        return TWOC_RT_OFF;
+        return TWOC_RT_AUTO;            /* step 99: unset is Auto (on with 4 or more cores, only above 60) */
     if (_stricmp(v, "on") == 0 || strcmp(v, "1") == 0 || _stricmp(v, "sync") == 0)
         return TWOC_RT_ON;
     if (_stricmp(v, "auto") == 0)
@@ -551,7 +551,7 @@ void twoc_settings_display_defaults(twoc_settings_t *s)
     s->pacing = TWOC_PACING_AUTO;
     s->framerate = 0;
     s->adaptive = 1;
-    s->render_thread = TWOC_RT_OFF;
+    s->render_thread = TWOC_RT_AUTO;
     s->show_fps = 0;
     s->startup_message = 1;
     s->fast_title = 0;
@@ -590,8 +590,8 @@ static void key_text(const twoc_settings_t *s, size_t i, char *buf, size_t cap)
         twoc_framerate_text(s->framerate, buf, cap);
     else if (strcmp(k, "adaptive_framerate") == 0)
         snprintf(buf, cap, "%d", s->adaptive ? 1 : 0);
-    else if (strcmp(k, "render_thread") == 0 && s->render_thread != TWOC_RT_OFF)
-        snprintf(buf, cap, "%s", twoc_rt_name(s->render_thread));      /* off, the default for now: unwritten */
+    else if (strcmp(k, "render_thread") == 0 && s->render_thread != TWOC_RT_AUTO)
+        snprintf(buf, cap, "%s", twoc_rt_name(s->render_thread));      /* step 99: auto, the default: unwritten */
     else if (strcmp(k, "show_fps") == 0 && s->show_fps)
         snprintf(buf, cap, "%d", s->show_fps);     /* step 82: off, the default: unwritten */
     else if (strcmp(k, "startup_message") == 0 && !s->startup_message)

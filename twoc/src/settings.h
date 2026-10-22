@@ -27,7 +27,7 @@
  *   framerate   = 60 | display | N            RECOMP_FRAMERATE (unset: 60; step 77: N a rate in Hz)
  *   adaptive_framerate = 0 | 1                RECOMP_FRAMERATE_ADAPTIVE (unset: on; step 75. The old
  *                                             name RECOMP_D3D_BRIDGE_INTERP_ADAPT still reads)
- *   render_thread = off | on | auto           RECOMP_RENDER_THREAD (unset: off for now; step 79)
+ *   render_thread = off | on | auto           RECOMP_RENDER_THREAD (unset: auto since step 99; step 79)
  *   show_fps    = 0 | 1 | 2                   RECOMP_SHOW_FPS (unset: off; step 82: the game's updates and
  *                                             the frames shown a second in the picture's corner; step 93:
  *                                             2 Detailed, also the threads' ms, the adaptive step, the CPU's
@@ -151,7 +151,7 @@ typedef struct {
     int antialiasing;                   /* TWOC_AA_* */
     int framerate;                      /* step 61: 0 the game's 60, 1 the display's (interpolated); step 77: N Hz */
     int adaptive;                       /* step 75: 1 fewer sub-frames while late (also when unset), 0 always all */
-    int render_thread;                  /* step 79: TWOC_RT_* (unset: off) */
+    int render_thread;                  /* step 79: TWOC_RT_* (unset: auto, step 99) */
     int show_fps;                       /* step 82: 1 the measured rates in a corner, 0 not (also unset); 2 more */
     int startup_message;                /* step 86: 1 the F1 line for the first seconds (also unset), 0 not */
     int hud, hud_margin;                /* step 65: 0 the HUD in the middle 4:3, 1 at the edges; 0-10 percent in */
@@ -196,7 +196,7 @@ void twoc_framerate_text(int fr, char *buf, size_t cap);    /* the file's word: 
 const char *twoc_aa_name(int aa);       /* the file's word: off, fxaa, smaa, msaa2x, msaa4x, msaa8x */
 int twoc_aa_parse(const char *v);       /* TWOC_AA_OFF for anything unknown */
 const char *twoc_rt_name(int rt);       /* step 79: off, on, auto */
-int twoc_rt_parse(const char *v);       /* TWOC_RT_OFF for anything unknown (sync, a check, is on) */
+int twoc_rt_parse(const char *v);       /* TWOC_RT_AUTO unset, _OFF for anything unknown (sync, a check, is on) */
 const char *twoc_ao_name(int ao);       /* step 92: off, ssao, gtao */
 int twoc_ao_parse(const char *v);       /* TWOC_AO_OFF for anything unknown */
 int twoc_ao_strength_parse(const char *v);  /* 0-100, TWOC_AO_STRENGTH_DEFAULT unset or unknown */
