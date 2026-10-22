@@ -372,7 +372,8 @@ static unsigned g_dump_seq, g_dump_first;
 static unsigned g_dump_every;           /* RECOMP_D3D_BRIDGE_DUMP_EVERY: also every Nth guest swap */
 static unsigned g_dump_from, g_dump_to; /* RECOMP_D3D_BRIDGE_DRAWLOG: every swap in this range */
 static ULONGLONG g_last_dump_ms;
-static int g_frame_work;                /* mirrored work since the last present */
+static int g_dump_asked;                /* step 100: RECOMP_D3D_BRIDGE_DUMP_ASKED, only the dumps asked for */
+static int g_frame_work;               /* mirrored work since the last present */
 static int g_dump_rt;                   /* RECOMP_D3D_BRIDGE_DUMP_RT: render targets too (S4) */
 /* Step 79: the counters, per side: g_st the replay side's, g_stg the game
  * side's (the recording, the texture table, the overlay pass and the HUD).
@@ -1399,9 +1400,14 @@ int d3dh_create(unsigned width, unsigned height, unsigned host_w, unsigned host_
         const char *every = getenv("RECOMP_D3D_BRIDGE_DUMP_EVERY");
         const char *rt = getenv("RECOMP_D3D_BRIDGE_DUMP_RT");
         const char *log = getenv("RECOMP_D3D_BRIDGE_DRAWLOG");
+        const char *asked = getenv("RECOMP_D3D_BRIDGE_DUMP_ASKED");
         snprintf(g_dump_prefix, sizeof(g_dump_prefix), "%s", dump_prefix);
         g_dump_every = every ? (unsigned)strtoul(every, NULL, 0) : 0;
         g_dump_rt = rt && *rt && strcmp(rt, "0") != 0;
+        /* Step 100 (a test aid, the capture kit's): RECOMP_D3D_BRIDGE_DUMP_ASKED=1 writes only the dumps asked
+         * for (the sub-frame, draw-log and EVERY ones), not the first 8 frames and one every 10 s, which at
+         * native 4K are 33 MB each and a hitch while a player plays */
+        g_dump_asked = asked && *asked && strcmp(asked, "0") != 0;
         if (log && *log) {
             char *e;
             g_dump_from = (unsigned)strtoul(log, &e, 0);
@@ -9887,7 +9893,7 @@ static int present_one(double t_s, unsigned swap_no, unsigned interval, unsigned
         dump_back_buffer(path, src);
     }
     if (g_dump_prefix[0] && sub == k &&
-        ((g_frame_work && g_dump_first < DUMP_FIRST_FRAMES) || now - g_last_dump_ms >= DUMP_PERIOD_MS ||
+        ((!g_dump_asked && ((g_frame_work && g_dump_first < DUMP_FIRST_FRAMES) || now - g_last_dump_ms >= DUMP_PERIOD_MS)) ||
          (g_dump_every && swap_no % g_dump_every == 0) || (swap_no >= g_dump_from && swap_no <= g_dump_to))) {
         char path[600];
         snprintf(path, sizeof(path), "%s%03u.bmp", g_dump_prefix, g_dump_seq++);
