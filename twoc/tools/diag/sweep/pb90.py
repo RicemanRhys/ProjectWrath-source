@@ -17,6 +17,11 @@ def front(h):
     u.SetWindowPos(h, 0, 0, 0, 0, 0, 0x0001 | 0x0002 | 0x0040)
     r = u.SetForegroundWindow(h)
     u.AttachThreadInput(b, a, False)
+    if h != tray and u.GetForegroundWindow() != h:     # step 99: the foreground lock refused it: minimise and
+        u.ShowWindow(h, 6)                              # restore (that takes the focus)
+        time.sleep(0.5)
+        u.ShowWindow(h, 9)
+        time.sleep(0.5)
     return r
 
 

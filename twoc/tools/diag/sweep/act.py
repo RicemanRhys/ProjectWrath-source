@@ -10,7 +10,7 @@ WGC = os.environ.get("WGCGRAB", r"C:\Users\User\AppData\Local\Temp\claude\C--Use
 # leave Crash standing; play.py keeps them itself)
 if os.environ.get("ACT_KEEP_LIVES") == "1":
     import ctypes, threading
-    sys.path.insert(0, os.path.dirname(HERE))
+    sys.path.insert(0, r"C:\Users\User\Desktop\Desktop Stuff\Claude Stuff\Crash TWOC decomp\twoc\tools\diag")
     import memsnap
     hw = memsnap.K32.OpenProcess(0x0438, False, memsnap.find_pid(os.environ.get("TWOC_EXE", "crash_twoc.exe")))
     def keep():
