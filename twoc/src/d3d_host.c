@@ -7619,6 +7619,11 @@ static const struct {
     { 0xB3631, HUD_FLY }, { 0xB3692, HUD_FLY }, { 0xB37A3, HUD_FLY },
     /* the time-trial clock, flying in from its pickup */
     { 0xB3A37, HUD_FLY },
+    /* step 100: the flying pickups (sub_000B0E10, the 0x4670C0 list, called at the panel's end): an extra life's
+     * head flying to the lives counter (it pauses at x 0.33, then to 0.49), a bonus round's fruit and heads
+     * flying from its counters (-0.8, -0.8 and 0.66) to the level's; at the end of their flights, past the
+     * ramp, they move as their counters do, at any margin */
+    { 0xB4632, HUD_FLY },
     /* the bottom corners: percentage and icon left (-0.8, -0.7), count and bar right (0.65-1) */
     { 0xB3AC8, HUD_LEFT }, { 0xB3B45, HUD_LEFT }, { 0xB3B84, HUD_RIGHT }, { 0xB3BEF, HUD_RIGHT },
     { 0xB3C4C, HUD_RIGHT }, { 0xB3C89, HUD_RIGHT }, { 0xB3CDD, HUD_RIGHT },

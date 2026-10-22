@@ -3860,7 +3860,8 @@ void d3db_list_flush(uint32_t ret, int end)
  * card), and for the draw log the code that queued it (a call chain, the
  * motion log's walk). Items are queued again every frame. */
 #define PANEL_HUD_FROM 0x000B2568u      /* sub_000B0EF0 past its pause and hub-pad parts */
-#define PANEL_HUD_TO   0x000B462Du      /* its common end (the panel camera) */
+#define PANEL_HUD_TO   0x000B4633u      /* its common end (the panel camera), with the flying pickups' draw */
+                                        /* (step 100: sub_000B0E10, called at 0xB462D, returns to 0xB4632) */
 #define ITEM_SLOTS 4096
 static struct {
     uint32_t item, swap, hud, chain[8];
