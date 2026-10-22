@@ -1,0 +1,13 @@
+The capture kit (step 100, notes 18.103): the user plays to a problem and double-clicks "capture now.cmd".
+
+These are its scripts. To make a kit folder (Desktop\Crash\CaptureKit in step 100):
+  - copy this folder's .cmd files, README.txt and kit\run.cmd there, and make an empty captures\;
+  - game\crash_twoc.exe: the build to test (it needs RECOMP_D3D_BRIDGE_DUMP_ASKED, step 100);
+  - game\crash_twoc.ini: a copy of the user's ini (twoc\build\Release\crash_twoc.ini), so the runs have
+    their settings without touching theirs;
+  - game\game_files\: default.xbe, crash_analysis.json, TDATA\ and UDATA\ copied from the repo's
+    game_files (UDATA holds the user's save: a copy), and Crashdat as a junction
+    (PowerShell: New-Item -ItemType Junction -Path ...\game_files\Crashdat -Target <repo>\game_files\Crashdat).
+Each numbered .cmd calls kit\run.cmd NAME [60] [wav]: logs and pictures to captures\NAME_<time>\, the
+draw-log, sub-frame-dump and INTERP_REC triggers there; "capture now.cmd" writes them (3 draw-log swaps,
+2 swaps of sub-frames, 20 recorded frames). "60" adds Frame rate: Game (60), "wav" the APU's output.

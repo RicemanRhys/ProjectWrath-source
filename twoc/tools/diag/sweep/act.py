@@ -29,6 +29,7 @@ for s in sys.argv[2:]:
     elif k == "burst":
         nm, n, g = v.split(":"); subprocess.run([WGC, "Crash TWOC - D3D bridge (host)", os.path.join(HERE, "runs", tag + "_" + nm)] + [str(round(i * float(g), 2)) for i in range(int(n))], capture_output=True)
     elif k == "tele": subprocess.run([sys.executable, os.path.join(HERE, "tele.py")] + v.split(":"))
+    elif k == "bg": subprocess.Popen([sys.executable, os.path.join(HERE, v.split(":")[0])] + v.split(":")[1:])
     elif k == "x": subprocess.run([sys.executable, os.path.join(HERE, v.split(":")[0])] + v.split(":")[1:])
     elif k == "poke":subprocess.run([sys.executable, os.path.join(HERE, "poke.py")] + v.split(":"))
     elif k == "grab":subprocess.run([WGC, "Crash TWOC - D3D bridge (host)", os.path.join(HERE, "runs", tag + "_" + v), "0"], capture_output=True)
