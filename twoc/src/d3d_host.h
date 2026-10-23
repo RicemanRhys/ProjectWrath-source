@@ -299,7 +299,7 @@ void d3dh_world_pass(int begin, const float *proj);
 /* Step 65: the HUD at the screen edges (1) or in the middle 4:3 (0, as the
  * game draws it) in a picture wider than 4:3, `margin` percent of the
  * picture's width in from the edge (0-10). From the next overlay pass. */
-void d3dh_set_hud(int edges, int margin);
+void d3dh_set_hud(int edges);
 
 /* S4, RECOMP_D3D_BRIDGE_PSPROBE: draw one pixel with this pixel shader and
  * fixed inputs (the vertex colours and one 1x1 texture per stage given

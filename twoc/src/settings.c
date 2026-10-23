@@ -45,7 +45,6 @@ static const key_t_ g_fixed[] = {
     { "startup_message", "RECOMP_STARTUP_MESSAGE",
       "1: \"Press F1 to open the settings menu\" for the first seconds, 0: not" },
     { "hud", "RECOMP_HUD", "centre (the game's 4:3 places) or edges: the HUD counters at the screen's edges, wider than 4:3" },
-    { "hud_margin", "RECOMP_HUD_MARGIN", "0-10: percent of the screen's width the HUD at the edges keeps in from them" },
     { "volume", "RECOMP_VOLUME", "0-100, the game's level in Windows' volume mixer" },
     { "music_volume", "RECOMP_MUSIC_VOLUME", "0-100: music, ambience and speech (the game's streams)" },
     { "effects_volume", "RECOMP_EFFECTS_VOLUME", "0-100: the sound effects" },
@@ -67,8 +66,8 @@ static const key_t_ g_fixed[] = {
 
 /* Keys of settings since removed: an older file's line is skipped without a
  * word, and the next save leaves it out (step 91: step 69's draw distance;
- * step 93: step 91's presets). */
-static const char *const g_retired[] = { "draw_distance", "preset" };
+ * step 93: step 91's presets; step 101: step 65's HUD margin). */
+static const char *const g_retired[] = { "draw_distance", "preset", "hud_margin" };
 
 /* Step 57: then one key per binding (controls.h), at its default unwritten:
  * pad_<xbox input> for the controller map, key_<binding> for the keyboard;
@@ -494,9 +493,6 @@ void twoc_settings_current(twoc_settings_t *s)
     s->startup_message = !(v && strcmp(v, "0") == 0);
     v = getenv("RECOMP_HUD");
     s->hud = v && _stricmp(v, "edges") == 0;
-    v = getenv("RECOMP_HUD_MARGIN");
-    s->hud_margin = v ? atoi(v) : 0;
-    s->hud_margin = s->hud_margin < 0 ? 0 : s->hud_margin > 10 ? 10 : s->hud_margin;
     v = getenv("RECOMP_VOLUME");
     s->volume = v && *v ? atoi(v) : -1;
     if (s->volume > 100)
@@ -561,7 +557,6 @@ void twoc_settings_display_defaults(twoc_settings_t *s)
     s->ao_strength = TWOC_AO_STRENGTH_DEFAULT;
     s->ao_half = 0;
     s->hud = 0;
-    s->hud_margin = 0;
 }
 
 /* Key i's value in `s` as the file writes it ("" for a volume never set). */
@@ -598,8 +593,6 @@ static void key_text(const twoc_settings_t *s, size_t i, char *buf, size_t cap)
         snprintf(buf, cap, "0");        /* step 86: on, the default: unwritten */
     else if (strcmp(k, "hud") == 0)
         snprintf(buf, cap, "%s", s->hud ? "edges" : "centre");
-    else if (strcmp(k, "hud_margin") == 0)
-        snprintf(buf, cap, "%d", s->hud_margin);
     else if (strcmp(k, "volume") == 0 && s->volume >= 0)
         snprintf(buf, cap, "%d", s->volume);
     else if (strcmp(k, "music_volume") == 0 && s->music >= 0)

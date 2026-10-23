@@ -1312,10 +1312,8 @@ int d3dh_create(unsigned width, unsigned height, unsigned host_w, unsigned host_
         if (twoc_framerate_parse(e))
             d3dh_set_framerate(twoc_framerate_parse(e));
         e = getenv("RECOMP_HUD");                       /* step 65: centre (unset) or edges */
-        if (e && _stricmp(e, "edges") == 0) {
-            const char *mg = getenv("RECOMP_HUD_MARGIN");
-            d3dh_set_hud(1, mg ? atoi(mg) : 0);
-        }
+        if (e && _stricmp(e, "edges") == 0)
+            d3dh_set_hud(1);
         e = getenv("RECOMP_D3D_BRIDGE_INTERP_REC");
         if (e && *e)
             snprintf(g_irec_trigger, sizeof(g_irec_trigger), "%s", e);
@@ -7548,17 +7546,16 @@ int d3dh_draw_up(const d3dh_draw_t *d)
  * the world and the HUD move by where they are (in the middle, within 0.2
  * of the 4:3 half width, not at all; past 0.45 all the way; part of the way
  * in between, so the clock just picked up never jumps). Each draw of a moved element gets x_clip += dx w (draw_exec), so
- * its shape and its distance from its 4:3 edge are kept; `margin` pulls it
- * in by that share of the picture's width, never past its 4:3 place. Not
+ * its shape and its distance from its 4:3 edge are kept. (Step 101: the
+ * margin that pulled it in is gone, on request: as at margin 0.) Not
  * interpolated (d3dh_draw_t.overlay; step 65 item 3). */
-static volatile LONG g_hud_edges, g_hud_margin;    /* RECOMP_HUD=edges, RECOMP_HUD_MARGIN (percent) */
+static volatile LONG g_hud_edges;       /* RECOMP_HUD=edges */
 static int g_ovl_in, g_ovl_anchor;      /* inside the overlay pass; its HUD is to be anchored */
 static unsigned g_ovl_first;            /* its first command in g_rc */
 
-void d3dh_set_hud(int edges, int margin)
+void d3dh_set_hud(int edges)
 {
     InterlockedExchange(&g_hud_edges, edges ? 1 : 0);
-    InterlockedExchange(&g_hud_margin, margin < 0 ? 0 : margin > 10 ? 10 : margin);
 }
 
 /* A recorded draw's screen box in clip-space NDC (x0, y0, x1, y1). Returns
@@ -7699,7 +7696,7 @@ static void hud_anchor(unsigned first)
     static double box[HUD_MAX][4], el[HUD_MAX][4];
     static unsigned cmd[HUD_MAX];
     static int par[HUD_MAX], anc[HUD_MAX], logn = -1;
-    double s = (4.0 / 3.0) / g_rwide, mg = 0.02 * (double)g_hud_margin, dl, dr;
+    double s = (4.0 / 3.0) / g_rwide, dl, dr;
     unsigned i, j, n = 0;
 
     GAME_SIDE();
@@ -7742,7 +7739,7 @@ static void hud_anchor(unsigned first)
         for (j = 0; j < 4; j++)
             el[r][j] = j < 2 ? (box[i][j] < el[r][j] ? box[i][j] : el[r][j]) : (box[i][j] > el[r][j] ? box[i][j] : el[r][j]);
     }
-    dl = s - 1.0 + mg;                  /* to the left edge (NDC), pulled in by the margin */
+    dl = s - 1.0;                       /* to the left edge (NDC) */
     dl = dl > 0 ? 0 : dl;
     dr = -dl;
     for (i = 0; i < n; i++) {
@@ -9176,10 +9173,9 @@ static void overlay_apply(twoc_settings_t *was, const twoc_settings_t *s)
         d3dh_set_pause_unfocused(s->pause_unfocused);
     if (s->fast_title != was->fast_title)
         fprintf(stderr, "[OVL] skip the title animation: %s from the next start\n", s->fast_title ? "on" : "off");
-    if (s->hud != was->hud || s->hud_margin != was->hud_margin) {   /* step 65: from the next overlay pass */
-        d3dh_set_hud(s->hud, s->hud_margin);
-        fprintf(stderr, "[OVL] HUD position: %s, margin %d%%\n", s->hud ? "screen edges" : "centre (4:3)",
-                s->hud_margin);
+    if (s->hud != was->hud) {           /* step 65: from the next overlay pass */
+        d3dh_set_hud(s->hud);
+        fprintf(stderr, "[OVL] HUD position: %s\n", s->hud ? "screen edges" : "centre (4:3)");
     }
     if (s->volume != was->volume)
         twoc_audio_set_volume(s->volume);

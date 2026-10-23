@@ -867,12 +867,6 @@ static int tab_display(twoc_settings_t *s, const ovl_info_t *in)
              "the left edge and those on the right (lives, the time trial clock) to the right edge, each keeping "
              "its shape and its distance from the edge. Title cards, the pause menu and anything centred stay "
              "where they are. Applied at once.");
-        if (s->hud) {
-            ImGui::SetNextItemWidth(ImGui::GetFontSize() * 12);
-            if (ImGui::SliderInt("HUD margin", &s->hud_margin, 0, 10, "%d%%"))
-                r |= OVL_CHANGED;
-            more("Pulls the HUD at the edges in from them by this share of the picture's width.");
-        }
         if (s->hud && (!wide || g_measure))
             help("Now: as the game draws it (the picture is 4:3).");
     }
@@ -1531,7 +1525,7 @@ static int tab_body(int t, twoc_settings_t *s, const ovl_info_t *in)
 }
 
 /* Step 97: every tab drawn off-screen into a window as wide as the menu, each with the rows its settings
- * can add shown (the HUD margin, the frame rate's rows at 72 fps, ambient occlusion's Strength and Half
+ * can add shown (the frame rate's rows at 72 fps, ambient occlusion's Strength and Half
  * resolution, the custom render size, the notes), to find the tallest. */
 static void measure(const twoc_settings_t *s, const ovl_info_t *in, float width)
 {

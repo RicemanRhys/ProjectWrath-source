@@ -35,7 +35,6 @@
  *   startup_message = 0 | 1                   RECOMP_STARTUP_MESSAGE (unset: on; step 86: "Press F1 to
  *                                             open the settings menu" at the bottom for ~8 s)
  *   hud         = centre | edges              RECOMP_HUD (unset: centre)
- *   hud_margin  = 0-10                        RECOMP_HUD_MARGIN (percent of the width; unset: 0)
  *   volume      = 0-100                       RECOMP_VOLUME (the game's volume in Windows' mixer)
  *   music_volume   = 0-100                    RECOMP_MUSIC_VOLUME (stream voices: music, ambience, speech)
  *   effects_volume = 0-100                    RECOMP_EFFECTS_VOLUME (buffer voices: the sound effects)
@@ -87,8 +86,8 @@
  * Step 65: the HUD position (notes 18.68). In a picture wider than 4:3 the
  * game's HUD counters sit in the middle 4:3; edges moves those on the left
  * to the left edge and those on the right to the right edge (title cards,
- * the pause menu and anything centred stay), hud_margin percent of the
- * width in from it. Applied at once.
+ * the pause menu and anything centred stay). Applied at once. (Step 101:
+ * hud_margin, which pulled them in, is gone; an old file's line is skipped.)
  *
  * Step 70: controllers (notes 18.73). sdl reads every pad the PC has
  * through SDL3 (PlayStation, Switch, Steam Controller and Deck, and the
@@ -154,7 +153,7 @@ typedef struct {
     int render_thread;                  /* step 79: TWOC_RT_* (unset: auto, step 99) */
     int show_fps;                       /* step 82: 1 the measured rates in a corner, 0 not (also unset); 2 more */
     int startup_message;                /* step 86: 1 the F1 line for the first seconds (also unset), 0 not */
-    int hud, hud_margin;                /* step 65: 0 the HUD in the middle 4:3, 1 at the edges; 0-10 percent in */
+    int hud;                            /* step 65: 0 the HUD in the middle 4:3, 1 at the edges */
     int volume;                         /* 0-100; -1: never set (Windows' own level) */
     int music, effects;                 /* 0-100; -1: never set (100, the game's mix) */
     int speakers;                       /* 0 stereo, 1 5.1; -1: never set (stereo) */
