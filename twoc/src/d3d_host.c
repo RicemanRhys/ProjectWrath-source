@@ -1015,6 +1015,10 @@ static void key_track(UINT msg, WPARAM wp, LPARAM lp)
         g_key_held[vk] = (unsigned char)down;
 }
 
+static volatile LONG g_photo, g_freeze; /* step 104: photo mode and the freeze (the photo block, below) */
+static int photo_toggle_key(int vk);
+static int photo_key(int vk);
+static int photo_mouse(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp);
 static int g_roll_key;                   /* step 104: F9 saves the rolling capture (on with it) */
 static volatile LONG g_roll_key_want;
 static int roll_init(void);
@@ -1023,6 +1027,8 @@ int d3dh_key_down(int vk)
 {
     if (vk == VK_F9 && g_roll_key)
         return 0;                       /* step 104: the rolling capture's key, never the game's */
+    if ((g_photo && !g_ovl_open) || photo_toggle_key(vk))
+        return 0;                       /* step 104: photo mode flies its camera with the keyboard; its toggles */
     if (vk == VK_MENU)
         return g_key_held[VK_LMENU] || g_key_held[VK_RMENU];
     return vk > 0 && vk < 256 && g_key_held[vk];
@@ -1058,6 +1064,17 @@ static LRESULT CALLBACK wnd_proc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp)
         }
         return 0;
     }
+    if (hwnd == g_hwnd && msg == WM_KEYDOWN && !(lp & (1 << 30)) && !g_ovl_open && g_ready) {
+        int vk = (int)wp;               /* step 104: photo mode's and the freeze's keys */
+        if (vk == VK_SHIFT)
+            vk = (int)MapVirtualKeyA((UINT)(lp >> 16) & 0xFF, MAPVK_VSC_TO_VK_EX);
+        else if (vk == VK_CONTROL)
+            vk = (lp & (1 << 24)) ? VK_RCONTROL : VK_LCONTROL;
+        if (photo_key(vk))
+            return 0;
+    }
+    if (hwnd == g_hwnd && photo_mouse(hwnd, msg, wp, lp))
+        return 0;
     if (hwnd == g_hwnd && overlay_message(hwnd, msg, wp, lp))
         return 0;
     switch (msg) {
@@ -1307,6 +1324,11 @@ int d3dh_create(unsigned width, unsigned height, unsigned host_w, unsigned host_
                     "%s (%d pass%s)\n", g_replay > 1 ? ", again and again as a cost check" : "", g_replay,
                     g_replay > 1 ? "es" : "");
         g_roll_key = roll_init();       /* step 104: the rolling capture, RECOMP_D3D_BRIDGE_ROLLING */
+        {   /* step 104: the free camera's controls as the settings have them */
+            static twoc_settings_t fs;
+            twoc_settings_current(&fs);
+            d3dh_set_freecam(&fs.fc);
+        }
         e = getenv("RECOMP_D3D_BRIDGE_BAKE");           /* step 87: baked draws, 0 | 1 */
         if (e && *e)
             g_bake = strcmp(e, "0") != 0;
@@ -4426,11 +4448,12 @@ static int g_iprev_ok;                  /* the frame before was recorded for thi
 static uint32_t *g_ikey[ITABS];         /* each draw's kind, for matching (the frame before's sorted) */
 static unsigned g_ikey_n[ITABS], g_ikey_cap[ITABS];
 static int g_ipair[IC_CAMS];            /* this frame's camera -> the frame before's, -1 none */
-static struct {
+typedef struct {
     int on;
     double c[16], vfix[16], dp[16];     /* step 100: double, so each draw's matrices are rounded once, as the game's */
     float pos[3];
-} g_isub[IC_CAMS];                      /* this sub-frame's corrections, by camera */
+} isub_t;
+static isub_t g_isub[IC_CAMS];          /* this sub-frame's corrections, by camera */
 static double g_it;                     /* this sub-frame's t */
 static unsigned g_imc = IC_NO_CAM;      /* step 65: the frame's main camera (most 3D draws); only its draws move */
 
@@ -4529,6 +4552,500 @@ static void m4_from(const float *f, double *d)
     for (i = 0; i < 16; i++)
         d[i] = f[i];
 }
+
+/* ── Step 104: photo mode and the freeze (notes 18.107) ───────────────────
+ *
+ * Photo mode replaces the game's camera with a free one for every 3D draw
+ * under the frame's main camera, by the interpolation's own correction
+ * (ic_draw): a program draw's c96-c99 become (WVP P^-1 Cam F^-1 P_F)^T and
+ * its camera-position registers F's position, a fixed-function draw's view
+ * V Cam F^-1 and, where its projection was the camera's, P_F. F is the free
+ * camera (its rows: right, up, forward at the game camera's lengths, its
+ * position), P_F the game's projection at the free field of view (the
+ * aspect kept). Draws under other cameras (render-to-texture: reflections,
+ * the water's cube) and pre-transformed 2D stay as recorded; the game's
+ * overlay pass (its HUD, title cards, the pause pages) is left out, and so
+ * are our own counter and the startup message. A draw whose world origin is
+ * the game camera's position (the sky, drawn around the eye) gets the free
+ * camera's turn only, not its move. Frames must be recorded for it, so with
+ * photo mode or the freeze on the game side records them as for
+ * interpolation (ic_want) at any frame rate; at Game (60) each recorded
+ * frame is drawn once under the free camera, with a frame rate above it
+ * every in-between frame is (objects still move between the game's frames).
+ * The game only sends what is in its own view: while photo mode is on its
+ * frustum is widened (sub_000956B0's wrapper, recomp_manual.c, tan(fov / 2)
+ * three times, at most 80 degrees each side), so more is drawn; things
+ * behind the game camera, and crates, fruit and enemies past the game's own
+ * distances from Crash (18.72), are never sent. It turns itself off at a
+ * camera cut while the game runs (a level load or loading screen, a death
+ * and respawn, a cutscene's change: the main camera stepping over 4 units
+ * or turning over 45 degrees in one game frame, or no 3D camera at all).
+ *
+ * The freeze holds the game in its Swap (the frame it just finished stays
+ * recorded) and draws that frame again at every refresh of the display,
+ * under the free camera if photo mode is on, else as it was; its sound is
+ * muted as under the F1 menu. The F1 menu opens over it as usual (the
+ * game isn't running behind it either way).
+ *
+ * Input: the toggles (F2 freeze, F3 photo mode by default) always; while
+ * photo mode is on the keyboard flies the camera and the game gets no key,
+ * the mouse looks while its right button is held (the pointer is captured
+ * only meanwhile) and its wheel changes the field of view; the controller
+ * plays the game while it runs and drives the camera while it is frozen
+ * (left stick moves, right stick looks, the bound buttons for the rest). */
+static volatile LONG g_photo_reset;     /* the camera back to the game's at the next frame */
+static volatile LONG g_fov_game;        /* the field of view back to the game's at the next frame */
+static SRWLOCK g_fc_lock = SRWLOCK_INIT;
+static twoc_freecam_t g_fcam;             /* the controls (overlay_apply, the start) */
+static int g_fc_have;
+static volatile LONG g_pm_dx, g_pm_dy, g_pm_wheel;   /* the mouse, from the window thread */
+static int g_pm_rmb, g_pm_x, g_pm_y;    /* window thread */
+static int g_photo_live;                /* this frame's passes are under the free camera (replay side) */
+static int g_freeze_in;                 /* inside the freeze's loop */
+static int g_freeze_kept;               /* the frame's commands kept for it */
+static char g_photo_why[128];           /* why photo mode went off by itself ("" none) */
+static isub_t g_psky;                   /* the sky's correction: the free camera's turn at the game's eye */
+static struct {
+    int have;                           /* a pose (from the game's camera at the start or a reset) */
+    double pos[3], yaw, pitch, fov;     /* the free camera */
+    double hs, us;                      /* the game's right and up rows' sense against ours */
+    LONGLONG last;                      /* the last update (QPC) */
+    float prev[16];                     /* the main camera of the frame before (the cut test) */
+    int prev_ok;
+} g_pc;
+
+void d3dh_set_freecam(const twoc_freecam_t *f)
+{
+    AcquireSRWLockExclusive(&g_fc_lock);
+    if (!g_fc_have || f->fov != g_fcam.fov) {     /* the slider sets the field of view (0: the game's) */
+        if (f->fov)
+            g_pc.fov = f->fov;
+        else
+            InterlockedExchange(&g_fov_game, 1);
+    }
+    g_fcam = *f;
+    g_fc_have = 1;
+    ReleaseSRWLockExclusive(&g_fc_lock);
+}
+
+int d3dh_photo_on(void)
+{
+    return g_photo != 0;
+}
+
+/* The controller's buttons the two toggles have (bit n: PC input n), for the poll to keep from the game. */
+unsigned d3dh_freecam_pad_mask(void)
+{
+    unsigned m = 0;
+
+    if (!g_fc_have)
+        return 0;
+    AcquireSRWLockShared(&g_fc_lock);
+    if (g_fcam.pad[FC_FREEZE] < XIN_BUTTONS)
+        m |= 1u << g_fcam.pad[FC_FREEZE];
+    if (g_fcam.pad[FC_PHOTO] < XIN_BUTTONS)
+        m |= 1u << g_fcam.pad[FC_PHOTO];
+    ReleaseSRWLockShared(&g_fc_lock);
+    return m;
+}
+
+/* At a present, the menu closed: a toggle's controller button just pressed (none bound by default: no read). */
+static void photo_pad_poll(void)
+{
+    static int was[2];
+    pads_src_t p;
+    unsigned char b[2];
+    int i;
+
+    if (!g_fc_have || g_ovl_open)
+        return;
+    AcquireSRWLockShared(&g_fc_lock);
+    b[0] = g_fcam.pad[FC_FREEZE];
+    b[1] = g_fcam.pad[FC_PHOTO];
+    ReleaseSRWLockShared(&g_fc_lock);
+    if (b[0] >= XIN_BUTTONS && b[1] >= XIN_BUTTONS)
+        return;
+    if (!pads_capture_state(&p))
+        memset(&p, 0, sizeof(p));
+    for (i = 0; i < 2; i++) {
+        int down = b[i] < XIN_BUTTONS && p.v[b[i]] >= ((b[i] == XIN_LT || b[i] == XIN_RT) ? 128 : 30);
+        if (down && !was[i]) {
+            if (i == 0)
+                d3dh_freeze_set(!g_freeze);
+            else
+                d3dh_photo_set(!g_photo, NULL);
+        }
+        was[i] = down;
+    }
+}
+
+int d3dh_freeze_on(void)
+{
+    return g_freeze != 0;
+}
+
+const char *d3dh_photo_why(void)
+{
+    return g_photo_why;
+}
+
+void d3dh_photo_set(int on, const char *why)
+{
+    if (InterlockedExchange(&g_photo, on ? 1 : 0) == (on ? 1 : 0))
+        return;
+    if (on) {
+        g_photo_why[0] = 0;
+        InterlockedExchange(&g_photo_reset, 1);     /* from where the game's camera is */
+    } else if (why) {
+        snprintf(g_photo_why, sizeof(g_photo_why), "%s", why);
+    }
+    fprintf(stderr, "[PHOTO] photo mode %s%s%s\n", on ? "on" : "off", why ? ": " : "", why ? why : "");
+}
+
+void d3dh_freeze_set(int on)
+{
+    if (InterlockedExchange(&g_freeze, on ? 1 : 0) != (on ? 1 : 0))
+        fprintf(stderr, "[PHOTO] freeze %s\n", on ? "on: the game holds, its last frame drawn at the display's rate"
+                                                  : "off: the game runs again");
+}
+
+/* A key down, for the window thread: the two toggles (1 if it was one). */
+static int photo_key(int vk)
+{
+    int a, s, hit = -1;
+
+    if (!g_fc_have)
+        return 0;
+    AcquireSRWLockShared(&g_fc_lock);
+    for (a = FC_FREEZE; a <= FC_PHOTO && hit < 0; a++)
+        for (s = 0; s < KIN_SLOTS; s++)
+            if (g_fcam.key[a][s] && g_fcam.key[a][s] == vk)
+                hit = a;
+    ReleaseSRWLockShared(&g_fc_lock);
+    if (hit == FC_FREEZE)
+        d3dh_freeze_set(!g_freeze);
+    else if (hit == FC_PHOTO)
+        d3dh_photo_set(!g_photo, NULL);
+    return hit >= 0;
+}
+
+/* Is vk one of the toggles' keys (never the game's)? */
+static int photo_toggle_key(int vk)
+{
+    int a, s, r = 0;
+
+    if (!g_fc_have || !vk)
+        return 0;
+    AcquireSRWLockShared(&g_fc_lock);
+    for (a = FC_FREEZE; a <= FC_PHOTO; a++)
+        for (s = 0; s < KIN_SLOTS; s++)
+            r |= g_fcam.key[a][s] == vk;
+    ReleaseSRWLockShared(&g_fc_lock);
+    return r;
+}
+
+/* The mouse while photo mode is on and the menu closed (window thread): 1 if taken. */
+static int photo_mouse(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp)
+{
+    if (!g_photo || g_ovl_open)
+        return 0;
+    switch (msg) {
+    case WM_RBUTTONDOWN:
+        g_pm_rmb = 1;
+        g_pm_x = (short)LOWORD(lp);
+        g_pm_y = (short)HIWORD(lp);
+        SetCapture(hwnd);
+        return 1;
+    case WM_RBUTTONUP:
+        g_pm_rmb = 0;
+        ReleaseCapture();
+        return 1;
+    case WM_MOUSEMOVE:
+        if (g_pm_rmb && (wp & MK_RBUTTON)) {
+            int x = (short)LOWORD(lp), y = (short)HIWORD(lp);
+            InterlockedExchangeAdd(&g_pm_dx, x - g_pm_x);
+            InterlockedExchangeAdd(&g_pm_dy, y - g_pm_y);
+            g_pm_x = x;
+            g_pm_y = y;
+            return 1;
+        }
+        g_pm_rmb = 0;
+        return 0;
+    case WM_MOUSEWHEEL:
+        InterlockedExchangeAdd(&g_pm_wheel, GET_WHEEL_DELTA_WPARAM(wp));
+        return 1;
+    }
+    return 0;
+}
+
+static int fc_held(const twoc_freecam_t *f, int a)
+{
+    return (f->key[a][0] && g_key_held[f->key[a][0]]) || (f->key[a][1] && g_key_held[f->key[a][1]]);
+}
+
+/* The free camera's pose from the game's camera b (Cam rows right, up, forward, position). */
+static void photo_pose_from(const icam_t *b)
+{
+    double f[3] = { b->m[8], b->m[9], b->m[10] }, r[3], u[3], l, rg[3], ug[3];
+    int j;
+
+    l = sqrt(f[0] * f[0] + f[1] * f[1] + f[2] * f[2]);
+    if (l <= 0)
+        return;
+    for (j = 0; j < 3; j++)
+        f[j] /= l;
+    g_pc.yaw = atan2(f[0], f[2]);
+    g_pc.pitch = asin(f[1] > 1 ? 1 : f[1] < -1 ? -1 : f[1]);
+    for (j = 0; j < 3; j++)
+        g_pc.pos[j] = b->m[12 + j];
+    r[0] = cos(g_pc.yaw);
+    r[1] = 0;
+    r[2] = -sin(g_pc.yaw);
+    u[0] = f[1] * r[2] - f[2] * r[1];
+    u[1] = f[2] * r[0] - f[0] * r[2];
+    u[2] = f[0] * r[1] - f[1] * r[0];
+    for (j = 0; j < 3; j++) {
+        rg[j] = b->m[j];
+        ug[j] = b->m[4 + j];
+    }
+    g_pc.hs = rg[0] * r[0] + rg[1] * r[1] + rg[2] * r[2] < 0 ? -1.0 : 1.0;
+    g_pc.us = ug[0] * u[0] + ug[1] * u[1] + ug[2] * u[2] < 0 ? -1.0 : 1.0;
+    AcquireSRWLockShared(&g_fc_lock);
+    j = g_fc_have ? g_fcam.fov : 0;
+    ReleaseSRWLockShared(&g_fc_lock);
+    if (j)
+        g_pc.fov = j;
+    else if (b->m[21] != 0.0f)          /* the game's: up and down the picture */
+        g_pc.fov = 2.0 * atan(1.0 / fabs((double)b->m[21])) * 57.29577951308232;
+    g_pc.have = 1;
+}
+
+/* The inputs since the last update, applied (once a frame shown). */
+static void photo_update(const icam_t *b)
+{
+    twoc_freecam_t f;
+    LARGE_INTEGER q;
+    double dt, mv[3] = { 0, 0, 0 }, spd, look, fl, fwd[3], rt[3];
+    double dyaw = 0, dpitch = 0, dfov = 0;
+    long mdx = InterlockedExchange(&g_pm_dx, 0), mdy = InterlockedExchange(&g_pm_dy, 0);
+    long wheel = InterlockedExchange(&g_pm_wheel, 0);
+    int j, keys = !g_ovl_open;
+
+    QueryPerformanceCounter(&q);
+    dt = g_pc.last ? (double)(q.QuadPart - g_pc.last) / (double)g_qpf.QuadPart : 0.0;
+    g_pc.last = q.QuadPart;
+    if (dt > 0.1)
+        dt = 0.1;                       /* after a pause: no jump */
+    if (InterlockedExchange(&g_photo_reset, 0) || !g_pc.have)
+        photo_pose_from(b);
+    if (InterlockedExchange(&g_fov_game, 0) && b->m[21] != 0.0f)
+        g_pc.fov = 2.0 * atan(1.0 / fabs((double)b->m[21])) * 57.29577951308232;
+    AcquireSRWLockShared(&g_fc_lock);
+    if (g_fc_have)
+        f = g_fcam;
+    else
+        freecam_defaults(&f);
+    ReleaseSRWLockShared(&g_fc_lock);
+    spd = 1.0 + f.speed * 0.15;         /* units a second: 7 at the default 40 (Crash runs about 10) */
+    look = (30.0 + f.look * 1.5) * 0.017453292519943295;    /* radians a second at full deflection */
+    if (keys) {
+        if (fc_held(&f, FC_FWD)) mv[2] += 1;
+        if (fc_held(&f, FC_BACK)) mv[2] -= 1;
+        if (fc_held(&f, FC_RIGHT)) mv[0] += 1;
+        if (fc_held(&f, FC_LEFT)) mv[0] -= 1;
+        if (fc_held(&f, FC_UP)) mv[1] += 1;
+        if (fc_held(&f, FC_DOWN)) mv[1] -= 1;
+        if (fc_held(&f, FC_LOOK_L)) dyaw -= look * dt;
+        if (fc_held(&f, FC_LOOK_R)) dyaw += look * dt;
+        if (fc_held(&f, FC_LOOK_U)) dpitch += look * dt;
+        if (fc_held(&f, FC_LOOK_D)) dpitch -= look * dt;
+        if (fc_held(&f, FC_FASTER)) spd *= 4;
+        if (fc_held(&f, FC_SLOWER)) spd *= 0.25;
+        if (fc_held(&f, FC_WIDER)) dfov += 40 * dt;
+        if (fc_held(&f, FC_NARROWER)) dfov -= 40 * dt;
+        if (fc_held(&f, FC_RESET))
+            photo_pose_from(b);
+        dyaw += mdx * (0.0005 + f.look * 0.00004);
+        dpitch -= mdy * (0.0005 + f.look * 0.00004);
+        dfov -= wheel / 120.0 * 3.0;
+    }
+    if (g_freeze && keys) {             /* frozen: the controller drives it too */
+        pads_src_t p;
+        if (pads_capture_state(&p)) {
+            double lx = p.stick[0][0] / 32767.0, ly = p.stick[0][1] / 32767.0;
+            double rx = p.stick[1][0] / 32767.0, ry = p.stick[1][1] / 32767.0;
+#define DZ(v) (fabs(v) < 0.2 ? 0.0 : ((v) > 0 ? ((v) - 0.2) / 0.8 : ((v) + 0.2) / 0.8))
+            mv[0] += DZ(lx);
+            mv[2] += DZ(ly);
+            dyaw += DZ(rx) * look * 1.5 * dt;
+            dpitch += DZ(ry) * look * 1.5 * dt;
+#undef DZ
+#define PADB(a) (f.pad[a] < XIN_BUTTONS && p.v[f.pad[a]] >= ((f.pad[a] == XIN_LT || f.pad[a] == XIN_RT) ? 40 : 30))
+            if (PADB(FC_UP)) mv[1] += f.pad[FC_UP] == XIN_RT || f.pad[FC_UP] == XIN_LT ? p.v[f.pad[FC_UP]] / 255.0 : 1.0;
+            if (PADB(FC_DOWN)) mv[1] -= f.pad[FC_DOWN] == XIN_RT || f.pad[FC_DOWN] == XIN_LT ? p.v[f.pad[FC_DOWN]] / 255.0 : 1.0;
+            if (PADB(FC_FASTER)) spd *= 4;
+            if (PADB(FC_SLOWER)) spd *= 0.25;
+            if (PADB(FC_WIDER)) dfov += 40 * dt;
+            if (PADB(FC_NARROWER)) dfov -= 40 * dt;
+            if (PADB(FC_RESET))
+                photo_pose_from(b);
+#undef PADB
+        }
+    }
+    if (f.invert)
+        dpitch = -dpitch;
+    g_pc.yaw += dyaw;
+    g_pc.pitch += dpitch;
+    g_pc.pitch = g_pc.pitch > 1.55 ? 1.55 : g_pc.pitch < -1.55 ? -1.55 : g_pc.pitch;
+    g_pc.fov += dfov;
+    g_pc.fov = g_pc.fov < 10 ? 10 : g_pc.fov > FC_FOV_MAX ? FC_FOV_MAX : g_pc.fov;
+    fl = cos(g_pc.pitch);
+    fwd[0] = sin(g_pc.yaw) * fl;
+    fwd[1] = sin(g_pc.pitch);
+    fwd[2] = cos(g_pc.yaw) * fl;
+    rt[0] = cos(g_pc.yaw);
+    rt[1] = 0;
+    rt[2] = -sin(g_pc.yaw);
+    for (j = 0; j < 3; j++)
+        g_pc.pos[j] += (fwd[j] * mv[2] + rt[j] * mv[0] + (j == 1 ? mv[1] : 0.0)) * spd * dt;
+}
+
+/* The free camera's corrections for camera mc of this frame (g_lock held, replay side): g_isub[mc] and the
+ * sky's, every other camera's off. 0 if it can't be (no projection to undo). */
+static int photo_sub(unsigned mc)
+{
+    const icam_t *b;
+    double ci[16], inv_ci[16], cn[16], vfix[16], tmp[16], c[16], pi[16], fwd[3], rt[3], up[3], fl, k;
+    unsigned i, j, s;
+
+    REPLAY_SIDE();
+    for (i = 0; i < g_icam_n[g_ic]; i++)
+        g_isub[i].on = 0;
+    g_psky.on = 0;
+    if (mc >= g_icam_n[g_ic])
+        return 0;
+    b = &g_icam[g_ic][mc];
+    if (!b->p_ok || b->m[21] == 0.0f)
+        return 0;
+    photo_update(b);
+    fl = cos(g_pc.pitch);
+    fwd[0] = sin(g_pc.yaw) * fl;
+    fwd[1] = sin(g_pc.pitch);
+    fwd[2] = cos(g_pc.yaw) * fl;
+    rt[0] = cos(g_pc.yaw);
+    rt[1] = 0;
+    rt[2] = -sin(g_pc.yaw);
+    up[0] = fwd[1] * rt[2] - fwd[2] * rt[1];
+    up[1] = fwd[2] * rt[0] - fwd[0] * rt[2];
+    up[2] = fwd[0] * rt[1] - fwd[1] * rt[0];
+    for (j = 0; j < 3; j++) {
+        double l0 = b->rot_ok ? b->len[0] : sqrt((double)b->m[0] * b->m[0] + (double)b->m[1] * b->m[1] + (double)b->m[2] * b->m[2]);
+        double l1 = b->rot_ok ? b->len[1] : sqrt((double)b->m[4] * b->m[4] + (double)b->m[5] * b->m[5] + (double)b->m[6] * b->m[6]);
+        double l2 = b->rot_ok ? b->len[2] : sqrt((double)b->m[8] * b->m[8] + (double)b->m[9] * b->m[9] + (double)b->m[10] * b->m[10]);
+        ci[j] = rt[j] * l0 * g_pc.hs;
+        ci[4 + j] = up[j] * l1 * g_pc.us;
+        ci[8 + j] = fwd[j] * l2;
+        ci[12 + j] = g_pc.pos[j];
+    }
+    ci[3] = b->m[3];
+    ci[7] = b->m[7];
+    ci[11] = b->m[11];
+    ci[15] = b->m[15];
+    for (j = 0; j < 16; j++)
+        pi[j] = b->m[16 + j];
+    k = 1.0 / tan(g_pc.fov * 0.5 * 0.017453292519943295) / fabs((double)b->m[21]);
+    pi[0] *= k;                         /* the field of view, the aspect kept */
+    pi[5] *= k;
+    m4_from(b->m, cn);
+    for (s = 0; s < 2; s++) {           /* the free camera; then the sky's: its turn at the game's eye */
+        isub_t *o = s ? &g_psky : &g_isub[mc];
+        if (s)
+            for (j = 0; j < 3; j++)
+                ci[12 + j] = b->m[12 + j];
+        if (m4_inv(ci, inv_ci) != 0)
+            return 0;
+        m4_mul(cn, inv_ci, vfix);
+        m4_mul(b->inv_p, vfix, tmp);
+        m4_mul(tmp, pi, c);
+        for (j = 0; j < 16; j++) {
+            o->c[j] = c[j];
+            o->vfix[j] = vfix[j];
+            o->dp[j] = pi[j] - b->m[16 + j];
+        }
+        for (j = 0; j < 3; j++)
+            o->pos[j] = (float)ci[12 + j];
+        o->on = 1;
+    }
+    return 1;
+}
+
+/* The frame's main camera: the one most 3D draws used (IC_NO_CAM: none). */
+static unsigned photo_main_cam(void)
+{
+    unsigned i, mc = IC_NO_CAM;
+
+    for (i = 0; i < g_icam_n[g_ic]; i++)
+        if (g_icam[g_ic][i].draws && (mc == IC_NO_CAM || g_icam[g_ic][i].draws > g_icam[g_ic][mc].draws))
+            mc = i;
+    return mc;
+}
+
+/* At a recorded frame's start (replay side, g_lock held): is it drawn under the free camera? Photo mode
+ * goes off at a camera cut while the game runs. */
+static void photo_frame(int rec)
+{
+    unsigned mc;
+    const icam_t *b;
+    double d, dot;
+    int j;
+
+    g_photo_live = 0;
+    if (!g_photo || !rec)
+        return;
+    mc = photo_main_cam();
+    if (mc == IC_NO_CAM || !g_icam[g_ic][mc].p_ok)
+        return;                         /* no 3D camera (the game's pause page, a loading screen): as recorded, and
+                                         * the camera that comes back is judged against the last one */
+    b = &g_icam[g_ic][mc];
+    if (g_pc.prev_ok && !g_freeze) {
+        double f0[3] = { g_pc.prev[8], g_pc.prev[9], g_pc.prev[10] }, f1[3] = { b->m[8], b->m[9], b->m[10] };
+        double l0 = sqrt(f0[0] * f0[0] + f0[1] * f0[1] + f0[2] * f0[2]), l1 = sqrt(f1[0] * f1[0] + f1[1] * f1[1] + f1[2] * f1[2]);
+        d = 0;
+        for (j = 0; j < 3; j++)
+            d += ((double)b->m[12 + j] - g_pc.prev[12 + j]) * ((double)b->m[12 + j] - g_pc.prev[12 + j]);
+        dot = l0 > 0 && l1 > 0 ? (f0[0] * f1[0] + f0[1] * f1[1] + f0[2] * f1[2]) / (l0 * l1) : 1.0;
+        if (d > 16.0 || dot < 0.7071) {
+            d3dh_photo_set(0, "the game's camera cut (a level load, a respawn or a cutscene's change)");
+            g_pc.prev_ok = 0;
+            return;
+        }
+    }
+    {   /* a line now and then: which camera, where the game's and the free one are */
+        static unsigned n;
+        if (n++ % 600 < 3)
+            fprintf(stderr, "[PHOTO] camera %u of %u (%u draws): the game's at (%.2f %.2f %.2f) looking (%.2f %.2f "
+                    "%.2f), up row (%.2f %.2f %.2f); the free one at (%.2f %.2f %.2f), yaw %.1f, pitch %.1f, fov %.1f\n",
+                    mc, g_icam_n[g_ic], b->draws, b->m[12], b->m[13], b->m[14], b->m[8], b->m[9], b->m[10], b->m[4],
+                    b->m[5], b->m[6], g_pc.pos[0], g_pc.pos[1], g_pc.pos[2], g_pc.yaw * 57.29577951308232,
+                    g_pc.pitch * 57.29577951308232, g_pc.fov);
+    }
+    memcpy(g_pc.prev, b->m, sizeof(g_pc.prev));
+    g_pc.prev_ok = 1;
+    g_imc = mc;
+    g_photo_live = 1;
+}
+
+/* A pass of the frame under the free camera at t = 1 (g_lock held). */
+static void photo_pass(void)
+{
+    REPLAY_SIDE();
+    g_it = 1.0;
+    if (g_photo_live && photo_sub(g_imc))
+        replay_pass(1);
+    else
+        replay_pass(0);
+}
+
 
 /* A 3x3 rotation (rows) as a quaternion (x, y, z, w), and back. */
 static void q_from_m3(const double *m, double *q)
@@ -7003,6 +7520,8 @@ static void ic_sub(double t)
             g_isub[i].pos[j] = (float)ci[12 + j];
         g_isub[i].on = 1;
     }
+    if (g_photo_live)
+        photo_sub(g_imc);               /* step 104: photo mode's camera instead */
 }
 
 /* A recorded draw in a sub-frame: under its camera's correction, or as it
@@ -7024,6 +7543,7 @@ static void ic_draw(const rcmd_t *c)
     d3dh_draw_t m;
     double wt[16];
     int i, j, n, cam_on, w_move = 0, b_move = 0, in_place = 0, kmoved = 0;
+    const isub_t *sub;
 
     REPLAY_SIDE();
 #define KREG(r) (kb[(r) >> 4] + 4 * ((r) & 15))
@@ -7034,6 +7554,8 @@ static void ic_draw(const rcmd_t *c)
         }                                                                       \
     } while (0)
 
+    if (g_photo_live && d->overlay)
+        return;                         /* step 104: photo mode: the game's HUD, cards and pause pages left out */
     if (c->u.draw.cls != IC_NONE && c->u.draw.cam != g_imc) {
         g_st.interp_kept++;             /* step 65: under another camera than the world's: as recorded */
         g_st.interp_other_cam++;
@@ -7058,6 +7580,20 @@ static void ic_draw(const rcmd_t *c)
         g_st.interp_kept++;
         draw_cmd(c, d, 0);
         return;
+    }
+    sub = cam_on ? &g_isub[c->u.draw.cam] : NULL;
+    if (cam_on && g_photo_live && g_psky.on) {      /* step 104: the sky, drawn around the game's eye */
+        const float *e = g_icam[g_ic][c->u.draw.cam].m + 12;
+        const double *w = c->u.draw.cls == IC_VP ? (o ? o->w + 12 : NULL) : NULL;
+        double wt3[3];
+        if (c->u.draw.cls != IC_VP && d->ff) {
+            wt3[0] = d->ff->world[12];
+            wt3[1] = d->ff->world[13];
+            wt3[2] = d->ff->world[14];
+            w = wt3;
+        }
+        if (w && fabs(w[0] - e[0]) < 0.05 && fabs(w[1] - e[1]) < 0.05 && fabs(w[2] - e[2]) < 0.05)
+            sub = &g_psky;
     }
     if (w_move)                         /* W(t), from the frame before's W and this one's (step 103: exact at both ends) */
         ic_wlerp(p->w, o->w, g_it, wt);
@@ -7097,7 +7633,7 @@ static void ic_draw(const rcmd_t *c)
             }
         }
         if (cam_on) {                   /* ... C: the camera at t */
-            m4_mul(wvp, g_isub[c->u.draw.cam].c, t2);
+            m4_mul(wvp, sub->c, t2);
             memcpy(wvp, t2, sizeof(wvp));
             /* Step 102 (notes 18.105): in an in-between frame a program
              * draw of 4 vertices (a decal, a sign, a flat prop: Gold Rush's
@@ -7109,14 +7645,14 @@ static void ic_draw(const rcmd_t *c)
              * tie in 7-9 of 30 swaps (Gold Rush's test); 128 steps (1/131072
              * of the depth range), 1 of 30. Frames at t = 1 are the game's
              * own; Frame rate Game doesn't come here. */
-            if (g_idecal != 0.0 && g_it < 1.0 && d->vert_count == 4) {
+            if (g_idecal != 0.0 && (g_it < 1.0 || g_photo_live) && d->vert_count == 4) {
                 for (i = 0; i < 4; i++)
                     wvp[4 * i + 2] -= g_idecal / 16777216.0 * wvp[4 * i + 3];
                 g_st.interp_decal++;
             }
             for (n = 0; n < c->u.draw.n_cpos; n++) {
                 IC_KEEP(c->u.draw.cpos[n]);
-                memcpy(KREG(c->u.draw.cpos[n]), g_isub[c->u.draw.cam].pos, 3 * sizeof(float));
+                memcpy(KREG(c->u.draw.cpos[n]), sub->pos, 3 * sizeof(float));
                 kmoved = 1;
             }
             g_st.interp_cpos += c->u.draw.n_cpos;
@@ -7215,12 +7751,12 @@ static void ic_draw(const rcmd_t *c)
         if (cam_on) {
             kmoved = 1;
             m4_from(d->ff->view, v);
-            m4_mul(v, g_isub[c->u.draw.cam].vfix, x);
+            m4_mul(v, sub->vfix, x);
             for (i = 0; i < 16; i++)
                 ff.view[i] = (float)x[i];
             if (c->u.draw.cls == IC_FF_PROJ)
                 for (i = 0; i < 16; i++)
-                    ff.proj[i] = (float)((double)d->ff->proj[i] + g_isub[c->u.draw.cam].dp[i]);
+                    ff.proj[i] = (float)((double)d->ff->proj[i] + sub->dp[i]);
         }
         if (w_move) {
             for (i = 0; i < 16; i++)
@@ -7273,7 +7809,7 @@ static void ic_clear(int i)
 /* Frames recorded for interpolation is what the setting asks for now. */
 static int ic_want(void)
 {
-    return g_interp_want && !g_replay_check && g_replay <= 1;
+    return (g_interp_want || g_photo || g_freeze) && !g_replay_check && g_replay <= 1;     /* step 104 */
 }
 
 /* At a frame's end, with nothing recorded: the setting, taken. */
@@ -8825,7 +9361,7 @@ void d3dh_overlay_pad_open(void)
  * running; the close count is read after, so a close is never missed. */
 int d3dh_overlay_input(unsigned *closes)
 {
-    int open = g_ovl_open || g_ovl_session;
+    int open = g_ovl_open || g_ovl_session || g_freeze_in;    /* step 104: the freeze gates the pad the same way */
 
     MemoryBarrier();
     *closes = (unsigned)g_ovl_closes;
@@ -9270,6 +9806,8 @@ static void overlay_apply(twoc_settings_t *was, const twoc_settings_t *s)
         twoc_set_drone_mute(s->mute_drone);
         fprintf(stderr, "[OVL] mute Droid Void's background drone: %s\n", s->mute_drone ? "on" : "off");
     }
+    if (memcmp(&s->fc, &was->fc, sizeof(s->fc)) != 0)
+        d3dh_set_freecam(&s->fc);       /* step 104: the free camera's controls */
     if (s->menu_scale != was->menu_scale)  /* step 104: the menu's own frames read it */
         fprintf(stderr, "[OVL] menu scale: %d%%\n", s->menu_scale);
     if (s->pause != was->pause) {
@@ -9554,6 +10092,9 @@ static int ovl_draw(ID3D11Texture2D *dst, int running)
     in.end_note = g_ovs.end_note[0] ? g_ovs.end_note : NULL;   /* step 97 */
     in.ending = twoc_ending();
     in.hwnd = g_hwnd;                   /* step 104 */
+    in.photo_on = g_photo != 0;
+    in.freeze_on = g_freeze != 0;
+    in.photo_why = g_photo_why;
     if (ic_possible()) {                /* step 61/77 */
         in.interp_fps = fp_step_fps(0);
         in.interp_per = fp_step_per(0);
@@ -9681,6 +10222,12 @@ static void ovl_after(int r)
     }
     if (r & (OVL_QUIT | OVL_RESTART))   /* step 97 */
         ovl_end_game((r & OVL_RESTART) != 0);
+    if (r & OVL_PHOTO)                  /* step 104: the Extras tab's toggles */
+        d3dh_photo_set(!g_photo, NULL);
+    if (r & OVL_PHOTO_OFF)
+        d3dh_photo_set(0, NULL);
+    if (r & OVL_FREEZE)
+        d3dh_freeze_set(!g_freeze);
     if (r & OVL_CLOSE)
         InterlockedExchange(&g_ovl_open, 0);
 }
@@ -10358,9 +10905,9 @@ static int present_one(double t_s, unsigned swap_no, unsigned interval, unsigned
                                                  (ID3D11Resource *)src);
             else if (shot_take(src) != 0 || blit_draw(dst, g_buf_w, g_buf_h) != 0)
                 copy_unscaled(dst, src);
-            if (g_ovl_open && g_ovs.active && !g_ovs.s.pause)
-                ovl_r = ovl_draw(dst, 1);   /* step 57: the overlay over the running game */
-            else {
+            if (g_ovl_open && g_ovs.active && (!g_ovs.s.pause || g_freeze_in))
+                ovl_r = ovl_draw(dst, !g_freeze_in);    /* step 57: over the running game; step 104: or frozen */
+            else if (!g_photo) {        /* step 104: photo mode shows none of it */
                 float ma = startmsg_alpha();    /* step 86: the startup message, like the counter */
                 if (g_show_fps || ma > 0.0f)
                     counter_draw(dst, ma);  /* step 82: on the window's picture only, never in a dump */
@@ -10391,6 +10938,7 @@ static int present_one(double t_s, unsigned swap_no, unsigned interval, unsigned
     meas_present(swap_no);              /* step 82 */
     if (g_roll.on)
         roll_poll();                    /* step 104 */
+    photo_pad_poll();                   /* step 104: a controller button bound to photo mode or the freeze */
     {   /* How many DWM compositions apart consecutive presents land: the
          * index of the first one after each present, from DWM's timing (its
          * last vblank, its count, the period). DWM composes on demand, so
@@ -10552,6 +11100,59 @@ static int present_slots(double t_s, unsigned swap_no, double slots, unsigned su
     return r | present_one(t_s, swap_no, n, sub, k, mid, (double)n);
 }
 
+/* Step 104: the frame's commands given back, unless the freeze keeps them (g_lock held). */
+static void freeze_or_done(void)
+{
+    if (g_freeze && g_ps)
+        g_freeze_kept = 1;
+    else
+        replay_done();
+}
+
+/* Step 104: the freeze. The game waits in its Swap (on the render thread: for the slot this frame holds)
+ * while the frame it finished is drawn again at every refresh, under photo mode's camera when that is on,
+ * muted; the F1 menu opens over it as usual. No lock held. */
+static void freeze_loop(double t_s, unsigned swap_no)
+{
+    REPLAY_SIDE();
+    fprintf(stderr, "[PHOTO] frozen at guest swap %u\n", swap_no);
+    twoc_audio_mute(1);
+    g_freeze_in = 1;
+    while (g_freeze && g_ready && !twoc_ending()) {
+        int r;
+        wd_rt(WD_R_OVERLAY, swap_no);
+        if (g_ovl_open && !g_ovs.active) {
+            AcquireSRWLockExclusive(&g_pause_lock);
+            if (g_ovl_open && !g_ovs.active)
+                ovl_begin();
+            ReleaseSRWLockExclusive(&g_pause_lock);
+        }
+        EnterCriticalSection(&g_lock);
+        if (g_photo && !g_photo_live)
+            photo_frame(1);             /* photo mode turned on while frozen */
+        else if (!g_photo)
+            g_photo_live = 0;
+        photo_pass();
+        LeaveCriticalSection(&g_lock);
+        r = present_one(t_s, swap_no, 1, 0, 1, 1, 1.0);
+        AcquireSRWLockExclusive(&g_pause_lock);
+        if (r && g_ovs.active)
+            ovl_after(r);
+        if (g_ovs.active && (!g_ovl_open || !g_ready))
+            ovl_end();
+        ReleaseSRWLockExclusive(&g_pause_lock);
+        sq_drain(1);
+    }
+    InterlockedIncrement(&g_ovl_closes);        /* the pad's buttons held now reach the game only once let go */
+    g_freeze_in = 0;
+    twoc_audio_mute(0);
+    EnterCriticalSection(&g_lock);
+    replay_done();
+    LeaveCriticalSection(&g_lock);
+    g_freeze_kept = 0;
+    fprintf(stderr, "[PHOTO] the game runs again from guest swap %u\n", swap_no);
+}
+
 /* ── Step 78: the frame plan, the replay side's unit (notes 18.81) ──────
  *
  * Step 77's plan (g_fp: the slots, the steps) and its clock (g_fc), the
@@ -10600,6 +11201,7 @@ static int replay_frame(fslot_t *f)
                 g_st.interp_at[ia_k() < 8 ? ia_k() : 7]++;
             }
         }
+        photo_frame(f->interp);         /* step 104: under photo mode's camera? (it may switch itself off) */
         g_bk_pass = 0;                  /* step 87: the passes it gets */
         g_bk_plan = interp ? fr.n : (unsigned)(g_replay > 1 ? g_replay : 1);
         if (interp) {
@@ -10607,16 +11209,21 @@ static int replay_frame(fslot_t *f)
             replay_pass(1);             /* the first sub-frame */
             if (fr.n == 1) {
                 ic_end();               /* step 96: before the slot is free (ic_end) */
-                replay_done();
+                freeze_or_done();       /* step 104 */
             }
         } else {
             if (f->interp)
                 ic_end();               /* step 96: before replay_run frees the slot (ic_end) */
-            if (g_replay_check)
-                replay_check(0, swap_no);
-            replay_run();
-            if (g_replay_check)
-                replay_check(1, swap_no);
+            if (g_ps && f->interp && (g_photo_live || g_freeze)) {
+                photo_pass();           /* step 104: photo mode's camera, or as recorded and kept for the freeze */
+                freeze_or_done();
+            } else {
+                if (g_replay_check)
+                    replay_check(0, swap_no);
+                replay_run();
+                if (g_replay_check)
+                    replay_check(1, swap_no);
+            }
         }
         LeaveCriticalSection(&g_lock);
     } else if (g_ps) {
@@ -10630,12 +11237,14 @@ static int replay_frame(fslot_t *f)
                 if (fr.t[sub - 1] < 1) {
                     ic_sub(g_interp_t0 ? fr.t0[sub - 1] : fr.t[sub - 1]);
                     replay_pass(1);
+                } else if (g_photo_live) {
+                    photo_pass();       /* step 104: t = 1 under photo mode's camera */
                 } else {
                     replay_pass(0);     /* t = 1: the frame as recorded */
                 }
                 if (sub == fr.n) {
                     ic_end();           /* step 96: before the slot is free (ic_end) */
-                    replay_done();
+                    freeze_or_done();   /* step 104 */
                 }
                 LeaveCriticalSection(&g_lock);
             }
@@ -10673,6 +11282,8 @@ static int replay_frame(fslot_t *f)
         if (g_ia.rp0)
             g_ia.replay_ms = (double)(q.QuadPart - g_ia.rp0) * 1000.0 / (double)g_qpf.QuadPart - g_ia.pace_ms;
     }
+    if (g_freeze_kept)
+        freeze_loop(t_s, swap_no);      /* step 104: held here, the frame drawn again at the display's rate */
     rt_let_go(f);
     return ovl_r;
 }
@@ -11244,7 +11855,7 @@ void d3dh_present(double t_s, unsigned swap_no)
     rec_unlock();
     ovl_r = replay_frame(g_ps);
     sq_drain(0);                        /* step 78: settings changed while the overlay held the game */
-    if (g_interp_want != g_interp || (g_iq_on && !g_interp)) {     /* step 61: between frames, nothing recorded */
+    if (ic_want() != g_interp || (g_iq_on && !g_interp)) {    /* step 61: between frames, nothing recorded (step 104: ic_want) */
         rec_lock(0);
         side_set(SIDE_GAME);            /* step 78: the game side takes the setting (whether it records) */
         if (!g_rs->rc_n)

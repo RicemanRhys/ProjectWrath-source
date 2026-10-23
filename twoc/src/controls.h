@@ -137,6 +137,53 @@ void controls_capture_begin(void);
 int controls_capture_key(void);
 int controls_capture_pad(int stick);
 
+/* Step 104 (notes 18.107): the free camera of photo mode and the freeze.
+ * Each action has up to two keys and, where a button makes sense, a button
+ * of the controller (the pad drives the camera only while the game is
+ * frozen: the left stick moves, the right stick looks; FC_PAD_STICK marks
+ * those, not rebindable). The two toggles must not be keys the game is
+ * bound to (they work while the game reads the keyboard); the rest may be
+ * (photo mode takes the keyboard from the game). In crash_twoc.ini:
+ *   fc_<action> = <key> [<key>] | none      RECOMP_FC_<ACTION>
+ *   fcpad_<action> = <xbox button> | none   RECOMP_FCPAD_<ACTION>
+ *   fc_speed = 1-100, fc_look = 1-100, fc_fov = 0 (the game's) or 30-110
+ *   (degrees, up and down the picture), fc_invert = 0 | 1
+ * each written only when it isn't the default. */
+enum {
+    FC_FREEZE, FC_PHOTO, FC_FWD, FC_BACK, FC_LEFT, FC_RIGHT, FC_UP, FC_DOWN,
+    FC_LOOK_L, FC_LOOK_R, FC_LOOK_U, FC_LOOK_D, FC_FASTER, FC_SLOWER, FC_WIDER, FC_NARROWER, FC_RESET,
+    FC_COUNT
+};
+#define FC_PAD_STICK 0xFE               /* an action the pad does with a stick */
+#define FC_SPEED_DEFAULT 40
+#define FC_LOOK_DEFAULT 50
+#define FC_FOV_DEFAULT 0                /* the game's own */
+#define FC_FOV_MIN 30
+#define FC_FOV_MAX 110
+typedef struct {
+    unsigned char key[FC_COUNT][KIN_SLOTS];     /* virtual-key codes, 0: none */
+    unsigned char pad[FC_COUNT];        /* an XIN_ button, XIN_NONE, or FC_PAD_STICK */
+    int speed, look, fov, invert;       /* 1-100, 1-100, degrees, 0 | 1 */
+} twoc_freecam_t;
+
+void freecam_defaults(twoc_freecam_t *f);
+void freecam_default_keys(twoc_freecam_t *f);   /* the keys and buttons only */
+const char *freecam_ini(int a);
+const char *freecam_label(int a);
+int freecam_parse_keys(const char *v, int a, twoc_freecam_t *f);
+void freecam_keys_text(const twoc_freecam_t *f, int a, char *buf, unsigned cap);
+int freecam_parse_pad(const char *v, int a, twoc_freecam_t *f);
+void freecam_pad_text(const twoc_freecam_t *f, int a, char *buf, unsigned cap);
+/* A key to action a's slot: -1 (refused) when a is a toggle and the game
+ * has the key; a key another action had moves here. */
+int freecam_assign_key(twoc_freecam_t *f, const twoc_controls_t *game, int a, int slot, int vk);
+void freecam_assign_pad(twoc_freecam_t *f, int a, int xin);
+int freecam_key_in_game(const twoc_controls_t *game, int vk);
+/* The poll: the Xbox inputs the PC controller's buttons in `mask` (bit n:
+ * PC input n, an XIN_ button) press, released in g (an XBOX_GAMEPAD, after
+ * controls_apply_pad): the free camera's toggles never reach the game. */
+void controls_mask_srcs(void *g, unsigned mask);
+
 #ifdef __cplusplus
 }
 #endif

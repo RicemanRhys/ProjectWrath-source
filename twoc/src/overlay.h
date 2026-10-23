@@ -54,11 +54,14 @@ typedef struct {
     const char *end_note;               /* step 97: why a restart didn't happen, or NULL */
     int ending;                         /* step 97: the game is quitting or restarting (restart.h) */
     HWND hwnd;                          /* step 104: the game's window (the menu scale keeps the slider under the mouse) */
+    int photo_on, freeze_on;            /* step 104: photo mode, the freeze */
+    const char *photo_why;              /* ... why photo mode went off by itself ("" none) */
 } ovl_info_t;
 
 /* Step 97: OVL_RESTART "Restart now" (a setting from the next start), OVL_QUIT "Quit game", each after
  * its question; d3d_host.c saves the settings and ends the game cleanly (restart.h). */
-enum { OVL_CHANGED = 1, OVL_CLOSE = 2, OVL_RESTART = 4, OVL_QUIT = 8 };
+enum { OVL_CHANGED = 1, OVL_CLOSE = 2, OVL_RESTART = 4, OVL_QUIT = 8,
+       OVL_PHOTO = 16, OVL_FREEZE = 32, OVL_PHOTO_OFF = 64 };  /* step 104: photo mode, the freeze toggled; off */
 
 /* Step 97: the settings waiting for a restart, as the menu names them ("Graphics card, Speakers"), "" none. */
 const char *ovl_restart_why(void);

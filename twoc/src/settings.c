@@ -71,6 +71,10 @@ static const key_t_ g_fixed[] = {
     { "keyboard", "RECOMP_KEYBOARD", "1: the keyboard plays too (key_ bindings), 0: the controller only" },
     { "controller_input", "RECOMP_CONTROLLER_INPUT",
       "sdl: every pad (SDL3; Xbox pads through XInput), or xinput: XInput only, as before" },
+    { "fc_speed", "RECOMP_FC_SPEED", "1-100: the photo mode camera's speed" },
+    { "fc_look", "RECOMP_FC_LOOK", "1-100: the photo mode camera's look sensitivity" },
+    { "fc_fov", "RECOMP_FC_FOV", "30-110: the photo mode camera's field of view, degrees" },
+    { "fc_invert", "RECOMP_FC_INVERT", "1: the photo mode camera's look up / down inverted" },
 };
 #define N_FIXED (sizeof(g_fixed) / sizeof(g_fixed[0]))
 
@@ -85,7 +89,9 @@ static const char *const g_retired[] = { "draw_distance", "preset", "hud_margin"
 #define K_PAD N_FIXED
 #define K_KEY (K_PAD + XIN_COUNT)
 #define K_EXTRA (K_KEY + KIN_COUNT)
-#define N_KEYS (K_EXTRA + SRC_EXTRAS)
+#define K_FCK (K_EXTRA + SRC_EXTRAS)    /* step 104: fc_<action>, the free camera's keys */
+#define K_FCP (K_FCK + FC_COUNT)        /* ... fcpad_<action>, its buttons */
+#define N_KEYS (K_FCP + FC_COUNT)
 static key_t_ g_keys[N_KEYS];
 static char g_key_names[N_KEYS - N_FIXED][2][40];
 
@@ -103,8 +109,12 @@ static void keys_init(void)
             snprintf(k, 40, "pad_%s", controls_xin_ini((int)(i - K_PAD)));
         else if (i < K_EXTRA)
             snprintf(k, 40, "key_%s", controls_kin_ini((int)(i - K_KEY)));
-        else
+        else if (i < K_FCK)
             snprintf(k, 40, "extra_%s", controls_extra_ini((int)(i - K_EXTRA) + XIN_COUNT));
+        else if (i < K_FCP)
+            snprintf(k, 40, "fc_%s", freecam_ini((int)(i - K_FCK)));
+        else
+            snprintf(k, 40, "fcpad_%s", freecam_ini((int)(i - K_FCP)));
         snprintf(v, 40, "RECOMP_%s", k);
         for (j = 0; v[j]; j++)
             v[j] = (char)toupper((unsigned char)v[j]);
@@ -118,9 +128,14 @@ static void keys_init(void)
 static int binding_ok(size_t i, const char *v)
 {
     twoc_controls_t c;
+    twoc_freecam_t f;
 
     if (i < K_PAD)
         return 0;
+    if (i >= K_FCK) {                   /* step 104 */
+        freecam_defaults(&f);
+        return i < K_FCP ? freecam_parse_keys(v, (int)(i - K_FCK), &f) : freecam_parse_pad(v, (int)(i - K_FCP), &f);
+    }
     controls_default_pad(&c);
     controls_default_keys(&c);
     return i < K_KEY     ? controls_parse_pad(v, (int)(i - K_PAD), &c)
@@ -567,9 +582,21 @@ void twoc_settings_current(twoc_settings_t *s)
     keys_init();
     controls_default_pad(&s->controls);
     controls_default_keys(&s->controls);
+    freecam_defaults(&s->fc);           /* step 104 */
+    if ((v = getenv("RECOMP_FC_SPEED")) != NULL && atoi(v) > 0)
+        s->fc.speed = atoi(v) > 100 ? 100 : atoi(v);
+    if ((v = getenv("RECOMP_FC_LOOK")) != NULL && atoi(v) > 0)
+        s->fc.look = atoi(v) > 100 ? 100 : atoi(v);
+    if ((v = getenv("RECOMP_FC_FOV")) != NULL && atoi(v) > 0)
+        s->fc.fov = atoi(v) < FC_FOV_MIN ? FC_FOV_MIN : atoi(v) > FC_FOV_MAX ? FC_FOV_MAX : atoi(v);
+    s->fc.invert = env_on("RECOMP_FC_INVERT");
     for (i = K_PAD; i < N_KEYS; i++)
         if ((v = getenv(g_keys[i].var)) != NULL && *v) {
-            if (i < K_KEY)
+            if (i >= K_FCP)
+                freecam_parse_pad(v, (int)(i - K_FCP), &s->fc);
+            else if (i >= K_FCK)
+                freecam_parse_keys(v, (int)(i - K_FCK), &s->fc);
+            else if (i < K_KEY)
                 controls_parse_pad(v, (int)(i - K_PAD), &s->controls);
             else if (i < K_EXTRA)
                 controls_parse_keys(v, (int)(i - K_KEY), &s->controls);
@@ -678,7 +705,28 @@ static void key_text(const twoc_settings_t *s, size_t i, char *buf, size_t cap)
         snprintf(buf, cap, "%s", s->gpu[0] ? s->gpu : "auto");     /* step 97 */
     else if (strcmp(k, "controller_input") == 0 && s->controller_input != PADS_SDL)
         snprintf(buf, cap, "%s", pads_mode_name(s->controller_input));     /* sdl, the default: unwritten */
-    else if (i >= K_PAD) {              /* a binding: written only when it isn't the default */
+    else if (strcmp(k, "fc_speed") == 0 && s->fc.speed != FC_SPEED_DEFAULT)
+        snprintf(buf, cap, "%d", s->fc.speed);     /* step 104: the free camera, its defaults unwritten */
+    else if (strcmp(k, "fc_look") == 0 && s->fc.look != FC_LOOK_DEFAULT)
+        snprintf(buf, cap, "%d", s->fc.look);
+    else if (strcmp(k, "fc_fov") == 0 && s->fc.fov != FC_FOV_DEFAULT)
+        snprintf(buf, cap, "%d", s->fc.fov);
+    else if (strcmp(k, "fc_invert") == 0 && s->fc.invert)
+        snprintf(buf, cap, "1");
+    else if (i >= K_FCK) {              /* step 104: a free-camera binding, unwritten at its default */
+        twoc_freecam_t d;
+        char def[64];
+        freecam_defaults(&d);
+        if (i < K_FCP) {
+            freecam_keys_text(&s->fc, (int)(i - K_FCK), buf, (unsigned)cap);
+            freecam_keys_text(&d, (int)(i - K_FCK), def, sizeof(def));
+        } else {
+            freecam_pad_text(&s->fc, (int)(i - K_FCP), buf, (unsigned)cap);
+            freecam_pad_text(&d, (int)(i - K_FCP), def, sizeof(def));
+        }
+        if (strcmp(buf, def) == 0)
+            buf[0] = 0;
+    } else if (i >= K_PAD) {            /* a binding: written only when it isn't the default */
         twoc_controls_t d;
         char def[64];
         controls_default_pad(&d);

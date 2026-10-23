@@ -45,8 +45,9 @@ static float g_scale = 1.0f;
 static ImGuiStyle g_style_base;
 
 /* Step 57: a binding waiting for its button or key (under g_cs). */
-enum { CAP_NONE, CAP_PAD, CAP_KEY };
+enum { CAP_NONE, CAP_PAD, CAP_KEY, CAP_FCKEY, CAP_FCPAD };  /* step 104: the free camera's keys and buttons */
 static int g_cap, g_cap_idx, g_cap_slot;
+static int g_fc_refused;                /* step 104: a key the game has, refused for a toggle (its VK) */
 
 /* Step 82: the controller drives the overlay (pads.h's OVL_PAD_* bits from
  * the frame's info): the D-pad or the left stick move, A chooses, B closes a
@@ -509,6 +510,20 @@ static int tab_controls(twoc_settings_t *s)
         controls_assign_key(&s->controls, g_cap_idx, g_cap_slot, got);
         r |= OVL_CHANGED;
         capture_end();
+    } else if (g_cap == CAP_FCKEY && (got = controls_capture_key()) > 0) {     /* step 104 */
+        if (freecam_assign_key(&s->fc, &s->controls, g_cap_idx, g_cap_slot, got) == 0) {
+            g_fc_refused = 0;
+            r |= OVL_CHANGED;
+        } else {
+            g_fc_refused = got;
+        }
+        capture_end();
+    } else if (g_cap == CAP_FCPAD && (got = controls_capture_pad(0)) >= 0) {
+        if (got < XIN_BUTTONS) {
+            freecam_assign_pad(&s->fc, g_cap_idx, got);
+            r |= OVL_CHANGED;
+        }
+        capture_end();
     }
     npads = pads_list(pads, (int)(sizeof(pads) / sizeof(pads[0])));
     style = pads_style();
@@ -670,6 +685,111 @@ static int tab_controls(twoc_settings_t *s)
     }
     more("WASD and the arrows move; Space or K jumps, J or E spins, L or Left Shift crouches and slides (and "
          "body slams in the air), Enter or P pauses.");
+
+    /* Step 104: photo mode's free camera and the freeze (the Extras tab turns them on) */
+    ImGui::SeparatorText("Freecam controls");
+    help("Photo mode's free camera and the freeze (Extras tab). The first two keys work any time; the rest only "
+         "while photo mode is on, when the keyboard flies the camera and doesn't play the game (so they may be "
+         "the game's own keys). The right mouse button held turns the camera, the mouse wheel changes the field "
+         "of view. The controller drives the camera only while the game is frozen: left stick to move, right "
+         "stick to look, and the buttons below. Click a key or button, then press the new one; Esc cancels; "
+         "right-click clears.");
+    if (g_fc_refused) {
+        char w[160];
+        snprintf(w, sizeof(w), "%s plays the game (Keyboard above): the two toggles need a key of their own.",
+                 controls_key_label(g_fc_refused));
+        amber(w);
+    }
+    if (ImGui::BeginTable("##fckeys", 4, ImGuiTableFlags_SizingStretchProp | ImGuiTableFlags_RowBg)) {
+        ImGui::TableSetupColumn("Free camera", ImGuiTableColumnFlags_WidthStretch);
+        ImGui::TableSetupColumn("Key", ImGuiTableColumnFlags_WidthFixed, fs * 6.5f);
+        ImGui::TableSetupColumn("Second key", ImGuiTableColumnFlags_WidthFixed, fs * 6.5f);
+        ImGui::TableSetupColumn("Controller", ImGuiTableColumnFlags_WidthFixed, fs * 7.5f);
+        ImGui::TableHeadersRow();
+        for (i = 0; i < FC_COUNT; i++) {
+            ImGui::TableNextRow();
+            ImGui::TableNextColumn();
+            input_name(freecam_label(i), "");
+            for (slot = 0; slot < KIN_SLOTS; slot++) {
+                int vk = s->fc.key[i][slot];
+                ImGui::TableNextColumn();
+                snprintf(lbl, sizeof(lbl), "%s##fck%d.%d",
+                         g_cap == CAP_FCKEY && g_cap_idx == i && g_cap_slot == slot ? "Press a key..."
+                         : vk ? controls_key_label(vk) : "-", i, slot);
+                if (ImGui::Button(lbl, ImVec2(-FLT_MIN, 0))) {
+                    g_cap = CAP_FCKEY;
+                    g_cap_idx = i;
+                    g_cap_slot = slot;
+                    controls_capture_begin();
+                    ImGui::GetIO().ClearInputKeys();
+                }
+                if (vk && ImGui::IsItemClicked(ImGuiMouseButton_Right)) {
+                    freecam_assign_key(&s->fc, NULL, i, slot, 0);
+                    r |= OVL_CHANGED;
+                }
+            }
+            ImGui::TableNextColumn();
+            if (s->fc.pad[i] == FC_PAD_STICK) {
+                ImGui::AlignTextToFramePadding();
+                ImGui::TextDisabled("%s", i == FC_FWD || i == FC_BACK || i == FC_LEFT || i == FC_RIGHT ? "Left stick"
+                                                                                                      : "Right stick");
+                continue;
+            }
+            snprintf(lbl, sizeof(lbl), "%s##fcp%d",
+                     g_cap == CAP_FCPAD && g_cap_idx == i ? "Press a button..."
+                     : s->fc.pad[i] < XIN_BUTTONS ? pads_src_label(s->fc.pad[i], style) : "-", i);
+            if (ImGui::Button(lbl, ImVec2(-FLT_MIN, 0))) {
+                g_cap = CAP_FCPAD;
+                g_cap_idx = i;
+                controls_capture_begin();
+                ImGui::GetIO().ClearInputKeys();
+            }
+            if (s->fc.pad[i] < XIN_BUTTONS && ImGui::IsItemClicked(ImGuiMouseButton_Right)) {
+                freecam_assign_pad(&s->fc, i, XIN_NONE);
+                r |= OVL_CHANGED;
+            }
+        }
+        ImGui::EndTable();
+    }
+    {
+        int v = s->fc.speed;
+        ImGui::SetNextItemWidth(fs * 12);
+        if (ImGui::SliderInt("Camera speed", &v, 1, 100)) {
+            s->fc.speed = v;
+            r |= OVL_CHANGED;
+        }
+        more("How fast the free camera flies (Faster held: four times, Slower held: a quarter).");
+        v = s->fc.look;
+        ImGui::SetNextItemWidth(fs * 12);
+        if (ImGui::SliderInt("Look sensitivity", &v, 1, 100)) {
+            s->fc.look = v;
+            r |= OVL_CHANGED;
+        }
+        more("How fast it turns: with the mouse, the look keys and the right stick.");
+        v = s->fc.fov ? s->fc.fov : FC_FOV_MIN - 1;
+        ImGui::SetNextItemWidth(fs * 12);
+        if (ImGui::SliderInt("Field of view", &v, FC_FOV_MIN - 1, FC_FOV_MAX, v < FC_FOV_MIN ? "The game's" : "%d deg")) {
+            s->fc.fov = v < FC_FOV_MIN ? 0 : v;
+            r |= OVL_CHANGED;
+        }
+        more("Up and down the picture, in degrees; the far left is the game's own. The field-of-view keys and the "
+             "mouse wheel change it while flying; the camera's reset puts it back here.");
+        bool inv = s->fc.invert != 0;
+        if (ImGui::Checkbox("Invert look up / down", &inv)) {
+            s->fc.invert = inv;
+            r |= OVL_CHANGED;
+        }
+    }
+    if (ImGui::Button("Reset freecam controls to defaults")) {
+        freecam_defaults(&s->fc);
+        g_fc_refused = 0;
+        r |= OVL_CHANGED;
+    }
+    more("F2 freezes and lets go, F3 turns photo mode on and off. W A S D move, E or Space up, Q or C down, the "
+         "arrows (or J L I K) look, Left Shift held faster, Left Ctrl held slower, Z or Num - a wider view, X or "
+         "Num + a narrower one, R or Home the game's camera again. Controller (frozen): RT up, LT down, RB faster, "
+         "LB slower, D-pad down / up the field of view, Y the game's camera. Speed 40, sensitivity 50, the "
+         "game's field of view, not inverted.");
     return r;
 }
 
@@ -1543,6 +1663,35 @@ static int tab_extras(twoc_settings_t *s, const ovl_info_t *in)
     int r = 0;
     char line[160];
 
+    ImGui::SeparatorText("Photo mode");     /* step 104 */
+    {
+        bool p = in->photo_on != 0, f = in->freeze_on != 0;
+        char k1[24], k2[24];
+        snprintf(k1, sizeof(k1), "%s", s->fc.key[FC_PHOTO][0] ? controls_key_label(s->fc.key[FC_PHOTO][0]) : "no key");
+        snprintf(k2, sizeof(k2), "%s", s->fc.key[FC_FREEZE][0] ? controls_key_label(s->fc.key[FC_FREEZE][0]) : "no key");
+        snprintf(line, sizeof(line), "Photo mode    %s", k1);
+        if (ImGui::Checkbox(line, &p))
+            r |= OVL_PHOTO;
+        more("A free camera instead of the game's: fly anywhere around the scene while the game runs (Crash and "
+             "the rest keep moving) or while it is frozen. The game's HUD, the counter and the startup message "
+             "go. The keyboard flies the camera (W A S D, E / Q, the arrows; Freecam controls on the Controls "
+             "tab) and stops playing the game; the controller still plays it, and flies the camera while the "
+             "game is frozen. The right mouse button held turns it. The game only draws what is near its own "
+             "view: wider than usual while photo mode is on, but not what is behind its camera, nor crates, fruit "
+             "and enemies far from Crash. Reflections still show the game's view. Turns itself off at a level "
+             "load, a loading screen, a respawn or a cutscene's cut. Never saved: off at every start.");
+        snprintf(line, sizeof(line), "Freeze the game (pause)    %s", k2);
+        if (ImGui::Checkbox(line, &f))
+            r |= OVL_FREEZE;
+        more("Holds the game where it is, silent, its last picture drawn again at the display's rate: with photo "
+             "mode on, fly around the frozen scene. Works with photo mode off too (it simply holds the picture). "
+             "This menu's own pause is separate.");
+        if (!in->photo_on && in->photo_why && in->photo_why[0]) {
+            snprintf(line, sizeof(line), "Photo mode went off: %s.", in->photo_why);
+            help(line);
+        }
+    }
+
     ImGui::SeparatorText("Look");
     {   /* step 101: Crash's fur; step 102: three ways */
         static const char *const fur[] = { "On", "Off for Crash only", "Off for everyone" };
@@ -1621,9 +1770,10 @@ static int tab_extras(twoc_settings_t *s, const ovl_info_t *in)
     ImGui::Separator();
     if (ImGui::Button("Reset extras to defaults"))
         g_reset_req = 2;                /* asked in build() */
-    more("Sets every setting on this tab back to its default: Character fur On, See-through gems and crystals "
-         "off, the startup message on, Pause the game while this menu is open on, Pause when in the background "
-         "off, Skip the title animation off. The other tabs stay as they are. Asks first.");
+    more("Sets every setting on this tab back to its default: Photo mode off, Character fur On, See-through gems "
+         "and crystals off, the startup message on, Pause the game while this menu is open on, Pause when in the "
+         "background off, Skip the title animation off. The freeze is left as it is. The other tabs stay as "
+         "they are. Asks first.");
     return r;
 }
 
@@ -1922,10 +2072,10 @@ static int build(twoc_settings_t *s, const ovl_info_t *in)
             r |= OVL_CHANGED;
             g_scroll_focus = 12;        /* step 104: Menu scale back to 100%: the button kept in view */
         }
-        if (reset_ask(XRESET_ASK, "Every setting on the Extras tab goes back to its default. The other tabs stay "
-                      "as they are.", &x_open)) {
+        if (reset_ask(XRESET_ASK, "Every setting on the Extras tab goes back to its default, and photo mode "
+                      "goes off. The other tabs stay as they are.", &x_open)) {
             twoc_settings_extras_defaults(s);
-            r |= OVL_CHANGED;
+            r |= OVL_CHANGED | OVL_PHOTO_OFF;   /* step 104 */
         }
         g_reset_open = d_open || x_open;
     }

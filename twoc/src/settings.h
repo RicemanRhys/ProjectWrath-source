@@ -41,6 +41,8 @@
  *                                             see-through, as a level draws one collected; unset: off)
  *   menu_scale  = 50-200                      RECOMP_MENU_SCALE (step 104: percent of the F1 menu's own size, its
  *                                             text and boxes; capped to what the window holds; unset: 100)
+ *   fc_speed, fc_look, fc_fov, fc_invert,     RECOMP_FC_* (step 104: the free camera of photo mode, controls.h;
+ *   fc_<action>, fcpad_<action>               each written only when not the default)
  *   volume      = 0-100                       RECOMP_VOLUME (the game's volume in Windows' mixer)
  *   music_volume   = 0-100                    RECOMP_MUSIC_VOLUME (stream voices: music, ambience, speech)
  *   effects_volume = 0-100                    RECOMP_EFFECTS_VOLUME (buffer voices: the sound effects)
@@ -180,6 +182,8 @@ typedef struct {
     int ao_half;                        /* step 92: 1 worked out at half the resolution, upsampled (unset: 0) */
     char gpu[128];                      /* step 97: "" Automatic (also unset), else a graphics card's name */
     int menu_scale;                     /* step 104: the F1 menu's size, percent of its own, 50-200 (100 also unset) */
+    twoc_freecam_t fc;                  /* step 104: the free camera's controls (controls.h); photo mode itself
+                                         * and the freeze are never saved */
     twoc_controls_t controls;           /* the controller map and the key bindings */
 } twoc_settings_t;
 

@@ -389,6 +389,27 @@ void controls_apply_pad(void *gp, const void *morep)
     *g = out;
 }
 
+void controls_mask_srcs(void *gp, unsigned mask)
+{
+    XBOX_GAMEPAD *g = (XBOX_GAMEPAD *)gp;
+    unsigned char map[XIN_COUNT];
+    int i;
+
+    if (!mask)
+        return;
+    AcquireSRWLockShared(&g_lock);
+    for (i = 0; i < XIN_COUNT; i++)
+        map[i] = g_have ? g_cur.pad[i] : (unsigned char)i;
+    ReleaseSRWLockShared(&g_lock);
+    for (i = 0; i < XIN_BUTTONS; i++)
+        if (map[i] < XIN_BUTTONS && (mask >> map[i] & 1)) {
+            if (i < 8)
+                g->bAnalogButtons[i] = 0;
+            else
+                g->wButtons &= (WORD)~g_bits[i];
+        }
+}
+
 /* d3d_host.c: the keys held on the bridge window, from its own messages, so
  * only while it has the focus (none at all without the bridge). */
 extern int d3dh_key_down(int vk);
@@ -528,4 +549,154 @@ int controls_capture_pad(int stick)
             got = x;
     }
     return got;
+}
+
+/* ── Step 104: the free camera's controls (photo mode, freeze) ──────────── */
+
+static const struct {
+    const char *ini, *label;
+    unsigned char key[KIN_SLOTS];
+    unsigned char pad;
+} g_fc[FC_COUNT] = {
+    [FC_FREEZE] = { "freeze", "Freeze / play", { VK_F2, 0 }, XIN_NONE },
+    [FC_PHOTO] = { "photo", "Photo mode on / off", { VK_F3, 0 }, XIN_NONE },
+    [FC_FWD] = { "forward", "Move forward", { 'W', 0 }, FC_PAD_STICK },
+    [FC_BACK] = { "back", "Move back", { 'S', 0 }, FC_PAD_STICK },
+    [FC_LEFT] = { "left", "Move left", { 'A', 0 }, FC_PAD_STICK },
+    [FC_RIGHT] = { "right", "Move right", { 'D', 0 }, FC_PAD_STICK },
+    [FC_UP] = { "up", "Move up", { 'E', VK_SPACE }, XIN_RT },
+    [FC_DOWN] = { "down", "Move down", { 'Q', 'C' }, XIN_LT },
+    [FC_LOOK_L] = { "look_left", "Look left", { VK_LEFT, 'J' }, FC_PAD_STICK },
+    [FC_LOOK_R] = { "look_right", "Look right", { VK_RIGHT, 'L' }, FC_PAD_STICK },
+    [FC_LOOK_U] = { "look_up", "Look up", { VK_UP, 'I' }, FC_PAD_STICK },
+    [FC_LOOK_D] = { "look_down", "Look down", { VK_DOWN, 'K' }, FC_PAD_STICK },
+    [FC_FASTER] = { "faster", "Faster (held)", { VK_LSHIFT, 0 }, XIN_WHITE },
+    [FC_SLOWER] = { "slower", "Slower (held)", { VK_LCONTROL, 0 }, XIN_BLACK },
+    [FC_WIDER] = { "fov_wider", "Field of view wider", { 'Z', VK_SUBTRACT }, XIN_DOWN },
+    [FC_NARROWER] = { "fov_narrower", "Field of view narrower", { 'X', VK_ADD }, XIN_UP },
+    [FC_RESET] = { "reset", "Camera back to the game's", { 'R', VK_HOME }, XIN_Y },
+};
+
+const char *freecam_ini(int a) { return a >= 0 && a < FC_COUNT ? g_fc[a].ini : ""; }
+const char *freecam_label(int a) { return a >= 0 && a < FC_COUNT ? g_fc[a].label : ""; }
+
+void freecam_default_keys(twoc_freecam_t *f)
+{
+    int a;
+
+    for (a = 0; a < FC_COUNT; a++) {
+        memcpy(f->key[a], g_fc[a].key, KIN_SLOTS);
+        f->pad[a] = g_fc[a].pad;
+    }
+}
+
+void freecam_defaults(twoc_freecam_t *f)
+{
+    freecam_default_keys(f);
+    f->speed = FC_SPEED_DEFAULT;
+    f->look = FC_LOOK_DEFAULT;
+    f->fov = FC_FOV_DEFAULT;
+    f->invert = 0;
+}
+
+int freecam_parse_keys(const char *v, int a, twoc_freecam_t *f)
+{
+    unsigned char k[KIN_SLOTS] = { 0 };
+    char buf[64], *tok, *ctx = NULL;
+    int n = 0, i;
+
+    if (a < 0 || a >= FC_COUNT)
+        return -1;
+    snprintf(buf, sizeof(buf), "%s", v);
+    for (tok = strtok_s(buf, " \t,", &ctx); tok; tok = strtok_s(NULL, " \t,", &ctx)) {
+        if (_stricmp(tok, "none") == 0) {
+            n++;
+            continue;
+        }
+        for (i = 0; i < N_KEYS && _stricmp(tok, g_keys[i].ini) != 0; i++)
+            ;
+        if (i == N_KEYS)
+            return -1;
+        if (n < KIN_SLOTS)
+            k[n++] = g_keys[i].vk;
+    }
+    memcpy(f->key[a], k, sizeof(k));
+    return 0;
+}
+
+void freecam_keys_text(const twoc_freecam_t *f, int a, char *buf, unsigned cap)
+{
+    int s, i, last = -1;
+
+    buf[0] = 0;
+    for (s = 0; s < KIN_SLOTS; s++)
+        if (f->key[a][s] && key_index(f->key[a][s]) >= 0)
+            last = s;
+    for (s = 0; s <= last; s++)
+        snprintf(buf + strlen(buf), cap - strlen(buf), "%s%s", s ? " " : "",
+                 (i = key_index(f->key[a][s])) >= 0 && f->key[a][s] ? g_keys[i].ini : "none");
+    if (!buf[0])
+        snprintf(buf, cap, "none");
+}
+
+int freecam_parse_pad(const char *v, int a, twoc_freecam_t *f)
+{
+    int x;
+
+    if (a < 0 || a >= FC_COUNT || g_fc[a].pad == FC_PAD_STICK)
+        return -1;
+    if (_stricmp(v, "none") == 0) {
+        f->pad[a] = XIN_NONE;
+        return 0;
+    }
+    for (x = 0; x < XIN_BUTTONS; x++)
+        if (_stricmp(v, g_xin[x].ini) == 0) {
+            f->pad[a] = (unsigned char)x;
+            return 0;
+        }
+    return -1;
+}
+
+void freecam_pad_text(const twoc_freecam_t *f, int a, char *buf, unsigned cap)
+{
+    snprintf(buf, cap, "%s", f->pad[a] < XIN_BUTTONS ? g_xin[f->pad[a]].ini : f->pad[a] == FC_PAD_STICK ? "" : "none");
+}
+
+int freecam_key_in_game(const twoc_controls_t *game, int vk)
+{
+    int k, s;
+
+    for (k = 0; k < KIN_COUNT; k++)
+        for (s = 0; s < KIN_SLOTS; s++)
+            if (game->key[k][s] == vk)
+                return 1;
+    return 0;
+}
+
+int freecam_assign_key(twoc_freecam_t *f, const twoc_controls_t *game, int a, int slot, int vk)
+{
+    int b, s;
+
+    if (a < 0 || a >= FC_COUNT || slot < 0 || slot >= KIN_SLOTS)
+        return -1;
+    if (vk && (a == FC_FREEZE || a == FC_PHOTO) && game && freecam_key_in_game(game, vk))
+        return -1;                      /* the two toggles work while the game reads the keyboard */
+    for (b = 0; b < FC_COUNT; b++)      /* a key has one free-camera action: it moves here */
+        for (s = 0; s < KIN_SLOTS; s++)
+            if (vk && f->key[b][s] == vk && !(b == a && s == slot))
+                f->key[b][s] = 0;
+    f->key[a][slot] = (unsigned char)vk;
+    return 0;
+}
+
+void freecam_assign_pad(twoc_freecam_t *f, int a, int xin)
+{
+    int b;
+
+    if (a < 0 || a >= FC_COUNT || g_fc[a].pad == FC_PAD_STICK)
+        return;
+    for (b = 0; b < FC_COUNT; b++)
+        if (xin < XIN_BUTTONS && f->pad[b] == xin)
+            f->pad[b] = XIN_NONE;
+    f->pad[a] = (unsigned char)(xin < XIN_BUTTONS ? xin : XIN_NONE);
 }

@@ -523,6 +523,28 @@ static void traced_sub_0002BCC0(void)
  * back after it: the view is wider and so is the culling, for every camera
  * that renders to the screen. Off, the lifted function runs as before. */
 extern void sub_000956B0_gen(void);
+extern int d3dh_photo_on(void);
+extern unsigned d3dh_freecam_pad_mask(void);
+
+/* Step 104 (notes 18.107): photo mode's wider culling. sub_000956B0 ends by
+ * storing the frustum's half-widths, tan(fov / 2) across (0x242350) and up
+ * and down (0x2425DC), which the object culling (sub_00094E20) multiplies by
+ * each object's depth; the projection itself is made before. While photo
+ * mode is on both are tripled (to tan 80 degrees at most), so the game sends
+ * what lies beside its view too, and the free camera can look there; the
+ * projection the bridge records stays the game's. */
+static void photo_widen(void)
+{
+    float x, y;
+
+    if (!d3db_host_on || !d3dh_photo_on())
+        return;
+    x = MEMF(0x242350) * 3.0f;
+    y = MEMF(0x2425DC) * 3.0f;
+    MEMF(0x242350) = x > 5.67f ? 5.67f : x;
+    MEMF(0x2425DC) = y > 5.67f ? 5.67f : y;
+}
+
 void sub_000956B0(void)
 {
     uint32_t cam = MEM32(esp + 4), saved;
@@ -530,6 +552,7 @@ void sub_000956B0(void)
 
     if (d3db_wide <= 0 || !cam) {
         sub_000956B0_gen();
+        photo_widen();                  /* step 104 */
         return;
     }
     saved = MEM32(cam + 0x44);
@@ -538,6 +561,7 @@ void sub_000956B0(void)
         MEMF(cam + 0x44) *= scale;
     sub_000956B0_gen();
     MEM32(cam + 0x44) = saved;
+    photo_widen();                      /* step 104 */
 }
 
 /* ── Step 65: the game's render passes (notes 18.68) ───────────
@@ -4294,6 +4318,7 @@ void sub_001542AB(void)
     if (result == ERROR_SUCCESS) {
         static DWORD kb_packets;
         controls_apply_pad(&state.Gamepad, nothers ? &others : NULL);  /* step 57: the PC controller's map; as is by default */
+        controls_mask_srcs(&state.Gamepad, d3dh_freecam_pad_mask());  /* step 104: photo mode's toggles, not the game's */
         pad_start = (state.Gamepad.wButtons & XBOX_GAMEPAD_START) != 0;    /* step 86: the controllers' Start */
         if (kb_port(port) && controls_apply_keys(&state.Gamepad))
             kb_packets++;                           /* the keyboard's changes count as packets */

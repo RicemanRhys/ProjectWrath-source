@@ -408,4 +408,15 @@ int d3dh_overlay_input(unsigned *closes);
  * next Swap. */
 void d3dh_set_render_thread(int mode);
 
+/* Step 104 (notes 18.107): photo mode (a free camera, the game's HUD left
+ * out) and the freeze (the game held, its frame drawn again at the display's
+ * rate); never saved. The controls: settings' fc (controls.h). `why` says
+ * why photo mode went off by itself (NULL: the player's). Any thread. */
+void d3dh_set_freecam(const twoc_freecam_t *f);
+void d3dh_photo_set(int on, const char *why);
+int d3dh_photo_on(void);
+const char *d3dh_photo_why(void);       /* "" none */
+void d3dh_freeze_set(int on);
+int d3dh_freeze_on(void);
+
 #endif
