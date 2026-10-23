@@ -5403,7 +5403,7 @@ static void mirror_swap(void)
                                  " %.1f%% of %.0f), first %u,"
                                  " other %u; a sub-frame redraws program draws %.0f, fixed-function %.0f, others"
                                  " as they were %.0f (another camera's %.0f), camera-position registers %.0f,"
-                                 " corrected in clip space %.0f\n", st.interp_per, f,
+                                 " decals drawn nearer %.0f\n", st.interp_per, f,
                                  f ? 100.0 * (st.interp_matched - lmt) / f : 0.0, st.interp_cut_step - lst,
                                  st.interp_cut_turn - ltu, m, m ? 100.0 * (st.interp_cut_frac - lcf) / m : 0.0,
                                  m ? (st.interp_cut_draws - lcd) / m : 0.0, st.interp_cut_first - lfi,
@@ -5412,8 +5412,8 @@ static void mirror_swap(void)
                                  subs ? (double)(st.interp_kept - lk) / subs : 0.0,
                                  subs ? (double)(st.interp_other_cam - loc) / subs : 0.0,
                                  subs ? (double)(st.interp_cpos - lcp) / subs : 0.0,
-                                 subs ? (double)(st.interp_clipfix - lcl) / subs : 0.0);
-                lcl = st.interp_clipfix;
+                                 subs ? (double)(st.interp_decal - lcl) / subs : 0.0);
+                lcl = st.interp_decal;
                 lf = st.interp_frames;
                 ls = st.interp_subs;
                 lst = st.interp_cut_step;
