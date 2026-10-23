@@ -9,6 +9,11 @@ in game_files\ are your own copy of the disc. There are no saves in this folder:
 game and name it WOMBAT, which opens every warp room, so every level in the tests can be
 reached.
 
+New in this build: Fahrenheit Frenzy's X-ray room shows its X-ray (a green negative of the
+room) instead of a black screen; "Crash's fur" in the settings menu's Display tab (On, the
+Xbox's fur; Off, as on the PlayStation 2; Coco's fur goes with it); the "HUD margin" slider
+is gone (the HUD at the screen edges sits as at 0% before).
+
 Each step says which computer it is on: [desktop] or [laptop].
 
 What's in the folder
@@ -108,6 +113,8 @@ B. Start the game [laptop]
         kept); Later leaves an orange note at the bottom, "Changes waiting for a restart",
         with its own Restart now button. Skip the title animation and Speakers (Audio tab)
         ask the same way.
+      - Display tab, Crash's fur: On (the Xbox's fur over his body, head and tail) or Off
+        (as on the PlayStation 2; Coco's fur goes too). Applies at once.
       - Show frame rate is Detailed in this package: the corner shows the game's speed
         ("Game 60/s" is full speed), the frames shown ("Shown 144/s" at 144 Hz), the two
         threads' milliseconds, the processor's speed and "Plugged in" or the battery's

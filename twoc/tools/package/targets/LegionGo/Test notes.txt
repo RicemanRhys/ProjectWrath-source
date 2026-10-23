@@ -95,6 +95,7 @@ between tests).
    (Then on again, Restart now.)
    About tab: the processor line, "Power throttling: not throttled", Graphics card "Chosen by:
    Automatic (the only graphics card)"?
+   Crash's fur Off (Display tab) in the hub: Crash without the fuzzy layer, and back On?
 
 Optional: DXVK (the DXVK-test folder), cast_bug's start:
       Game:        /s    Shown:        /s

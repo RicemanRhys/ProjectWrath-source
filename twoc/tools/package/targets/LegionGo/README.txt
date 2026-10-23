@@ -17,6 +17,16 @@ which opens every warp room (all crystals), so every level in the tests can be r
 *** hold comfortably, close the game and let it cool down.
 
 New in this package:
+  - Fahrenheit Frenzy's X-ray room shows its X-ray (a green negative of the room, Crash
+    as a skeleton) instead of a black screen.
+  - "Crash's fur" (Display tab, under HUD position; On in this package, the Xbox's look):
+    Off draws Crash without the layer of fur over his body, head and tail, as on the
+    PlayStation 2. Coco's fur is the same layer and goes with it. Applies at once.
+  - The "HUD margin" slider is gone: with HUD position "Screen edges" the counters sit at
+    the screen's edges (as at 0% before). An older crash_twoc.ini's hud_margin line is
+    ignored and dropped the next time the settings are saved.
+
+From the last package (also new to this folder if you skipped it):
   - Quit game: a button next to Resume at the bottom of the settings menu, on every tab.
     It asks "Quit the game? Unsaved progress will be lost." with Yes / No (No is first;
     B means No) and then closes the game cleanly: your settings saved, a save copy that is
@@ -49,7 +59,7 @@ Still from last time:
     Yes and A, or B for No) and puts every setting on that tab back to the game's own
     default: Render size Game (480 lines), Frame rate Game (60), Render scale 100%,
     Anti-aliasing and Ambient occlusion Off, Anisotropic filtering Off, Render thread Auto,
-    the HUD in the centre, the counter off. Full screen, the aspect ratio, sound, controls
+    the HUD in the centre, Crash's fur on, the counter off. Full screen, the aspect ratio, sound, controls
     and saves stay as they are.
   - 72 fps in the Frame rate list: half of 144 Hz, so each frame is held for 2
     refreshes and motion stays even. The line under the list says what it does on 144,
@@ -178,6 +188,7 @@ B. Start the game (on the Legion Go)
       Render scale ........ 100% (the screen's size) or less or more (part F)
       Anisotropic filtering  Off / 2x / 4x / 8x / 16x (further down, under Textures)
       Anti-aliasing ....... Off / FXAA / SMAA / MSAA / MSAA + SMAA (part F)
+      Crash's fur ......... On (the Xbox's fur) / Off (as on the PS2)
     Changes apply at once and are saved to crash_twoc.ini when you close the menu.
     This package starts with: Render size "Monitor (native, ...)" (the screen's own size),
     Frame rate "Match display", Anisotropic filtering 4x, Anti-aliasing Off, Render scale
