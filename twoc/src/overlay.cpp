@@ -681,8 +681,9 @@ extern "C" void ovl_rates_text(int ok, double game_ups, double shown_fps, int br
 
 /* Step 86: the startup message, centred near the bottom of the picture (pic: x, y, w, h in the target, then
  * the message's own scale, by the picture's height), its lines at `alpha`; made smaller if a line would
- * leave the picture's middle 4:3. `scale` is the frame's (the counter's). */
-static void startup_lines(const float *pic, float scale, const char *msg, float alpha)
+ * leave the picture's middle 4:3. `scale` is the frame's (the counter's). Step 104: at the top of the picture
+ * instead, below the corner counter's box (`avoid`: x0, y0, x1, y1; NULL none) where the two would meet. */
+static void startup_lines(const float *pic, float scale, const char *msg, float alpha, const float *avoid)
 {
     const char *nl = strchr(msg, '\n');
     char a[128], b[128];
@@ -698,8 +699,13 @@ static void startup_lines(const float *pic, float scale, const char *msg, float 
         fs *= room / wide;
     padx = 12.0f * scale * fs;
     pady = 6.0f * scale * fs;
-    ImGui::SetNextWindowPos(ImVec2(pic[0] + pic[2] * 0.5f, pic[1] + pic[3] * 0.985f), ImGuiCond_Always,
-                            ImVec2(0.5f, 1.0f));
+    {   /* step 104: the top of the picture; the box's size as ImGui will make it, to keep off the counter */
+        float bw = (wa > wb ? wa : wb) * fs + 2.0f * padx;
+        float x0 = pic[0] + pic[2] * 0.5f - bw * 0.5f, y = pic[1] + pic[3] * 0.015f;
+        if (avoid && x0 < avoid[2] && x0 + bw > avoid[0] && y < avoid[3])
+            y = avoid[3] + pic[3] * 0.01f;
+        ImGui::SetNextWindowPos(ImVec2(pic[0] + pic[2] * 0.5f, y), ImGuiCond_Always, ImVec2(0.5f, 0.0f));
+    }
     ImGui::SetNextWindowBgAlpha(0.6f);
     ImGui::PushStyleVar(ImGuiStyleVar_Alpha, alpha);
     ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding, ImVec2(padx, pady));
@@ -743,6 +749,7 @@ extern "C" void ovl_counter(ID3D11RenderTargetView *rtv, unsigned w, unsigned h,
     }
     ImGui_ImplDX11_NewFrame();
     ImGui::NewFrame();
+    float box[4], *avoid = NULL;        /* step 104: the counter's box, kept clear by the startup message */
     if (lines) {                        /* step 86: NULL with only the startup message to draw */
         ImGui::SetNextWindowPos(ImVec2(io.DisplaySize.x * 0.01f, io.DisplaySize.y * 0.01f), ImGuiCond_Always);
         ImGui::SetNextWindowBgAlpha(0.55f);
@@ -752,11 +759,19 @@ extern "C" void ovl_counter(ID3D11RenderTargetView *rtv, unsigned w, unsigned h,
                                         ImGuiWindowFlags_AlwaysAutoResize | ImGuiWindowFlags_NoNav |
                                         ImGuiWindowFlags_NoFocusOnAppearing | ImGuiWindowFlags_NoSavedSettings);
         ImGui::TextUnformatted(lines);
+        {
+            ImVec2 p = ImGui::GetWindowPos(), z = ImGui::GetWindowSize();
+            box[0] = p.x;
+            box[1] = p.y;
+            box[2] = p.x + z.x;
+            box[3] = p.y + z.y;
+            avoid = box;
+        }
         ImGui::End();
         ImGui::PopStyleVar(2);
     }
     if (msg && msg_alpha > 0.0f && pic)
-        startup_lines(pic, scale, msg, msg_alpha);
+        startup_lines(pic, scale, msg, msg_alpha, avoid);
     ImGui::Render();
     {
         ID3D11Device *dev = NULL;

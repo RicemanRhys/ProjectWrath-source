@@ -82,7 +82,8 @@ int ovl_frame(ID3D11RenderTargetView *rtv, unsigned w, unsigned h, float scale, 
  * left corner of `rtv`, over the game's picture, with the overlay closed.
  * Step 86: `lines` NULL for no counter; `msg` (NULL: none) the startup
  * message near the bottom of the picture at pic[0..3] (x, y, w, h), at
- * opacity `msg_alpha`, scaled by pic[4]. */
+ * opacity `msg_alpha`, scaled by pic[4]; step 104: at the top, centred,
+ * below the counter where the two would meet. */
 void ovl_counter(ID3D11RenderTargetView *rtv, unsigned w, unsigned h, float scale, const char *lines,
                  const char *msg, float msg_alpha, const float *pic);
 /* Step 82: the measured rates as the overlay and the counter word them. */
