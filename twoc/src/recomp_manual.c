@@ -100,6 +100,114 @@ static int dev_flag(const char *name)
     return v && *v && strcmp(v, "0") != 0;
 }
 
+/* Step 102 (notes 18.105): "Mute Droid Void's background drone". Droid Void's
+ * ambience, "AmbientLoop" in the game's sound table (the level's sound 0xB3,
+ * after its music's two, in the run at 0x1A8378 that sub_000B4D20 points
+ * 0x463810 at), is LEVSPEC\DRVD_BG.wav: 12.8 s of Xbox ADPCM, mono, 22,050 Hz,
+ * looped under the music for the whole level. The table's volume word can't
+ * silence it: a type-0 sound takes the caller's volume (0x1AA420) when it gives
+ * one, and this one's does (measured: the word at 0 or 1, the drone as loud).
+ * So the mute is on the file: while it is on, the samples the game reads from
+ * DRVD_BG.wav are zeros (the header kept), and zero ADPCM blocks decode to
+ * silence. Only that file, and only when it is opened for Droid Void: the
+ * level's files (levels\a\droid\droidchars.dat) open just before its
+ * sounds, while 0x463810 still holds the level before's run (the same file is
+ * listed once more, at 0x1A9E18, with the space cutscene's voices). The game
+ * reads it whole at the level's start, so a change applies from the level's
+ * next start. The guest's file calls come through coop_kernel_call below:
+ * NtCreateFile/NtOpenFile give the name and the handle, NtReadFile (synchronous
+ * in the bridge) and NtSetInformationFile the position. */
+#define KT_NTCLOSE      0x0015AAB0u     /* kernel thunks: [slot] = the call's VA */
+#define KT_NTOPENFILE   0x0015AAE8u
+#define KT_NTREADFILE   0x0015AAF4u
+#define KT_NTSETINFO    0x0015AB30u
+#define KT_NTCREATEFILE 0x0015AB34u
+static volatile LONG g_drone_mute;      /* the setting */
+static uint32_t g_drone_h;              /* DRVD_BG.wav's guest handle, while open and muted */
+static uint32_t g_drone_pos, g_drone_data = 48, g_drone_zeroed;
+static int g_drone_level;               /* the last level file opened was Droid Void's */
+
+void twoc_set_drone_mute(int on)
+{
+    if (InterlockedExchange(&g_drone_mute, on ? 1 : 0) != (on ? 1 : 0))
+        fprintf(stderr, "[SND] Droid Void's background drone: %s (from the level's next start)\n",
+                on ? "muted" : "as the game plays it");
+}
+
+typedef struct { uint32_t va, a[8]; } drone_call_t;
+
+/* Before a kernel call: 1 if it is one the mute watches (its arguments kept). */
+static int drone_pre(uint32_t va, drone_call_t *c)
+{
+    int i;
+
+    if (va == MEM32(KT_NTCREATEFILE) || va == MEM32(KT_NTOPENFILE)) {
+        if (!g_drone_mute)
+            return 0;
+    } else if (!g_drone_h || (va != MEM32(KT_NTREADFILE) && va != MEM32(KT_NTSETINFO) && va != MEM32(KT_NTCLOSE))) {
+        return 0;
+    }
+    c->va = va;
+    for (i = 0; i < 8; i++)
+        c->a[i] = MEM32(esp + 4 + 4 * i);
+    return 1;
+}
+
+/* After it, with its status. */
+static void drone_post(const drone_call_t *c, uint32_t status)
+{
+    static const char want[] = "levspec\\drvd_bg.wav";
+    uint32_t s, n, start, got, k;
+
+    if (c->va == MEM32(KT_NTCREATEFILE) || c->va == MEM32(KT_NTOPENFILE)) {
+        char name[160];
+        if (status || !c->a[2] || !(s = MEM32(c->a[2] + 4)))     /* OBJECT_ATTRIBUTES.ObjectName */
+            return;
+        n = MEM16(s);
+        if (n >= sizeof(name) || !MEM32(s + 4))
+            return;
+        memcpy(name, (const void *)XBOX_PTR(MEM32(s + 4)), n);
+        name[n] = 0;
+        _strlwr(name);
+        if (strstr(name, "\\levels\\")) {
+            g_drone_level = strstr(name, "\\levels\\a\\droid\\") != NULL;
+            return;
+        }
+        if (n < sizeof(want) - 1 || strcmp(name + n - (sizeof(want) - 1), want) != 0 || !g_drone_level)
+            return;
+        g_drone_h = MEM32(c->a[0]);
+        g_drone_pos = 0;
+        g_drone_data = 48;
+        g_drone_zeroed = 0;
+    } else if (c->a[0] != g_drone_h) {
+        return;
+    } else if (c->va == MEM32(KT_NTREADFILE)) {
+        uint8_t *p = (uint8_t *)XBOX_PTR(c->a[5]);
+        start = c->a[7] ? MEM32(c->a[7]) : g_drone_pos;
+        got = status ? 0 : MEM32(c->a[4] + 4);              /* IO_STATUS_BLOCK.Information */
+        if (start == 0 && got >= 20 && memcmp(p, "RIFF", 4) == 0) {
+            for (k = 12; k + 8 <= got; k += 8 + ((MEM32(c->a[5] + k + 4) + 1) & ~1u))
+                if (memcmp(p + k, "data", 4) == 0) {
+                    g_drone_data = k + 8;
+                    break;
+                }
+        }
+        if (g_drone_mute && start + got > g_drone_data) {
+            k = start < g_drone_data ? g_drone_data - start : 0;
+            memset(p + k, 0, got - k);
+            g_drone_zeroed += got - k;
+        }
+        g_drone_pos = start + got;
+    } else if (c->va == MEM32(KT_NTSETINFO)) {
+        if (!status && c->a[4] == 14)                       /* FilePositionInformation */
+            g_drone_pos = MEM32(c->a[2]);
+    } else {
+        fprintf(stderr, "[SND] Droid Void's background drone: %u bytes of its samples read as silence\n",
+                g_drone_zeroed);
+        g_drone_h = 0;
+    }
+}
+
 /* Called once from main.c, before the guest runs. */
 void twoc_dev_options_init(void)
 {
@@ -769,10 +877,15 @@ static void coop_kernel_call(void)
     int watched = cs && cs == g_cs_watch;
     int had = watched && coop_holds_cs(cs);            /* before this call */
 
+    drone_call_t dc;
+    int drone = drone_pre(va, &dc);        /* step 102: Droid Void's drone muted */
+
     if (enter && self)
         InterlockedExchange(&self->acquiring, 1);
     if (!hg_kernel_call(va, self))         /* the guest heap guard, below (S7) */
         recomp_lookup_kernel(va)();        /* the lookup also selects this thread's dispatch slot */
+    if (drone)
+        drone_post(&dc, eax);
     if (enter) {
         if (t_cs_n < COOP_CS_TRACK)
             t_cs_held[t_cs_n] = cs;

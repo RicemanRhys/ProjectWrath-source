@@ -1355,6 +1355,17 @@ static int tab_audio(twoc_settings_t *s)
              "the left, as on the console. Off, 3D sounds are centred left-right (front-back still pans in "
              "5.1). Applies at once.");
     }
+    {   /* step 102 */
+        bool m = s->mute_drone != 0;
+        if (ImGui::Checkbox("Mute Droid Void's background drone", &m)) {
+            s->mute_drone = m;
+            r |= OVL_CHANGED;
+        }
+        more("Droid Void plays a droning ambience loop under its music for the whole level, as on the Xbox. "
+             "This silences that one sound and nothing else: the music, the sound effects, the speech and every "
+             "other level stay as they are. From the next time the level starts (a level being played keeps "
+             "the sound it started with).");
+    }
     {
         static const char *const spk[] = { "Stereo", "5.1 surround" };
         int cur = s->speakers > 0, devch = 0, out = mcpx_apu_output_channels(&devch);

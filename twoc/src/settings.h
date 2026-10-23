@@ -44,6 +44,8 @@
  *   speakers       = stereo | 5.1             RECOMP_SPEAKERS (from the next start)
  *   gpu            = auto | <adapter name>    RECOMP_GPU (step 97: the graphics card, gpu.h; matched by
  *                                             name; unset or not on this PC: auto; from the next start)
+ *   mute_droid_drone = 0 | 1                  RECOMP_MUTE_DROID_DRONE (step 102: Droid Void's background drone,
+ *                                             DRVD_BG, silent from the level's next start; unset: off)
  *   hrtf           = 0 | 1                    RECOMP_HRTF (unset: on)
  *   pause          = 0 | 1                    RECOMP_OVERLAY_PAUSE (unset: on)
  *   keyboard       = 0 | 1                    RECOMP_KEYBOARD (unset: on)
@@ -158,6 +160,7 @@ typedef struct {
     int startup_message;                /* step 86: 1 the F1 line for the first seconds (also unset), 0 not */
     int hud;                            /* step 65: 0 the HUD in the middle 4:3, 1 at the edges */
     int fur;                            /* step 101: 1 Crash's fur drawn (also unset), 0 not (the PS2's look) */
+    int mute_drone;                     /* step 102: 1 Droid Void's background drone muted, 0 not (also unset) */
     int hub_seethrough;                 /* step 102: 1 the hub pads' crystals and gems see-through, 0 solid (also unset) */
     int volume;                         /* 0-100; -1: never set (Windows' own level) */
     int music, effects;                 /* 0-100; -1: never set (100, the game's mix) */
@@ -238,6 +241,9 @@ void twoc_audio_close(void);
 void twoc_audio_set_kind(int stream, int percent);
 /* The APU's HRTF on 3D voices, on or off (it is on unless this says off). */
 void twoc_audio_set_hrtf(int on);
+/* Step 102 (recomp_manual.c): Droid Void's background drone muted (1) or as
+ * the game plays it (0), from the next time it starts. */
+void twoc_set_drone_mute(int on);
 
 #ifdef __cplusplus
 }

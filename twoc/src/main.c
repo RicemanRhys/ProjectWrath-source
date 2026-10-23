@@ -522,6 +522,8 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance,
         extern void twoc_dev_options_init(void);
         twoc_dev_options_init();
     }
+    if (getenv("RECOMP_MUTE_DROID_DRONE") && strcmp(getenv("RECOMP_MUTE_DROID_DRONE"), "1") == 0)
+        twoc_set_drone_mute(1);         /* step 102 (the ini's mute_droid_drone comes as this too) */
 
     /* D3D mirror bridge (d3d_bridge.c). Inert unless RECOMP_D3D_BRIDGE is set. */
     {

@@ -57,6 +57,9 @@ static const key_t_ g_fixed[] = {
       "auto (Windows' choice; the game asks for the high-performance card) or a graphics card's name as the F1"
       " menu's Display tab lists it (from the next start)" },
     { "hrtf", "RECOMP_HRTF", "1: 3D sounds placed left-right (the Xbox's HRTF), 0: centred" },
+    { "mute_droid_drone", "RECOMP_MUTE_DROID_DRONE",
+      "1: Droid Void's background drone (its ambience loop, DRVD_BG) silent from the level's next start; 0: as the"
+      " game plays it" },
     { "pause", "RECOMP_OVERLAY_PAUSE", "1: the game waits while the overlay is open, 0: it runs behind it" },
     { "pause_unfocused", "RECOMP_PAUSE_UNFOCUSED",
       "1: the game waits, muted, while its window is in the background or minimised" },
@@ -513,6 +516,8 @@ void twoc_settings_current(twoc_settings_t *s)
     s->speakers = v && *v ? strcmp(v, "5.1") == 0 : -1;
     v = getenv("RECOMP_HRTF");
     s->hrtf = !(v && strcmp(v, "0") == 0);
+    v = getenv("RECOMP_MUTE_DROID_DRONE");
+    s->mute_drone = v && strcmp(v, "1") == 0;      /* step 102 */
     v = getenv("RECOMP_OVERLAY_PAUSE");
     s->pause = !(v && strcmp(v, "0") == 0);
     v = getenv("RECOMP_KEYBOARD");
@@ -617,6 +622,8 @@ static void key_text(const twoc_settings_t *s, size_t i, char *buf, size_t cap)
         snprintf(buf, cap, "%s", s->speakers ? "5.1" : "stereo");
     else if (strcmp(k, "hrtf") == 0)
         snprintf(buf, cap, "%d", s->hrtf ? 1 : 0);
+    else if (strcmp(k, "mute_droid_drone") == 0 && s->mute_drone)
+        snprintf(buf, cap, "1");        /* step 102: off, the default: unwritten */
     else if (strcmp(k, "pause") == 0)
         snprintf(buf, cap, "%d", s->pause ? 1 : 0);
     else if (strcmp(k, "keyboard") == 0)

@@ -9174,6 +9174,10 @@ static void overlay_apply(twoc_settings_t *was, const twoc_settings_t *s)
         twoc_audio_set_kind(0, s->effects);
     if (s->hrtf != was->hrtf)
         twoc_audio_set_hrtf(s->hrtf);
+    if (s->mute_drone != was->mute_drone) {    /* step 102: from the level's next start */
+        twoc_set_drone_mute(s->mute_drone);
+        fprintf(stderr, "[OVL] mute Droid Void's background drone: %s\n", s->mute_drone ? "on" : "off");
+    }
     if (s->pause != was->pause) {
         InterlockedExchange(&g_ovl_pauses, s->pause);   /* step 79: the game side looks at its Swap */
         fprintf(stderr, "[OVL] pause the game while open: %s\n", s->pause ? "on" : "off");
@@ -10371,6 +10375,8 @@ static void trigger_file(unsigned swap_no)
                 ts.fur = atoi(v) != 0;
             } else if (strcmp(k, "hubglass") == 0) {        /* step 102 */
                 ts.hub_seethrough = atoi(v) != 0;
+            } else if (strcmp(k, "drone") == 0) {           /* step 102: 1 muted */
+                ts.mute_drone = atoi(v) != 0;
             } else {
                 fprintf(stderr, "[D3DB] trigger file: set %s: not a setting here\n", k);
             }
