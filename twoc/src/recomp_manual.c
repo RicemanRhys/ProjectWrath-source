@@ -116,16 +116,36 @@ static int dev_flag(const char *name)
  * reads it whole at the level's start, so a change applies from the level's
  * next start. The guest's file calls come through coop_kernel_call below:
  * NtCreateFile/NtOpenFile give the name and the handle, NtReadFile (synchronous
- * in the bridge) and NtSetInformationFile the position. */
+ * in the bridge) and NtSetInformationFile the position.
+ *
+ * Step 104 (notes 18.107): "Skip the title animation" silences the animation's
+ * sound track too. The title animation is the "logos cut", and its sound is
+ * one stream, SFX\VCE_ENG\LOGOS.wav (26.7 s of Xbox ADPCM, mono, 44,100 Hz:
+ * Cortex's lines and the animation's sounds mixed; the only reference to the
+ * file is the cut's entry at 0x1A6340, beside "intro1 cut"'s INTRO1.wav and
+ * the others), opened as the cut starts; the title music (MUSIC\THEMEL.wav
+ * and THEMER.wav) is streams of its own. Sped up, the animation is over in a
+ * fraction of a second while its sound track streams on for 26 s over the
+ * main menu. So with the fast title, LOGOS.wav opened before the main menu
+ * opens reads as silence, the same way as the drone; an opening after that
+ * (the speed knob is back to normal then) is left as it is.
+ * RECOMP_FAST_TITLE_SOUND=1 keeps it. */
 #define KT_NTCLOSE      0x0015AAB0u     /* kernel thunks: [slot] = the call's VA */
 #define KT_NTOPENFILE   0x0015AAE8u
 #define KT_NTREADFILE   0x0015AAF4u
 #define KT_NTSETINFO    0x0015AB30u
 #define KT_NTCREATEFILE 0x0015AB34u
 static volatile LONG g_drone_mute;      /* the setting */
-static uint32_t g_drone_h;              /* DRVD_BG.wav's guest handle, while open and muted */
-static uint32_t g_drone_pos, g_drone_data = 48, g_drone_zeroed;
+static int g_title_mute;                /* step 104: the fast title's sound track silenced (set at the start) */
 static int g_drone_level;               /* the last level file opened was Droid Void's */
+/* Step 104: the files read as silence, while open (the drone, the title's sound track). */
+typedef struct {
+    uint32_t h;                         /* the guest handle; 0 a free slot */
+    uint32_t pos, data, zeroed;
+    const char *what;
+} mute_file_t;
+static mute_file_t g_mute_files[4];
+static volatile LONG g_mute_open;       /* slots in use */
 
 void twoc_set_drone_mute(int on)
 {
@@ -142,9 +162,9 @@ static int drone_pre(uint32_t va, drone_call_t *c)
     int i;
 
     if (va == MEM32(KT_NTCREATEFILE) || va == MEM32(KT_NTOPENFILE)) {
-        if (!g_drone_mute)
+        if (!g_drone_mute && !g_title_mute)
             return 0;
-    } else if (!g_drone_h || (va != MEM32(KT_NTREADFILE) && va != MEM32(KT_NTSETINFO) && va != MEM32(KT_NTCLOSE))) {
+    } else if (!g_mute_open || (va != MEM32(KT_NTREADFILE) && va != MEM32(KT_NTSETINFO) && va != MEM32(KT_NTCLOSE))) {
         return 0;
     }
     c->va = va;
@@ -153,13 +173,22 @@ static int drone_pre(uint32_t va, drone_call_t *c)
     return 1;
 }
 
+/* Whether `name` (lower case, n characters) ends in `tail`. */
+static int name_ends(const char *name, uint32_t n, const char *tail)
+{
+    size_t k = strlen(tail);
+    return n >= k && strcmp(name + n - k, tail) == 0;
+}
+
 /* After it, with its status. */
 static void drone_post(const drone_call_t *c, uint32_t status)
 {
-    static const char want[] = "levspec\\drvd_bg.wav";
+    mute_file_t *m = NULL;
     uint32_t s, n, start, got, k;
+    int i;
 
     if (c->va == MEM32(KT_NTCREATEFILE) || c->va == MEM32(KT_NTOPENFILE)) {
+        const char *what;
         char name[160];
         if (status || !c->a[2] || !(s = MEM32(c->a[2] + 4)))     /* OBJECT_ATTRIBUTES.ObjectName */
             return;
@@ -173,38 +202,56 @@ static void drone_post(const drone_call_t *c, uint32_t status)
             g_drone_level = strstr(name, "\\levels\\a\\droid\\") != NULL;
             return;
         }
-        if (n < sizeof(want) - 1 || strcmp(name + n - (sizeof(want) - 1), want) != 0 || !g_drone_level)
+        if (g_drone_mute && g_drone_level && name_ends(name, n, "levspec\\drvd_bg.wav"))
+            what = "Droid Void's background drone";
+        else if (g_title_mute && !g_dev_menu_ms && name_ends(name, n, "vce_eng\\logos.wav"))
+            what = "the title animation's sound track (LOGOS.wav, the fast title)";    /* step 104 */
+        else
             return;
-        g_drone_h = MEM32(c->a[0]);
-        g_drone_pos = 0;
-        g_drone_data = 48;
-        g_drone_zeroed = 0;
-    } else if (c->a[0] != g_drone_h) {
+        for (i = 0; i < (int)(sizeof(g_mute_files) / sizeof(g_mute_files[0])); i++)
+            if (!g_mute_files[i].h) {
+                m = &g_mute_files[i];
+                break;
+            }
+        if (!m)
+            return;
+        m->h = MEM32(c->a[0]);
+        m->pos = 0;
+        m->data = 48;
+        m->zeroed = 0;
+        m->what = what;
+        InterlockedIncrement(&g_mute_open);
         return;
-    } else if (c->va == MEM32(KT_NTREADFILE)) {
+    }
+    for (i = 0; i < (int)(sizeof(g_mute_files) / sizeof(g_mute_files[0])); i++)
+        if (g_mute_files[i].h && g_mute_files[i].h == c->a[0])
+            m = &g_mute_files[i];
+    if (!m)
+        return;
+    if (c->va == MEM32(KT_NTREADFILE)) {
         uint8_t *p = (uint8_t *)XBOX_PTR(c->a[5]);
-        start = c->a[7] ? MEM32(c->a[7]) : g_drone_pos;
+        start = c->a[7] ? MEM32(c->a[7]) : m->pos;
         got = status ? 0 : MEM32(c->a[4] + 4);              /* IO_STATUS_BLOCK.Information */
         if (start == 0 && got >= 20 && memcmp(p, "RIFF", 4) == 0) {
             for (k = 12; k + 8 <= got; k += 8 + ((MEM32(c->a[5] + k + 4) + 1) & ~1u))
                 if (memcmp(p + k, "data", 4) == 0) {
-                    g_drone_data = k + 8;
+                    m->data = k + 8;
                     break;
                 }
         }
-        if (g_drone_mute && start + got > g_drone_data) {
-            k = start < g_drone_data ? g_drone_data - start : 0;
+        if (start + got > m->data) {    /* the samples: zero ADPCM blocks decode to silence */
+            k = start < m->data ? m->data - start : 0;
             memset(p + k, 0, got - k);
-            g_drone_zeroed += got - k;
+            m->zeroed += got - k;
         }
-        g_drone_pos = start + got;
+        m->pos = start + got;
     } else if (c->va == MEM32(KT_NTSETINFO)) {
         if (!status && c->a[4] == 14)                       /* FilePositionInformation */
-            g_drone_pos = MEM32(c->a[2]);
+            m->pos = MEM32(c->a[2]);
     } else {
-        fprintf(stderr, "[SND] Droid Void's background drone: %u bytes of its samples read as silence\n",
-                g_drone_zeroed);
-        g_drone_h = 0;
+        fprintf(stderr, "[SND] %s: %u bytes of its samples read as silence\n", m->what, m->zeroed);
+        m->h = 0;
+        InterlockedDecrement(&g_mute_open);
     }
 }
 
@@ -219,6 +266,10 @@ void twoc_dev_options_init(void)
         MEMF(DEV_TITLE_SPEED_VA) = DEV_TITLE_SPEED;
         fprintf(stderr, "[DEV] fast title: title speed knob 0x%08X = %.1f (normal 0.5)\n",
                 DEV_TITLE_SPEED_VA, DEV_TITLE_SPEED);
+        g_title_mute = !dev_flag("RECOMP_FAST_TITLE_SOUND");    /* step 104 */
+        fprintf(stderr, "[SND] the title animation's sound track (LOGOS.wav): %s\n",
+                g_title_mute ? "silent with the fast title (RECOMP_FAST_TITLE_SOUND=1 keeps it)"
+                             : "kept (RECOMP_FAST_TITLE_SOUND)");
     }
     if (g_dev_autostart)
         fprintf(stderr, "[DEV] autostart: A on port 0 at +5 s and +20 s after the main menu opens\n");

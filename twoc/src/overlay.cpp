@@ -1608,8 +1608,9 @@ static int tab_extras(twoc_settings_t *s, const ovl_info_t *in)
         }
         more("At each start, after the logos, the game plays its title animation (Crash and the title "
              "music) before the main menu opens. On, the animation runs many times faster, so the main menu "
-             "opens about " TWOC_FAST_TITLE_SAVES " sooner; the logos and the menu are as before. From the "
-             "next start (a launcher's -FastTitle wins over this).");
+             "opens about " TWOC_FAST_TITLE_SAVES " sooner, and its sound track (Cortex's lines and the "
+             "animation's sounds) is left out instead of playing on over the main menu; the logos, the title "
+             "music and the menu are as before. From the next start (a launcher's -FastTitle wins over this).");
         snprintf(line, sizeof(line), "Now: %s this run.%s", in->fast_title_now ? "on" : "off",
                  !s->fast_title != !in->fast_title_now ? (s->fast_title ? " On from the next start."
                                                                          : " Off from the next start.") : "");
