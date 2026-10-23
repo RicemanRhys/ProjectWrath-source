@@ -710,8 +710,9 @@ void d3db_init(void)
     g_vsdump = d3db_host_on && env_on("RECOMP_D3D_BRIDGE_VSDUMP");
     g_vsprobe = d3db_host_on && env_on("RECOMP_D3D_BRIDGE_VSPROBE");
     g_vp_copy = d3db_host_on && env_on("RECOMP_D3D_BRIDGE_VP_COPY");
-    if (getenv("RECOMP_FUR") && strcmp(getenv("RECOMP_FUR"), "0") == 0)
-        d3db_set_fur(0);                /* step 101 */    if (d3db_host_on && getenv("RECOMP_D3D_BRIDGE_DRAWLOG")) {  /* "A-B": guest swaps */
+    if (getenv("RECOMP_FUR"))           /* step 101: 0 off; step 102: crash */
+        d3db_set_fur(twoc_fur_parse(getenv("RECOMP_FUR")));
+    if (d3db_host_on && getenv("RECOMP_D3D_BRIDGE_DRAWLOG")) {  /* "A-B": guest swaps */
         char *e;
         g_drawlog_from = strtol(getenv("RECOMP_D3D_BRIDGE_DRAWLOG"), &e, 0);
         g_drawlog_to = *e == '-' ? strtol(e + 1, NULL, 0) : g_drawlog_from;
@@ -3949,15 +3950,37 @@ void d3db_item_queued(uint32_t item)
  * texture of noise blended over the body without depth writes (Crash's
  * body, head and tail; Coco's too, the same layer; his reflection in the
  * hub's floor and his stencil shadow take no fur). With the setting off
- * those draws aren't mirrored: the PS2's look. */
+ * those draws aren't mirrored: the PS2's look.
+ * Step 102 (notes 18.105): "Character fur", three ways. Off for everyone is
+ * step 101's; off for Crash only skips the shells whose fur texture's
+ * palette is one of Crash's (FUR_CRASH: by their content, the same in every
+ * level and every model of him the survey found), so Coco's, Crunch's and
+ * anyone else's stay. */
 #define FUR_PASS_RET 0x0009FF2Au
-static volatile LONG g_fur_off;         /* RECOMP_FUR=0 or the setting off */
+static const uint32_t FUR_CRASH[] = { 0xBC407B4Eu, 0x7BE8AC19u, 0x0CEC16F0u, 0x05122CD2u };
+static volatile LONG g_fur_mode = TWOC_FUR_ON;      /* RECOMP_FUR or the setting */
 static int g_item_fur;                  /* the item being drawn is a fur shell */
-static volatile LONG g_fur_skipped;     /* draws not mirrored for it */
+static volatile LONG g_fur_skipped, g_fur_kept;     /* draws not mirrored for it; kept with Crash's off */
 
-void d3db_set_fur(int on)
+void d3db_set_fur(int mode)
 {
-    InterlockedExchange(&g_fur_off, on ? 0 : 1);
+    InterlockedExchange(&g_fur_mode, mode);
+}
+
+/* Step 102: the shell being drawn is Crash's: its stage-0 palette, by content. */
+static int fur_is_crash(void)
+{
+    uint32_t th = MEM32(dev() + DEV_TEXTURES), pal = MEM32(dev() + DEV_PALETTES), sig;
+    unsigned i;
+
+    if (!th || ((MEM32(th + RES_FORMAT) >> 8) & 0xFF) != XDK_FMT_P8 || !pal)
+        return 0;
+    sig = content_sig((const uint8_t *)XBOX_PTR(phys_to_va(res_data(pal))),
+                      4 * (256u >> ((MEM32(pal + RES_COMMON) >> 30) & 3)));
+    for (i = 0; i < sizeof(FUR_CRASH) / sizeof(FUR_CRASH[0]); i++)
+        if (sig == FUR_CRASH[i])
+            return 1;
+    return 0;
 }
 
 void d3db_item_drawn(uint32_t item, uint32_t ret)
@@ -4004,9 +4027,12 @@ static int host_draw(d3dh_draw_t *dr)
 {
     float cam[32];
 
-    if (g_item_fur && g_fur_off) {      /* step 101: Crash's fur off */
-        InterlockedIncrement(&g_fur_skipped);
-        return 0;
+    if (g_item_fur && g_fur_mode != TWOC_FUR_ON) {     /* step 101: the fur off; step 102: or Crash's */
+        if (g_fur_mode == TWOC_FUR_OFF || fur_is_crash()) {
+            InterlockedIncrement(&g_fur_skipped);
+            return 0;
+        }
+        InterlockedIncrement(&g_fur_kept);
     }
 
     memcpy(cam, (const void *)XBOX_PTR(0x00242620u), 64);
@@ -5225,9 +5251,10 @@ static void mirror_swap(void)
                     st.tex_uploads, st.p8_uploads, st.cube_uploads, st.tex_upload_fails, st.tex_evictions,
                     (long)g_cube_binds, (long)g_null_stages, (long)g_gap[GAP_VALUE],
                     (long)g_gap[GAP_TEXOP], (long)g_gap[GAP_DIFFUSE_ARG], (long)g_gap[GAP_FRONTFACE]);
-            if (g_fur_off || g_fur_skipped)     /* step 101: only once the fur has been off */
-                log_block_printf(&lb, "[D3DB] host fur shells: %s; draws not mirrored for it %ld\n",
-                                 g_fur_off ? "off" : "on", (long)g_fur_skipped);
+            if (g_fur_mode != TWOC_FUR_ON || g_fur_skipped)    /* step 101: only once the fur has been off */
+                log_block_printf(&lb, "[D3DB] host fur shells: %s; draws not mirrored for it %ld, others' kept %ld\n",
+                                 g_fur_mode == TWOC_FUR_OFF ? "off" : g_fur_mode == TWOC_FUR_CRASH ? "off for Crash"
+                                 : "on", (long)g_fur_skipped, (long)g_fur_kept);
             log_block_printf(&lb, "[D3DB] host fixed function: indexed draws %u, untransformed draws %u (lit by xbox_d3d8"
                     " %ld, lit on the CPU %ld); gaps: over 8 lights %ld, texture transform %ld, CPU lighting"
                     " without a diffuse %ld, specular %ld, texcoord format %ld, immediate w not 1 %ld; linear textures"

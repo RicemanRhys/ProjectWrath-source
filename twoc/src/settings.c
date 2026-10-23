@@ -45,7 +45,9 @@ static const key_t_ g_fixed[] = {
     { "startup_message", "RECOMP_STARTUP_MESSAGE",
       "1: \"Press F1 to open the settings menu\" for the first seconds, 0: not" },
     { "hud", "RECOMP_HUD", "centre (the game's 4:3 places) or edges: the HUD counters at the screen's edges, wider than 4:3" },
-    { "fur", "RECOMP_FUR", "1: Crash's fur (and Coco's, the same layer), the Xbox's look; 0: without, as on the PS2" },
+    { "fur", "RECOMP_FUR",
+      "1: the characters' fur, the Xbox's look; crash: off for Crash only (Coco's and the others' stay); 0: off for"
+      " everyone, as on the PS2" },
     { "hub_seethrough", "RECOMP_HUB_SEETHROUGH",
       "1: the hub pads' crystals and gems drawn see-through, as a level draws one already collected; 0: solid, the"
       " game's own look" },
@@ -137,6 +139,16 @@ static const char *g_pacing_names[TWOC_PACING_COUNT] = { "auto", "vsync", "limit
 const char *twoc_pacing_name(int pacing)
 {
     return pacing >= 0 && pacing < TWOC_PACING_COUNT ? g_pacing_names[pacing] : "auto";
+}
+
+/* Step 102: fur = 1 | crash | 0 (step 101's file has 0 or nothing). */
+int twoc_fur_parse(const char *v)
+{
+    if (v && strcmp(v, "0") == 0)
+        return TWOC_FUR_OFF;
+    if (v && _stricmp(v, "crash") == 0)
+        return TWOC_FUR_CRASH;
+    return TWOC_FUR_ON;
 }
 
 /* Step 77: framerate = 60 | display | N. 0 the game's 60 (also unset or
@@ -500,8 +512,7 @@ void twoc_settings_current(twoc_settings_t *s)
     s->startup_message = !(v && strcmp(v, "0") == 0);
     v = getenv("RECOMP_HUD");
     s->hud = v && _stricmp(v, "edges") == 0;
-    v = getenv("RECOMP_FUR");
-    s->fur = !(v && strcmp(v, "0") == 0);  /* step 101 */
+    s->fur = twoc_fur_parse(getenv("RECOMP_FUR"));     /* step 101; step 102: three ways */
     v = getenv("RECOMP_HUB_SEETHROUGH");
     s->hub_seethrough = v && strcmp(v, "1") == 0;   /* step 102 */
     v = getenv("RECOMP_VOLUME");
@@ -570,7 +581,7 @@ void twoc_settings_display_defaults(twoc_settings_t *s)
     s->ao_strength = TWOC_AO_STRENGTH_DEFAULT;
     s->ao_half = 0;
     s->hud = 0;
-    s->fur = 1;                         /* step 101 */
+    s->fur = TWOC_FUR_ON;               /* step 101 */
     s->hub_seethrough = 0;              /* step 102 */
 }
 
@@ -608,8 +619,8 @@ static void key_text(const twoc_settings_t *s, size_t i, char *buf, size_t cap)
         snprintf(buf, cap, "0");        /* step 86: on, the default: unwritten */
     else if (strcmp(k, "hud") == 0)
         snprintf(buf, cap, "%s", s->hud ? "edges" : "centre");
-    else if (strcmp(k, "fur") == 0 && !s->fur)
-        snprintf(buf, cap, "0");        /* step 101: on, the default: unwritten */
+    else if (strcmp(k, "fur") == 0 && s->fur != TWOC_FUR_ON)  /* step 101: on, the default: unwritten */
+        snprintf(buf, cap, "%s", s->fur == TWOC_FUR_CRASH ? "crash" : "0");
     else if (strcmp(k, "hub_seethrough") == 0 && s->hub_seethrough)
         snprintf(buf, cap, "1");        /* step 102: off, the default: unwritten */
     else if (strcmp(k, "volume") == 0 && s->volume >= 0)

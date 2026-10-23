@@ -9188,7 +9188,8 @@ static void overlay_apply(twoc_settings_t *was, const twoc_settings_t *s)
     }
     if (s->fur != was->fur) {           /* step 101: from the next draw */
         d3db_set_fur(s->fur);
-        fprintf(stderr, "[OVL] Crash's fur: %s\n", s->fur ? "on" : "off");
+        fprintf(stderr, "[OVL] character fur: %s\n", s->fur == TWOC_FUR_ON ? "on" : s->fur == TWOC_FUR_CRASH
+                ? "off for Crash only" : "off for everyone");
     }
     if (s->hub_seethrough != was->hub_seethrough) {    /* step 102: from the next frame */
         twoc_set_hub_seethrough(s->hub_seethrough);
@@ -10371,8 +10372,8 @@ static void trigger_file(unsigned swap_no)
                 ts.ao_half = atoi(v) > 0;
             } else if (strcmp(k, "pausebg") == 0) {         /* step 90: pause_unfocused */
                 ts.pause_unfocused = atoi(v) != 0;
-            } else if (strcmp(k, "fur") == 0) {             /* step 101 */
-                ts.fur = atoi(v) != 0;
+            } else if (strcmp(k, "fur") == 0) {             /* step 101; step 102: 1, crash, 0 */
+                ts.fur = twoc_fur_parse(v);
             } else if (strcmp(k, "hubglass") == 0) {        /* step 102 */
                 ts.hub_seethrough = atoi(v) != 0;
             } else if (strcmp(k, "drone") == 0) {           /* step 102: 1 muted */

@@ -35,7 +35,8 @@
  *   startup_message = 0 | 1                   RECOMP_STARTUP_MESSAGE (unset: on; step 86: "Press F1 to
  *                                             open the settings menu" at the bottom for ~8 s)
  *   hud         = centre | edges              RECOMP_HUD (unset: centre)
- *   fur         = 0 | 1                       RECOMP_FUR (step 101: Crash's fur shells; unset: on)
+ *   fur         = 1 | crash | 0               RECOMP_FUR (step 101: the fur shells, 1 on, 0 off for everyone;
+ *                                             step 102: crash, off for Crash only; unset: on)
  *   hub_seethrough = 0 | 1                    RECOMP_HUB_SEETHROUGH (step 102: the hub pads' crystals and gems
  *                                             see-through, as a level draws one collected; unset: off)
  *   volume      = 0-100                       RECOMP_VOLUME (the game's volume in Windows' mixer)
@@ -159,7 +160,7 @@ typedef struct {
     int show_fps;                       /* step 82: 1 the measured rates in a corner, 0 not (also unset); 2 more */
     int startup_message;                /* step 86: 1 the F1 line for the first seconds (also unset), 0 not */
     int hud;                            /* step 65: 0 the HUD in the middle 4:3, 1 at the edges */
-    int fur;                            /* step 101: 1 Crash's fur drawn (also unset), 0 not (the PS2's look) */
+    int fur;                            /* TWOC_FUR_*: step 101 on (also unset) / off; step 102: off for Crash only */
     int mute_drone;                     /* step 102: 1 Droid Void's background drone muted, 0 not (also unset) */
     int hub_seethrough;                 /* step 102: 1 the hub pads' crystals and gems see-through, 0 solid (also unset) */
     int volume;                         /* 0-100; -1: never set (Windows' own level) */
@@ -241,6 +242,13 @@ void twoc_audio_close(void);
 void twoc_audio_set_kind(int stream, int percent);
 /* The APU's HRTF on 3D voices, on or off (it is on unless this says off). */
 void twoc_audio_set_hrtf(int on);
+/* Step 102: "Character fur": the fur shells on (1, also unset), off for
+ * everyone (0, step 101's "Crash's fur" off) or off for Crash only (2);
+ * the ini's values 1, 0 and crash. */
+#define TWOC_FUR_OFF 0
+#define TWOC_FUR_ON 1
+#define TWOC_FUR_CRASH 2
+int twoc_fur_parse(const char *v);
 /* Step 102 (recomp_manual.c): Droid Void's background drone muted (1) or as
  * the game plays it (0), from the next time it starts. */
 void twoc_set_drone_mute(int on);

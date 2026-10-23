@@ -870,15 +870,19 @@ static int tab_display(twoc_settings_t *s, const ovl_info_t *in)
         if (s->hud && (!wide || g_measure))
             help("Now: as the game draws it (the picture is 4:3).");
     }
-    {   /* step 101: Crash's fur */
-        bool f = s->fur != 0;
-        if (ImGui::Checkbox("Crash's fur", &f)) {
-            s->fur = f;
+    {   /* step 101: Crash's fur; step 102: three ways */
+        static const char *const fur[] = { "On", "Off for Crash only", "Off for everyone" };
+        static const int val[] = { TWOC_FUR_ON, TWOC_FUR_CRASH, TWOC_FUR_OFF };
+        int cur = s->fur == TWOC_FUR_CRASH ? 1 : s->fur == TWOC_FUR_OFF ? 2 : 0;
+        ImGui::SetNextItemWidth(ImGui::GetFontSize() * 12);
+        if (ImGui::Combo("Character fur", &cur, fur, 3)) {
+            s->fur = val[cur];
             r |= OVL_CHANGED;
         }
-        more("On: the Xbox's look, a layer of fur over Crash's body, head and tail. Off: without it, as on "
-             "the PlayStation 2 (his reflection and shadow have none either way). Coco's fur is the same layer "
-             "and goes with it. Applied at once.");
+        more("The layer of fur the Xbox draws over its furry characters. On: the Xbox's look. Off for Crash only: "
+             "Crash without it, as on the PlayStation 2; Coco, Crunch "
+             "and the others keep theirs (Coco's green look in Crashteroids stays). Off for everyone: no fur on "
+             "anyone. Reflections and shadows have none either way. Applied at once.");
     }
     {   /* step 102: the hub pads' crystals and gems as a level draws one collected */
         bool g = s->hub_seethrough != 0;
@@ -1280,8 +1284,8 @@ static int tab_display(twoc_settings_t *s, const ovl_info_t *in)
     more("Sets every setting on this tab back to what the game starts with when it has no settings file: "
          "Render size Game (480 lines), Render scale 100%, Pacing Auto, Frame rate Game (60), Adaptive On, "
          "Render thread Off, Show frame rate Off, the startup message on, Skip the title animation off, "
-         "Anisotropic filtering Off, Anti-aliasing Off, Ambient occlusion Off, HUD in the centre, Crash's fur "
-         "on, See-through gems and crystals in the hub off. Fullscreen, "
+         "Anisotropic filtering Off, Anti-aliasing Off, Ambient occlusion Off, HUD in the centre, Character "
+         "fur On, See-through gems and crystals in the hub off. Fullscreen, "
          "the aspect ratio, the graphics card, sound, controls and saves stay as they are. Asks first.");
     if (g_measure)                      /* step 97: measured: the question's state isn't touched */
         return r;
