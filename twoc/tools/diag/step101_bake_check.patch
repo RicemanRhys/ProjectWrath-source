@@ -1,0 +1,154 @@
+diff --git a/twoc/src/d3d_host.c b/twoc/src/d3d_host.c
+index d245868..62c72b7 100644
+--- a/twoc/src/d3d_host.c
++++ b/twoc/src/d3d_host.c
+@@ -3283,6 +3283,7 @@ static unsigned g_bk_cap;
+ enum { BK_OFF, BK_CAPTURE, BK_BAKED };
+ static int g_bk_mode;                   /* this pass's */
+ static unsigned g_bk_plan, g_bk_pass;   /* the frame's passes, those done */
++static int g_tmp_plain;                 /* TMP step 87: a pass drawn the ordinary way, for the check */
+ 
+ /* A recorded draw drawn from its capture: `d` as this pass has it (a copy
+  * with moved matrices or constants when `moved`). Called with g_lock held. */
+@@ -4043,7 +4044,7 @@ static void replay_pass(int interp)
+     REPLAY_SIDE();
+     QueryPerformanceCounter(&t0);
+     g_bk_mode = BK_OFF;                 /* step 87: the first of passes captured, the rest drawn from that */
+-    if (g_bake && g_bk_plan > 1) {
++    if (g_bake && g_bk_plan > 1 && !g_tmp_plain) {
+         if (g_bk_pass == 0) {
+             if (g_bk_cap < g_ps->rc_n) {
+                 bake_t *n = (bake_t *)realloc(g_bk, (size_t)g_ps->rc_n * sizeof(bake_t));
+@@ -9516,6 +9517,111 @@ static void present_mode(double t_s)
+     }
+ }
+ 
++/* TMP step 87: depth-stencil snapshots: every render target's depth and the
++ * back buffer's (the stand-in's, or the default views'), taken (0) or put
++ * back (1). */
++static ID3D11Texture2D *g_tmp_dsnap[RT_SLOTS + 1];
++static ID3D11Texture2D *tmp_dsrc(int i)
++{
++    ID3D11Texture2D *t = NULL;
++    if (i < RT_SLOTS) {
++        if (g_rt[i].depth && ((D3D8Surface *)g_rt[i].depth)->d3d11_texture) {
++            t = ((D3D8Surface *)g_rt[i].depth)->d3d11_texture;
++            ID3D11Texture2D_AddRef(t);
++        }
++    } else if (g_bb.depth) {
++        t = ((D3D8Surface *)g_bb.depth)->d3d11_texture;
++        if (t)
++            ID3D11Texture2D_AddRef(t);
++    } else {
++        d3dh_target_t z;
++        ID3D11RenderTargetView *rtv = NULL;
++        ID3D11DepthStencilView *dsv = NULL;
++        memset(&z, 0, sizeof(z));
++        bind_target(&z);
++        ID3D11DeviceContext_OMGetRenderTargets(d3d8_GetD3D11Context(), 1, &rtv, &dsv);
++        if (rtv)
++            ID3D11RenderTargetView_Release(rtv);
++        if (dsv) {
++            ID3D11DepthStencilView_GetResource(dsv, (ID3D11Resource **)&t);
++            ID3D11DepthStencilView_Release(dsv);
++        }
++    }
++    return t;
++}
++static void tmp_depth(int restore)
++{
++    ID3D11DeviceContext *ctx = d3d8_GetD3D11Context();
++    D3D11_TEXTURE2D_DESC a, b;
++    int i;
++    for (i = 0; i <= RT_SLOTS; i++) {
++        ID3D11Texture2D *t = tmp_dsrc(i);
++        if (!t)
++            continue;
++        ID3D11Texture2D_GetDesc(t, &a);
++        if (g_tmp_dsnap[i]) {
++            ID3D11Texture2D_GetDesc(g_tmp_dsnap[i], &b);
++            if (b.Width != a.Width || b.Height != a.Height || b.Format != a.Format || b.SampleDesc.Count !=
++                a.SampleDesc.Count) {
++                ID3D11Texture2D_Release(g_tmp_dsnap[i]);
++                g_tmp_dsnap[i] = NULL;
++            }
++        }
++        if (!restore) {
++            if (!g_tmp_dsnap[i] && FAILED(ID3D11Device_CreateTexture2D(d3d8_GetD3D11Device(), &a, NULL, &g_tmp_dsnap[i])))
++                g_tmp_dsnap[i] = NULL;
++            if (g_tmp_dsnap[i])
++                ID3D11DeviceContext_CopyResource(ctx, (ID3D11Resource *)g_tmp_dsnap[i], (ID3D11Resource *)t);
++        } else if (g_tmp_dsnap[i]) {
++            ID3D11DeviceContext_CopyResource(ctx, (ID3D11Resource *)t, (ID3D11Resource *)g_tmp_dsnap[i]);
++        }
++        ID3D11Texture2D_Release(t);
++    }
++}
++
++/* TMP step 87: with TMP_ICHECK=1 a pass drawn from the captures is drawn
++ * the ordinary way first, from the targets as they are, then from the
++ * captures from the same targets, and the back buffers compared. Step 95:
++ * TMP_ICHECK=3 also a frame's first pass (captured, and drawn from the frame
++ * before's captures: cut 3) against the same pass drawn the ordinary way. */
++static int g_tmp_icheck = -1;
++static void tmp_pass(int interp, unsigned swap_no)
++{
++    ID3D11Texture2D *bb;
++
++    if (g_tmp_icheck < 0) {
++        const char *e = getenv("TMP_ICHECK");
++        g_tmp_icheck = e && (*e == '1' || *e == '2' || *e == '3') ? *e - '0' : 0;   /* 2: both passes the ordinary way */
++        if (g_tmp_icheck)
++            fprintf(stderr, "[TMP] bake check: each pass %s drawn the ordinary way, then %s,"
++                    " compared (colour and depth-stencil put back between)\n",
++                    g_tmp_icheck == 3 ? "(a frame's first too)" : "after a frame's first",
++                    g_tmp_icheck == 2 ? "the ordinary way again (the check's own floor)" :
++                    g_tmp_icheck == 3 ? "as it is drawn (captured, from the frame before's captures, from its own)" :
++                    "from its captures");
++    }
++    if (!g_tmp_icheck || !g_bake || g_bk_plan <= 1 || (g_bk_pass == 0 && g_tmp_icheck != 3)) {
++        replay_pass(interp);
++        return;
++    }
++    bb = back_tex();                    /* where both start */
++    if (bb) {
++        replay_check_snap(0, bb);
++        ID3D11Texture2D_Release(bb);
++    }
++    tmp_depth(0);
++    g_tmp_plain = 1;
++    replay_pass(interp);
++    g_tmp_plain = 0;
++    g_bk_pass--;                        /* the pass again */
++    replay_check(0, swap_no);           /* kept, the targets put back */
++    tmp_depth(1);                       /* and their depth */
++    g_tmp_plain = g_tmp_icheck == 2;
++    replay_pass(interp);
++    g_tmp_plain = 0;
++    replay_check(1, swap_no);           /* compared */
++}
++
+ /* One present: the back buffer (as drawn now) dumped when due and shown at
+  * DXGI `interval`, after its wait. Step 61: sub-frame `sub` of `k` (k 1: the
+  * frame itself; only the last of a frame is a frame's dump). Returns the
+@@ -9819,7 +9925,7 @@ static int replay_frame(fslot_t *f)
+         g_bk_plan = interp ? fr.n : (unsigned)(g_replay > 1 ? g_replay : 1);
+         if (interp) {
+             ic_sub(g_interp_t0 ? fr.t0[0] : fr.t[0]);
+-            replay_pass(1);             /* the first sub-frame */
++            tmp_pass(1, swap_no);       /* the first sub-frame */
+             if (fr.n == 1) {
+                 ic_end();               /* step 96: before the slot is free (ic_end) */
+                 replay_done();
+@@ -9844,9 +9950,9 @@ static int replay_frame(fslot_t *f)
+                 EnterCriticalSection(&g_lock);
+                 if (fr.t[sub - 1] < 1) {
+                     ic_sub(g_interp_t0 ? fr.t0[sub - 1] : fr.t[sub - 1]);
+-                    replay_pass(1);
++                    tmp_pass(1, swap_no);
+                 } else {
+-                    replay_pass(0);     /* t = 1: the frame as recorded */
++                    tmp_pass(0, swap_no);   /* t = 1: the frame as recorded */
+                 }
+                 if (sub == fr.n) {
+                     ic_end();           /* step 96: before the slot is free (ic_end) */
