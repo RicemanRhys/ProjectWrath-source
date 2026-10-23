@@ -710,7 +710,8 @@ void d3db_init(void)
     g_vsdump = d3db_host_on && env_on("RECOMP_D3D_BRIDGE_VSDUMP");
     g_vsprobe = d3db_host_on && env_on("RECOMP_D3D_BRIDGE_VSPROBE");
     g_vp_copy = d3db_host_on && env_on("RECOMP_D3D_BRIDGE_VP_COPY");
-    if (d3db_host_on && getenv("RECOMP_D3D_BRIDGE_DRAWLOG")) {  /* "A-B": guest swaps */
+    if (getenv("RECOMP_FUR") && strcmp(getenv("RECOMP_FUR"), "0") == 0)
+        d3db_set_fur(0);                /* step 101 */    if (d3db_host_on && getenv("RECOMP_D3D_BRIDGE_DRAWLOG")) {  /* "A-B": guest swaps */
         char *e;
         g_drawlog_from = strtol(getenv("RECOMP_D3D_BRIDGE_DRAWLOG"), &e, 0);
         g_drawlog_to = *e == '-' ? strtol(e + 1, NULL, 0) : g_drawlog_from;
@@ -3924,10 +3925,30 @@ void d3db_item_queued(uint32_t item)
     }
 }
 
-void d3db_item_drawn(uint32_t item)
+/* Step 101: Crash's fur (notes 18.104). The game draws a furry item's
+ * fur as shells: after the world's other passes, sub_0009FD40 draws each
+ * item on its fur list 1 to N times (N by its distance), the shell's
+ * offset set before each (0x9FF1C), through sub_000A8240 called at
+ * 0x9FF25: the item's own skinned mesh again with its fur material, a P8
+ * texture of noise blended over the body without depth writes (Crash's
+ * body, head and tail; Coco's too, the same layer; his reflection in the
+ * hub's floor and his stencil shadow take no fur). With the setting off
+ * those draws aren't mirrored: the PS2's look. */
+#define FUR_PASS_RET 0x0009FF2Au
+static volatile LONG g_fur_off;         /* RECOMP_FUR=0 or the setting off */
+static int g_item_fur;                  /* the item being drawn is a fur shell */
+static volatile LONG g_fur_skipped;     /* draws not mirrored for it */
+
+void d3db_set_fur(int on)
+{
+    InterlockedExchange(&g_fur_off, on ? 0 : 1);
+}
+
+void d3db_item_drawn(uint32_t item, uint32_t ret)
 {
     uint32_t s = (item >> 4) % ITEM_SLOTS;
 
+    g_item_fur = item && ret == FUR_PASS_RET;
     g_item = item;
     g_item_hud = item && g_items[s].item == item && g_items[s].swap == (uint32_t)g_swaps ? g_items[s].hud : 0;
 }
@@ -3935,6 +3956,11 @@ void d3db_item_drawn(uint32_t item)
 static int host_draw(d3dh_draw_t *dr)
 {
     float cam[32];
+
+    if (g_item_fur && g_fur_off) {      /* step 101: Crash's fur off */
+        InterlockedIncrement(&g_fur_skipped);
+        return 0;
+    }
 
     memcpy(cam, (const void *)XBOX_PTR(0x00242620u), 64);
     memcpy(cam + 16, (const void *)XBOX_PTR(0x00242398u), 64);
@@ -5145,6 +5171,9 @@ static void mirror_swap(void)
                     st.tex_uploads, st.p8_uploads, st.cube_uploads, st.tex_upload_fails, st.tex_evictions,
                     (long)g_cube_binds, (long)g_null_stages, (long)g_gap[GAP_VALUE],
                     (long)g_gap[GAP_TEXOP], (long)g_gap[GAP_DIFFUSE_ARG], (long)g_gap[GAP_FRONTFACE]);
+            if (g_fur_off || g_fur_skipped)     /* step 101: only once the fur has been off */
+                log_block_printf(&lb, "[D3DB] host fur shells: %s; draws not mirrored for it %ld\n",
+                                 g_fur_off ? "off" : "on", (long)g_fur_skipped);
             log_block_printf(&lb, "[D3DB] host fixed function: indexed draws %u, untransformed draws %u (lit by xbox_d3d8"
                     " %ld, lit on the CPU %ld); gaps: over 8 lights %ld, texture transform %ld, CPU lighting"
                     " without a diffuse %ld, specular %ld, texcoord format %ld, immediate w not 1 %ld; linear textures"

@@ -426,9 +426,9 @@ void sub_000A8240(void)
         sub_000A8240_gen();
         return;
     }
-    d3db_item_drawn(MEM32(esp + 4));
+    d3db_item_drawn(MEM32(esp + 4), MEM32(esp));   /* step 101: and where from (the fur shells' pass) */
     sub_000A8240_gen();
-    d3db_item_drawn(0);
+    d3db_item_drawn(0, 0);
 }
 
 /* ── Cooperative NtSuspendThread / NtResumeThread ──────────── */

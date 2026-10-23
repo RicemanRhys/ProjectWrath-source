@@ -78,9 +78,13 @@ float d3db_camera_aspect_scale(uint32_t camera, float aspect);
  * and 1 after. Bridge on only. */
 void d3db_list_flush(uint32_t ret, int end);
 /* The wrappers of sub_0009EF10 (an item queued into the display list) and
- * sub_000A8240 (an item drawn; 0 once it is). */
+ * sub_000A8240 (an item drawn, `ret` its call's return address; 0 once it
+ * is). */
 void d3db_item_queued(uint32_t item);
-void d3db_item_drawn(uint32_t item);
+void d3db_item_drawn(uint32_t item, uint32_t ret);
+/* Step 101: the fur shells drawn (1, the default) or not (0), from the next
+ * draw (F1, Display, "Crash's fur"). */
+void d3db_set_fur(int on);
 /* sub_000B0EF0's wrapper (the game's panel: pause menu, HUD): the guest
  * stack pointer at its entry, 0 once it returns. */
 void d3db_panel(uint32_t entry_esp);

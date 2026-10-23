@@ -35,6 +35,7 @@
  *   startup_message = 0 | 1                   RECOMP_STARTUP_MESSAGE (unset: on; step 86: "Press F1 to
  *                                             open the settings menu" at the bottom for ~8 s)
  *   hud         = centre | edges              RECOMP_HUD (unset: centre)
+ *   fur         = 0 | 1                       RECOMP_FUR (step 101: Crash's fur shells; unset: on)
  *   volume      = 0-100                       RECOMP_VOLUME (the game's volume in Windows' mixer)
  *   music_volume   = 0-100                    RECOMP_MUSIC_VOLUME (stream voices: music, ambience, speech)
  *   effects_volume = 0-100                    RECOMP_EFFECTS_VOLUME (buffer voices: the sound effects)
@@ -154,6 +155,7 @@ typedef struct {
     int show_fps;                       /* step 82: 1 the measured rates in a corner, 0 not (also unset); 2 more */
     int startup_message;                /* step 86: 1 the F1 line for the first seconds (also unset), 0 not */
     int hud;                            /* step 65: 0 the HUD in the middle 4:3, 1 at the edges */
+    int fur;                            /* step 101: 1 Crash's fur drawn (also unset), 0 not (the PS2's look) */
     int volume;                         /* 0-100; -1: never set (Windows' own level) */
     int music, effects;                 /* 0-100; -1: never set (100, the game's mix) */
     int speakers;                       /* 0 stereo, 1 5.1; -1: never set (stereo) */

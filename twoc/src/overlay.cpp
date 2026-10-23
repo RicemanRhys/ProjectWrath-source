@@ -870,6 +870,16 @@ static int tab_display(twoc_settings_t *s, const ovl_info_t *in)
         if (s->hud && (!wide || g_measure))
             help("Now: as the game draws it (the picture is 4:3).");
     }
+    {   /* step 101: Crash's fur */
+        bool f = s->fur != 0;
+        if (ImGui::Checkbox("Crash's fur", &f)) {
+            s->fur = f;
+            r |= OVL_CHANGED;
+        }
+        more("On: the Xbox's look, a layer of fur over Crash's body, head and tail. Off: without it, as on "
+             "the PlayStation 2 (his reflection and shadow have none either way). Coco's fur is the same layer "
+             "and goes with it. Applied at once.");
+    }
     {   /* step 91: the render size by aspect ratio, a custom one, and what it draws */
         static const ImVec4 mark(1.0f, 0.8f, 0.3f, 1.0f);
         static bool custom;
@@ -1259,7 +1269,8 @@ static int tab_display(twoc_settings_t *s, const ovl_info_t *in)
     more("Sets every setting on this tab back to what the game starts with when it has no settings file: "
          "Render size Game (480 lines), Render scale 100%, Pacing Auto, Frame rate Game (60), Adaptive On, "
          "Render thread Off, Show frame rate Off, the startup message on, Skip the title animation off, "
-         "Anisotropic filtering Off, Anti-aliasing Off, Ambient occlusion Off, HUD in the centre. Fullscreen, "
+         "Anisotropic filtering Off, Anti-aliasing Off, Ambient occlusion Off, HUD in the centre, Crash's fur "
+         "on. Fullscreen, "
          "the aspect ratio, the graphics card, sound, controls and saves stay as they are. Asks first.");
     if (g_measure)                      /* step 97: measured: the question's state isn't touched */
         return r;
