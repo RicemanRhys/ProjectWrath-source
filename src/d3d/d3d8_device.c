@@ -1257,10 +1257,15 @@ HRESULT d3d8_DrawBaked(const D3D8Baked *b, ID3D11ShaderResourceView *const srv[4
 {
     ID3D11DeviceContext *ctx = g_device_state.d3d11_context;
 
-    if (!b->gen || b->gen != d3d8_bake_gen || b->ring_gen != g_ring_gen || (b->vsh && !vs_blk))
+    if (!b->gen || b->gen != d3d8_bake_gen || b->ring_gen != g_ring_gen || (b->vsh && !vs_blk) ||
+        (d3d8_clipfix_on && !b->vs_fix))
         return S_FALSE;
     g_d3d_draw_count++;
-    d3d8_bind_vs(ctx, b->vs);
+    if (d3d8_clipfix_on) {              /* twoc notes 18.104: its form with the clip-space correction */
+        d3d8_bind_vs(ctx, b->vs_fix);
+        d3d8_clipfix_bind(ctx);
+    } else
+        d3d8_bind_vs(ctx, b->vs);
     d3d8_bind_layout(ctx, b->il);
     if (b->vsh) {
         d3d8_vsh_baked_consts(b, vs_blk, fresh);        /* and b1 bound */
@@ -1322,7 +1327,8 @@ HRESULT d3d8_DrawBakedAgain(const D3D8Baked *old, D3D8Baked *now, ID3D11ShaderRe
     void *converted = NULL;
 
     if (!old->gen || old->gen != d3d8_bake_gen || !verts || !stride ||
-        stride != old->stride || (idx != NULL) != (old->ib_format != DXGI_FORMAT_UNKNOWN))
+        stride != old->stride || (idx != NULL) != (old->ib_format != DXGI_FORMAT_UNKNOWN) ||
+        (d3d8_clipfix_on && !old->vs_fix))
         return S_FALSE;
     topology = map_primitive_type(pt, prim_count, &count);
     if (!count || topology != old->topology)
@@ -1376,7 +1382,11 @@ HRESULT d3d8_DrawBakedAgain(const D3D8Baked *old, D3D8Baked *now, ID3D11ShaderRe
         return S_FALSE;
     }
     g_d3d_draw_count++;
-    d3d8_bind_vs(ctx, now->vs);
+    if (d3d8_clipfix_on) {              /* twoc notes 18.104 */
+        d3d8_bind_vs(ctx, now->vs_fix);
+        d3d8_clipfix_bind(ctx);
+    } else
+        d3d8_bind_vs(ctx, now->vs);
     d3d8_bind_layout(ctx, now->il);
     if (now->vsh) {
         d3d8_vsh_bake_again(now);       /* as a capturing draw's: the ring's block, `now` told where */

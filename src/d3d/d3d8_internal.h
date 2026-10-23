@@ -476,6 +476,7 @@ typedef struct {
     ID3D11SamplerState      *samp[4];
     ID3D11Buffer            *vs_cb[2];
     UINT                     vs_cb1_first;  /* slot 1's first constant (twoc notes 18.90: the constants ring) */
+    ID3D11Buffer            *vs_cb2;    /* slot 2: the clip-space correction's (twoc notes 18.104) */
     ID3D11Buffer            *ps_cb;
     ID3D11Buffer            *vb;        /* IA slot 0 */
     UINT                     vb_stride, vb_offset;
@@ -621,6 +622,7 @@ typedef struct {
     const void              *ff_xf, *ff_lt;     /* fixed-function: its transform and lighting constants */
     const void              *ps_consts;         /* the pixel constants, as in ps_cb */
     UINT                     ps_bytes;
+    ID3D11VertexShader      *vs_fix;            /* vs with the clip-space correction (twoc notes 18.104), NULL none */
 } D3D8Baked;
 
 extern UINT d3d8_bake_gen;
@@ -655,6 +657,26 @@ HRESULT d3d8_DrawBaked(const D3D8Baked *b, ID3D11ShaderResourceView *const srv[4
 HRESULT d3d8_DrawBakedAgain(const D3D8Baked *old, D3D8Baked *now, ID3D11ShaderResourceView *const srv[4],
                             const D3DMATRIX *const ff_m[3], D3DPRIMITIVETYPE pt, UINT prim_count, UINT nverts,
                             const void *idx, const void *verts, UINT stride, D3D8UpKept *kept);
+
+/* Twoc step 101 (notes 18.104): a correction applied in clip space after
+ * the vertex transform, the same arithmetic in both shader paths. While `m`
+ * is set (16 floats, row vectors: clip' = clip m), a draw's position is
+ * multiplied by it at the end of its vertex shader: a fixed-function draw's
+ * after its world-view-projection (pre-transformed draws are left as they
+ * are), a program's after the screen-space mapping is undone. Each shader
+ * has a second compiled form with that one multiply (the fixed-function
+ * one made at init, a program's at its first draw with a correction set);
+ * the forms used without one are those compiled before, unchanged. A baked
+ * draw holds both forms (D3D8Baked.vs_fix) and draws with the one the
+ * correction asks for. NULL: off (the default). twoc's interpolation sets
+ * it for the in-between frames only, so a camera correction gives a decal
+ * drawn by a program and the wall drawn by fixed function under it the
+ * same depths, as the game's own frames give them. */
+void d3d8_SetClipFix(const float *m);
+void d3d8_SetClipFixBias(float ndc);    /* the program form's depth toward the eye (NDC), 0: none */
+extern BOOL d3d8_clipfix_on;
+extern ID3D11VertexShader *d3d8_prep_vs[2];     /* the draw being prepared's shader without and with it */
+void d3d8_clipfix_bind(ID3D11DeviceContext *ctx);
 
 /* Twoc step 99 (measurement only): the bake's memory and the rings, for the
  * memory log. Any thread; read without a lock (sizes only). */
