@@ -87,6 +87,18 @@ static float g_fixed_h;                 /* the window's height outside the tabs'
 #define TAB_MIN_ROWS 8.0f               /* the least the tabs get before the whole menu is made smaller */
 static int g_end_kind;                  /* OVL_QUIT or OVL_RESTART once asked for (the status line's word) */
 
+/* Step 104: Menu scale. The player's percentage multiplies the menu's own scale (the DPI, 0.8 over the running
+ * game, the cap to the picture's width, the fit to its height), capped to what the window holds. */
+#define MS_STEP 10                      /* percent a D-pad or arrow press moves it */
+#define MS_MIN_SCALE 0.5f               /* the smallest the menu is drawn at: 9 px text */
+static int g_ms_shown = 100;            /* the percentage shown, of what the menu is at 100% */
+static bool g_ms_limited;               /* ... less than chosen: the window holds no more */
+static int g_ms_drag = -1;              /* the mouse dragging the slider: its value, applied when let go */
+static int g_ms_warp;                   /* the scale changed by the mouse: the pointer back onto the slider */
+#define MS_WARP_READ 6                  /* ... in this many shown frames */
+static int g_scroll_focus;              /* frames left to keep the focused item in view after a scale change */
+static ImVec2 g_ms_warp_at;             /* ... where, in the picture's pixels */
+
 static void capture_end(void)
 {
     g_cap = CAP_NONE;
@@ -1182,13 +1194,84 @@ static int tab_display(twoc_settings_t *s, const ovl_info_t *in)
         }
     }
 
+    ImGui::SeparatorText("Menu");       /* step 104 */
+    {
+        int v = g_ms_drag >= 0 ? g_ms_drag : s->menu_scale, nv = v;
+        bool changed;
+        ImGui::SetNextItemWidth(ImGui::GetFontSize() * 12);
+        changed = ImGui::SliderInt("Menu scale", &nv, TWOC_MENU_SCALE_MIN, TWOC_MENU_SCALE_MAX, "%d%%",
+                                   ImGuiSliderFlags_AlwaysClamp);
+        if (!g_measure) {
+            bool mouse = ImGui::IsItemActive() && ImGui::GetIO().MouseDown[0];
+            int d = 0;
+            if (mouse) {                /* dragged: shown as it goes in whole steps of 5%, applied when let go
+                                         * (the slider would move under the pointer at every step) */
+                g_ms_drag = (nv + 2) / 5 * 5;
+            } else if (g_ms_drag >= 0) {
+                if (g_ms_drag != s->menu_scale) {
+                    s->menu_scale = g_ms_drag;
+                    r |= OVL_CHANGED;
+                    g_ms_warp = 1;
+                    g_scroll_focus = 8;
+                }
+                g_ms_drag = -1;
+            } else if (changed && nv != v) {    /* the pad or the keys with the slider active (A): a step */
+                d = nv > v ? MS_STEP : -MS_STEP;
+            } else if (ImGui::IsItemFocused() && !ImGui::IsItemActive()) {
+                /* focused: the D-pad or the arrows left and right move it too, no A needed */
+                if (ImGui::IsKeyPressed(ImGuiKey_GamepadDpadLeft, true) || ImGui::IsKeyPressed(ImGuiKey_LeftArrow, true))
+                    d = -MS_STEP;
+                if (ImGui::IsKeyPressed(ImGuiKey_GamepadDpadRight, true) || ImGui::IsKeyPressed(ImGuiKey_RightArrow, true))
+                    d = MS_STEP;
+            }
+            if (d) {                    /* to the next whole step that way */
+                int m = d > 0 ? (v / MS_STEP + 1) * MS_STEP : (v - 1) / MS_STEP * MS_STEP;
+                m = m < TWOC_MENU_SCALE_MIN ? TWOC_MENU_SCALE_MIN : m > TWOC_MENU_SCALE_MAX ? TWOC_MENU_SCALE_MAX : m;
+                if (m != s->menu_scale) {
+                    s->menu_scale = m;
+                    r |= OVL_CHANGED;
+                    g_scroll_focus = 8;
+                }
+            }
+            if (g_scroll_focus && (ImGui::IsItemFocused() || g_ms_warp))
+                ImGui::SetScrollHereY(0.5f);    /* step 104: the slider stays in view where the tab scrolls */
+            {   /* test only (RECOMP_DEV_OVL_RECT): where the slider is, in the picture's pixels, when it moves */
+                static ImVec2 seen;
+                ImVec2 a = ImGui::GetItemRectMin(), b = ImGui::GetItemRectMax();
+                if ((a.x != seen.x || a.y != seen.y) && getenv("RECOMP_DEV_OVL_RECT") && *getenv("RECOMP_DEV_OVL_RECT"))
+                    fprintf(stderr, "[OVL] menu scale slider at %.0f,%.0f - %.0f,%.0f (%d%%)\n", a.x, a.y, b.x, b.y,
+                            s->menu_scale);
+                seen = a;
+            }
+            if (g_ms_warp == MS_WARP_READ) {  /* the new size and its scroll settled: the pointer onto it */
+                ImVec2 a = ImGui::GetItemRectMin(), b = ImGui::GetItemRectMax();
+                float f = (float)(s->menu_scale - TWOC_MENU_SCALE_MIN) / (TWOC_MENU_SCALE_MAX - TWOC_MENU_SCALE_MIN);
+                g_ms_warp_at = ImVec2(a.x + (b.x - a.x) * (0.04f + 0.92f * f), (a.y + b.y) * 0.5f);
+                g_ms_warp = MS_WARP_READ + 1;
+            }
+        }
+        more("How big this menu's text and boxes are: 100% is its own size, which already follows the window's "
+             "height and Windows' display scale. Smaller leaves more of the game in view; larger is easier to read "
+             "from a distance. Over the window's size it is held to the most that fits. The frame-rate counter "
+             "and the startup message keep their own size. D-pad or arrow keys left and right change it. Applied "
+             "at once.");
+        if (g_ms_limited || g_measure) {
+            char line[96];
+            snprintf(line, sizeof(line), "Limited by the window: showing %d%%.", g_ms_limited ? g_ms_shown : 100);
+            help(line);
+        }
+    }
+
     ImGui::Spacing();                   /* step 93: everything above back to its default, after a question */
     ImGui::Separator();
     if (ImGui::Button("Reset display settings to defaults"))
         g_reset_req = 1;                /* step 104: asked in build() */
+    if (g_scroll_focus && ImGui::IsItemFocused() && !g_measure)
+        ImGui::SetScrollHereY(0.5f);    /* step 104: after the reset's new menu scale */
     more("Sets every setting on this tab and the Graphics tab back to what the game starts with when it has no "
          "settings file: Render size Game (480 lines), Render scale 100%, Pacing Auto, Frame rate Game (60), "
-         "Adaptive On, Render thread Auto, Show frame rate Off, HUD in the centre; Anisotropic filtering Off, "
+         "Adaptive On, Render thread Auto, Show frame rate Off, HUD in the centre, Menu scale 100%; Anisotropic "
+         "filtering Off, "
          "Anti-aliasing Off, Ambient occlusion Off. Fullscreen, the aspect ratio, the graphics card, the Extras, "
          "sound, controls and saves stay as they are. Asks first.");
     return r;
@@ -1836,6 +1919,7 @@ static int build(twoc_settings_t *s, const ovl_info_t *in)
                       "as they are.", &d_open)) {
             twoc_settings_display_defaults(s);
             r |= OVL_CHANGED;
+            g_scroll_focus = 12;        /* step 104: Menu scale back to 100%: the button kept in view */
         }
         if (reset_ask(XRESET_ASK, "Every setting on the Extras tab goes back to its default. The other tabs stay "
                       "as they are.", &x_open)) {
@@ -1903,11 +1987,31 @@ extern "C" int ovl_frame(ID3D11RenderTargetView *rtv, unsigned w, unsigned h, fl
     EnterCriticalSection(&g_cs);
     if (info->running)                  /* step 57: smaller over the running game, to leave more of it in view */
         scale *= 0.8f;
+    /* Step 104: hcap, the scale at which the window's height holds the menu with TAB_MIN_ROWS rows of tabs
+     * (measured on a shown frame; the menu's height grows in step with its scale), again from scratch when
+     * the picture's height changes. */
+    static float hcap = 1e9f;
+    static unsigned hcap_h;
+    float s100, s0, user = (float)(s->menu_scale >= TWOC_MENU_SCALE_MIN && s->menu_scale <= TWOC_MENU_SCALE_MAX
+                                       ? s->menu_scale : 100) / 100.0f;
+    if (h != hcap_h) {
+        hcap = 1e9f;
+        hcap_h = h;
+    }
     {   /* step 93: never wider than the picture (34 font sizes of 18 px and the padding): a small window in real
-         * pixels, as the reset's Game (480 lines) on a scaled display gives, had the panel cut off at the right */
+         * pixels, as the reset's Game (480 lines) on a scaled display gives, had the panel cut off at the right.
+         * Step 104: the player's Menu scale times the menu's own (s0: as wide and as tall as it is at 100%),
+         * held to the most the window takes */
         float wmax = (float)w * 0.98f / (34.0f * 18.0f + 32.0f);
+        s100 = scale < wmax ? scale : wmax;
+        s0 = s100 < hcap ? s100 : hcap;
+        scale = s0 * user;
         if (scale > wmax)
             scale = wmax;
+        if (scale > hcap)
+            scale = hcap;
+        if (scale < MS_MIN_SCALE && s0 >= MS_MIN_SCALE)
+            scale = MS_MIN_SCALE;
     }
     ImGuiIO &io = ImGui::GetIO();
     io.DisplaySize = ImVec2((float)w, (float)h);
@@ -1990,6 +2094,13 @@ extern "C" int ovl_frame(ID3D11RenderTargetView *rtv, unsigned w, unsigned h, fl
         }
         if (g_fixed_h + fh * TAB_MIN_ROWS > room && fit > 0.4f)
             fit *= room / (g_fixed_h + fh * TAB_MIN_ROWS);
+        if (!settling) {                /* step 104: the scale the window's height holds, and what is shown */
+            float hc = g_scale * room / (g_fixed_h + fh * TAB_MIN_ROWS);
+            if (hcap > 1e8f || fabsf(hc - hcap) > hcap * 0.02f)
+                hcap = hc;              /* a real change only: rounding alone would have the menu re-measured */
+            g_ms_shown = (int)(g_scale / s0 * 100.0f + 0.5f);
+            g_ms_limited = g_ms_shown + 1 < s->menu_scale;
+        }
         {   /* test only: the window's place and size whenever they or the tab change */
             static int on = -1, tab = -1;
             static ImVec2 pos, size;
@@ -2013,6 +2124,29 @@ extern "C" int ovl_frame(ID3D11RenderTargetView *rtv, unsigned w, unsigned h, fl
     }
     ImGui::End();
     ImGui::Render();
+    if (!settling) {                    /* step 104: the steps after a menu scale change, on shown frames */
+        if (g_scroll_focus)
+            g_scroll_focus--;
+        if (g_ms_warp >= 1 && g_ms_warp < MS_WARP_READ)
+            g_ms_warp++;                /* shown frames for the new size and the scroll to settle */
+        else if (g_ms_warp == MS_WARP_READ + 1) {
+            POINT pt, c;
+            RECT cr;
+            g_ms_warp = 0;
+            if (info->hwnd && GetCursorPos(&pt) && GetClientRect(info->hwnd, &cr) && cr.right > 0 && cr.bottom > 0) {
+                c = pt;
+                ScreenToClient(info->hwnd, &c);
+                if (c.x >= 0 && c.y >= 0 && c.x < cr.right && c.y < cr.bottom) {  /* only a pointer in the window */
+                    c.x = (LONG)(g_ms_warp_at.x * cr.right / (float)w);
+                    c.y = (LONG)(g_ms_warp_at.y * cr.bottom / (float)h);
+                    ClientToScreen(info->hwnd, &c);
+                    SetCursorPos(c.x, c.y);
+                    io.AddMousePosEvent(g_ms_warp_at.x, g_ms_warp_at.y);
+                    fprintf(stderr, "[OVL] menu scale %d%%: the pointer back on its slider\n", s->menu_scale);
+                }
+            }
+        }
+    }
 
     {
         ID3D11Device *dev = NULL;

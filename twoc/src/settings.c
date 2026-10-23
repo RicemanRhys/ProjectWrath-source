@@ -51,6 +51,7 @@ static const key_t_ g_fixed[] = {
     { "hub_seethrough", "RECOMP_HUB_SEETHROUGH",
       "1: the hub pads' crystals and gems drawn see-through, as a level draws one already collected; 0: solid, the"
       " game's own look" },
+    { "menu_scale", "RECOMP_MENU_SCALE", "50-200: percent of the F1 menu's own size (its text and boxes)" },
     { "volume", "RECOMP_VOLUME", "0-100, the game's level in Windows' volume mixer" },
     { "music_volume", "RECOMP_MUSIC_VOLUME", "0-100: music, ambience and speech (the game's streams)" },
     { "effects_volume", "RECOMP_EFFECTS_VOLUME", "0-100: the sound effects" },
@@ -476,6 +477,18 @@ static int env_percent(const char *name)
     return p < 0 ? 0 : p > 100 ? 100 : p;
 }
 
+int twoc_menu_scale_parse(const char *v)
+{
+    int p;
+
+    if (!v || !*v)
+        return 100;
+    p = atoi(v);
+    if (p <= 0)
+        return 100;
+    return p < TWOC_MENU_SCALE_MIN ? TWOC_MENU_SCALE_MIN : p > TWOC_MENU_SCALE_MAX ? TWOC_MENU_SCALE_MAX : p;
+}
+
 void twoc_settings_current(twoc_settings_t *s)
 {
     const char *v;
@@ -538,6 +551,7 @@ void twoc_settings_current(twoc_settings_t *s)
     s->ao = twoc_ao_parse(getenv("RECOMP_AO"));                                   /* step 92 */
     s->ao_strength = twoc_ao_strength_parse(getenv("RECOMP_AO_STRENGTH"));
     s->ao_half = env_on("RECOMP_AO_HALF");
+    s->menu_scale = twoc_menu_scale_parse(getenv("RECOMP_MENU_SCALE"));     /* step 104 */
     s->pause_unfocused = env_on("RECOMP_PAUSE_UNFOCUSED");
     s->fast_title = env_on("RECOMP_DEV_FAST_TITLE");
     v = getenv("RECOMP_GPU");           /* step 97: auto (and unset) is "" */
@@ -579,6 +593,7 @@ void twoc_settings_display_defaults(twoc_settings_t *s)
     s->ao_strength = TWOC_AO_STRENGTH_DEFAULT;
     s->ao_half = 0;
     s->hud = 0;
+    s->menu_scale = 100;                /* step 104: the Display tab's last setting */
 }
 
 void twoc_settings_extras_defaults(twoc_settings_t *s)
@@ -651,6 +666,8 @@ static void key_text(const twoc_settings_t *s, size_t i, char *buf, size_t cap)
         snprintf(buf, cap, "%s", twoc_ao_name(s->ao));     /* step 92: off, the default: unwritten */
     else if (strcmp(k, "ao_strength") == 0 && s->ao_strength != TWOC_AO_STRENGTH_DEFAULT)
         snprintf(buf, cap, "%d", s->ao_strength);
+    else if (strcmp(k, "menu_scale") == 0 && s->menu_scale != 100)
+        snprintf(buf, cap, "%d", s->menu_scale);   /* step 104: 100, the default: unwritten */
     else if (strcmp(k, "ao_half") == 0 && s->ao_half)
         snprintf(buf, cap, "1");        /* off, the default: unwritten */
     else if (strcmp(k, "pause_unfocused") == 0 && s->pause_unfocused)

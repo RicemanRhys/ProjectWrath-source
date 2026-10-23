@@ -9219,6 +9219,8 @@ static void overlay_apply(twoc_settings_t *was, const twoc_settings_t *s)
         twoc_set_drone_mute(s->mute_drone);
         fprintf(stderr, "[OVL] mute Droid Void's background drone: %s\n", s->mute_drone ? "on" : "off");
     }
+    if (s->menu_scale != was->menu_scale)  /* step 104: the menu's own frames read it */
+        fprintf(stderr, "[OVL] menu scale: %d%%\n", s->menu_scale);
     if (s->pause != was->pause) {
         InterlockedExchange(&g_ovl_pauses, s->pause);   /* step 79: the game side looks at its Swap */
         fprintf(stderr, "[OVL] pause the game while open: %s\n", s->pause ? "on" : "off");
@@ -9500,6 +9502,7 @@ static int ovl_draw(ID3D11Texture2D *dst, int running)
     in.about = &g_ovs.about;            /* step 93 */
     in.end_note = g_ovs.end_note[0] ? g_ovs.end_note : NULL;   /* step 97 */
     in.ending = twoc_ending();
+    in.hwnd = g_hwnd;                   /* step 104 */
     if (ic_possible()) {                /* step 61/77 */
         in.interp_fps = fp_step_fps(0);
         in.interp_per = fp_step_per(0);

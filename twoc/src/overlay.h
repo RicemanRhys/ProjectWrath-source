@@ -53,6 +53,7 @@ typedef struct {
     const twoc_about_t *about;          /* step 93: the About tab's lines (collected at the opening) */
     const char *end_note;               /* step 97: why a restart didn't happen, or NULL */
     int ending;                         /* step 97: the game is quitting or restarting (restart.h) */
+    HWND hwnd;                          /* step 104: the game's window (the menu scale keeps the slider under the mouse) */
 } ovl_info_t;
 
 /* Step 97: OVL_RESTART "Restart now" (a setting from the next start), OVL_QUIT "Quit game", each after

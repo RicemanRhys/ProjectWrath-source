@@ -39,6 +39,8 @@
  *                                             step 102: crash, off for Crash only; unset: on)
  *   hub_seethrough = 0 | 1                    RECOMP_HUB_SEETHROUGH (step 102: the hub pads' crystals and gems
  *                                             see-through, as a level draws one collected; unset: off)
+ *   menu_scale  = 50-200                      RECOMP_MENU_SCALE (step 104: percent of the F1 menu's own size, its
+ *                                             text and boxes; capped to what the window holds; unset: 100)
  *   volume      = 0-100                       RECOMP_VOLUME (the game's volume in Windows' mixer)
  *   music_volume   = 0-100                    RECOMP_MUSIC_VOLUME (stream voices: music, ambience, speech)
  *   effects_volume = 0-100                    RECOMP_EFFECTS_VOLUME (buffer voices: the sound effects)
@@ -177,6 +179,7 @@ typedef struct {
     int ao_strength;                    /* step 92: percent, 0-100 (TWOC_AO_STRENGTH_DEFAULT also unset) */
     int ao_half;                        /* step 92: 1 worked out at half the resolution, upsampled (unset: 0) */
     char gpu[128];                      /* step 97: "" Automatic (also unset), else a graphics card's name */
+    int menu_scale;                     /* step 104: the F1 menu's size, percent of its own, 50-200 (100 also unset) */
     twoc_controls_t controls;           /* the controller map and the key bindings */
 } twoc_settings_t;
 
@@ -216,6 +219,9 @@ unsigned twoc_aa_samples(int aa);       /* MSAA's samples a pixel; 1 for the oth
 int twoc_aa_post(int aa);               /* step 90: the filter on the finished frame: TWOC_AA_FXAA, _SMAA or _OFF */
 int twoc_render_scale_parse(const char *v);     /* step 90: 25-200, 100 unset or unknown */
 int twoc_show_fps_parse(const char *v);         /* step 93: 0 off (unset), 1 Simple, 2 Detailed */
+#define TWOC_MENU_SCALE_MIN 50          /* step 104: menu_scale's range, percent */
+#define TWOC_MENU_SCALE_MAX 200
+int twoc_menu_scale_parse(const char *v);       /* step 104: 50-200, 100 unset or unknown */
 /* Step 91: the render size's arithmetic, the bridge's and the overlay's
  * (notes 18.56, 18.67, 18.93). render_size "WxH" (each 64-8192) or "native"
  * (the primary monitor's mode) into its box *pw x *ph; "" or "0" is 0 x 0,
