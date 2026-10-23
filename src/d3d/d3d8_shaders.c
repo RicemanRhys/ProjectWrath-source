@@ -21,7 +21,6 @@
 #include <d3dcompiler.h>
 #include <string.h>
 #include <stdio.h>
-#include <stdlib.h>
 #include <math.h>
 
 #pragma comment(lib, "d3dcompiler.lib")
@@ -471,7 +470,6 @@ static void build_ps_source(UINT sig, char *buf, int bufsize)
  * ================================================================ */
 
 static ID3D11VertexShader  *g_vs = NULL;
-static ID3D11VertexShader  *g_vs_fix = NULL;     /* g_vs with the clip-space correction (twoc notes 18.104) */
 static ID3DBlob            *g_vs_blob = NULL;
 static ID3D11Buffer        *g_vs_cb = NULL;      /* VS transform CB (b0) */
 static ID3D11Buffer        *g_vs_light_cb = NULL; /* VS lighting CB (b1) */
@@ -629,16 +627,6 @@ static VSTransformConstants g_ff_xf;
 static VSLightingConstants g_ff_lt;
 static BOOL g_prep_vsh, g_prep_comb;
 static BOOL g_ff_ok;                    /* both fixed-function buffers filled from them */
-
-/* Twoc step 101 (notes 18.104, d3d8_internal.h): the clip-space correction,
- * transposed as the shaders read it (column_major, as WorldViewProj), and
- * its buffer at VS slot b2. */
-BOOL d3d8_clipfix_on;
-ID3D11VertexShader *d3d8_prep_vs[2];
-static float g_clipfix[20];                 /* the matrix, then the program forms' depth bias */
-static float g_clipfix_bias;
-static BOOL g_clipfix_set;
-static ID3D11Buffer *g_clipfix_cb;
 static const void *g_xf_captured, *g_lt_captured, *g_ps_captured;
 static const void *g_xf_baked_last, *g_lt_baked_last, *g_ps_baked_last;
 
@@ -872,35 +860,6 @@ HRESULT d3d8_shaders_init(void)
         NULL, &g_vs);
     if (FAILED(hr)) return hr;
 
-    /* Twoc notes 18.104: the same source with the clip-space correction
-     * after the transform, made from a copy so g_vs's stays as it was. */
-    {
-        static const char at[] = "    o.pos = mul(float4(input.pos.xyz, 1.0), WorldViewProj);\n";
-        static const char head[] = "cbuffer ClipFixCB : register(b2) {\n    float4x4 ClipFix;\n    float ClipFixBias;\n};\n\n";
-        static const char fix[] = "    o.pos = mul(o.pos, ClipFix);\n";
-        const char *p = strstr(g_vs_source, at);
-        size_t n = strlen(g_vs_source), k;
-        char *src = p ? (char *)malloc(n + sizeof(head) + sizeof(fix)) : NULL;
-        ID3DBlob *blob = NULL;
-        if (src) {
-            k = (size_t)(p - g_vs_source) + sizeof(at) - 1;
-            memcpy(src, head, sizeof(head) - 1);
-            memcpy(src + sizeof(head) - 1, g_vs_source, k);
-            memcpy(src + sizeof(head) - 1 + k, fix, sizeof(fix) - 1);
-            memcpy(src + sizeof(head) - 1 + k + sizeof(fix) - 1, g_vs_source + k, n - k + 1);
-            if (SUCCEEDED(D3DCompile(src, strlen(src), "vs_ffp_fix", NULL, NULL, "main", "vs_5_0", 0, 0, &blob,
-                                     NULL))) {
-                if (FAILED(ID3D11Device_CreateVertexShader(d3d8_GetD3D11Device(), ID3D10Blob_GetBufferPointer(blob),
-                                                           ID3D10Blob_GetBufferSize(blob), NULL, &g_vs_fix)))
-                    g_vs_fix = NULL;
-                ID3D10Blob_Release(blob);
-            }
-            free(src);
-        }
-        if (!g_vs_fix)
-            fprintf(stderr, "D3D8: the fixed-function shader's clip-space correction form wasn't made\n");
-    }
-
     /* Compile the default (all-2D) pixel shader */
     g_ff_ps_cache_count = 0;
     memset(g_ff_ps_cache, 0, sizeof(g_ff_ps_cache));
@@ -951,66 +910,7 @@ void d3d8_shaders_shutdown(void)
     if (g_vs_light_cb) { ID3D11Buffer_Release(g_vs_light_cb); g_vs_light_cb = NULL; }
     if (g_vs_cb)       { ID3D11Buffer_Release(g_vs_cb); g_vs_cb = NULL; }
     if (g_vs)          { ID3D11VertexShader_Release(g_vs); g_vs = NULL; }
-    if (g_vs_fix)      { ID3D11VertexShader_Release(g_vs_fix); g_vs_fix = NULL; }
-    if (g_clipfix_cb)  { ID3D11Buffer_Release(g_clipfix_cb); g_clipfix_cb = NULL; }
-    g_clipfix_set = FALSE;
-    d3d8_clipfix_on = FALSE;
     if (g_vs_blob)     { ID3D10Blob_Release(g_vs_blob); g_vs_blob = NULL; }
-}
-
-/* Twoc step 101 (notes 18.104, d3d8_internal.h): the correction set, or off. */
-void d3d8_SetClipFix(const float *m)
-{
-    float t[20];
-    int i;
-
-    if (!m) {
-        d3d8_clipfix_on = FALSE;
-        return;
-    }
-    if (!g_clipfix_cb) {
-        D3D11_BUFFER_DESC cbd;
-        memset(&cbd, 0, sizeof(cbd));
-        cbd.ByteWidth = sizeof(g_clipfix);
-        cbd.Usage = D3D11_USAGE_DYNAMIC;
-        cbd.BindFlags = D3D11_BIND_CONSTANT_BUFFER;
-        cbd.CPUAccessFlags = D3D11_CPU_ACCESS_WRITE;
-        if (FAILED(ID3D11Device_CreateBuffer(d3d8_GetD3D11Device(), &cbd, NULL, &g_clipfix_cb)))
-            return;
-    }
-    for (i = 0; i < 16; i++)
-        t[i] = m[4 * (i & 3) + (i >> 2)];
-    t[16] = g_clipfix_bias;
-    t[17] = t[18] = t[19] = 0;
-    if (!g_clipfix_set || memcmp(t, g_clipfix, sizeof(t)) != 0) {
-        ID3D11DeviceContext *ctx = d3d8_GetD3D11Context();
-        D3D11_MAPPED_SUBRESOURCE mapped;
-        if (FAILED(ID3D11DeviceContext_Map(ctx, (ID3D11Resource *)g_clipfix_cb, 0, D3D11_MAP_WRITE_DISCARD, 0,
-                                           &mapped)))
-            return;
-        memcpy(mapped.pData, t, sizeof(t));
-        ID3D11DeviceContext_Unmap(ctx, (ID3D11Resource *)g_clipfix_cb, 0);
-        memcpy(g_clipfix, t, sizeof(t));
-        g_clipfix_set = TRUE;
-    }
-    d3d8_clipfix_on = TRUE;
-}
-
-/* The programs' corrected form's depth bias (NDC; 0, the default: none),
- * from the next d3d8_SetClipFix. */
-void d3d8_SetClipFixBias(float ndc)
-{
-    g_clipfix_bias = ndc;
-}
-
-/* Slot b2 holding the correction, for a draw with it (d3d8_bind_vs_cb's
- * record: a reset binds it again). */
-void d3d8_clipfix_bind(ID3D11DeviceContext *ctx)
-{
-    if (g_d3d8_bound.vs_cb2 != g_clipfix_cb) {
-        g_d3d8_bound.vs_cb2 = g_clipfix_cb;
-        ID3D11DeviceContext_VSSetConstantBuffers(ctx, 2, 1, &g_clipfix_cb);
-    }
 }
 
 /* ================================================================
@@ -1073,15 +973,7 @@ static void ff_vs_prepare_draw(DWORD fvf)
     rs = d3d8_GetRenderStates();
     tex_count = (fvf & D3DFVF_TEXCOUNT_MASK) >> D3DFVF_TEXCOUNT_SHIFT;
 
-    /* Twoc notes 18.104: the form with the clip-space correction while one
-     * is set (a pre-transformed draw takes g_vs's path in both). */
-    d3d8_prep_vs[0] = g_vs;
-    d3d8_prep_vs[1] = d3d8_fvf_transformed(fvf) ? g_vs : g_vs_fix;
-    if (d3d8_clipfix_on && d3d8_prep_vs[1]) {
-        d3d8_bind_vs(ctx, d3d8_prep_vs[1]);
-        d3d8_clipfix_bind(ctx);
-    } else
-        d3d8_bind_vs(ctx, g_vs);
+    d3d8_bind_vs(ctx, g_vs);
 
     /* Bind input layout */
     layout = get_or_create_layout(fvf);
@@ -1342,7 +1234,6 @@ void d3d8_shaders_prepare_draw(DWORD handle)
 
     if (!ctx) return;
     g_ff_ok = FALSE;
-    d3d8_prep_vs[0] = d3d8_prep_vs[1] = NULL;
     g_prep_vsh = d3d8_vsh_prepare_draw(handle);
     if (!g_prep_vsh)
         ff_vs_prepare_draw(handle);
@@ -1376,12 +1267,6 @@ static const void *bake_block(const void *p, size_t n, const void **last)
  * constants. b->gen is left 0 when they aren't all known. */
 void d3d8_shaders_bake(D3D8Baked *b)
 {
-    /* Twoc notes 18.104: both forms of its vertex shader, whichever is bound */
-    if (d3d8_prep_vs[0] && (b->vs == d3d8_prep_vs[0] || b->vs == d3d8_prep_vs[1])) {
-        b->vs = d3d8_prep_vs[0];
-        b->vs_fix = d3d8_prep_vs[1];
-    } else
-        b->vs_fix = NULL;
     b->vsh = g_prep_vsh;
     b->ff_xf = b->ff_lt = NULL;
     if (!g_prep_vsh) {

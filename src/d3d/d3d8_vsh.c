@@ -132,11 +132,7 @@ typedef struct {
     uint32_t            layout_masks[16];  /* inputs_read | (texcoord-field<<16) */
     int                 layout_count;
     uint16_t            inputs_read;  /* Which v registers are read */
-    ID3D11VertexShader *vs_fix;       /* with the clip-space correction (twoc notes 18.104), made when first asked */
-    int                 fix_failed;
 } VshCacheEntry;
-
-static int g_gen_clipfix;             /* d3d8_vsh_generate_hlsl writes the corrected form */
 
 static VshCacheEntry g_vsh_cache[NV2A_VS_CACHE_SIZE];
 
@@ -464,7 +460,7 @@ int d3d8_vsh_generate_hlsl(const NV2AVshProgram *program,
                             char *buf, int bufsize)
 {
     StrBuf sb;
-    int i, tail;
+    int i;
     uint16_t inputs = program->inputs_read;
 
     sb_init(&sb, buf, bufsize);
@@ -492,7 +488,6 @@ int d3d8_vsh_generate_hlsl(const NV2AVshProgram *program,
         "    r = r >= 0.0 ? clamp(r, 5.42101e-20, 1.884467e+19) : clamp(r, -1.884467e+19, -5.42101e-20);\n"
         "    return r.xxxx;\n"
         "}\n"
-        "%s"
         "float4 nv_exp(float x) { float f = floor(x); return float4(exp2(f), x - f, exp2(x), 1.0); }\n"
         "float4 nv_log(float x) {\n"
         "    float t = abs(x);\n"
@@ -505,8 +500,7 @@ int d3d8_vsh_generate_hlsl(const NV2AVshProgram *program,
         "    if (s.x > 0.0) { t.y = s.x; if (s.y > 0.0) t.z = pow(s.y, s.w); }\n"
         "    return t;\n"
         "}\n"
-        "\n", NV2A_VS_MAX_CONSTANTS,
-        g_gen_clipfix ? "cbuffer ClipFixCB : register(b2) {\n    float4x4 ClipFix;\n    float ClipFixBias;\n};\n" : "");
+        "\n", NV2A_VS_MAX_CONSTANTS);
 
     /* Inputs: every register read, as a float4 (the caller expands each
      * attribute the NV2A way). */
@@ -547,33 +541,12 @@ int d3d8_vsh_generate_hlsl(const NV2AVshProgram *program,
         "    float4 oT0 = float4(0,0,0,1), oT1 = float4(0,0,0,1), oT2 = float4(0,0,0,1), oT3 = float4(0,0,0,1);\n"
         "    #define R12 oPos\n");
 
-    /* Twoc notes 18.104: the corrected form takes the position before the
-     * XDK's screen-space tail (MUL oPos.xyz, oPos, c[58], then the MAD with
-     * 1/w and c[59]): the clip the program's transform made, as the
-     * fixed-function shader makes it, rather than one mapped to the screen
-     * and back, which isn't the same to the last bit in x and y and the
-     * correction carries those into the depth. */
-    if (g_gen_clipfix)
-        sb_append(&sb, "    float4 clipraw = float4(0,0,0,0);\n");
-    tail = -1;
-    for (i = 0; g_gen_clipfix && i < program->length && tail < 0; i++) {
-        const NV2AVshInstruction *t = &program->insns[i];
-        if (t->mac_op == NV2A_VSH_MAC_MUL && t->mac_src[1].reg_type == NV2A_VSH_REG_CONST &&
-            t->mac_src[1].reg_index == 58 && !t->mac_src[1].rel_addr &&
-            t->mac_src[0].reg_type == NV2A_VSH_REG_TEMP && t->mac_src[0].reg_index == 12 &&
-            ((t->mac_dst.temp_reg == 12 && t->mac_dst.write_mask) ||
-             (t->out_mask && !t->out_is_const && !t->out_from_ilu && t->out_index == NV2A_VSH_OUT_POS)))
-            tail = i;
-    }
-
     /* Each instruction: both units read, then write (they run in parallel). */
     for (i = 0; i < program->length; i++) {
         const NV2AVshInstruction *inst = &program->insns[i];
         int mac = inst->mac_op != NV2A_VSH_MAC_NOP, ilu = inst->ilu_op != NV2A_VSH_ILU_NOP;
         char name[16];
 
-        if (i == tail)
-            sb_append(&sb, "    clipraw = oPos;\n");
         sb_append(&sb, "    { /* %d */\n", i);
         if (mac)
             emit_mac_op(&sb, inst);
@@ -607,7 +580,6 @@ int d3d8_vsh_generate_hlsl(const NV2AVshProgram *program,
         "    float3 vs = c[58].xyz;\n"
         "    vs = vs != 0.0 ? vs : 1.0;\n"
         "    o.pos = float4((oPos.xyz - c[59].xyz) / vs * oPos.w, oPos.w);\n"
-        "%s"
         "    o.diffuse  = saturate(oD0);\n"
         "    o.specular = saturate(oD1);\n"
         "    o.tex0 = oT0;\n"
@@ -617,8 +589,7 @@ int d3d8_vsh_generate_hlsl(const NV2AVshProgram *program,
         "    o.fog = saturate(oFog.x);\n"          /* vertex fog: the factor */
         "    o.viewpos = float4(0.0, 0.0, oFog.x, 1.0);\n"   /* table fog: the NV2A fogs from oFog.x */
         "    return o;\n"
-        "}\n", !g_gen_clipfix ? "" : tail >= 0 ? "    o.pos = mul(clipraw, ClipFix);\n    o.pos.z -= ClipFixBias * o.pos.w;\n"
-                                                : "    o.pos = mul(o.pos, ClipFix);\n    o.pos.z -= ClipFixBias * o.pos.w;\n");
+        "}\n");
 
     return sb.pos;
 }
@@ -717,8 +688,6 @@ static VshCacheEntry *cache_insert(uint32_t hash)
 
         if (evict->vs)
             ID3D11VertexShader_Release(evict->vs);
-        if (evict->vs_fix)
-            ID3D11VertexShader_Release(evict->vs_fix);
         if (evict->vs_blob)
             ID3D10Blob_Release(evict->vs_blob);
         for (j = 0; j < evict->layout_count; j++) {
@@ -808,42 +777,6 @@ static VshCacheEntry *compile_shader(const DWORD *microcode, int num_insns,
     return entry;
 }
 
-/* Twoc notes 18.104: an entry's form with the clip-space correction (the
- * same HLSL with the one multiply after the screen-space mapping is undone,
- * and its buffer at b2); its input signature is the base form's, so the
- * base form's layouts serve it. */
-static void compile_fix(VshCacheEntry *entry, const DWORD *microcode, int num_insns)
-{
-    NV2AVshProgram program;
-    static char hlsl_buf[98304];
-    int hlsl_len;
-    ID3DBlob *code = NULL, *errors = NULL;
-
-    entry->fix_failed = 1;
-    d3d8_vsh_parse(microcode, num_insns, &program);
-    g_gen_clipfix = 1;
-    hlsl_len = d3d8_vsh_generate_hlsl(&program, hlsl_buf, sizeof(hlsl_buf));
-    g_gen_clipfix = 0;
-    if (hlsl_len <= 0)
-        return;
-    if (FAILED(D3DCompile(hlsl_buf, (SIZE_T)hlsl_len, "nv2a_vsh_fix", NULL, NULL, "main", "vs_5_0",
-                          D3DCOMPILE_OPTIMIZATION_LEVEL3, 0, &code, &errors))) {
-        fprintf(stderr, "D3D8 VSH: the clip-space correction form of 0x%08X wasn't compiled: %s\n", entry->hash,
-                errors ? (char *)ID3D10Blob_GetBufferPointer(errors) : "unknown");
-        if (errors)
-            ID3D10Blob_Release(errors);
-        return;
-    }
-    if (errors)
-        ID3D10Blob_Release(errors);
-    if (SUCCEEDED(ID3D11Device_CreateVertexShader(d3d8_GetD3D11Device(), ID3D10Blob_GetBufferPointer(code),
-                                                  ID3D10Blob_GetBufferSize(code), NULL, &entry->vs_fix)))
-        entry->fix_failed = 0;
-    else
-        entry->vs_fix = NULL;
-    ID3D10Blob_Release(code);
-}
-
 /**
  * Get the input layout for a cache entry.
  * Creates and caches the layout on first request per (input mask, texcoord sizes).
@@ -914,7 +847,6 @@ void d3d8_vsh_shutdown(void)
         VshCacheEntry *e = &g_vsh_cache[i];
         if (!e->in_use) continue;
         if (e->vs)      ID3D11VertexShader_Release(e->vs);
-        if (e->vs_fix)  ID3D11VertexShader_Release(e->vs_fix);
         if (e->vs_blob) ID3D10Blob_Release(e->vs_blob);
         for (j = 0; j < e->layout_count; j++) {
             if (e->layouts[j])
@@ -1152,17 +1084,8 @@ BOOL d3d8_vsh_prepare_draw(DWORD handle)
             return FALSE;
     }
 
-    /* Bind the vertex shader: with the clip-space correction while one is
-     * set (twoc notes 18.104), that form made the first time it is asked */
-    if (d3d8_clipfix_on && !entry->vs_fix && !entry->fix_failed)
-        compile_fix(entry, vsh->microcode, vsh->length);
-    d3d8_prep_vs[0] = entry->vs;
-    d3d8_prep_vs[1] = entry->vs_fix;
-    if (d3d8_clipfix_on && entry->vs_fix) {
-        d3d8_bind_vs(ctx, entry->vs_fix);
-        d3d8_clipfix_bind(ctx);
-    } else
-        d3d8_bind_vs(ctx, entry->vs);
+    /* Bind the vertex shader */
+    d3d8_bind_vs(ctx, entry->vs);
 
     /* Bind the input layout (sizes texcoords from the bound stream FVF) */
     layout = get_cached_layout(entry, d3d8_GetCurrentFVF());
