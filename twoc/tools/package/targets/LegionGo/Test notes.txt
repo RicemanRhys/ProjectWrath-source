@@ -95,7 +95,12 @@ between tests).
    (Then on again, Restart now.)
    About tab: the processor line, "Power throttling: not throttled", Graphics card "Chosen by:
    Automatic (the only graphics card)"?
-   Crash's fur Off (Display tab) in the hub: Crash without the fuzzy layer, and back On?
+   Character fur (Display tab) in the hub, each of the three: On, Off for Crash only (Crash
+   without the fuzzy layer, Coco at the save screen keeps hers), Off for everyone, back to On?
+   See-through gems and crystals in the hub On: the pads' crystal and gems drawn as glass?
+   Then Off: as before?
+   Medieval Madness at Match display: do the marks on the walls still flicker?
+   Mute Droid Void's background drone On, then Droid Void: no drone under the music?
 
 Optional: DXVK (the DXVK-test folder), cast_bug's start:
       Game:        /s    Shown:        /s

@@ -9,10 +9,20 @@ in game_files\ are your own copy of the disc. There are no saves in this folder:
 game and name it WOMBAT, which opens every warp room, so every level in the tests can be
 reached.
 
-New in this build: Fahrenheit Frenzy's X-ray room shows its X-ray (a green negative of the
-room) instead of a black screen; "Crash's fur" in the settings menu's Display tab (On, the
-Xbox's fur; Off, as on the PlayStation 2; Coco's fur goes with it); the "HUD margin" slider
-is gone (the HUD at the screen edges sits as at 0% before).
+New in this build: "Character fur" in the settings menu's Display tab replaces "Crash's
+fur": On (the Xbox's fur), Off for Crash only (Crash as on the PlayStation 2; Coco, Crunch
+and the others keep theirs) or Off for everyone; "See-through gems and crystals in the hub"
+(Display tab, Off by default): the pads' crystal and gems drawn as glass, as a level draws
+one you already have; "Mute Droid Void's background drone" (Audio tab, Off by default; from
+the level's next start); at Match display the marks on Gold Rush's walls no longer flicker
+(Medieval Madness's should be gone too, not checked on the desktop).
+From the last build: Fahrenheit Frenzy's X-ray room shows its X-ray instead of a black
+screen; the "HUD margin" slider is gone.
+
+Known quirks of the original game (the Xbox does these too): Droid Void's drone plays for the
+whole level, also after Crash dies (the Audio tab's option silences it); in Crashteroids
+Coco looks green and furry, her fur seen through the cockpit's green glass (Character fur
+"Off for everyone" removes it, "Off for Crash only" keeps it).
 
 Each step says which computer it is on: [desktop] or [laptop].
 
@@ -113,8 +123,11 @@ B. Start the game [laptop]
         kept); Later leaves an orange note at the bottom, "Changes waiting for a restart",
         with its own Restart now button. Skip the title animation and Speakers (Audio tab)
         ask the same way.
-      - Display tab, Crash's fur: On (the Xbox's fur over his body, head and tail) or Off
-        (as on the PlayStation 2; Coco's fur goes too). Applies at once.
+      - Display tab, Character fur: On (the Xbox's fur), Off for Crash only (his body, head
+        and tail as on the PlayStation 2; the others keep theirs) or Off for everyone.
+        See-through gems and crystals in the hub: the pads' crystal and gems as glass.
+        Both apply at once. Audio tab, Mute Droid Void's background drone: from the
+        level's next start.
       - Show frame rate is Detailed in this package: the corner shows the game's speed
         ("Game 60/s" is full speed), the frames shown ("Shown 144/s" at 144 Hz), the two
         threads' milliseconds, the processor's speed and "Plugged in" or the battery's

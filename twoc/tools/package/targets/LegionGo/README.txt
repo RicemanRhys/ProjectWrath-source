@@ -17,16 +17,42 @@ which opens every warp room (all crystals), so every level in the tests can be r
 *** hold comfortably, close the game and let it cool down.
 
 New in this package:
+  - "Character fur" (Display tab, under HUD position) replaces last package's "Crash's
+    fur" and has three choices: On (the Xbox's look, the default), Off for Crash only (Crash
+    without his layer of fur, as on the PlayStation 2; Coco, Crunch, Pura and the others
+    keep theirs) and Off for everyone (no fur
+    on anyone, as "Crash's fur" Off did). Applies at once. A crash_twoc.ini from the last
+    package keeps its choice (fur off there is "Off for everyone").
+  - "See-through gems and crystals in the hub" (Display tab, under Character fur; Off in
+    this package, the game's own look): the crystal and the gems shown at each warp room
+    pad are drawn as glass, the way a level draws a crystal or gem you already have (a
+    coloured gem keeps its colour). The relics are glass already; the pads' outline
+    icons are part of the room and stay as they are. Applies at once.
+  - "Mute Droid Void's background drone" (Audio tab; Off in this package): Droid Void
+    plays a droning ambience loop under its music for the whole level, even after Crash
+    dies (the Xbox does the same). This silences that one sound and nothing else. It
+    takes effect the next time the level starts.
+  - With Frame rate "Match display" (or any rate above 60), the marks on Gold Rush's walls
+    no longer flicker in and out: the in-between frames draw them a hair nearer, so they
+    stay in front of their wall as in the game's own frames. Medieval Madness's flicker
+    looks the same kind and should be gone too, but couldn't be checked on the desktop
+    (Test notes asks). Frame rate "Game (60)" is unchanged.
+
+Known quirks of the original game (the Xbox version does these too; not bugs of the port):
+  - Droid Void's drone plays for the whole level, also after Crash dies and while the
+    level restarts. "Mute Droid Void's background drone" (Audio tab) silences it.
+  - In Crashteroids, Coco looks green and furry: her fur is seen through the cockpit's
+    green glass. Character fur "Off for everyone" removes it; "Off for Crash only" keeps
+    it, since it is Coco's.
+
+From the last package:
   - Fahrenheit Frenzy's X-ray room shows its X-ray (a green negative of the room, Crash
     as a skeleton) instead of a black screen.
-  - "Crash's fur" (Display tab, under HUD position; On in this package, the Xbox's look):
-    Off draws Crash without the layer of fur over his body, head and tail, as on the
-    PlayStation 2. Coco's fur is the same layer and goes with it. Applies at once.
   - The "HUD margin" slider is gone: with HUD position "Screen edges" the counters sit at
     the screen's edges (as at 0% before). An older crash_twoc.ini's hud_margin line is
     ignored and dropped the next time the settings are saved.
 
-From the last package (also new to this folder if you skipped it):
+From the package before (also new to this folder if you skipped them):
   - Quit game: a button next to Resume at the bottom of the settings menu, on every tab.
     It asks "Quit the game? Unsaved progress will be lost." with Yes / No (No is first;
     B means No) and then closes the game cleanly: your settings saved, a save copy that is
@@ -59,7 +85,8 @@ Still from last time:
     Yes and A, or B for No) and puts every setting on that tab back to the game's own
     default: Render size Game (480 lines), Frame rate Game (60), Render scale 100%,
     Anti-aliasing and Ambient occlusion Off, Anisotropic filtering Off, Render thread Auto,
-    the HUD in the centre, Crash's fur on, the counter off. Full screen, the aspect ratio, sound, controls
+    the HUD in the centre, Character fur On, See-through gems and crystals in the hub
+    Off, the counter off. Full screen, the aspect ratio, sound, controls
     and saves stay as they are.
   - 72 fps in the Frame rate list: half of 144 Hz, so each frame is held for 2
     refreshes and motion stays even. The line under the list says what it does on 144,
@@ -188,7 +215,10 @@ B. Start the game (on the Legion Go)
       Render scale ........ 100% (the screen's size) or less or more (part F)
       Anisotropic filtering  Off / 2x / 4x / 8x / 16x (further down, under Textures)
       Anti-aliasing ....... Off / FXAA / SMAA / MSAA / MSAA + SMAA (part F)
-      Crash's fur ......... On (the Xbox's fur) / Off (as on the PS2)
+      Character fur ....... On (the Xbox's fur) / Off for Crash only (Crash as on the PS2;
+                            the others keep theirs) / Off for everyone
+      See-through gems and crystals in the hub ... Off (the game's look) / On (glass)
+    On the Audio tab: Mute Droid Void's background drone (from the level's next start).
     Changes apply at once and are saved to crash_twoc.ini when you close the menu.
     This package starts with: Render size "Monitor (native, ...)" (the screen's own size),
     Frame rate "Match display", Anisotropic filtering 4x, Anti-aliasing Off, Render scale

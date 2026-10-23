@@ -46,6 +46,10 @@ Optional:
    Quit game (No first, then Yes): did the game and the black window close?
    Switching tabs: did the menu keep its size and place?
    Safe settings launcher: the small window, the orange line, no restart questions?
-   Crash's fur Off (Display tab) in the hub: Crash without the fuzzy layer, and back On?
+   Character fur (Display tab) in the hub: Off for Crash only (Crash without the fuzzy layer,
+   Coco keeps hers), Off for everyone, back to On?
+   See-through gems and crystals in the hub On: the pads' crystal and gems as glass?
+   Medieval Madness at Match display: do the marks on the walls still flicker?
+   Mute Droid Void's background drone On, then Droid Void: no drone under the music?
 
 Warmth, fan noise, anything else (crashes, sound crackles, controls, picture problems):
