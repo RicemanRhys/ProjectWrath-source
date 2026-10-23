@@ -1,9 +1,11 @@
 @echo off
-rem run.cmd NAME [60] [wav] -- the issue launchers call this. Starts this kit's own copy of the game
+rem run.cmd NAME [60|rolling] [wav] -- the issue launchers call this. Starts this kit's own copy of the game
 rem (game\crash_twoc.exe, with its own crash_twoc.ini and its own copy of your save; your build folder,
 rem your ini and your saves are never touched) with the capture switches on. Its logs and pictures go
 rem to captures\NAME_<date>_<time>\. "60" plays this run at Frame rate: Game (60) for the comparison,
-rem "wav" also records the game's sound to sound.wav in that folder.
+rem "wav" also records the game's sound to sound.wav in that folder. "rolling" (step 104) keeps the last
+rem seconds in memory (every frame shown, small, the draws, the anomaly check) and writes them to
+rem captures\rolling_<date>_<time>\ when F9 is pressed in the game window or "capture now.cmd" runs.
 setlocal
 set "KIT=%~dp0.."
 for /f "usebackq delims=" %%t in (`powershell -NoProfile -Command "Get-Date -Format yyyy-MM-dd_HH-mm-ss"`) do set "TS=%%t"
@@ -26,11 +28,18 @@ set "RECOMP_D3D_BRIDGE_SUBDUMP=@%FWD%/subdump.trig"
 set "RECOMP_D3D_BRIDGE_INTERP_REC=%OUT%\interp.bin"
 set RECOMP_FRAMERATE=
 if "%~2"=="60" set RECOMP_FRAMERATE=60
+set RECOMP_D3D_BRIDGE_ROLLING=
+set RECOMP_D3D_BRIDGE_ANOMALY=
+set RECOMP_D3D_BRIDGE_ROLLING_TRIGGER=
+if "%~2"=="rolling" set "RECOMP_D3D_BRIDGE_ROLLING=%KIT%\captures"
+if "%~2"=="rolling" set "RECOMP_D3D_BRIDGE_ROLLING_TRIGGER=%OUT%\rolling.trig"
+if "%~2"=="rolling" set RECOMP_D3D_BRIDGE_ANOMALY=1
 if "%~3"=="wav" set "RECOMP_APU_OUT_WAV=%OUT%\sound.wav"
 echo.
 echo Crash is running (%~1). Play to the spot in README.txt, then double-click "capture now.cmd".
 if defined RECOMP_FRAMERATE echo This run is at Frame rate: Game (60), for the comparison.
 if defined RECOMP_APU_OUT_WAV echo The game's sound is being recorded to sound.wav.
+if defined RECOMP_D3D_BRIDGE_ROLLING echo Rolling capture on: right AFTER you see the glitch, press F9 in the game window.
 echo Close the game window when you're done; this window closes with it.
 cd /d "%KIT%\game"
 "%KIT%\game\crash_twoc.exe" >"%OUT%\run.out.log" 2>"%OUT%\run.err.log"

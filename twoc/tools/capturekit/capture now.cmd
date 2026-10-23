@@ -11,6 +11,8 @@ if not exist "%KIT%kit\current.txt" (
     exit /b 1
 )
 set /p OUT=<"%KIT%kit\current.txt"
+rem Step 104: launcher 7's rolling capture writes the seconds before this moment (as F9 does).
+>"%OUT%\rolling.trig" echo 1
 >"%OUT%\interp.bin.go" echo 20
 >"%OUT%\subdump.trig" echo 2
 >"%OUT%\drawlog.trig" echo 3

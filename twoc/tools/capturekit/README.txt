@@ -1,4 +1,4 @@
-Crash TWOC capture kit (step 100; exe refreshed in step 103)
+Crash TWOC capture kit (step 100; exe refreshed in step 104)
 ============================================================
 
 What this is
@@ -90,6 +90,26 @@ The problems
    If you can, also take a screenshot of the same spot in xemu: the "real
    hardware" picture is from a video and I can't tell which console it shows.
 
+7  Rolling capture: the black triangle on a wall (step 104)
+   For the glitch that lasts a frame or two while Crash moves (a dark
+   triangle forming on a wall; Smokey and the Bandicoot). This launcher
+   keeps the last 2 seconds or so in memory all the time: every frame
+   shown (the in-between ones too) as a small picture, the game's draws
+   of the last half second or so (with Match display), and a check of
+   every draw for broken numbers. Play normally at your usual settings.
+   Right AFTER you see the glitch, press F9 in the game window (or
+   double-click "capture now.cmd"); the seconds just before the key are
+   written to captures\rolling_<date>_<time>\. Pressing it a second or so
+   late is fine. You can press it again any time after 5 seconds; each
+   press makes its own folder. It uses about 300 MB of memory at 240 Hz
+   (the same at 4K and 1080p: the pictures are always 480 pixels wide),
+   about 60 MB at Game (60), and nothing else is slowed (measured at 1080p,
+   240 Hz: every frame still shown on its refresh). F9 is never passed to
+   the game. Please send the rolling_ folders and the 7_rolling_ folder
+   (its run.err.log has the check's lines). If you also try it at Game
+   (60), note it in a text file: the triangle in your picture was taken at
+   Game (60) (the counter says "Adaptive: - (Game (60))").
+
 What gets written (in the capture folder)
 -----------------------------------------
 run.err.log     the game's log (the draw log of the captured frames is in it)
@@ -99,3 +119,6 @@ interp.bin      the interpolation's record of 20 frames (about 30 MB)
 captures.txt    when you pressed "capture now"
 sound.wav       (problem 2 only) the game's sound
 power.log       the usual power log
+rolling_<time>\  (problem 7, beside the other folders in captures\) frames\*.bmp, every frame
+                shown in the last ~2 s at 480 pixels wide; interp.bin, the draws of the last game
+                frames (Match display only); anomalies.txt; info.txt (the level, the settings)

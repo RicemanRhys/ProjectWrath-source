@@ -174,6 +174,9 @@ static char g_motion_on_path[MAX_PATH];
 static int g_motion_live;
 static unsigned g_motion_n;
 static uint32_t g_motion_vsc_ret[4], g_motion_draw_ret;  /* who last wrote c0 (a call chain), who drew */
+static int g_anom_on;               /* step 104: RECOMP_D3D_BRIDGE_ANOMALY (host_draw's check) */
+static CRITICAL_SECTION g_anom_cs;
+static volatile LONG g_anom_cs_ok;
 static uint32_t g_draw_ret;         /* the draw call's guest return address, for the draw log (18.56) */
 static uint32_t g_draw_chain[6];    /* step 65: and the callers above it (the motion log's walk), while logging */
 static char g_check_prefix[512];    /* where the checks write: "<dump dir>\host", as the host dumps */
@@ -717,6 +720,12 @@ void d3db_init(void)
         g_drawlog_from = strtol(getenv("RECOMP_D3D_BRIDGE_DRAWLOG"), &e, 0);
         g_drawlog_to = *e == '-' ? strtol(e + 1, NULL, 0) : g_drawlog_from;
     }
+    g_anom_on = d3db_host_on && env_on("RECOMP_D3D_BRIDGE_ANOMALY");     /* step 104 */
+    if (g_anom_on && !InterlockedExchange(&g_anom_cs_ok, 1))
+        InitializeCriticalSection(&g_anom_cs);
+    if (g_anom_on)
+        fprintf(stderr, "[ANOM] every draw scanned for NaN, infinite or absurd vertices and matrices "
+                "(RECOMP_D3D_BRIDGE_ANOMALY)\n");
     if (d3db_host_on && getenv("RECOMP_D3D_BRIDGE_DRAWLOG_TRIGGER")) {
         snprintf(g_drawlog_trigger, sizeof(g_drawlog_trigger), "%s", getenv("RECOMP_D3D_BRIDGE_DRAWLOG_TRIGGER"));
         fprintf(stderr, "[D3DB] draw log on demand: the swaps after %s appears (it holds their count)\n",
@@ -4023,9 +4032,128 @@ static int hub_tint_draw(void)
     return 0;
 }
 
+/* Step 104 (notes 18.107): RECOMP_D3D_BRIDGE_ANOMALY=1 (the capture kit's rolling capture sets it) scans every
+ * mirrored draw for numbers no draw should carry: a vertex position (the FVF's, or a program's first input, v0)
+ * or a fixed-function matrix, or a program's c96-c99 (its WVP) and bone registers c124-c189, that is NaN or
+ * infinite, or a position over 1e5 units or a register over 1e7 from the origin. The first offending value is
+ * logged with the draw's identity (swap, kind, program or FVF, mesh, pass, its caller and the call chain above
+ * it), 300 lines at most, and counted for d3db_anomalies. Off: one test of a flag. */
+static volatile LONG g_anom_n, g_anom_draws;
+#define ANOM_KEEP 64                    /* the last lines, for the rolling capture's anomalies.txt */
+static char g_anom_line[ANOM_KEEP][400];
+
+void d3db_anomaly_tail(FILE *f)
+{
+    LONG n = g_anom_n, i;
+
+    if (!g_anom_on) {
+        fprintf(f, "The anomaly check was off (RECOMP_D3D_BRIDGE_ANOMALY).\n");
+        return;
+    }
+    fprintf(f, "%ld draws scanned, %ld with NaN, infinite or absurd numbers%s\n", (long)g_anom_draws, (long)n,
+            n ? "; the last of them:" : ".");
+    if (!g_anom_cs_ok)
+        return;
+    EnterCriticalSection(&g_anom_cs);
+    for (i = n > ANOM_KEEP ? n - ANOM_KEEP : 0; i < n; i++)
+        fputs(g_anom_line[i % ANOM_KEEP], f);
+    LeaveCriticalSection(&g_anom_cs);
+}
+
+static int anom_bad(float v, float lim)
+{
+    return v != v || v > lim || v < -lim;   /* NaN, inf (over any limit) or absurd */
+}
+
+static void anom_check(const d3dh_draw_t *dr)
+{
+    const char *what = NULL;
+    char where[96] = "";
+    float val[4] = { 0, 0, 0, 0 };
+    uint32_t i, k;
+
+    InterlockedIncrement(&g_anom_draws);
+    if (dr->verts && dr->stride >= 12) {
+        uint32_t pos = dr->fvf & FVF_POSITION_MASK, n = dr->vprog ? 4 : pos == FVF_XYZRHW ? 4 : 3;
+        if (dr->vprog || pos == FVF_XYZ || pos == FVF_XYZRHW)
+            for (i = 0; i < dr->vert_count && !what; i++) {
+                const float *p = (const float *)((const uint8_t *)dr->verts + (size_t)i * dr->stride);
+                for (k = 0; k < n; k++)
+                    if (anom_bad(p[k], k == 3 ? 1e7f : 1e5f)) {
+                        what = dr->vprog ? "vertex v0" : "vertex position";
+                        snprintf(where, sizeof(where), "vertex %u of %u", i, dr->vert_count);
+                        memcpy(val, p, n * sizeof(float));
+                        break;
+                    }
+            }
+    }
+    if (!what && dr->ff) {
+        static const char *const mn[3] = { "world", "view", "projection" };
+        const float *m[3] = { dr->ff->world, dr->ff->view, dr->ff->proj };
+        for (i = 0; i < 3 && !what; i++)
+            for (k = 0; k < 16; k++)
+                if (anom_bad(m[i][k], 1e7f)) {
+                    what = mn[i];
+                    snprintf(where, sizeof(where), "matrix element %u", k);
+                    memcpy(val, m[i] + (k & ~3u), 4 * sizeof(float));
+                    break;
+                }
+    }
+    if (!what && dr->vprog && dr->vprog->consts) {
+        for (i = 96; i < 190 && !what; i++) {
+            const float *c = dr->vprog->consts + 4 * i;
+            if (i >= 100 && i < 124)
+                continue;
+            for (k = 0; k < 4; k++)
+                if (anom_bad(c[k], 1e7f)) {
+                    what = i < 100 ? "WVP register" : "bone register";
+                    snprintf(where, sizeof(where), "c%u.%c", i, "xyzw"[k]);
+                    memcpy(val, c, 4 * sizeof(float));
+                    break;
+                }
+        }
+    }
+    if (!what)
+        return;
+    {
+        uint32_t off, n = 0, v, ch[6] = { 0 };
+        LONG at = InterlockedIncrement(&g_anom_n);
+        char line[400];
+        for (off = 4; off < 0x800 && n < 6; off += 4) {
+            v = MEM32(esp + off);
+            if (v > 0x11005u && v < 0x135AA0u &&
+                (MEM8(v - 5) == 0xE8 || MEM8(v - 6) == 0xFF || MEM8(v - 2) == 0xFF || MEM8(v - 3) == 0xFF))
+                ch[n++] = v;
+        }
+        snprintf(line, sizeof(line), "[ANOM] guest swap %ld: %s %s %s (%g %g %g %g); %s %08X, prim %u x %u, %u vertices, mesh %08X,"
+                " pass %X%s; from %08X < %X < %X < %X < %X < %X < %X\n", (long)g_swaps + 1, what, where,
+                val[0] != val[0] || val[1] != val[1] || val[2] != val[2] || val[3] != val[3] ? "NaN" : "out of range",
+                (double)val[0], (double)val[1], (double)val[2], (double)val[3], dr->vprog ? "program" : "FVF",
+                dr->vprog ? dr->vprog->key : dr->fvf, dr->prim, dr->prim_count, dr->vert_count, g_mesh, g_pass,
+                dr->ff ? "" : dr->vprog ? "" : " (pre-transformed)", g_draw_ret, ch[0], ch[1], ch[2], ch[3], ch[4],
+                ch[5]);
+        if (at <= 300)
+            fputs(line, stderr);
+        if (g_anom_cs_ok) {
+            EnterCriticalSection(&g_anom_cs);
+            snprintf(g_anom_line[(at - 1) % ANOM_KEEP], sizeof(g_anom_line[0]), "%s", line);
+            LeaveCriticalSection(&g_anom_cs);
+        }
+    }
+}
+
+void d3db_anomalies(unsigned *draws, unsigned *bad)
+{
+    *draws = (unsigned)g_anom_draws;
+    *bad = (unsigned)g_anom_n;
+}
+
 static int host_draw(d3dh_draw_t *dr)
 {
     float cam[32];
+
+    if (g_anom_on)
+        anom_check(dr);                 /* step 104 */
 
     if (g_item_fur && g_fur_mode != TWOC_FUR_ON) {     /* step 101: the fur off; step 102: or Crash's */
         if (g_fur_mode == TWOC_FUR_OFF || fur_is_crash()) {

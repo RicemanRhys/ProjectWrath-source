@@ -1015,8 +1015,14 @@ static void key_track(UINT msg, WPARAM wp, LPARAM lp)
         g_key_held[vk] = (unsigned char)down;
 }
 
+static int g_roll_key;                   /* step 104: F9 saves the rolling capture (on with it) */
+static volatile LONG g_roll_key_want;
+static int roll_init(void);
+
 int d3dh_key_down(int vk)
 {
+    if (vk == VK_F9 && g_roll_key)
+        return 0;                       /* step 104: the rolling capture's key, never the game's */
     if (vk == VK_MENU)
         return g_key_held[VK_LMENU] || g_key_held[VK_RMENU];
     return vk > 0 && vk < 256 && g_key_held[vk];
@@ -1042,6 +1048,13 @@ static LRESULT CALLBACK wnd_proc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp)
                 InterlockedExchange(&g_ovl_open, 0);
                 fprintf(stderr, "[OVL] %s: the settings overlay closes\n", wp == VK_F1 ? "F1" : "Esc");
             }
+        }
+        return 0;
+    }
+    if (hwnd == g_hwnd && msg == WM_KEYDOWN && wp == VK_F9 && g_roll_key) {   /* step 104: the rolling capture */
+        if (!(lp & (1 << 30))) {
+            InterlockedExchange(&g_roll_key_want, 1);
+            fprintf(stderr, "[ROLL] F9\n");
         }
         return 0;
     }
@@ -1293,6 +1306,7 @@ int d3dh_create(unsigned width, unsigned height, unsigned host_w, unsigned host_
             fprintf(stderr, "[D3DB] host record and replay: each frame's host draws recorded and drawn at its present"
                     "%s (%d pass%s)\n", g_replay > 1 ? ", again and again as a cost check" : "", g_replay,
                     g_replay > 1 ? "es" : "");
+        g_roll_key = roll_init();       /* step 104: the rolling capture, RECOMP_D3D_BRIDGE_ROLLING */
         e = getenv("RECOMP_D3D_BRIDGE_BAKE");           /* step 87: baked draws, 0 | 1 */
         if (e && *e)
             g_bake = strcmp(e, "0") != 0;
@@ -5877,37 +5891,41 @@ static void ia_frame(const fslot_t *f)
 
 /* RECOMP_D3D_BRIDGE_INTERP_REC (a check): each recorded draw of this frame,
  * as interpolation sees it, appended to the file. */
-static void ic_rec_dump(unsigned swap_no)
+typedef struct {
+    uint8_t *p;
+    size_t n, cap;
+} rbuf_t;
+
+static void rb_put(rbuf_t *b, const void *p, size_t n)
 {
-    char go[MAX_PATH + 8];
-    FILE *f;
+    if (b->n + n > b->cap) {
+        size_t c = b->cap ? b->cap : 1 << 20;
+        uint8_t *q;
+        while (c < b->n + n)
+            c *= 2;
+        q = (uint8_t *)realloc(b->p, c);
+        if (!q)
+            return;
+        b->p = q;
+        b->cap = c;
+    }
+    memcpy(b->p + b->n, p, n);
+    b->n += n;
+}
+
+/* A frame's draws as interpolation sees them, RECOMP_D3D_BRIDGE_INTERP_REC's records, appended to `b` (step 104:
+ * the rolling capture keeps them too). */
+static void ic_rec_frame(rbuf_t *b, unsigned swap_no)
+{
     unsigned i, cur = (unsigned)g_ic;
 
-    snprintf(go, sizeof(go), "%s.go", g_irec_trigger);
-    if (!g_irec_left && GetFileAttributesA(go) != INVALID_FILE_ATTRIBUTES) {
-        FILE *g = fopen(go, "r");
-        if (g) {
-            if (fscanf(g, "%u", &g_irec_left) != 1)
-                g_irec_left = 2;
-            fclose(g);
-        }
-        DeleteFileA(go);
-    }
-    g_irec_this = 0;
-    if (!g_irec_left)
-        return;
-    g_irec_left--;
-    g_irec_this = 1;                    /* step 68: the pair log follows the recorded frames */
-    f = fopen(g_irec_trigger, "ab");
-    if (!f)
-        return;
     {
         uint32_t h[4] = { 0x46524543u, swap_no, g_ps->rc_n, g_icam_n[cur] };
-        fwrite(h, 4, 4, f);
+        rb_put(b, h, 16);
         for (i = 0; i < g_icam_n[cur]; i++) {
             uint32_t ci[2] = { g_icam[cur][i].draws, (uint32_t)g_icam[cur][i].p_ok | (uint32_t)g_icam[cur][i].rot_ok << 1 };
-            fwrite(g_icam[cur][i].m, 4, 32, f);
-            fwrite(ci, 4, 2, f);
+            rb_put(b, g_icam[cur][i].m, 4 * 32);
+            rb_put(b, ci, 4 * 2);
         }
     }
     for (i = 0; i < g_ps->rc_n; i++) {
@@ -5937,22 +5955,52 @@ static void ic_rec_dump(unsigned swap_no)
                         if (d->vprog->fresh[q >> 5] >> (q & 31) & 1)
                             r[8] |= 1u << (8 + k);
             }
-            fwrite(r, 4, 12, f);
-            fwrite(d->camera ? d->camera : zero, 4, 32, f);
-            fwrite(d->ff ? d->ff->world : zero, 4, 16, f);
-            fwrite(d->ff ? d->ff->view : zero, 4, 16, f);
-            fwrite(d->ff ? d->ff->proj : zero, 4, 16, f);
+            rb_put(b, r, 4 * 12);
+            rb_put(b, d->camera ? d->camera : zero, 4 * 32);
+            rb_put(b, d->ff ? d->ff->world : zero, 4 * 16);
+            rb_put(b, d->ff ? d->ff->view : zero, 4 * 16);
+            rb_put(b, d->ff ? d->ff->proj : zero, 4 * 16);
             if (d->vprog) {               /* step 95: from its blocks */
                 unsigned q;
                 for (q = 0; q < D3DH_KBLOCKS; q++)
-                    fwrite(d->vprog->blk[q], 4, 64, f);
+                    rb_put(b, d->vprog->blk[q], 4 * 64);
             } else
-                fwrite(zero, 4, 768, f);
-            fwrite(slot >= 0 ? g_vs[slot].cmask : (const uint32_t *)zero, 4, 6, f);
+                rb_put(b, zero, 4 * 768);
+            rb_put(b, slot >= 0 ? g_vs[slot].cmask : (const uint32_t *)zero, 4 * 6);
         } else {
-            fwrite(r, 4, 12, f);
+            rb_put(b, r, 4 * 12);
         }
     }
+}
+
+static void ic_rec_dump(unsigned swap_no)
+{
+    char go[MAX_PATH + 8];
+    FILE *f;
+    rbuf_t b = { NULL, 0, 0 };
+
+    snprintf(go, sizeof(go), "%s.go", g_irec_trigger);
+    if (!g_irec_left && GetFileAttributesA(go) != INVALID_FILE_ATTRIBUTES) {
+        FILE *g = fopen(go, "r");
+        if (g) {
+            if (fscanf(g, "%u", &g_irec_left) != 1)
+                g_irec_left = 2;
+            fclose(g);
+        }
+        DeleteFileA(go);
+    }
+    g_irec_this = 0;
+    if (!g_irec_left)
+        return;
+    g_irec_left--;
+    g_irec_this = 1;                    /* step 68: the pair log follows the recorded frames */
+    f = fopen(g_irec_trigger, "ab");
+    if (!f)
+        return;
+    ic_rec_frame(&b, swap_no);          /* step 104: built, then written */
+    if (b.n)
+        fwrite(b.p, 1, b.n, f);
+    free(b.p);
     fclose(f);
 }
 
@@ -6773,6 +6821,8 @@ static void ic_pair(void)
 /* At the present: how many sub-frames this frame gets (1: shown as it is),
  * the cameras paired. `ovl`: the overlay opens or holds the game this
  * present (one frame). Called with g_lock held. */
+static void roll_rec(unsigned swap_no);
+
 static int ic_begin(unsigned swap_no, int ovl, int need)
 {
     static unsigned logged;
@@ -6784,6 +6834,7 @@ static int ic_begin(unsigned swap_no, int ovl, int need)
     REPLAY_SIDE();
     if (g_irec_trigger[0])
         ic_rec_dump(swap_no);
+    roll_rec(swap_no);                  /* step 104: the rolling capture, when on */
     qsort(g_ikey[cur], g_ikey_n[cur], sizeof(uint32_t), cmp_u32);    /* the frame before's next */
     g_st.interp_per = k ? g_fp.span / g_fp.step[0] : 1.0;
     ic_log_possible(k);                 /* step 63 */
@@ -9944,6 +9995,312 @@ static void present_mode(double t_s)
  * DXGI `interval`, after its wait. Step 61: sub-frame `sub` of `k` (k 1: the
  * frame itself; only the last of a frame is a frame's dump). Returns the
  * running overlay's OVL_* bits. */
+/* ── Step 104: the rolling capture (notes 18.107) ─────────────────────────
+ *
+ * For a glitch too rare to catch on purpose (a dark triangle on a wall for a
+ * frame or two, Smokey and the Bandicoot): with RECOMP_D3D_BRIDGE_ROLLING=DIR
+ * (the capture kit's launcher 7 sets it), the last seconds are kept in
+ * memory and written to DIR\rolling_<date>_<time>\ when the player presses
+ * F9 in the game window, or when RECOMP_D3D_BRIDGE_ROLLING_TRIGGER's file
+ * appears ("capture now.cmd" writes it):
+ *   - every presented picture (each in-between frame), drawn small on the
+ *     graphics card (ROLL_W wide) and read back two presents later, so the
+ *     present never waits for it; frames\NNNNN_sSSSSSS_K-of-N.bmp;
+ *   - with a frame rate above Game (60), each game frame's draws as
+ *     interpolation sees them, in RECOMP_D3D_BRIDGE_INTERP_REC's format
+ *     (interp.bin, read by tools/diag/interp_recio.py), as many of the last
+ *     frames as fit their budget;
+ *   - the anomaly check's lines (RECOMP_D3D_BRIDGE_ANOMALY), anomalies.txt;
+ *   - info.txt: when, the level, the picture's size, the frame-rate plan and
+ *     every RECOMP_ setting in effect.
+ * Memory: the pictures at most RECOMP_D3D_BRIDGE_ROLLING_SECS seconds (2.5)
+ * of the display's rate within ROLL_PIC_MB, the records ROLL_REC_MB; both
+ * allocated at the first frame and logged ([ROLL]). Writing happens on a
+ * thread of its own; the rings start again after it. Off: one flag test a
+ * present and a game frame. */
+#define ROLL_W 480u
+#define ROLL_PIC_MB 192u
+#define ROLL_REC_MB 96u
+#define ROLL_STAGES 3
+typedef struct {
+    unsigned swap, sub, k;
+    LONGLONG t;
+} roll_meta_t;
+static struct {
+    int on;
+    char dir[MAX_PATH], trig[MAX_PATH];
+    double secs;
+    unsigned w, h, bgra;                /* the small picture */
+    ID3D11Texture2D *tiny, *stage[ROLL_STAGES];
+    roll_meta_t smeta[ROLL_STAGES];
+    int sused[ROLL_STAGES];
+    unsigned si;
+    uint8_t *pic;                       /* npic pictures of w * h * 3 bytes, a ring */
+    roll_meta_t *meta;
+    unsigned npic, phead, pn;
+    rbuf_t *rec;                        /* the records, a ring of game frames */
+    unsigned nrec, rhead, rn;
+    size_t rbytes;
+    volatile LONG want, saving;
+    unsigned poll;
+    int failed;
+} g_roll;
+
+static int roll_init(void)
+{
+    const char *e = getenv("RECOMP_D3D_BRIDGE_ROLLING");
+
+    if (!e || !*e)
+        return 0;
+    snprintf(g_roll.dir, sizeof(g_roll.dir), "%s", e);
+    e = getenv("RECOMP_D3D_BRIDGE_ROLLING_TRIGGER");
+    if (e && *e)
+        snprintf(g_roll.trig, sizeof(g_roll.trig), "%s", e);
+    e = getenv("RECOMP_D3D_BRIDGE_ROLLING_SECS");
+    g_roll.secs = e && atof(e) > 0.2 ? atof(e) : 2.5;
+    g_roll.on = 1;
+    fprintf(stderr, "[ROLL] rolling capture on: the last %.1f s kept, written to %s\\rolling_<time> on F9%s%s\n",
+            g_roll.secs, g_roll.dir, g_roll.trig[0] ? " or when this appears: " : "", g_roll.trig);
+    return 1;
+}
+
+/* At a present (g_lock held): this picture, small, into the ring; the one from two presents back read. */
+static void roll_grab(ID3D11Texture2D *src, unsigned swap_no, unsigned sub, unsigned k)
+{
+    ID3D11Device *dev = d3d8_GetD3D11Device();
+    ID3D11DeviceContext *ctx = d3d8_GetD3D11Context();
+    D3D11_TEXTURE2D_DESC d;
+    D3D11_MAPPED_SUBRESOURCE m;
+    LARGE_INTEGER q;
+    unsigned i, x, y, j;
+
+    REPLAY_SIDE();
+    if (!src || g_roll.failed || g_roll.saving)
+        return;
+    if (!g_roll.tiny) {                /* the first frame: the sizes and the memory */
+        double hz = d3dh_display_hz() > 30 ? d3dh_display_hz() : 60.0;
+        size_t one;
+        ID3D11Texture2D_GetDesc(src, &d);
+        g_roll.bgra = d.Format == DXGI_FORMAT_B8G8R8A8_UNORM || d.Format == DXGI_FORMAT_B8G8R8X8_UNORM;
+        g_roll.w = ROLL_W;
+        g_roll.h = (unsigned)((double)ROLL_W * d.Height / d.Width + 0.5) & ~1u;
+        d.Width = g_roll.w;
+        d.Height = g_roll.h;
+        d.MipLevels = d.ArraySize = 1;
+        d.SampleDesc.Count = 1;
+        d.SampleDesc.Quality = 0;
+        d.Usage = D3D11_USAGE_DEFAULT;
+        d.BindFlags = D3D11_BIND_RENDER_TARGET;
+        d.CPUAccessFlags = 0;
+        d.MiscFlags = 0;
+        if (FAILED(ID3D11Device_CreateTexture2D(dev, &d, NULL, &g_roll.tiny)))
+            g_roll.failed = 1;
+        d.Usage = D3D11_USAGE_STAGING;
+        d.BindFlags = 0;
+        d.CPUAccessFlags = D3D11_CPU_ACCESS_READ;
+        for (i = 0; i < ROLL_STAGES && !g_roll.failed; i++)
+            if (FAILED(ID3D11Device_CreateTexture2D(dev, &d, NULL, &g_roll.stage[i])))
+                g_roll.failed = 1;
+        one = (size_t)g_roll.w * g_roll.h * 3;
+        g_roll.npic = (unsigned)(g_roll.secs * hz + 2);
+        if ((size_t)g_roll.npic * one > (size_t)ROLL_PIC_MB << 20)
+            g_roll.npic = (unsigned)(((size_t)ROLL_PIC_MB << 20) / one);
+        g_roll.pic = g_roll.failed ? NULL : (uint8_t *)malloc((size_t)g_roll.npic * one);
+        g_roll.meta = (roll_meta_t *)calloc(g_roll.npic, sizeof(roll_meta_t));
+        g_roll.nrec = 600;              /* at most 10 s of game frames, within ROLL_REC_MB */
+        g_roll.rec = (rbuf_t *)calloc(g_roll.nrec, sizeof(rbuf_t));
+        if (!g_roll.pic || !g_roll.meta || !g_roll.rec)
+            g_roll.failed = 1;
+        fprintf(stderr, "[ROLL] %s: pictures %ux%u, %u of them (%.1f s at %.0f Hz, %.0f MB), draw records up to "
+                "%u MB (with a frame rate above Game (60))\n", g_roll.failed ? "can't start" : "ready", g_roll.w,
+                g_roll.h, g_roll.npic, g_roll.npic / hz, hz, (double)g_roll.npic * one / 1048576.0, ROLL_REC_MB);
+        if (g_roll.failed)
+            return;
+    }
+    if (shot_take(src) != 0 || blit_draw(g_roll.tiny, g_roll.w, g_roll.h) != 0)
+        return;
+    QueryPerformanceCounter(&q);
+    i = g_roll.si;
+    ID3D11DeviceContext_CopyResource(ctx, (ID3D11Resource *)g_roll.stage[i], (ID3D11Resource *)g_roll.tiny);
+    g_roll.smeta[i].swap = swap_no;
+    g_roll.smeta[i].sub = sub;
+    g_roll.smeta[i].k = k;
+    g_roll.smeta[i].t = q.QuadPart;
+    g_roll.sused[i] = 1;
+    g_roll.si = (i + 1) % ROLL_STAGES;
+    i = g_roll.si;                      /* the oldest: two presents back, done on the card by now */
+    if (!g_roll.sused[i] || FAILED(ID3D11DeviceContext_Map(ctx, (ID3D11Resource *)g_roll.stage[i], 0, D3D11_MAP_READ, 0, &m)))
+        return;
+    {
+        uint8_t *dst = g_roll.pic + (size_t)g_roll.phead * g_roll.w * g_roll.h * 3;
+        for (y = 0; y < g_roll.h; y++) {
+            const uint8_t *px = (const uint8_t *)m.pData + (size_t)y * m.RowPitch;
+            uint8_t *o = dst + (size_t)y * g_roll.w * 3;
+            for (x = 0, j = 0; x < g_roll.w; x++, j += 3) {
+                o[j] = px[4 * x + (g_roll.bgra ? 0 : 2)];
+                o[j + 1] = px[4 * x + 1];
+                o[j + 2] = px[4 * x + (g_roll.bgra ? 2 : 0)];
+            }
+        }
+    }
+    ID3D11DeviceContext_Unmap(ctx, (ID3D11Resource *)g_roll.stage[i], 0);
+    g_roll.meta[g_roll.phead] = g_roll.smeta[i];
+    g_roll.sused[i] = 0;
+    g_roll.phead = (g_roll.phead + 1) % g_roll.npic;
+    if (g_roll.pn < g_roll.npic)
+        g_roll.pn++;
+}
+
+/* A game frame's records (ic_begin, interpolating), into the ring, the oldest let go past the budget. */
+static void roll_rec(unsigned swap_no)
+{
+    rbuf_t *b;
+
+    if (!g_roll.on || !g_roll.rec || g_roll.saving)
+        return;
+    b = &g_roll.rec[g_roll.rhead];
+    g_roll.rbytes -= b->n;
+    b->n = 0;
+    ic_rec_frame(b, swap_no);
+    g_roll.rbytes += b->n;
+    g_roll.rhead = (g_roll.rhead + 1) % g_roll.nrec;
+    if (g_roll.rn < g_roll.nrec)
+        g_roll.rn++;
+    while (g_roll.rn > 1 && g_roll.rbytes > (size_t)ROLL_REC_MB << 20) {     /* the oldest out */
+        rbuf_t *o = &g_roll.rec[(g_roll.rhead + g_roll.nrec - g_roll.rn) % g_roll.nrec];
+        g_roll.rbytes -= o->n;
+        o->n = 0;
+        g_roll.rn--;
+    }
+}
+
+extern void d3db_anomaly_tail(FILE *f);
+extern const char *twoc_level_name(void);
+extern char **_environ;
+
+static DWORD WINAPI roll_save_thread(LPVOID arg)
+{
+    char dir[MAX_PATH + 64], p[MAX_PATH + 128];
+    SYSTEMTIME st;
+    FILE *f;
+    unsigned i, n = 0, first, w = g_roll.w, h = g_roll.h;
+    unsigned rowbytes = w * 3, pad = (4 - (rowbytes & 3)) & 3, filesz = 54 + (rowbytes + pad) * h;
+    LONGLONG newest = 0;
+    double span = 0;
+    size_t recb = 0;
+
+    (void)arg;
+    GetLocalTime(&st);
+    snprintf(dir, sizeof(dir), "%s\\rolling_%04u-%02u-%02u_%02u-%02u-%02u", g_roll.dir, st.wYear, st.wMonth, st.wDay,
+             st.wHour, st.wMinute, st.wSecond);
+    CreateDirectoryA(g_roll.dir, NULL);
+    CreateDirectoryA(dir, NULL);
+    snprintf(p, sizeof(p), "%s\\frames", dir);
+    CreateDirectoryA(p, NULL);
+    first = (g_roll.phead + g_roll.npic - g_roll.pn) % g_roll.npic;
+    if (g_roll.pn)
+        newest = g_roll.meta[(g_roll.phead + g_roll.npic - 1) % g_roll.npic].t;
+    for (i = 0; i < g_roll.pn; i++) {   /* the pictures, oldest first, within the last secs */
+        unsigned at = (first + i) % g_roll.npic, y;
+        const roll_meta_t *m = &g_roll.meta[at];
+        uint8_t hdr[54], zero[4] = { 0 };
+        double age = (double)(newest - m->t) / (double)g_qpf.QuadPart;
+        if (age > g_roll.secs)
+            continue;
+        span = age > span ? age : span;
+        snprintf(p, sizeof(p), "%s\\frames\\%05u_s%06u_%u-of-%u.bmp", dir, n, m->swap, m->sub ? m->sub : 1,
+                 m->k ? m->k : 1);
+        f = fopen(p, "wb");
+        if (!f)
+            continue;
+        memset(hdr, 0, sizeof(hdr));
+        hdr[0] = 'B';
+        hdr[1] = 'M';
+        memcpy(hdr + 2, &filesz, 4);
+        hdr[10] = 54;
+        hdr[14] = 40;
+        memcpy(hdr + 18, &w, 4);
+        memcpy(hdr + 22, &h, 4);
+        hdr[26] = 1;
+        hdr[28] = 24;
+        fwrite(hdr, 1, sizeof(hdr), f);
+        for (y = h; y-- > 0;) {
+            fwrite(g_roll.pic + (size_t)at * w * h * 3 + (size_t)y * rowbytes, 1, rowbytes, f);
+            fwrite(zero, 1, pad, f);
+        }
+        fclose(f);
+        n++;
+    }
+    snprintf(p, sizeof(p), "%s\\interp.bin", dir);
+    if (g_roll.rn && (f = fopen(p, "wb")) != NULL) {
+        unsigned r0 = (g_roll.rhead + g_roll.nrec - g_roll.rn) % g_roll.nrec;
+        for (i = 0; i < g_roll.rn; i++) {
+            const rbuf_t *b = &g_roll.rec[(r0 + i) % g_roll.nrec];
+            fwrite(b->p, 1, b->n, f);
+            recb += b->n;
+        }
+        fclose(f);
+    }
+    snprintf(p, sizeof(p), "%s\\anomalies.txt", dir);
+    if ((f = fopen(p, "w")) != NULL) {
+        d3db_anomaly_tail(f);
+        fclose(f);
+    }
+    snprintf(p, sizeof(p), "%s\\info.txt", dir);
+    if ((f = fopen(p, "w")) != NULL) {
+        char **e;
+        fprintf(f, "Rolling capture, %04u-%02u-%02u %02u:%02u:%02u (the key pressed at the end of it)\n", st.wYear,
+                st.wMonth, st.wDay, st.wHour, st.wMinute, st.wSecond);
+        fprintf(f, "Level: %s\n", twoc_level_name()[0] ? twoc_level_name() : "not known");
+        fprintf(f, "Pictures: %u, %ux%u, the last %.2f s, every frame shown (each in-between frame); named\n"
+                   "  NNNNN_sSWAP_K-of-N.bmp: the game frame (guest swap) and which of its N frames shown.\n",
+                n, w, h, span);
+        fprintf(f, "Draw records: %u game frames (%.1f MB) in interp.bin%s\n", g_roll.rn, recb / 1048576.0,
+                g_roll.rn ? "" : " (none: they are kept with a frame rate above Game (60))");
+        fprintf(f, "Display: %.2f Hz; picture drawn at %ux%u, shown at %ux%u; frame plan: %s\n", d3dh_display_hz(),
+                g_w, g_h, g_vw, g_vh, g_fp.on ? g_fp.note : "Game (60)");
+        fprintf(f, "Settings in effect:\n");
+        for (e = _environ; e && *e; e++)
+            if (strncmp(*e, "RECOMP_", 7) == 0)
+                fprintf(f, "  %s\n", *e);
+        fclose(f);
+    }
+    fprintf(stderr, "[ROLL] saved %u pictures (%.2f s) and %u game frames' draw records (%.1f MB) to %s\n", n, span,
+            g_roll.rn, recb / 1048576.0, dir);
+    g_roll.pn = 0;                      /* the rings start again */
+    for (i = 0; i < g_roll.nrec; i++)
+        g_roll.rec[i].n = 0;
+    g_roll.rn = 0;
+    g_roll.rbytes = 0;
+    InterlockedExchange(&g_roll.saving, 0);
+    return 0;
+}
+
+/* At a present: F9 or the trigger file asked: the rings written on a thread of their own. */
+static void roll_poll(void)
+{
+    HANDLE t;
+
+    if (!g_roll.trig[0] || ++g_roll.poll % 30 == 0) {
+        if (g_roll.trig[0] && GetFileAttributesA(g_roll.trig) != INVALID_FILE_ATTRIBUTES) {
+            DeleteFileA(g_roll.trig);
+            InterlockedExchange(&g_roll.want, 1);
+        }
+    }
+    if (InterlockedExchange(&g_roll_key_want, 0))
+        InterlockedExchange(&g_roll.want, 1);   /* F9 */
+    if (!g_roll.want || g_roll.saving || !g_roll.pic)
+        return;
+    InterlockedExchange(&g_roll.want, 0);
+    InterlockedExchange(&g_roll.saving, 1);
+    fprintf(stderr, "[ROLL] capture asked: writing the last %.1f s\n", g_roll.secs);
+    t = CreateThread(NULL, 0, roll_save_thread, NULL, 0, NULL);
+    if (t)
+        CloseHandle(t);
+    else
+        InterlockedExchange(&g_roll.saving, 0);
+}
+
 static int present_one(double t_s, unsigned swap_no, unsigned interval, unsigned sub, unsigned k, int mid,
                        double slots)
 {
@@ -10009,6 +10366,8 @@ static int present_one(double t_s, unsigned swap_no, unsigned interval, unsigned
                     counter_draw(dst, ma);  /* step 82: on the window's picture only, never in a dump */
             }
         }
+        if (g_roll.on)
+            roll_grab(src, swap_no, sub, k);    /* step 104: the picture as drawn, without the counter */
         if (src)
             ID3D11Texture2D_Release(src);
         if (dst)
@@ -10030,6 +10389,8 @@ static int present_one(double t_s, unsigned swap_no, unsigned interval, unsigned
     }
     g_st.presents++;
     meas_present(swap_no);              /* step 82 */
+    if (g_roll.on)
+        roll_poll();                    /* step 104 */
     {   /* How many DWM compositions apart consecutive presents land: the
          * index of the first one after each present, from DWM's timing (its
          * last vblank, its count, the period). DWM composes on demand, so

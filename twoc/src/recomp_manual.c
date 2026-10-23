@@ -138,6 +138,13 @@ static int dev_flag(const char *name)
 static volatile LONG g_drone_mute;      /* the setting */
 static int g_title_mute;                /* step 104: the fast title's sound track silenced (set at the start) */
 static int g_drone_level;               /* the last level file opened was Droid Void's */
+static int g_level_track;               /* step 104: the rolling capture names the level (RECOMP_D3D_BRIDGE_ROLLING) */
+static char g_level_name[64];           /* ... the last levels\ folder a file was opened from ("a\west_a") */
+
+const char *twoc_level_name(void)
+{
+    return g_level_name;
+}
 /* Step 104: the files read as silence, while open (the drone, the title's sound track). */
 typedef struct {
     uint32_t h;                         /* the guest handle; 0 a free slot */
@@ -162,7 +169,7 @@ static int drone_pre(uint32_t va, drone_call_t *c)
     int i;
 
     if (va == MEM32(KT_NTCREATEFILE) || va == MEM32(KT_NTOPENFILE)) {
-        if (!g_drone_mute && !g_title_mute)
+        if (!g_drone_mute && !g_title_mute && !g_level_track)
             return 0;
     } else if (!g_mute_open || (va != MEM32(KT_NTREADFILE) && va != MEM32(KT_NTSETINFO) && va != MEM32(KT_NTCLOSE))) {
         return 0;
@@ -199,7 +206,10 @@ static void drone_post(const drone_call_t *c, uint32_t status)
         name[n] = 0;
         _strlwr(name);
         if (strstr(name, "\\levels\\")) {
+            const char *l = strstr(name, "\\levels\\") + 8, *e = strchr(l, '\\');
             g_drone_level = strstr(name, "\\levels\\a\\droid\\") != NULL;
+            if (e && (e = strchr(e + 1, '\\')) != NULL && e - l < (int)sizeof(g_level_name))
+                snprintf(g_level_name, sizeof(g_level_name), "%.*s", (int)(e - l), l);     /* step 104 */
             return;
         }
         if (g_drone_mute && g_drone_level && name_ends(name, n, "levspec\\drvd_bg.wav"))
@@ -260,6 +270,7 @@ void twoc_dev_options_init(void)
 {
     g_dev_fast_title = dev_flag("RECOMP_DEV_FAST_TITLE");
     g_dev_autostart  = dev_flag("RECOMP_DEV_AUTOSTART");
+    g_level_track    = getenv("RECOMP_D3D_BRIDGE_ROLLING") && *getenv("RECOMP_D3D_BRIDGE_ROLLING");   /* step 104 */
     g_dev_start_ms   = GetTickCount64();
 
     if (g_dev_fast_title) {
