@@ -55,12 +55,17 @@ static int g_cap, g_cap_idx, g_cap_slot;
 static unsigned g_pad_mask, g_pad_last;
 static int g_pad_fresh = 1;
 static int g_tab_cur, g_tab_want = -1;
-#define N_TABS 5                        /* Display, Audio, Controls, Saves (step 83), About (step 93) */
+/* Display, Audio, Controls, Saves (step 83), About (step 93); step 104: Graphics after Display, Extras before
+ * About */
+enum { TAB_DISPLAY, TAB_GRAPHICS, TAB_AUDIO, TAB_CONTROLS, TAB_SAVES, TAB_EXTRAS, TAB_ABOUT, N_TABS };
 #define TWOC_FAST_TITLE_SAVES "20 seconds" /* step 90: the menu at 5.9 s from the launch instead of 27.6 */
 static int g_sv_shown;                  /* step 83: the Saves tab shown since the overlay opened */
 #define RESET_ASK "Reset the Display settings?"     /* step 93: the reset button's question */
+#define XRESET_ASK "Reset the Extras?"  /* step 104: the Extras tab's */
 static bool g_reset_shut;               /* step 93: the overlay opened again: the question isn't left open */
-static bool g_reset_open;               /* ... the question is up (last frame) */
+static bool g_reset_open;               /* ... a reset question is up (last frame) */
+static int g_reset_req;                 /* step 104: a tab's reset button pressed: 1 Display, 2 Extras (opened by
+                                         * build, in the window the questions live in) */
 
 /* Step 97: Quit game's and Restart now's questions (the reset's way: the safe answer first, B closes), and
  * the window's steady height. */
@@ -775,8 +780,6 @@ static int tab_display(twoc_settings_t *s, const ovl_info_t *in)
 {
     static const char *const pacing[TWOC_PACING_COUNT] = { "Auto", "Display (vsync)", "Limiter (59.94 Hz)",
                                                             "Limiter + vsync" };
-    static const int aniso[] = { 1, 2, 4, 8, 16 };
-    static const char *const aniso_names[] = { "Off (the game's own)", "2x", "4x", "8x", "16x" };
     int r = 0, i;
     char buf[64], line[160];
 
@@ -869,31 +872,6 @@ static int tab_display(twoc_settings_t *s, const ovl_info_t *in)
              "where they are. Applied at once.");
         if (s->hud && (!wide || g_measure))
             help("Now: as the game draws it (the picture is 4:3).");
-    }
-    {   /* step 101: Crash's fur; step 102: three ways */
-        static const char *const fur[] = { "On", "Off for Crash only", "Off for everyone" };
-        static const int val[] = { TWOC_FUR_ON, TWOC_FUR_CRASH, TWOC_FUR_OFF };
-        int cur = s->fur == TWOC_FUR_CRASH ? 1 : s->fur == TWOC_FUR_OFF ? 2 : 0;
-        ImGui::SetNextItemWidth(ImGui::GetFontSize() * 12);
-        if (ImGui::Combo("Character fur", &cur, fur, 3)) {
-            s->fur = val[cur];
-            r |= OVL_CHANGED;
-        }
-        more("The layer of fur the Xbox draws over its furry characters. On: the Xbox's look. Off for Crash only: "
-             "Crash without it, as on the PlayStation 2; Coco, Crunch "
-             "and the others keep theirs (Coco's green look in Crashteroids stays). Off for everyone: no fur on "
-             "anyone. Reflections and shadows have none either way. Applied at once.");
-    }
-    {   /* step 102: the hub pads' crystals and gems as a level draws one collected */
-        bool g = s->hub_seethrough != 0;
-        if (ImGui::Checkbox("See-through gems and crystals in the hub", &g)) {
-            s->hub_seethrough = g;
-            r |= OVL_CHANGED;
-        }
-        more("On: the crystals and gems on the hub's pads drawn see-through, the way a level draws one you have "
-             "already collected (glass that bends what is behind it, a gem in its colour over that). Off: solid, "
-             "the game's own look. The relics are glass already and stay as they are; so do the outline icons of "
-             "what is still to find. Applied at once.");
     }
     {   /* step 91: the render size by aspect ratio, a custom one, and what it draws */
         static const ImVec4 mark(1.0f, 0.8f, 0.3f, 1.0f);
@@ -1147,30 +1125,6 @@ static int tab_display(twoc_settings_t *s, const ovl_info_t *in)
                  "watts or \"Plugged in\", Windows' power mode and a temperature if Windows has one (from the "
                  "power log, read once a second). Applied at once.");
         }
-        {   /* step 86 */
-            bool m = s->startup_message != 0;
-            if (ImGui::Checkbox("Show the startup message", &m)) {
-                s->startup_message = m;
-                r |= OVL_CHANGED;
-            }
-            more("\"Press F1 to open the settings menu\" (and, with a controller, \"or hold Start\") at the bottom "
-                 "of the picture for the first seconds of each start. Off also takes it away if it is showing.");
-        }
-        {   /* step 90: -FastTitle's switch, from the next start */
-            bool t = s->fast_title != 0;
-            if (ImGui::Checkbox("Skip the title animation", &t)) {
-                s->fast_title = t;
-                r |= OVL_CHANGED;
-            }
-            more("At each start, after the logos, the game plays its title animation (Crash and the title "
-                 "music) before the main menu opens. On, the animation runs many times faster, so the main menu "
-                 "opens about " TWOC_FAST_TITLE_SAVES " sooner; the logos and the menu are as before. From the "
-                 "next start (a launcher's -FastTitle wins over this).");
-            snprintf(line, sizeof(line), "Now: %s this run.%s", in->fast_title_now ? "on" : "off",
-                     !s->fast_title != !in->fast_title_now ? (s->fast_title ? " On from the next start."
-                                                                             : " Off from the next start.") : "");
-            help(line);
-        }
         if (s->framerate) {             /* step 75 */
             static const char *const ad_names[2] = { "On", "Off" };
             int cur = s->adaptive ? 0 : 1;
@@ -1212,6 +1166,27 @@ static int tab_display(twoc_settings_t *s, const ovl_info_t *in)
             help(line);
         }
     }
+
+    ImGui::Spacing();                   /* step 93: everything above back to its default, after a question */
+    ImGui::Separator();
+    if (ImGui::Button("Reset display settings to defaults"))
+        g_reset_req = 1;                /* step 104: asked in build() */
+    more("Sets every setting on this tab and the Graphics tab back to what the game starts with when it has no "
+         "settings file: Render size Game (480 lines), Render scale 100%, Pacing Auto, Frame rate Game (60), "
+         "Adaptive On, Render thread Auto, Show frame rate Off, HUD in the centre; Anisotropic filtering Off, "
+         "Anti-aliasing Off, Ambient occlusion Off. Fullscreen, the aspect ratio, the graphics card, the Extras, "
+         "sound, controls and saves stay as they are. Asks first.");
+    return r;
+}
+
+/* Step 104: the Graphics tab: what was the Display tab's textures, anti-aliasing and ambient occlusion, as
+ * they were (the same keys and defaults; the Display tab's reset covers them). */
+static int tab_graphics(twoc_settings_t *s, const ovl_info_t *in)
+{
+    static const int aniso[] = { 1, 2, 4, 8, 16 };
+    static const char *const aniso_names[] = { "Off (the game's own)", "2x", "4x", "8x", "16x" };
+    int r = 0, i;
+    char line[160];
 
     ImGui::SeparatorText("Textures");
     {
@@ -1277,43 +1252,6 @@ static int tab_display(twoc_settings_t *s, const ovl_info_t *in)
             help("Now: off; it couldn't be set up on this graphics card (see the log's [AO] lines).");
         }
     }
-    ImGui::Spacing();                   /* step 93: everything above back to its default, after a question */
-    ImGui::Separator();
-    if (ImGui::Button("Reset display settings to defaults"))
-        ImGui::OpenPopup(RESET_ASK);
-    more("Sets every setting on this tab back to what the game starts with when it has no settings file: "
-         "Render size Game (480 lines), Render scale 100%, Pacing Auto, Frame rate Game (60), Adaptive On, "
-         "Render thread Off, Show frame rate Off, the startup message on, Skip the title animation off, "
-         "Anisotropic filtering Off, Anti-aliasing Off, Ambient occlusion Off, HUD in the centre, Character "
-         "fur On, See-through gems and crystals in the hub off. Fullscreen, "
-         "the aspect ratio, the graphics card, sound, controls and saves stay as they are. Asks first.");
-    if (g_measure)                      /* step 97: measured: the question's state isn't touched */
-        return r;
-    ImGui::SetNextWindowPos(ImGui::GetMainViewport()->GetCenter(), ImGuiCond_Appearing, ImVec2(0.5f, 0.5f));
-    g_reset_open = false;
-    if (ImGui::BeginPopupModal(RESET_ASK, NULL, ImGuiWindowFlags_AlwaysAutoResize | ImGuiWindowFlags_NoSavedSettings)) {
-        g_reset_open = !g_reset_shut;
-        bool no = g_reset_shut;         /* the overlay closed with the question open */
-        ImGui::PushTextWrapPos(ImGui::GetFontSize() * 24);
-        ImGui::TextUnformatted("Every setting on the Display tab goes back to its default. Fullscreen, the "
-                               "aspect ratio, the graphics card, sound, controls and saves stay as they are.");
-        ImGui::PopTextWrapPos();
-        ImGui::Spacing();
-        if (ImGui::Button("Yes", ImVec2(ImGui::GetFontSize() * 6, 0))) {
-            twoc_settings_display_defaults(s);
-            r |= OVL_CHANGED;
-            no = true;
-        }
-        ImGui::SameLine();
-        if (ImGui::Button("No", ImVec2(ImGui::GetFontSize() * 6, 0)) ||
-            ImGui::IsKeyPressed(ImGuiKey_GamepadFaceRight, false))
-            no = true;                  /* B on the pad, as it closes a list */
-        ImGui::SetItemDefaultFocus();   /* No first: Yes is a step away */
-        if (no)
-            ImGui::CloseCurrentPopup();
-        ImGui::EndPopup();
-    }
-    g_reset_shut = false;
     return r;
 }
 
@@ -1500,6 +1438,96 @@ static void tab_saves(void)
         help(st.status);
 }
 
+/* Step 104: the Extras tab: the look and behaviour options that were on the Display tab and at the top of
+ * the menu, as they were (the same keys and defaults), with a reset of their own. */
+static int tab_extras(twoc_settings_t *s, const ovl_info_t *in)
+{
+    int r = 0;
+    char line[160];
+
+    ImGui::SeparatorText("Look");
+    {   /* step 101: Crash's fur; step 102: three ways */
+        static const char *const fur[] = { "On", "Off for Crash only", "Off for everyone" };
+        static const int val[] = { TWOC_FUR_ON, TWOC_FUR_CRASH, TWOC_FUR_OFF };
+        int cur = s->fur == TWOC_FUR_CRASH ? 1 : s->fur == TWOC_FUR_OFF ? 2 : 0;
+        ImGui::SetNextItemWidth(ImGui::GetFontSize() * 12);
+        if (ImGui::Combo("Character fur", &cur, fur, 3)) {
+            s->fur = val[cur];
+            r |= OVL_CHANGED;
+        }
+        more("The layer of fur the Xbox draws over its furry characters. On: the Xbox's look. Off for Crash only: "
+             "Crash without it, as on the PlayStation 2; Coco, Crunch "
+             "and the others keep theirs (Coco's green look in Crashteroids stays). Off for everyone: no fur on "
+             "anyone. Reflections and shadows have none either way. Applied at once.");
+    }
+    {   /* step 102: the hub pads' crystals and gems as a level draws one collected */
+        bool g = s->hub_seethrough != 0;
+        if (ImGui::Checkbox("See-through gems and crystals in the hub", &g)) {
+            s->hub_seethrough = g;
+            r |= OVL_CHANGED;
+        }
+        more("On: the crystals and gems on the hub's pads drawn see-through, the way a level draws one you have "
+             "already collected (glass that bends what is behind it, a gem in its colour over that). Off: solid, "
+             "the game's own look. The relics are glass already and stay as they are; so do the outline icons of "
+             "what is still to find. Applied at once.");
+    }
+
+    ImGui::SeparatorText("Menu and start");
+    {   /* step 86 */
+        bool m = s->startup_message != 0;
+        if (ImGui::Checkbox("Show the startup message", &m)) {
+            s->startup_message = m;
+            r |= OVL_CHANGED;
+        }
+        more("\"Press F1 to open the settings menu\" (and, with a controller, \"or hold Start\") at the top "
+             "of the picture for the first seconds of each start. Off also takes it away if it is showing.");
+    }
+    {   /* step 57; step 104: from the top of the menu */
+        bool p = s->pause != 0;
+        if (ImGui::Checkbox("Pause the game while this menu is open", &p)) {
+            s->pause = p;
+            r |= OVL_CHANGED;
+        }
+        more("Off: the game keeps running and drawing behind this menu, so a change to the picture shows at "
+             "once, and its sound plays on. It gets no controller or keyboard input until the menu closes, and "
+             "a button still held then counts only once it is let go. Applied at once.");
+    }
+    {   /* step 90 */
+        bool p = s->pause_unfocused != 0;
+        if (ImGui::Checkbox("Pause when in the background", &p)) {
+            s->pause_unfocused = p;
+            r |= OVL_CHANGED;
+        }
+        more("The game waits, silent, while its window is minimised or another window is in front, as it waits "
+             "under this menu, and goes on when it is in front again. Not while it is starting or switching to "
+             "fullscreen. Applied at once.");
+    }
+    {   /* step 90: -FastTitle's switch, from the next start */
+        bool t = s->fast_title != 0;
+        if (ImGui::Checkbox("Skip the title animation", &t)) {
+            s->fast_title = t;
+            r |= OVL_CHANGED;
+        }
+        more("At each start, after the logos, the game plays its title animation (Crash and the title "
+             "music) before the main menu opens. On, the animation runs many times faster, so the main menu "
+             "opens about " TWOC_FAST_TITLE_SAVES " sooner; the logos and the menu are as before. From the "
+             "next start (a launcher's -FastTitle wins over this).");
+        snprintf(line, sizeof(line), "Now: %s this run.%s", in->fast_title_now ? "on" : "off",
+                 !s->fast_title != !in->fast_title_now ? (s->fast_title ? " On from the next start."
+                                                                         : " Off from the next start.") : "");
+        help(line);
+    }
+
+    ImGui::Spacing();
+    ImGui::Separator();
+    if (ImGui::Button("Reset extras to defaults"))
+        g_reset_req = 2;                /* asked in build() */
+    more("Sets every setting on this tab back to its default: Character fur On, See-through gems and crystals "
+         "off, the startup message on, Pause the game while this menu is open on, Pause when in the background "
+         "off, Skip the title animation off. The other tabs stay as they are. Asks first.");
+    return r;
+}
+
 /* Step 93: what this build is and what it runs on (about.c). */
 static void tab_about(const ovl_info_t *in)
 {
@@ -1546,15 +1574,19 @@ static void tab_about(const ovl_info_t *in)
 static int tab_body(int t, twoc_settings_t *s, const ovl_info_t *in)
 {
     switch (t) {
-    case 0:
+    case TAB_DISPLAY:
         return tab_display(s, in);
-    case 1:
+    case TAB_GRAPHICS:                  /* step 104 */
+        return tab_graphics(s, in);
+    case TAB_AUDIO:
         return tab_audio(s);
-    case 2:
+    case TAB_CONTROLS:
         return tab_controls(s);
-    case 3:
+    case TAB_SAVES:
         tab_saves();
         return 0;
+    case TAB_EXTRAS:                    /* step 104 */
+        return tab_extras(s, in);
     default:
         tab_about(in);
         return 0;
@@ -1660,6 +1692,37 @@ static int ask(const char *id, const char *text, const char *yes, const char *no
     return r;
 }
 
+/* Step 93: a reset's Yes / No (No focused, B or the overlay closing for it); step 104: one for each tab with a
+ * reset. Returns 1 the frame Yes is chosen; *open: it is up. */
+static int reset_ask(const char *id, const char *text, bool *open)
+{
+    int r = 0;
+
+    *open = false;
+    ImGui::SetNextWindowPos(ImGui::GetMainViewport()->GetCenter(), ImGuiCond_Appearing, ImVec2(0.5f, 0.5f));
+    if (ImGui::BeginPopupModal(id, NULL, ImGuiWindowFlags_AlwaysAutoResize | ImGuiWindowFlags_NoSavedSettings)) {
+        bool no = g_reset_shut;         /* the overlay closed with the question open */
+        *open = !g_reset_shut;
+        ImGui::PushTextWrapPos(ImGui::GetFontSize() * 24);
+        ImGui::TextUnformatted(text);
+        ImGui::PopTextWrapPos();
+        ImGui::Spacing();
+        if (ImGui::Button("Yes", ImVec2(ImGui::GetFontSize() * 6, 0))) {
+            r = 1;
+            no = true;
+        }
+        ImGui::SameLine();
+        if (ImGui::Button("No", ImVec2(ImGui::GetFontSize() * 6, 0)) ||
+            ImGui::IsKeyPressed(ImGuiKey_GamepadFaceRight, false))
+            no = true;                  /* B on the pad, as it closes a list */
+        ImGui::SetItemDefaultFocus();   /* No first: Yes is a step away */
+        if (no)
+            ImGui::CloseCurrentPopup();
+        ImGui::EndPopup();
+    }
+    return r;
+}
+
 /* Step 97: the rows at the bottom, in the same place on every tab: Resume and Quit game (how to drive the
  * menu in a "(?)" after them), and a status row (a restart waiting, with its button; why one didn't happen;
  * the last save's outcome). */
@@ -1707,7 +1770,8 @@ static int footer(const ovl_info_t *in, unsigned pend)
 
 static int build(twoc_settings_t *s, const ovl_info_t *in)
 {
-    static const char *const tab_names[N_TABS] = { "Display", "Audio", "Controls", "Saves", "About" };
+    static const char *const tab_names[N_TABS] = { "Display", "Graphics", "Audio", "Controls", "Saves", "Extras",
+                                                   "About" };
     char restore_when[32], id[16];
     unsigned pend;
     float y0;
@@ -1720,27 +1784,7 @@ static int build(twoc_settings_t *s, const ovl_info_t *in)
                            "game closes. Start the game the usual way for your own settings again.");
         ImGui::PopTextWrapPos();
     }
-    {
-        bool p = s->pause != 0;
-        if (ImGui::Checkbox("Pause the game while this menu is open", &p)) {
-            s->pause = p;
-            r |= OVL_CHANGED;
-        }
-        more("Off: the game keeps running and drawing behind this menu, so a change to the picture shows at "
-             "once, and its sound plays on. It gets no controller or keyboard input until the menu closes, and "
-             "a button still held then counts only once it is let go.");
-    }
-    {   /* step 90 */
-        bool p = s->pause_unfocused != 0;
-        if (ImGui::Checkbox("Pause when in the background", &p)) {
-            s->pause_unfocused = p;
-            r |= OVL_CHANGED;
-        }
-        more("The game waits, silent, while its window is minimised or another window is in front, as it waits "
-             "under this menu, and goes on when it is in front again. Not while it is starting or switching to "
-             "fullscreen. Applied at once.");
-    }
-    /* Step 97: the tab bar picks the tab only; its contents go in a child of the same height on every tab
+    /* Step 104: the two pause settings that were here are on the Extras tab. Step 97: the tab bar picks the tab only; its contents go in a child of the same height on every tab
      * (g_child_h), each tab with its own (so its own scroll), flattened into the window for the controller's
      * and the keyboard's navigation. */
     if (ImGui::BeginTabBar("##tabs")) {
@@ -1754,7 +1798,7 @@ static int build(twoc_settings_t *s, const ovl_info_t *in)
         g_tab_want = -1;
         ImGui::EndTabBar();
     }
-    if (g_tab_cur != 3)
+    if (g_tab_cur != TAB_SAVES)
         g_sv_shown = 0;                 /* step 83: the backups listed again when the tab is next shown */
     y0 = ImGui::GetCursorPosY();
     snprintf(id, sizeof(id), "##tab%d", g_tab_cur);
@@ -1762,6 +1806,30 @@ static int build(twoc_settings_t *s, const ovl_info_t *in)
     r |= tab_body(g_tab_cur, s, in);
     ImGui::EndChild();
     (void)y0;
+
+    /* Step 93: the Display tab's reset; step 104: and the Extras tab's, both asked here (the safe answer
+     * focused, B or the overlay closing for it) */
+    if (g_reset_req == 1)
+        ImGui::OpenPopup(RESET_ASK);
+    else if (g_reset_req == 2)
+        ImGui::OpenPopup(XRESET_ASK);
+    g_reset_req = 0;
+    {
+        bool d_open, x_open;
+        if (reset_ask(RESET_ASK, "Every setting on the Display and Graphics tabs goes back to its default. "
+                      "Fullscreen, the aspect ratio, the graphics card, the Extras, sound, controls and saves stay "
+                      "as they are.", &d_open)) {
+            twoc_settings_display_defaults(s);
+            r |= OVL_CHANGED;
+        }
+        if (reset_ask(XRESET_ASK, "Every setting on the Extras tab goes back to its default. The other tabs stay "
+                      "as they are.", &x_open)) {
+            twoc_settings_extras_defaults(s);
+            r |= OVL_CHANGED;
+        }
+        g_reset_open = d_open || x_open;
+    }
+    g_reset_shut = false;
 
     /* Step 97: a setting from the next start just changed: ask whether to restart now (never with the safe
      * settings, which can't keep the change). */
@@ -1914,11 +1982,13 @@ extern "C" int ovl_frame(ID3D11RenderTargetView *rtv, unsigned w, unsigned h, fl
             if (on < 0)
                 on = getenv("RECOMP_DEV_OVL_RECT") && *getenv("RECOMP_DEV_OVL_RECT");
             if (on && (tab != g_tab_cur || p.x != pos.x || p.y != pos.y || z.x != size.x || z.y != size.y)) {
+                float tallest = 0;
+                int t;
+                for (t = 0; t < N_TABS; t++)
+                    tallest = g_tab_h[t] > tallest ? g_tab_h[t] : tallest;
                 fprintf(stderr, "[OVL] rect: tab %d at %.1f,%.1f size %.1f x %.1f%s (picture %ux%u, scale %.3f, "
                         "tabs' child %.1f, tallest tab %.1f)\n", g_tab_cur, p.x, p.y, z.x, z.y,
-                        settling ? " not shown" : "", w, h, g_scale, g_child_h,
-                        g_tab_h[0] > g_tab_h[2] ? (g_tab_h[0] > g_tab_h[3] ? g_tab_h[0] : g_tab_h[3])
-                                                : (g_tab_h[2] > g_tab_h[3] ? g_tab_h[2] : g_tab_h[3]));
+                        settling ? " not shown" : "", w, h, g_scale, g_child_h, tallest);
                 tab = g_tab_cur;
                 pos = p;
                 size = z;

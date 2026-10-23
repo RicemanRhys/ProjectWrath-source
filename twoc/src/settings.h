@@ -186,11 +186,15 @@ void twoc_settings_load(void);
 void twoc_settings_current(twoc_settings_t *s);
 /* Step 93: the Display tab's settings in `s` back to their defaults (what a
  * run without the file has): render size, render scale, pacing, frame rate,
- * adaptive, render thread, the counter, the startup message, skipping the
- * title, anisotropy, anti-aliasing, ambient occlusion, the HUD. Fullscreen,
- * the aspect ratio, the graphics card (step 97), audio, controls and saves
+ * adaptive, render thread, the counter, the HUD; step 104: and the Graphics
+ * tab's, anisotropy, anti-aliasing, ambient occlusion. Fullscreen, the aspect
+ * ratio, the graphics card (step 97), the Extras, audio, controls and saves
  * are left as they are. */
 void twoc_settings_display_defaults(twoc_settings_t *s);
+/* Step 104: the Extras tab's settings back to their defaults: Character fur
+ * on, the hub's see-through gems off, the startup message on, the menu's
+ * pause on, the pause in the background off, skipping the title off. */
+void twoc_settings_extras_defaults(twoc_settings_t *s);
 /* Write `s` to crash_twoc.ini. Returns 0 on success, 1 when the file is
  * ignored this run (step 93: RECOMP_IGNORE_INI, the safe settings: the
  * file is neither read nor written), -1 when it couldn't be written. */

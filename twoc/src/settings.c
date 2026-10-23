@@ -573,16 +573,22 @@ void twoc_settings_display_defaults(twoc_settings_t *s)
     s->adaptive = 1;
     s->render_thread = TWOC_RT_AUTO;
     s->show_fps = 0;
-    s->startup_message = 1;
-    s->fast_title = 0;
-    s->anisotropy = 1;
+    s->anisotropy = 1;                  /* step 104: the Graphics tab's, under the same reset */
     s->antialiasing = TWOC_AA_OFF;
     s->ao = TWOC_AO_OFF;
     s->ao_strength = TWOC_AO_STRENGTH_DEFAULT;
     s->ao_half = 0;
     s->hud = 0;
+}
+
+void twoc_settings_extras_defaults(twoc_settings_t *s)
+{
     s->fur = TWOC_FUR_ON;               /* step 101 */
     s->hub_seethrough = 0;              /* step 102 */
+    s->startup_message = 1;
+    s->pause = 1;
+    s->pause_unfocused = 0;
+    s->fast_title = 0;
 }
 
 /* Key i's value in `s` as the file writes it ("" for a volume never set). */
