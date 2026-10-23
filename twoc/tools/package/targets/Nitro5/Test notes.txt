@@ -49,7 +49,9 @@ Optional:
    Character fur (Display tab) in the hub: Off for Crash only (Crash without the fuzzy layer,
    Coco keeps hers), Off for everyone, back to On?
    See-through gems and crystals in the hub On: the pads' crystal and gems as glass?
-   Medieval Madness at Match display: do the marks on the walls still flicker?
+   Match display, late in Gold Rush (about 3/4 through) and half-way through Medieval
+   Madness, moving: do buildings, walls or ground still shake or shift sideways, do
+   textures pop in and out, do the marks on the walls flicker? Crash and the enemies smooth?
    Mute Droid Void's background drone On, then Droid Void: no drone under the music?
 
 Warmth, fan noise, anything else (crashes, sound crackles, controls, picture problems):

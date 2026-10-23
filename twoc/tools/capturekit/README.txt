@@ -1,10 +1,10 @@
-Crash TWOC capture kit (step 100)
-=================================
+Crash TWOC capture kit (step 100; exe refreshed in step 103)
+============================================================
 
 What this is
 ------------
 A separate copy of the game for catching the playtest problems I couldn't
-reproduce on my own. It has its own exe (this step's build), its own copy of
+reproduce on my own. It has its own exe (the latest build), its own copy of
 your settings (crash_twoc.ini, copied once from twoc\build\Release) and its
 own copy of your save (game\game_files\UDATA, copied once). Your build
 folder, your ini and your saves are never used or changed by it. The game
@@ -68,12 +68,19 @@ The problems
    late in the level. Gold Rush: about 3/4 through, the buildings' textures
    moving left and right. Medieval Madness: half-way, shifting textures.
    When you see it, capture while moving (keep moving through the capture).
-   What I found: in Gold Rush late in the level, decals on walls (a brick
-   patch) vanish in the in-between frames and come back on every game frame:
-   a flicker. This build halves it; the full fix is the next step. The
-   captures tell me whether what you see in Smokey and Medieval Madness is
-   the same thing.
-   5b: the same at Game (60): does it happen there at all?
+   5 runs at your own settings (Match display): the in-between frames are
+   what this is about. 5b is the comparison: the same at Frame rate:
+   Game (60), with no in-between frames at all. Use 5 to show the problem,
+   5b at the same spot to show it isn't there (or that it is).
+   What is fixed in this build (step 103): late in Gold Rush and Medieval
+   Madness the buildings and ground drawn by one path shifted 1-20 pixels
+   (at 4K) in every in-between frame and came back on the game's own
+   frames, and wall textures over them came and went with it (your step 102
+   captures: Gold Rush and Medieval Madness). The decal fix of step 102 (wall
+   marks drawn a hair nearer in the in-between frames) is in too, always on
+   at Match display. If Smokey and the Bandicoot's ground still shakes, or
+   anything still shifts in Gold Rush or Medieval Madness, capture with 5
+   while moving, then once with 5b at the same spot.
 
 6  Fahrenheit Frenzy: the X-ray machine
    Half-way through, at the X-ray machine. When the room looks black (only

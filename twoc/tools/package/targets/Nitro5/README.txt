@@ -9,15 +9,17 @@ in game_files\ are your own copy of the disc. There are no saves in this folder:
 game and name it WOMBAT, which opens every warp room, so every level in the tests can be
 reached.
 
-New in this build: "Character fur" in the settings menu's Display tab replaces "Crash's
+New in this build: at Frame rate "Match display" buildings, walls and ground no longer shake
+or shift sideways while Crash moves and textures on them no longer pop in and out (late in
+Gold Rush and Medieval Madness most of all); Frame rate "Game (60)" is unchanged.
+From the last build: "Character fur" in the settings menu's Display tab replaces "Crash's
 fur": On (the Xbox's fur), Off for Crash only (Crash as on the PlayStation 2; Coco, Crunch
 and the others keep theirs) or Off for everyone; "See-through gems and crystals in the hub"
 (Display tab, Off by default): the pads' crystal and gems drawn as glass, as a level draws
 one you already have; "Mute Droid Void's background drone" (Audio tab, Off by default; from
 the level's next start); at Match display the marks on Gold Rush's walls no longer flicker
-(Medieval Madness's should be gone too, not checked on the desktop).
-From the last build: Fahrenheit Frenzy's X-ray room shows its X-ray instead of a black
-screen; the "HUD margin" slider is gone.
+(Medieval Madness's should be gone too, not checked on the desktop); Fahrenheit Frenzy's
+X-ray room shows its X-ray instead of a black screen; the "HUD margin" slider is gone.
 
 Known quirks of the original game (the Xbox does these too): Droid Void's drone plays for the
 whole level, also after Crash dies (the Audio tab's option silences it); in Crashteroids

@@ -17,7 +17,15 @@ which opens every warp room (all crystals), so every level in the tests can be r
 *** hold comfortably, close the game and let it cool down.
 
 New in this package:
-  - "Character fur" (Display tab, under HUD position) replaces last package's "Crash's
+  - With Frame rate "Match display" (or any rate above 60), buildings, walls and ground no
+    longer shake or shift sideways while Crash moves, and textures on them no longer pop
+    in and out (late in Gold Rush and Medieval Madness most of all; the further a level
+    goes from its start, the worse it was). Part of the scenery was drawn a few pixels off
+    in every in-between frame and put back on the game's own frames. Crash, Coco and the
+    enemies move as smoothly as before. Frame rate "Game (60)" is unchanged.
+
+From the last package:
+  - "Character fur" (Display tab, under HUD position) replaces the older "Crash's
     fur" and has three choices: On (the Xbox's look, the default), Off for Crash only (Crash
     without his layer of fur, as on the PlayStation 2; Coco, Crunch, Pura and the others
     keep theirs) and Off for everyone (no fur
@@ -45,14 +53,12 @@ Known quirks of the original game (the Xbox version does these too; not bugs of 
     green glass. Character fur "Off for everyone" removes it; "Off for Crash only" keeps
     it, since it is Coco's.
 
-From the last package:
+From the package before (also new to this folder if you skipped them):
   - Fahrenheit Frenzy's X-ray room shows its X-ray (a green negative of the room, Crash
     as a skeleton) instead of a black screen.
   - The "HUD margin" slider is gone: with HUD position "Screen edges" the counters sit at
     the screen's edges (as at 0% before). An older crash_twoc.ini's hud_margin line is
     ignored and dropped the next time the settings are saved.
-
-From the package before (also new to this folder if you skipped them):
   - Quit game: a button next to Resume at the bottom of the settings menu, on every tab.
     It asks "Quit the game? Unsaved progress will be lost." with Yes / No (No is first;
     B means No) and then closes the game cleanly: your settings saved, a save copy that is
