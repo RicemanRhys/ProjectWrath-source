@@ -1748,6 +1748,14 @@ static int stage_reached(unsigned s)
             return 0;
     return 1;
 }
+/* Step 101: whether the pixel shader samples stage `s` as a 2D or 3D
+ * texture (PSTextureModes, 5 bits a stage: PROJECT2D 1, PROJECT3D 2). */
+static int ps_stage_2d(unsigned s)
+{
+    uint32_t m = (rs_x(XRS_PSTEXTUREMODES) >> (5 * s)) & 31;
+
+    return m == 1 || m == 2;
+}
 #define CUBE_SEEN_MAX 16
 static uint32_t g_cube_seen[CUBE_SEEN_MAX];     /* shaders, stage and texture modes: each kind logged once */
 
@@ -2384,12 +2392,17 @@ static int setup_draw(d3dh_draw_t *dr, uint32_t fvf, d3dh_tex_t tex[4], d3dh_sta
             return -1;
         }
         dr->tex[s] = r ? &tex[s] : NULL;
-        if (!r && !MEM32(d + DEV_PIXEL_SHADER) && stage_reached(s)) {
+        if (!r && (MEM32(d + DEV_PIXEL_SHADER) ? ps_stage_2d(s) : stage_reached(s))) {
             /* Step 49: a stage in use with no texture. The NV2A reads such a
              * stage (texture mode NONE) as opaque black, 0,0,0,1, as xemu
              * models it; an unbound D3D11 view reads 0,0,0,0, so a
              * MODULATE(TEXTURE, DIFFUSE) stage lost the diffuse alpha (Crash's
-             * shadow: two of its three darkening passes added nothing). */
+             * shadow: two of its three darkening passes added nothing).
+             * Step 101: a pixel shader's 2D or 3D stage with no texture too
+             * (D3D gives the NV2A mode NONE for it): Fahrenheit Frenzy's
+             * X-ray screen blends its green negative of the screen copy by
+             * stage 1's alpha, a stage it leaves empty (1: the negative;
+             * 0, as drawn before, black). */
             static const uint32_t black = 0xFF000000u;
             memset(&tex[s], 0, sizeof(tex[s]));
             tex[s].key = tex[s].data = NULL_TEXTURE_KEY;
@@ -4737,6 +4750,15 @@ static void drawlog(const char *path, uint32_t xdk_prim, uint32_t n, uint32_t fv
             fprintf(stderr, " (%.4g %.4g %.4g)", (double)p[0], (double)p[1], (double)p[2]);
         }
         fputc('\n', stderr);
+        if (fvf & FVF_DIFFUSE) {        /* step 101: their colours (a dark room's walls) */
+            uint32_t c_off = 12 + ((fvf & FVF_NORMAL) ? 12 : 0) + ((fvf & FVF_PSIZE) ? 4 : 0), col;
+            fprintf(stderr, "[D3DB] drawlog   colours");
+            for (i = 0; i < nv; i++) {
+                memcpy(&col, v + (size_t)i * stride + c_off, 4);
+                fprintf(stderr, " %08X", col);
+            }
+            fputc('\n', stderr);
+        }
     }
 }
 
