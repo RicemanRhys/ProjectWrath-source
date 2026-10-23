@@ -46,12 +46,19 @@ Optional:
    Quit game (No first, then Yes): did the game and the black window close?
    Switching tabs: did the menu keep its size and place?
    Safe settings launcher: the small window, the orange line, no restart questions?
-   Character fur (Display tab) in the hub: Off for Crash only (Crash without the fuzzy layer,
+   Character fur (Extras tab) in the hub: Off for Crash only (Crash without the fuzzy layer,
    Coco keeps hers), Off for everyone, back to On?
    See-through gems and crystals in the hub On: the pads' crystal and gems as glass?
    Match display, late in Gold Rush (about 3/4 through) and half-way through Medieval
    Madness, moving: do buildings, walls or ground still shake or shift sideways, do
    textures pop in and out, do the marks on the walls flicker? Crash and the enemies smooth?
    Mute Droid Void's background drone On, then Droid Void: no drone under the music?
+   The tabs in the new order (Display, Graphics, Audio, Controls, Saves, Extras, About), the
+   menu the same size and place on each?
+   Menu scale (Display tab, last) at 50% and 150%: smaller / bigger at once?
+   The startup message at the top of the picture?
+   Skip the title animation on: no Cortex voice lines at the main menu, the music still on?
+   Photo mode (F3) and Freeze (F2): the HUD gone, the camera flown with W A S D and the mouse
+   (right button held), the frozen scene smooth? Anything missing or odd:
 
 Warmth, fan noise, anything else (crashes, sound crackles, controls, picture problems):

@@ -9,13 +9,25 @@ in game_files\ are your own copy of the disc. There are no saves in this folder:
 game and name it WOMBAT, which opens every warp room, so every level in the tests can be
 reached.
 
-New in this build: at Frame rate "Match display" buildings, walls and ground no longer shake
-or shift sideways while Crash moves and textures on them no longer pop in and out (late in
-Gold Rush and Medieval Madness most of all); Frame rate "Game (60)" is unchanged.
-From the last build: "Character fur" in the settings menu's Display tab replaces "Crash's
+New in this build: the settings menu's tabs are Display, Graphics, Audio, Controls, Saves,
+Extras, About. Graphics holds Anisotropic filtering, Anti-aliasing and Ambient occlusion
+(moved from Display); Extras holds Character fur, See-through gems and crystals in the hub,
+Show the startup message, Pause the game while this menu is open, Pause when in the
+background and Skip the title animation, with its own reset; "Reset display settings"
+covers the Display and Graphics tabs. Menu scale (Display tab, last): the menu's size, 50%
+to 200%. The startup message is at the top of the picture. Skip the title animation also
+leaves out the title animation's sound track (Cortex's lines) instead of letting it play on
+over the main menu. Photo mode and Freeze (Extras tab; F3 and F2): a free camera with the
+HUD hidden, flown with the keyboard (W A S D, E / Q, the arrows, the right mouse button held
+to turn) while the game runs, or around the frozen scene (the controller flies it then);
+never saved, off at every start; its keys under Controls, "Freecam controls".
+From the last build: at Frame rate "Match display" buildings, walls and ground no longer
+shake or shift sideways while Crash moves and textures on them no longer pop in and out
+(late in Gold Rush and Medieval Madness most of all); Frame rate "Game (60)" is unchanged.
+From the build before: "Character fur" (now on the Extras tab) replaces "Crash's
 fur": On (the Xbox's fur), Off for Crash only (Crash as on the PlayStation 2; Coco, Crunch
 and the others keep theirs) or Off for everyone; "See-through gems and crystals in the hub"
-(Display tab, Off by default): the pads' crystal and gems drawn as glass, as a level draws
+(Extras tab, Off by default): the pads' crystal and gems drawn as glass, as a level draws
 one you already have; "Mute Droid Void's background drone" (Audio tab, Off by default; from
 the level's next start); at Match display the marks on Gold Rush's walls no longer flicker
 (Medieval Madness's should be gone too, not checked on the desktop); Fahrenheit Frenzy's
@@ -23,8 +35,8 @@ X-ray room shows its X-ray instead of a black screen; the "HUD margin" slider is
 
 Known quirks of the original game (the Xbox does these too): Droid Void's drone plays for the
 whole level, also after Crash dies (the Audio tab's option silences it); in Crashteroids
-Coco looks green and furry, her fur seen through the cockpit's green glass (Character fur
-"Off for everyone" removes it, "Off for Crash only" keeps it).
+Coco looks green and furry, her fur seen through the cockpit's green glass (Character fur,
+Extras tab: "Off for everyone" removes it, "Off for Crash only" keeps it).
 
 Each step says which computer it is on: [desktop] or [laptop].
 
@@ -101,7 +113,7 @@ B. Start the game [laptop]
     If Windows says "Windows protected your PC", click "More info", then "Run anyway".
 2.  The game opens in a window as big as the screen. Alt+Enter switches to full screen and
     back.
-3.  Press F1: the settings menu opens. Click the "About" tab (the fifth). Check:
+3.  Press F1: the settings menu opens. Click the "About" tab (the last). Check:
       Graphics card ...... must say NVIDIA GeForce RTX 3050 Laptop GPU (not Intel UHD
                            or Intel Iris Xe). If it says Intel: close the game, do part A
                            step 6 again, start again.
@@ -123,9 +135,9 @@ B. Start the game [laptop]
         or a card by name. A change applies at the next start, so it asks "Restart the game
         to use ...?": Restart now starts it again with the new card (your settings are
         kept); Later leaves an orange note at the bottom, "Changes waiting for a restart",
-        with its own Restart now button. Skip the title animation and Speakers (Audio tab)
-        ask the same way.
-      - Display tab, Character fur: On (the Xbox's fur), Off for Crash only (his body, head
+        with its own Restart now button. Skip the title animation (Extras tab) and Speakers
+        (Audio tab) ask the same way.
+      - Extras tab, Character fur: On (the Xbox's fur), Off for Crash only (his body, head
         and tail as on the PlayStation 2; the others keep theirs) or Off for everyone.
         See-through gems and crystals in the hub: the pads' crystal and gems as glass.
         Both apply at once. Audio tab, Mute Droid Void's background drone: from the
@@ -192,8 +204,9 @@ not on the laptop:
 So even the heaviest of these fits in 4 GB with room to spare. On the laptop the limit is
 more likely the GPU's speed than its memory: 4K, MSAA 8x and full-size ambient occlusion
 cost it a lot of drawing. The safe start at 1080p is this package's settings; to try more,
-one at a time, watching the counter's "Game 60/s": Anti-aliasing SMAA or MSAA 2x,
-Ambient occlusion GTAO with Half resolution, Anisotropic filtering 8x or 16x. If the counter drops under 60, put the
+one at a time, watching the counter's "Game 60/s" (all on the Graphics tab): Anti-aliasing
+SMAA or MSAA 2x, Ambient occlusion GTAO with Half resolution, Anisotropic filtering 8x or
+16x. If the counter drops under 60, put the
 last change back. (Other levels weren't measured; the drivers differ too, so treat these
 as a guide.)
 

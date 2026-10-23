@@ -17,6 +17,44 @@ which opens every warp room (all crystals), so every level in the tests can be r
 *** hold comfortably, close the game and let it cool down.
 
 New in this package:
+  - The settings menu's tabs are now Display, Graphics, Audio, Controls, Saves, Extras,
+    About (LB / RB still go round all of them). Graphics holds Anisotropic filtering,
+    Anti-aliasing and Ambient occlusion (with its Strength and Half resolution), moved from
+    the Display tab. Extras holds Character fur, See-through gems and crystals in the hub,
+    Show the startup message, Pause the game while this menu is open (it was at the top of
+    the menu), Pause when in the background and Skip the title animation, with a "Reset
+    extras to defaults" button of its own. The same settings, defaults and saved values as
+    before. "Reset display settings to defaults" (Display tab) now resets the Display and
+    Graphics tabs only.
+  - Menu scale (Display tab, the last setting): makes the settings menu's text and boxes
+    smaller or bigger, 50% to 200%, at once (D-pad left / right on it). 100% is the size
+    it had. Bigger than the screen allows is held back, and the line under the slider says
+    so ("Limited by the window: showing 120%").
+  - The startup message ("Press F1 to open the settings menu ...") is now at the top of
+    the picture, centred.
+  - With Skip the title animation on, the title animation's sound track (Cortex's lines
+    and the animation's sounds) no longer plays on over the main menu; the title music
+    plays as before. From the next start. Later cutscenes keep their voices.
+  - Photo mode and Freeze (Extras tab, at the top; F3 and F2 on a keyboard): photo mode
+    swaps the game's camera for a free one you fly around the scene, with the game's HUD,
+    the frame-rate counter and the startup message hidden. The game keeps running behind
+    it (Crash and the rest move), or Freeze holds it, silent, and you fly around the frozen
+    scene. Keyboard: W A S D move, E / Space up, Q / C down, the arrows look, Left Shift
+    held faster, Left Ctrl held slower, Z / X the field of view, R back to the game's
+    camera; the right mouse button held turns the camera, the wheel zooms. The controller
+    keeps playing the game while it runs, and flies the camera while frozen (left stick
+    moves, right stick looks, RT / LT up / down, RB / LB faster / slower, D-pad up / down
+    the field of view, Y the game's camera). Photo mode is never saved (off at every
+    start) and turns itself off at a level load, a respawn or a cutscene's cut. The game
+    only sends what is near its own view: a little more while photo mode is on, but not
+    what is behind its camera, nor crates, fruit and enemies far from Crash; reflections
+    still show the game's view.
+  - Freecam controls (Controls tab, at the bottom): every photo mode key (two each) and
+    controller button can be changed the same way as the game's, with Camera speed, Look
+    sensitivity, Field of view (the game's, or 30 to 110 degrees), Invert look and a reset.
+    Freeze and Photo mode can't take a key the game uses.
+
+From the last package:
   - With Frame rate "Match display" (or any rate above 60), buildings, walls and ground no
     longer shake or shift sideways while Crash moves, and textures on them no longer pop
     in and out (late in Gold Rush and Medieval Madness most of all; the further a level
@@ -24,14 +62,14 @@ New in this package:
     in every in-between frame and put back on the game's own frames. Crash, Coco and the
     enemies move as smoothly as before. Frame rate "Game (60)" is unchanged.
 
-From the last package:
-  - "Character fur" (Display tab, under HUD position) replaces the older "Crash's
+From the package before:
+  - "Character fur" (now on the Extras tab) replaces the older "Crash's
     fur" and has three choices: On (the Xbox's look, the default), Off for Crash only (Crash
     without his layer of fur, as on the PlayStation 2; Coco, Crunch, Pura and the others
     keep theirs) and Off for everyone (no fur
     on anyone, as "Crash's fur" Off did). Applies at once. A crash_twoc.ini from the last
     package keeps its choice (fur off there is "Off for everyone").
-  - "See-through gems and crystals in the hub" (Display tab, under Character fur; Off in
+  - "See-through gems and crystals in the hub" (now on the Extras tab; Off in
     this package, the game's own look): the crystal and the gems shown at each warp room
     pad are drawn as glass, the way a level draws a crystal or gem you already have (a
     coloured gem keeps its colour). The relics are glass already; the pads' outline
@@ -50,10 +88,10 @@ Known quirks of the original game (the Xbox version does these too; not bugs of 
   - Droid Void's drone plays for the whole level, also after Crash dies and while the
     level restarts. "Mute Droid Void's background drone" (Audio tab) silences it.
   - In Crashteroids, Coco looks green and furry: her fur is seen through the cockpit's
-    green glass. Character fur "Off for everyone" removes it; "Off for Crash only" keeps
-    it, since it is Coco's.
+    green glass. Character fur (Extras tab) "Off for everyone" removes it; "Off for Crash
+    only" keeps it, since it is Coco's.
 
-From the package before (also new to this folder if you skipped them):
+From the packages before that (also new to this folder if you skipped them):
   - Fahrenheit Frenzy's X-ray room shows its X-ray (a green negative of the room, Crash
     as a skeleton) instead of a black screen.
   - The "HUD margin" slider is gone: with HUD position "Screen edges" the counters sit at
@@ -88,12 +126,12 @@ Still from last time:
   - Collect logs' events.txt dates marked as local time, with the UTC time beside them.
   - "Reset display settings to defaults", a button at the bottom of the Display tab. It
     asks first (Yes / No; works with the controller: D-pad to the button, A, then Left for
-    Yes and A, or B for No) and puts every setting on that tab back to the game's own
-    default: Render size Game (480 lines), Frame rate Game (60), Render scale 100%,
-    Anti-aliasing and Ambient occlusion Off, Anisotropic filtering Off, Render thread Auto,
-    the HUD in the centre, Character fur On, See-through gems and crystals in the hub
-    Off, the counter off. Full screen, the aspect ratio, sound, controls
-    and saves stay as they are.
+    Yes and A, or B for No) and puts every setting on the Display and Graphics tabs back to
+    the game's own default: Render size Game (480 lines), Frame rate Game (60), Render scale
+    100%, Render thread Auto, the HUD in the centre, the counter off, Menu scale 100%;
+    Anti-aliasing and Ambient occlusion Off, Anisotropic filtering Off. Full screen, the
+    aspect ratio, the Extras, sound, controls and saves stay as they are (the Extras tab
+    has its own reset).
   - 72 fps in the Frame rate list: half of 144 Hz, so each frame is held for 2
     refreshes and motion stays even. The line under the list says what it does on 144,
     180 and 240 Hz screens.
@@ -105,7 +143,7 @@ Still from last time:
   - "Play Crash (safe settings).bat": every setting at its default, in a window, and
     crash_twoc.ini neither read nor written (the settings menu says so at its top). If the
     game won't start after a settings change, use this.
-  - An About tab in the settings menu (the fifth; LB / RB): the build, the graphics chip and
+  - An About tab in the settings menu (now the last; LB / RB): the build, the graphics chip and
     its driver, the screen's mode and refresh rate, the processor, the Windows version and
     the game files' check. THIRD_PARTY_LICENSES.txt lists the other people's code inside
     the game and beside it, with their licences.
@@ -181,9 +219,9 @@ A. Set up the Legion Go (once)
     about a second also opens and closes it. In the settings menu the D-pad or the left
     stick moves, A chooses, B closes a list or the menu, LB and RB change tabs. On a
     keyboard F1 opens and closes it (Esc closes it too), and the touch screen works as a
-    mouse there. For the first 8 seconds after the game starts, a line at the bottom of
+    mouse there. For the first 8 seconds after the game starts, a line at the top of
     the picture says so ("Press F1 to open the settings menu (or hold Start on the
-    controller)"); "Show the startup message" on the Display tab turns it off.
+    controller)"); "Show the startup message" on the Extras tab turns it off.
 8.  Close other games and launchers (Steam, Xbox app, Epic...), and let Windows Update
     finish first. Nothing else should be running while you test.
 
@@ -219,15 +257,22 @@ B. Start the game (on the Legion Go)
       Adaptive frame rate . leave On
       Render thread ....... Auto / On / Off; the line under it says whether it is on
       Render scale ........ 100% (the screen's size) or less or more (part F)
-      Anisotropic filtering  Off / 2x / 4x / 8x / 16x (further down, under Textures)
+      Menu scale .......... the settings menu's own size, 50% to 200% (the last setting)
+    The "Graphics" tab (the second):
+      Anisotropic filtering  Off / 2x / 4x / 8x / 16x
       Anti-aliasing ....... Off / FXAA / SMAA / MSAA / MSAA + SMAA (part F)
+      Ambient occlusion ... Off / SSAO / GTAO
+    The "Extras" tab (the sixth):
+      Photo mode, Freeze .. the free camera and the freeze (F3, F2); see "New in this package"
       Character fur ....... On (the Xbox's fur) / Off for Crash only (Crash as on the PS2;
                             the others keep theirs) / Off for everyone
       See-through gems and crystals in the hub ... Off (the game's look) / On (glass)
+      Show the startup message, Pause the game while this menu is open, Pause when in the
+      background, Skip the title animation
     On the Audio tab: Mute Droid Void's background drone (from the level's next start).
     Changes apply at once and are saved to crash_twoc.ini when you close the menu.
     This package starts with: Render size "Monitor (native, ...)" (the screen's own size),
-    Frame rate "Match display", Anisotropic filtering 4x, Anti-aliasing Off, Render scale
+    Frame rate "Match display", Anisotropic filtering 4x (Graphics tab), Anti-aliasing Off, Render scale
     100%, Render thread Auto, Adaptive frame rate On. The tests below say which of these
     to change, and when to put them back.
 6.  To stop: Quit game at the bottom of the settings menu (Yes), or close the game window
@@ -283,12 +328,12 @@ All on the Legion Go. Write what you see in Test notes.txt as you go.
         Anisotropic filtering 4x). Play avalanch and the snow boss for about 10 minutes.
         Close the game.
      b. With the game closed, Legion Space: Balanced. Start "Play Crash.bat", open the
-        settings menu, and on the Display tab set three things: Render size 1280x800 (in
-        the 16:10 group), Frame rate 72 fps, and Anisotropic filtering 2x. Leave everything
-        else as it is. Play the same for about 10 minutes. Close the game.
-     c. Optional: Balanced again, but with the package's settings back: on the Display tab
-        set Render size "Monitor (native, ...)", Frame rate "Match display" and Anisotropic
-        filtering 4x (the last round's "very slow demo" was Balanced with these settings).
+        settings menu, and set three things: on the Display tab Render size 1280x800 (in
+        the 16:10 group) and Frame rate 72 fps, on the Graphics tab Anisotropic filtering
+        2x. Leave everything else as it is. Play the same for about 10 minutes. Close the game.
+     c. Optional: Balanced again, but with the package's settings back: Render size "Monitor
+        (native, ...)" and Frame rate "Match display" (Display tab), Anisotropic filtering
+        4x (Graphics tab) (the last round's "very slow demo" was Balanced with these settings).
         5 minutes is enough. Close the game.
    For each, write down: the counter's "Game N/s" and "Shown N/s" a minute into each level,
    how warm the back got, the fan, and anything odd. If the Legion Go crashes or freezes:
@@ -298,8 +343,8 @@ All on the Legion Go. Write what you see in Test notes.txt as you go.
 
 4. The lighter settings on battery (cast_bug's start, then avalanch). Unplug the charger
    and write down the time and the percentage. With the game closed, set Legion Space to
-   Balanced. Start "Play Crash.bat", and on the settings menu's Display tab set Render size
-   1280x800, Frame rate 72 fps and Anisotropic filtering 2x (as in test 3b; they are saved,
+   Balanced. Start "Play Crash.bat", and in the settings menu set Render size 1280x800 and
+   Frame rate 72 fps (Display tab), Anisotropic filtering 2x (Graphics tab) (as in test 3b; they are saved,
    so if you did 3b last they are still set). Go to cast_bug and stand 30 s: write down the
    counter and the Measured line. Then play avalanch for 5 minutes. Close the game, write
    down the battery percentage and plug the charger back in.
@@ -316,8 +361,9 @@ All on the Legion Go. Write what you see in Test notes.txt as you go.
      - anything you saw: stutter, Crash in slow motion
 
 5. Anti-aliasing (plugged in, Legion Space Performance, set before starting): start "Play
-   Crash.bat". On the Display tab set Render size "Monitor (native, ...)", Frame rate
-   "Match display", Anti-aliasing "MSAA 2x + SMAA" and Anisotropic filtering 16x. Then
+   Crash.bat". On the Display tab set Render size "Monitor (native, ...)" and Frame rate
+   "Match display", on the Graphics tab Anti-aliasing "MSAA 2x + SMAA" and Anisotropic
+   filtering 16x. Then
    cast_bug's start for 30 s: the counter, the Measured line and how it looks (edges,
    fences, leaves) against test 3a. Afterwards set Anti-aliasing back to Off and
    Anisotropic filtering back to 4x.
@@ -331,12 +377,13 @@ All on the Legion Go. Write what you see in Test notes.txt as you go.
      - Frame rate 72 fps from the list: does the line under it say "Even: 72.00 fps, each
        frame held 2 refreshes"?
      - Reset display settings to defaults (bottom of the Display tab), with the controller:
-       does No (or B) leave everything as it was, and Yes put the tab back to the defaults
-       (a small window, Frame rate Game (60))? Afterwards set the package's settings again
-       (the Aspect ratio stays 16:10): Render size "Monitor (native, ...)", Frame rate
-       "Match display", Anisotropic filtering 4x, Render thread Auto, Show frame rate
-       Simple, HUD position Screen edges, Skip the title animation on. (Or close the game
-       and copy crash_twoc.ini from the desktop again.)
+       does No (or B) leave everything as it was, and Yes put the Display and Graphics tabs
+       back to the defaults (a small window, Frame rate Game (60)) while the Extras tab keeps
+       its settings? Afterwards set the package's settings again (the Aspect ratio stays
+       16:10): Render size "Monitor (native, ...)", Frame rate "Match display", Render
+       thread Auto, Show frame rate Simple, HUD position Screen edges (Display tab),
+       Anisotropic filtering 4x (Graphics tab). (Or close the game and copy crash_twoc.ini
+       from the desktop again.)
      - The About tab: does it name the Legion Go's graphics chip (AMD Radeon) and driver,
        1920x1200 (or your resolution) at 144 Hz, and Windows 11? Copy its lines into Test
        notes.txt.
@@ -348,7 +395,7 @@ All on the Legion Go. Write what you see in Test notes.txt as you go.
        Yes): does the game close, and the black window with it?
      - Switch tabs with LB / RB: does the menu stay the same size and in the same place?
        On the Controls tab, does the D-pad scroll down the long list and back up?
-     - Skip the title animation off (Display tab): does it ask "Restart the game to play
+     - Skip the title animation off (Extras tab): does it ask "Restart the game to play
        the title animation again?" Choose Later: is there an orange "Changes waiting for a
        restart" line at the bottom? Press its Restart now: does the game come back (the
        title animation plays at its own speed now)? Then switch it on again and Restart now.
@@ -428,9 +475,9 @@ F. The new settings
 -------------------
 All in the settings menu (Menu held, or F1), saved to crash_twoc.ini.
   On battery or in Legion Space's Balanced mode, lighter settings keep the chip cooler,
-  quieter and longer on battery: Render size 1280x800, Frame rate 72 fps and Anisotropic
-  filtering 2x (Display tab). Plugged in, the package's own: Render size "Monitor (native,
-  ...)", Frame rate "Match display", Anisotropic filtering 4x.
+  quieter and longer on battery: Render size 1280x800, Frame rate 72 fps (Display tab) and
+  Anisotropic filtering 2x (Graphics tab). Plugged in, the package's own: Render size
+  "Monitor (native, ...)", Frame rate "Match display", Anisotropic filtering 4x.
   Render size (Display tab) .......... the sizes are grouped by shape: 4:3, 16:10, 16:9 and
         21:9, the group of the chosen aspect ratio marked (16:10 here: 1280 x 800,
         1440 x 900, 1680 x 1050, 1920 x 1200, 2560 x 1600, 3840 x 2400); Custom takes any
@@ -442,16 +489,20 @@ All in the settings menu (Menu held, or F1), saved to crash_twoc.ini.
         less to draw (softer, cooler, longer on battery: 67% or 75% are good there); over
         100% it draws more than is shown and scales it down (supersampling: smoother
         edges, at a cost). Applies at once.
-  Anti-aliasing: MSAA 2x/4x/8x + SMAA (Display tab) ..... MSAA, then SMAA on the finished
+  Anti-aliasing: MSAA 2x/4x/8x + SMAA (Graphics tab) .... MSAA, then SMAA on the finished
         picture, which also smooths the edges MSAA leaves inside see-through textures
         (fences, leaves). Applies at once.
-  Pause when in the background (top of the menu, off by default) .... the game waits,
+  Pause when in the background (Extras tab, off by default) ......... the game waits,
         silent, while its window is minimised or another window is in front, and goes on
         when it is in front again. Not while it is starting or going full screen.
-  Skip the title animation (Display tab, on in this package) ......... at each start the
+  Skip the title animation (Extras tab, on in this package) .......... at each start the
         game plays its title animation (Crash and the title music) before the main menu;
-        on, the animation runs many times faster, so the menu opens about 20 seconds sooner. The logos and
+        on, the animation runs many times faster, so the menu opens about 20 seconds sooner,
+        and its sound track (Cortex's lines) is left out; the logos, the title music and
         the menu itself are the same. From the next start (it asks whether to restart now).
+  Menu scale (Display tab) ................ the settings menu's size, 50% to 200%.
+  Photo mode, Freeze (Extras tab) ......... a free camera, the game held; never saved.
+  Freecam controls (Controls tab) ......... photo mode's keys, buttons and sliders.
   Graphics card (Display tab, Automatic in this package) ..... which graphics chip draws the
         game; on a PC with two (a laptop's Intel and NVIDIA) it can name one. From the next
         start: it asks "Restart the game to use ...?" (Restart now / Later).
