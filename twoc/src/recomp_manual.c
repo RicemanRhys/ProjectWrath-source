@@ -409,14 +409,159 @@ void sub_000B0EF0(void)
     d3db_panel(0);
 }
 
+/* Step 102 (notes 18.105): "See-through gems and crystals in the hub". In a
+ * level a crystal or gem already collected is drawn see-through: its mesh
+ * with a refraction material (flags 0x10000: pixel shader 523299A9 over the
+ * screen's copy and a cube map, tinted by the material's colour, no blending,
+ * depth written), and a gem's once more with a layer of its colour at 63.5%
+ * (162/255) blended over it without depth writes. The hub's pads show them
+ * with display models of their own (the model table's crystal_h 0xC1,
+ * crate_gem_h 0xC2, bonus_gem_h 0xC3, red/green/blue/purple/yellow_gem_h
+ * 0xC4-0xC8: the level's meshes, each with one plain material), queued by
+ * sub_00035F80 called at 0x69F9B in the pads' display loop. With the setting
+ * on, as that call queues one of them (sub_000A42F0 -> this wrapper), its
+ * material takes the refraction's flags (the relics' glass material's), and a
+ * gem is queued again with a copy of the relics' tint material in its own
+ * colour at the level's alpha. The game draws both itself, so recording,
+ * interpolation, baking and the render thread see ordinary draws. The relics
+ * are the game's own glass already; the pads' outline icons are the hub's
+ * scenery. Off: a flipped material gets its flags back as it is next queued. */
+#define HUB_QUEUE_RET   0x000A4547u     /* sub_000A42F0's call of sub_0009EF10 */
+#define HUB_CLASS_RET   0x000A4500u     /* sub_000A42F0's call of sub_000B63F0 */
+#define MAT_OVERRIDE    0x004234E8u     /* a material every item queued takes instead of its part's, or 0 */
+#define HUB_MODEL_RET   0x00035F91u     /* sub_00035F80's call of sub_000A42F0 */
+#define HUB_PAD_RET     0x00069FA0u     /* the pads' display loop's call of sub_00035F80 (0x69F9B) */
+#define MDL_TABLE       0x0019C7F0u     /* 32 bytes an id: the model set, its def; +0x10 the name */
+#define MAT_COLOUR      0x14            /* a material's diffuse r, g, b (floats) */
+#define MAT_ALPHA       0x34
+#define MAT_TEXTURE     0x38
+#define MAT_FLAGS       0x3C
+#define MAT_SIZE        0xA0
+#define MAT_REFRACT     0x00010000u     /* the flag of the refraction pass */
+#define MAT_TINT        0x000200CAu     /* a blended layer, sorted by depth (the relics' tint) */
+#define ITEM_POOL_N     0x001A3B94u     /* the display list's free items, counted down */
+#define ITEM_POOL       0x003F2708u     /* 0x2C bytes an item */
+#define HUB_GEM_ALPHA   0x3F22A2A3u     /* 162/255: Arctic Antics' collected blue gem's layer */
+static volatile LONG g_hub_see = -1;    /* the setting; -1 until RECOMP_HUB_SEETHROUGH is read */
+static uint32_t g_hub_tint;             /* 8 guest materials: a gem's colour layer, by model id - 0xC1 */
+static struct { uint32_t mat, flags; } g_hub_orig[8];  /* a display material made to refract, and its flags */
+static int g_hub_busy;                  /* queueing a gem's colour layer */
+static int g_hub_used;                  /* a material was made to refract: off has to give it back */
+static volatile LONG g_hub_logged = -1;
+
+void twoc_set_hub_seethrough(int on)
+{
+    InterlockedExchange(&g_hub_see, on ? 1 : 0);
+}
+
+/* The mesh of model-table id `id` (0 when it isn't loaded). */
+static uint32_t hub_model(uint32_t id)
+{
+    uint32_t set = MEM32(MDL_TABLE + 32 * id), def = MEM32(MDL_TABLE + 32 * id + 4);
+
+    return set && def ? MEM32(MEM32(set + 0x14) + 4 * MEM32(MEM32(def + 0x40) + 0x40)) : 0;
+}
+
+/* The render class sub_000B63F0 gives an item of mesh part `part` (with the
+ * material override 0x4234E8 as it stands): which of the display list's
+ * lists sub_0009EF10 links it into, kept in the item at +0x2A. */
+static uint16_t hub_class(uint32_t part)
+{
+    PUSH32(esp, part);
+    PUSH32(esp, HUB_CLASS_RET);
+    RECOMP_ABI_CALL(0x000B63F0u, sub_000B63F0);
+    esp += 4;                           /* cdecl */
+    return (uint16_t)eax;
+}
+
+/* Called with the wrapper's stack as the game's call left it, before the
+ * lifted body: the display material made to refract or given its flags
+ * back (and the item's class with it, so the change shows in this frame);
+ * for a gem with the setting on, its colour layer's material (0 none). */
+static uint32_t hub_seethrough(void)
+{
+    uint32_t item = MEM32(esp + 8), part = MEM32(item + 0x1C), mat = part ? MEM32(part + 4) : 0;
+    uint32_t model = MEM32(esp + 0x84), id, m, p, n, flags, tint = 0, refract = 0;
+    int on;
+
+    if (g_hub_see < 0) {
+        const char *v = getenv("RECOMP_HUB_SEETHROUGH");
+        InterlockedCompareExchange(&g_hub_see, v && strcmp(v, "1") == 0, -1);
+    }
+    on = g_hub_see > 0;
+    for (id = 0xC1; id <= 0xC8 && hub_model(id) != model; id++)
+        ;
+    if (!mat || id > 0xC8)              /* a relic: the game's glass already */
+        return 0;
+    m = hub_model(1);                   /* relic_p: its glass and its tint layer */
+    for (p = m ? MEM32(m + 0xC) : 0, n = 0; p && n < 16; p = MEM32(p), n++) {
+        uint32_t f = MEM32(MEM32(p + 4) + MAT_FLAGS);
+        if (f == MAT_REFRACT)
+            refract = 1;
+        else if (f == MAT_TINT && !MEM32(MEM32(p + 4) + MAT_TEXTURE))
+            tint = MEM32(p + 4);
+    }
+    if (!refract || !tint)
+        return 0;
+    if (g_hub_logged != on && (on || g_hub_used)) {     /* only once it has been on */
+        InterlockedExchange(&g_hub_logged, on);
+        fprintf(stderr, "[HUB] see-through gems and crystals in the hub: %s\n", on ? "on" : "off");
+    }
+    flags = MEM32(mat + MAT_FLAGS);
+    if (!on && g_hub_orig[id - 0xC1].mat == mat && flags == MAT_REFRACT)
+        MEM32(mat + MAT_FLAGS) = g_hub_orig[id - 0xC1].flags;
+    else if (on && flags != MAT_REFRACT) {
+        g_hub_orig[id - 0xC1].mat = mat;
+        g_hub_orig[id - 0xC1].flags = flags;
+        MEM32(mat + MAT_FLAGS) = MAT_REFRACT;
+        g_hub_used = 1;
+    }
+    if (MEM32(mat + MAT_FLAGS) != flags)
+        MEM16(item + 0x2A) = hub_class(part);
+    if (!on || id == 0xC1)              /* the crystal: a level's has no colour layer */
+        return 0;
+    if (!g_hub_tint)
+        g_hub_tint = xbox_HeapAlloc(8 * MAT_SIZE, 16);
+    if (!g_hub_tint)
+        return 0;
+    m = g_hub_tint + (id - 0xC1) * MAT_SIZE;
+    memcpy((void *)XBOX_PTR(m), (const void *)XBOX_PTR(tint), MAT_SIZE);
+    memcpy((void *)XBOX_PTR(m + MAT_COLOUR), (const void *)XBOX_PTR(mat + MAT_COLOUR), 12);
+    MEM32(m + MAT_ALPHA) = HUB_GEM_ALPHA;
+    return m;
+}
+
 /* sub_0009EF10(material, item) links a queued item into the display list;
  * sub_000A8240(item) draws one when the list is flushed. */
 extern void sub_0009EF10_gen(void);
 void sub_0009EF10(void)
 {
+    uint32_t tint = 0, item = MEM32(esp + 8), n, copy, save;
+
     if (d3db_host_on)
-        d3db_item_queued(MEM32(esp + 8));
+        d3db_item_queued(item);
+    if (MEM32(esp) == HUB_QUEUE_RET && MEM32(esp + 0x80) == HUB_MODEL_RET && MEM32(esp + 0x90) == HUB_PAD_RET
+            && (g_hub_see || g_hub_used) && !g_hub_busy)
+        tint = hub_seethrough();        /* step 102 */
     sub_0009EF10_gen();
+    if (!tint || !(n = MEM32(ITEM_POOL_N)))
+        return;
+    MEM32(ITEM_POOL_N) = --n;           /* the gem's colour layer: the item again, in its own class */
+    copy = ITEM_POOL + n * 0x2C;
+    memcpy((void *)XBOX_PTR(copy), (const void *)XBOX_PTR(item), 0x2C);
+    save = MEM32(MAT_OVERRIDE);
+    MEM32(MAT_OVERRIDE) = tint;
+    MEM16(copy + 0x2A) = hub_class(MEM32(item + 0x1C));
+    MEM32(MAT_OVERRIDE) = save;
+    if (d3db_host_on)
+        d3db_hub_tint_item(copy);
+    g_hub_busy = 1;
+    PUSH32(esp, copy);
+    PUSH32(esp, tint);
+    PUSH32(esp, HUB_QUEUE_RET);
+    RECOMP_ABI_CALL(0x0009EF10u, sub_0009EF10);
+    esp += 8;                           /* cdecl: the caller pops the arguments */
+    g_hub_busy = 0;
 }
 
 extern void sub_000A8240_gen(void);

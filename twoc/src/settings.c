@@ -46,6 +46,9 @@ static const key_t_ g_fixed[] = {
       "1: \"Press F1 to open the settings menu\" for the first seconds, 0: not" },
     { "hud", "RECOMP_HUD", "centre (the game's 4:3 places) or edges: the HUD counters at the screen's edges, wider than 4:3" },
     { "fur", "RECOMP_FUR", "1: Crash's fur (and Coco's, the same layer), the Xbox's look; 0: without, as on the PS2" },
+    { "hub_seethrough", "RECOMP_HUB_SEETHROUGH",
+      "1: the hub pads' crystals and gems drawn see-through, as a level draws one already collected; 0: solid, the"
+      " game's own look" },
     { "volume", "RECOMP_VOLUME", "0-100, the game's level in Windows' volume mixer" },
     { "music_volume", "RECOMP_MUSIC_VOLUME", "0-100: music, ambience and speech (the game's streams)" },
     { "effects_volume", "RECOMP_EFFECTS_VOLUME", "0-100: the sound effects" },
@@ -496,6 +499,8 @@ void twoc_settings_current(twoc_settings_t *s)
     s->hud = v && _stricmp(v, "edges") == 0;
     v = getenv("RECOMP_FUR");
     s->fur = !(v && strcmp(v, "0") == 0);  /* step 101 */
+    v = getenv("RECOMP_HUB_SEETHROUGH");
+    s->hub_seethrough = v && strcmp(v, "1") == 0;   /* step 102 */
     v = getenv("RECOMP_VOLUME");
     s->volume = v && *v ? atoi(v) : -1;
     if (s->volume > 100)
@@ -561,6 +566,7 @@ void twoc_settings_display_defaults(twoc_settings_t *s)
     s->ao_half = 0;
     s->hud = 0;
     s->fur = 1;                         /* step 101 */
+    s->hub_seethrough = 0;              /* step 102 */
 }
 
 /* Key i's value in `s` as the file writes it ("" for a volume never set). */
@@ -599,6 +605,8 @@ static void key_text(const twoc_settings_t *s, size_t i, char *buf, size_t cap)
         snprintf(buf, cap, "%s", s->hud ? "edges" : "centre");
     else if (strcmp(k, "fur") == 0 && !s->fur)
         snprintf(buf, cap, "0");        /* step 101: on, the default: unwritten */
+    else if (strcmp(k, "hub_seethrough") == 0 && s->hub_seethrough)
+        snprintf(buf, cap, "1");        /* step 102: off, the default: unwritten */
     else if (strcmp(k, "volume") == 0 && s->volume >= 0)
         snprintf(buf, cap, "%d", s->volume);
     else if (strcmp(k, "music_volume") == 0 && s->music >= 0)

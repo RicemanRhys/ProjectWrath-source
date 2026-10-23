@@ -9197,6 +9197,10 @@ static void overlay_apply(twoc_settings_t *was, const twoc_settings_t *s)
         d3db_set_fur(s->fur);
         fprintf(stderr, "[OVL] Crash's fur: %s\n", s->fur ? "on" : "off");
     }
+    if (s->hub_seethrough != was->hub_seethrough) {    /* step 102: from the next frame */
+        twoc_set_hub_seethrough(s->hub_seethrough);
+        fprintf(stderr, "[OVL] see-through gems and crystals in the hub: %s\n", s->hub_seethrough ? "on" : "off");
+    }
     if (s->startup_message != was->startup_message) {  /* step 86: off takes it away at once */
         InterlockedExchange(&g_startmsg, s->startup_message);
         fprintf(stderr, "[OVL] startup message: %s\n", s->startup_message ? "on" : "off");
@@ -10377,6 +10381,8 @@ static void trigger_file(unsigned swap_no)
                 ts.pause_unfocused = atoi(v) != 0;
             } else if (strcmp(k, "fur") == 0) {             /* step 101 */
                 ts.fur = atoi(v) != 0;
+            } else if (strcmp(k, "hubglass") == 0) {        /* step 102 */
+                ts.hub_seethrough = atoi(v) != 0;
             } else {
                 fprintf(stderr, "[D3DB] trigger file: set %s: not a setting here\n", k);
             }

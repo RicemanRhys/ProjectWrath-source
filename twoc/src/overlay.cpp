@@ -880,6 +880,17 @@ static int tab_display(twoc_settings_t *s, const ovl_info_t *in)
              "the PlayStation 2 (his reflection and shadow have none either way). Coco's fur is the same layer "
              "and goes with it. Applied at once.");
     }
+    {   /* step 102: the hub pads' crystals and gems as a level draws one collected */
+        bool g = s->hub_seethrough != 0;
+        if (ImGui::Checkbox("See-through gems and crystals in the hub", &g)) {
+            s->hub_seethrough = g;
+            r |= OVL_CHANGED;
+        }
+        more("On: the crystals and gems on the hub's pads drawn see-through, the way a level draws one you have "
+             "already collected (glass that bends what is behind it, a gem in its colour over that). Off: solid, "
+             "the game's own look. The relics are glass already and stay as they are; so do the outline icons of "
+             "what is still to find. Applied at once.");
+    }
     {   /* step 91: the render size by aspect ratio, a custom one, and what it draws */
         static const ImVec4 mark(1.0f, 0.8f, 0.3f, 1.0f);
         static bool custom;
@@ -1270,7 +1281,7 @@ static int tab_display(twoc_settings_t *s, const ovl_info_t *in)
          "Render size Game (480 lines), Render scale 100%, Pacing Auto, Frame rate Game (60), Adaptive On, "
          "Render thread Off, Show frame rate Off, the startup message on, Skip the title animation off, "
          "Anisotropic filtering Off, Anti-aliasing Off, Ambient occlusion Off, HUD in the centre, Crash's fur "
-         "on. Fullscreen, "
+         "on, See-through gems and crystals in the hub off. Fullscreen, "
          "the aspect ratio, the graphics card, sound, controls and saves stay as they are. Asks first.");
     if (g_measure)                      /* step 97: measured: the question's state isn't touched */
         return r;

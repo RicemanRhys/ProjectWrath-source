@@ -2369,6 +2369,8 @@ static void draw_viewport(d3dh_draw_t *dr)
  * render states, the viewport and, for untransformed vertices, the
  * fixed-function state. Returns 0 (lit by xbox_d3d8 or unlit), 1 (to be lit
  * on the CPU: LIGHTING is already off in `rs`), or -1 (skipped and counted). */
+static int hub_tint_draw(void);
+
 static int setup_draw(d3dh_draw_t *dr, uint32_t fvf, d3dh_tex_t tex[4], d3dh_state_t rs[64],
                       d3dh_state_t tss[4][16], d3dh_ps_t *ps, d3dh_ff_t *ff)
 {
@@ -2451,6 +2453,20 @@ static int setup_draw(d3dh_draw_t *dr, uint32_t fvf, d3dh_tex_t tex[4], d3dh_sta
         InterlockedIncrement(&g_copy_sampled);
     dr->rs = rs;
     dr->n_rs = translate_rs(rs);
+    if (hub_tint_draw()) {              /* step 102: a hub gem's colour layer at 162/255 */
+        for (i = 0; i < dr->n_tss[0]; i++)
+            if (tss[0][i].state == PTSS_COLOROP)
+                tss[0][i].value = 2;    /* SELECTARG1: the diffuse colour, as stage 0 disabled gave it */
+            else if (tss[0][i].state == PTSS_COLORARG1 || tss[0][i].state == PTSS_ALPHAARG1)
+                tss[0][i].value = 0;    /* DIFFUSE */
+            else if (tss[0][i].state == PTSS_ALPHAOP)
+                tss[0][i].value = 4;    /* MODULATE */
+            else if (tss[0][i].state == PTSS_ALPHAARG2)
+                tss[0][i].value = 3;    /* TFACTOR */
+        for (i = 0; i < dr->n_rs; i++)
+            if (rs[i].state == PRS_TEXTUREFACTOR)
+                rs[i].value = 0xA2FFFFFFu;
+    }
     if ((fvf & FVF_POSITION_MASK) == FVF_XYZ) {
         describe_ff(ff);
         dr->ff = ff;
@@ -3953,6 +3969,37 @@ void d3db_item_drawn(uint32_t item, uint32_t ret)
     g_item_hud = item && g_items[s].item == item && g_items[s].swap == (uint32_t)g_swaps ? g_items[s].hud : 0;
 }
 
+/* Step 102: the hub's gems' colour layers (recomp_manual.c, "See-through
+ * gems and crystals in the hub"). A level draws a collected gem's layer at
+ * 63.5% through its material's alpha, which reaches the gem's program as a
+ * constant v2.w; the hub's display meshes have vertex colours there, alpha 1,
+ * so the bridge makes stage 0's alpha the diffuse alpha times a texture
+ * factor of 162/255 for those draws (stage 0 is disabled in them: the
+ * diffuse colour, which stays). The items are noted as they are queued, for
+ * that frame's flush. */
+#define HUB_TINT_SLOTS 32
+static struct { uint32_t item, swap; } g_hub_tint[HUB_TINT_SLOTS];
+static unsigned g_hub_tint_n;
+
+void d3db_hub_tint_item(uint32_t item)
+{
+    g_hub_tint[g_hub_tint_n % HUB_TINT_SLOTS].item = item;
+    g_hub_tint[g_hub_tint_n % HUB_TINT_SLOTS].swap = (uint32_t)g_swaps;
+    g_hub_tint_n++;
+}
+
+static int hub_tint_draw(void)
+{
+    unsigned i;
+
+    if (!g_item || !g_hub_tint_n)
+        return 0;
+    for (i = 0; i < HUB_TINT_SLOTS; i++)
+        if (g_hub_tint[i].item == g_item && g_hub_tint[i].swap == (uint32_t)g_swaps)
+            return 1;
+    return 0;
+}
+
 static int host_draw(d3dh_draw_t *dr)
 {
     float cam[32];
@@ -4696,6 +4743,13 @@ static void drawlog(const char *path, uint32_t xdk_prim, uint32_t n, uint32_t fv
                     ch[6], ch[7]);
         else
             fprintf(stderr, "[D3DB] drawlog   item %08X type %u\n", g_item, MEM32(g_item + 4));
+        if (MEM32(g_item + 0x18)) {     /* step 102: its fields, its part's material, where its matrix puts it */
+            uint32_t m = MEM32(g_item + 0x18), part = MEM32(g_item + 0x1C);
+            fprintf(stderr, "[D3DB] drawlog   itemx %08X %08X %08X %08X arg %08X part %08X mat %08X at (%.3f %.3f %.3f) diag (%.3f %.3f %.3f)\n",
+                    MEM32(g_item + 8), MEM32(g_item + 0xC), MEM32(g_item + 0x10), MEM32(g_item + 0x14), MEM32(g_item + 0x20),
+                    part, part ? MEM32(part + 4) : 0, (double)MEMF(m + 0x30), (double)MEMF(m + 0x34), (double)MEMF(m + 0x38),
+                    (double)MEMF(m), (double)MEMF(m + 0x14), (double)MEMF(m + 0x28));
+        }
     }
     /* S5: the blending and stage-0/1 ops too (XDK values), and the pixel shader. */
     fprintf(stderr, "[D3DB] drawlog   blend %u %X %X op %X atest %u %X ref %X z %u/%u; stage 0 colour %u %X %X alpha"

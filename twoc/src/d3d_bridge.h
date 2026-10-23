@@ -85,6 +85,11 @@ void d3db_item_drawn(uint32_t item, uint32_t ret);
 /* Step 101: the fur shells drawn (1, the default) or not (0), from the next
  * draw (F1, Display, "Crash's fur"). */
 void d3db_set_fur(int on);
+/* Step 102 (recomp_manual.c): the hub pads' crystals and gems see-through
+ * (1) or solid (0, the game's own), from the next frame (F1, Display). */
+void twoc_set_hub_seethrough(int on);
+/* Step 102: an item queued as a hub gem's colour layer, this frame. */
+void d3db_hub_tint_item(uint32_t item);
 /* sub_000B0EF0's wrapper (the game's panel: pause menu, HUD): the guest
  * stack pointer at its entry, 0 once it returns. */
 void d3db_panel(uint32_t entry_esp);
