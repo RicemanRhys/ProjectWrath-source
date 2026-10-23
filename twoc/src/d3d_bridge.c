@@ -5310,7 +5310,7 @@ static void mirror_swap(void)
                 lby = st.replay_bytes;
             }
             if (st.interp_frames || st.interp_off) {    /* step 61: frame interpolation */
-                static unsigned lf, ls, lst, ltu, lm, lfi, lo, lvp, lff, lk, lcp, loc;
+                static unsigned lf, ls, lst, ltu, lm, lfi, lo, lvp, lff, lk, lcp, loc, lcl;
                 static double lmt, lcf, lcd;
                 unsigned f = st.interp_frames - lf, subs = st.interp_subs - ls, m = st.interp_cut_match - lm;
                 /* step 96: the frames held for matches, how many of their draws matched (the interpolated
@@ -5319,7 +5319,8 @@ static void mirror_swap(void)
                                  " (draws matched %.1f%%), held: camera step %u, turn %u, matches %u (draws matched"
                                  " %.1f%% of %.0f), first %u,"
                                  " other %u; a sub-frame redraws program draws %.0f, fixed-function %.0f, others"
-                                 " as they were %.0f (another camera's %.0f), camera-position registers %.0f\n", st.interp_per, f,
+                                 " as they were %.0f (another camera's %.0f), camera-position registers %.0f,"
+                                 " corrected in clip space %.0f\n", st.interp_per, f,
                                  f ? 100.0 * (st.interp_matched - lmt) / f : 0.0, st.interp_cut_step - lst,
                                  st.interp_cut_turn - ltu, m, m ? 100.0 * (st.interp_cut_frac - lcf) / m : 0.0,
                                  m ? (st.interp_cut_draws - lcd) / m : 0.0, st.interp_cut_first - lfi,
@@ -5327,7 +5328,9 @@ static void mirror_swap(void)
                                  subs ? (double)(st.interp_ff - lff) / subs : 0.0,
                                  subs ? (double)(st.interp_kept - lk) / subs : 0.0,
                                  subs ? (double)(st.interp_other_cam - loc) / subs : 0.0,
-                                 subs ? (double)(st.interp_cpos - lcp) / subs : 0.0);
+                                 subs ? (double)(st.interp_cpos - lcp) / subs : 0.0,
+                                 subs ? (double)(st.interp_clipfix - lcl) / subs : 0.0);
+                lcl = st.interp_clipfix;
                 lf = st.interp_frames;
                 ls = st.interp_subs;
                 lst = st.interp_cut_step;

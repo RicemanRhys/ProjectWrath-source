@@ -398,6 +398,8 @@ static double g_icut_step = 2.0, g_icut_turn = 30.0, g_icut_match = 0.5;   /* RE
 static double g_isnap = 1.5;            /* step 62: RECOMP_D3D_BRIDGE_INTERP_OBJECTS, an object stepping further snaps; 0: objects off */
 static int g_iskel = 1;                 /* step 66: RECOMP_D3D_BRIDGE_INTERP_SKELETONS=0, bones one by one as before */
 static int g_imatch = 1;                /* step 68: RECOMP_D3D_BRIDGE_INTERP_MATCH=0, step 62's pairing in draw order */
+static int g_iclip;                     /* step 101: RECOMP_D3D_BRIDGE_INTERP_CLIPFIX=1, the camera corrected in clip space */
+static double g_ibias;                  /* step 101: RECOMP_D3D_BRIDGE_INTERP_BIAS, D24 steps (with CLIPFIX=1) */
 static int g_ipairlog, g_irec_this;     /* step 68: RECOMP_D3D_BRIDGE_PAIRLOG=1, each recorded frame's pairs logged */
 static unsigned g_ipair_swap;           /* the swap being paired (the pair log) */
 static int g_interp_t0;                 /* RECOMP_D3D_BRIDGE_INTERP_T0: sub-frames at t = 0 .. (k-1)/k (a check) */
@@ -1334,6 +1336,11 @@ int d3dh_create(unsigned width, unsigned height, unsigned host_w, unsigned host_
         g_iskel = !(e && strcmp(e, "0") == 0);
         e = getenv("RECOMP_D3D_BRIDGE_INTERP_MATCH");       /* step 68: "0" pairs in draw order (a check) */
         g_imatch = !(e && strcmp(e, "0") == 0);
+        e = getenv("RECOMP_D3D_BRIDGE_INTERP_CLIPFIX");     /* step 101: "1" in clip space (a study, off: */
+        g_iclip = e && strcmp(e, "1") == 0;                 /* it didn't stop the decals' flicker) */
+        e = getenv("RECOMP_D3D_BRIDGE_INTERP_BIAS");        /* step 101: the program draws' depth bias, D24 steps */
+        g_ibias = e && *e ? atof(e) : g_ibias;
+        d3d8_SetClipFixBias((float)(g_ibias / 16777216.0));
         e = getenv("RECOMP_D3D_BRIDGE_PAIRLOG");
         g_ipairlog = e && *e && strcmp(e, "0") != 0;
         e = getenv("RECOMP_FRAMERATE_ADAPTIVE");   /* step 75: "0" always the display's count (settings.c reads */
@@ -4414,6 +4421,7 @@ static int g_ipair[IC_CAMS];            /* this frame's camera -> the frame befo
 static struct {
     int on;
     double c[16], vfix[16], dp[16];     /* step 100: double, so each draw's matrices are rounded once, as the game's */
+    float cf[16];                       /* step 101: c as xbox_d3d8 applies it in clip space */
     float pos[3];
 } g_isub[IC_CAMS];                      /* this sub-frame's corrections, by camera */
 static double g_it;                     /* this sub-frame's t */
@@ -6885,6 +6893,7 @@ static void ic_sub(double t)
         m4_mul(tmp, pi, c);
         for (j = 0; j < 16; j++) {
             g_isub[i].c[j] = c[j];
+            g_isub[i].cf[j] = (float)c[j];
             g_isub[i].vfix[j] = vfix[j];
             g_isub[i].dp[j] = pi[j] - b->m[16 + j];
         }
@@ -6912,7 +6921,7 @@ static void ic_draw(const rcmd_t *c)
     const float *pb = NULL;
     d3dh_draw_t m;
     double wt[16];
-    int i, j, n, cam_on, w_move = 0, b_move = 0, in_place = 0;
+    int i, j, n, cam_on, w_move = 0, b_move = 0, in_place = 0, fix, kmoved = 0;
 
     REPLAY_SIDE();
 #define KREG(r) (kb[(r) >> 4] + 4 * ((r) & 15))
@@ -6930,6 +6939,18 @@ static void ic_draw(const rcmd_t *c)
         return;
     }
     cam_on = c->u.draw.cam < IC_CAMS && g_isub[c->u.draw.cam].on;
+    /* Step 101 (notes 18.104), with RECOMP_D3D_BRIDGE_INTERP_CLIPFIX=1 (a
+     * study, off by default): a draw under the frame's projection has its
+     * camera corrected in clip space by xbox_d3d8, after the transform made
+     * as the game frame made it (the same multiply in both shader paths),
+     * instead of in its matrices. Meant to give a decal drawn by a program
+     * and its wall drawn by fixed function the same depths, as in the game's
+     * own frames; measured, it didn't (Gold Rush's decal lost in 10-12 of
+     * 30 swaps, step 100's way 4-9): the game's frames don't give the two
+     * bit-identical clip positions either (the program's goes to the screen
+     * and back through 1/w), and a correction mixes x, y and w into the
+     * depth. A draw with its own projection keeps step 61's way. */
+    fix = cam_on && g_iclip && (c->u.draw.cls == IC_VP || c->u.draw.cls == IC_FF_PROJ);
     if (c->u.draw.obj >= 0) {           /* step 62: the object, if it moved */
         o = &g_iobj[g_ic][c->u.draw.obj];
         if (o->prev >= 0) {
@@ -7003,19 +7024,25 @@ static void ic_draw(const rcmd_t *c)
                 g_st.interp_obj_vp++;
             }
         }
-        if (cam_on) {                   /* ... C: the camera at t */
-            m4_mul(wvp, g_isub[c->u.draw.cam].c, t2);
-            memcpy(wvp, t2, sizeof(wvp));
+        if (cam_on) {                   /* ... C: the camera at t (in clip space when fix) */
+            if (!fix) {
+                m4_mul(wvp, g_isub[c->u.draw.cam].c, t2);
+                memcpy(wvp, t2, sizeof(wvp));
+            }
             for (n = 0; n < c->u.draw.n_cpos; n++) {
                 IC_KEEP(c->u.draw.cpos[n]);
                 memcpy(KREG(c->u.draw.cpos[n]), g_isub[c->u.draw.cam].pos, 3 * sizeof(float));
+                kmoved = 1;
             }
             g_st.interp_cpos += c->u.draw.n_cpos;
         }
-        for (j = 0; j < 4; j++) {
-            IC_KEEP(96 + j);
-            for (i = 0; i < 4; i++)
-                KREG(96 + j)[i] = (float)wvp[4 * i + j];
+        if (w_move || (cam_on && !fix)) {
+            for (j = 0; j < 4; j++) {
+                IC_KEEP(96 + j);
+                for (i = 0; i < 4; i++)
+                    KREG(96 + j)[i] = (float)wvp[4 * i + j];
+            }
+            kmoved = 1;
         }
         if (b_move) {                   /* the bones at t */
             int bi, moved = 0;
@@ -7089,6 +7116,7 @@ static void ic_draw(const rcmd_t *c)
                 moved = 1;
             }
             g_st.interp_bones += moved;
+            kmoved |= moved;
         }
         vp = *d->vprog;
         vp.consts = in_place ? NULL : k4_copy;
@@ -7099,7 +7127,8 @@ static void ic_draw(const rcmd_t *c)
     } else {
         double v[16], x[16];
         ff = *d->ff;
-        if (cam_on) {
+        if (cam_on && !fix) {
+            kmoved = 1;
             m4_from(d->ff->view, v);
             m4_mul(v, g_isub[c->u.draw.cam].vfix, x);
             for (i = 0; i < 16; i++)
@@ -7112,11 +7141,18 @@ static void ic_draw(const rcmd_t *c)
             for (i = 0; i < 16; i++)
                 ff.world[i] = (float)wt[i];
             g_st.interp_obj_ff++;
+            kmoved = 1;
         }
         m.ff = &ff;
         g_st.interp_ff++;
     }
-    draw_cmd(c, &m, 1);
+    if (fix) {
+        d3d8_SetClipFix(g_isub[c->u.draw.cam].cf);
+        g_st.interp_clipfix++;
+    }
+    draw_cmd(c, &m, kmoved);            /* step 101: its registers or matrices as recorded unless kmoved */
+    if (fix)
+        d3d8_SetClipFix(NULL);
     while (n_keep) {                    /* step 76: the recording as it was, for the next sub-frame */
         n_keep--;
         memcpy(KREG(keep[n_keep].reg), keep[n_keep].v, 4 * sizeof(float));
@@ -10331,6 +10367,10 @@ static void trigger_file(unsigned swap_no)
                     g_ao_radius = (float)atof(v);
             } else if (strcmp(k, "aodenoise") == 0) {
                 g_ao_denoise = atoi(v) > 0 ? atoi(v) : g_ao_denoise;
+            } else if (strcmp(k, "ibias") == 0) {           /* step 101: a test aid: the in-between frames' */
+                g_ibias = atof(v);                          /* program depth bias, D24 steps */
+                d3d8_SetClipFixBias((float)(g_ibias / 16777216.0));
+                fprintf(stderr, "[D3DB] trigger file: in-between program depth bias %g\n", g_ibias);
             } else if (strcmp(k, "aohalf") == 0) {
                 ts.ao_half = atoi(v) > 0;
             } else if (strcmp(k, "pausebg") == 0) {         /* step 90: pause_unfocused */
