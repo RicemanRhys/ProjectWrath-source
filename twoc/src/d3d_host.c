@@ -4622,6 +4622,65 @@ static void aff_lerp(const aff_t *a, const aff_t *b, double t, aff_t *o)
         o->t[i] = a->t[i] + (b->t[i] - a->t[i]) * t;
 }
 
+/* Step 103 (notes 18.106): an object's world at t between its two recorded
+ * worlds wa and wb (row-vector 4x4s), exact at both ends. A program draw's
+ * W is rebuilt as (WVP) P^-1 Cam from float32 registers: right as a
+ * projective matrix, but its last column and corner carry the rebuild's
+ * rounding, which grows with the camera's distance from the world's origin
+ * (late in Gold Rush, 375 units out: W[3][3] 0.99995 where 1 is meant, so a
+ * mesh drawn in world space, W = I, read 0.017 units off), and its axes a
+ * little off orthogonal. aff_lerp gives an exact affine W(t) (orthogonal
+ * axes, last column 0 0 0 1), so for an object that didn't move W(t) W^-1
+ * was that rounding, not I: in every in-between frame the buildings and
+ * ground drawn by programs shifted 16-20 px at 4K against those drawn by
+ * fixed function, and back at t = 1 (the user's shaking). Here what
+ * aff_lerp leaves out of each end is added back, blended linearly: W(0) and
+ * W(1) are the recorded matrices, an object that didn't move blends two
+ * copies of one transform, and one that moved keeps aff_lerp's path. */
+static void ic_wlerp(const double *wa, const double *wb, double t, double *o)
+{
+    aff_t a, b, r;
+    double qa[4], qb[4], la[3], lb[3], ra[9], rb[9];
+    int i, j;
+
+    for (i = 0; i < 3; i++)
+        for (j = 0; j < 3; j++) {
+            a.r[3 * i + j] = wa[4 * i + j];
+            b.r[3 * i + j] = wb[4 * i + j];
+        }
+    for (j = 0; j < 3; j++) {
+        a.t[j] = wa[12 + j];
+        b.t[j] = wb[12 + j];
+    }
+    aff_lerp(&a, &b, t, &r);
+    if (aff_rot(&a, qa, la) && aff_rot(&b, qb, lb)) {  /* aff_lerp's ends: each rotation rebuilt from its quaternion */
+        double na = sqrt(qa[0] * qa[0] + qa[1] * qa[1] + qa[2] * qa[2] + qa[3] * qa[3]);
+        double nb = sqrt(qb[0] * qb[0] + qb[1] * qb[1] + qb[2] * qb[2] + qb[3] * qb[3]);
+        for (j = 0; j < 4; j++) {
+            qa[j] /= na;
+            qb[j] /= nb;
+        }
+        m3_from_q(qa, ra);
+        m3_from_q(qb, rb);
+        for (i = 0; i < 3; i++)
+            for (j = 0; j < 3; j++) {
+                ra[3 * i + j] *= la[i];
+                rb[3 * i + j] *= lb[i];
+            }
+    } else {                            /* lerped element by element: its ends are a's and b's */
+        memcpy(ra, a.r, sizeof(ra));
+        memcpy(rb, b.r, sizeof(rb));
+    }
+    for (i = 0; i < 3; i++) {
+        for (j = 0; j < 3; j++)
+            o[4 * i + j] = r.r[3 * i + j] + (1 - t) * (a.r[3 * i + j] - ra[3 * i + j]) +
+                           t * (b.r[3 * i + j] - rb[3 * i + j]);
+        o[4 * i + 3] = wa[4 * i + 3] + (wb[4 * i + 3] - wa[4 * i + 3]) * t;
+        o[12 + i] = r.t[i];
+    }
+    o[15] = wa[15] + (wb[15] - wa[15]) * t;
+}
+
 /* A camera's derived values: P^-1, and its rotation and row lengths when
  * its rows are orthogonal and right-handed (else it is lerped whole). */
 static void icam_prep(icam_t *c)
@@ -6949,26 +7008,8 @@ static void ic_draw(const rcmd_t *c)
         draw_cmd(c, d, 0);
         return;
     }
-    if (w_move) {                       /* W(t), from the frame before's W and this one's */
-        aff_t a, b, r;
-        for (i = 0; i < 3; i++)
-            for (j = 0; j < 3; j++) {
-                a.r[3 * i + j] = p->w[4 * i + j];
-                b.r[3 * i + j] = o->w[4 * i + j];
-            }
-        for (j = 0; j < 3; j++) {
-            a.t[j] = p->w[12 + j];
-            b.t[j] = o->w[12 + j];
-        }
-        aff_lerp(&a, &b, g_it, &r);
-        for (i = 0; i < 3; i++) {
-            for (j = 0; j < 3; j++)
-                wt[4 * i + j] = r.r[3 * i + j];
-            wt[4 * i + 3] = 0;
-            wt[12 + i] = r.t[i];
-        }
-        wt[15] = 1;
-    }
+    if (w_move)                         /* W(t), from the frame before's W and this one's (step 103: exact at both ends) */
+        ic_wlerp(p->w, o->w, g_it, wt);
     m = *d;
     n_keep = 0;
     if (c->u.draw.cls == IC_VP) {
