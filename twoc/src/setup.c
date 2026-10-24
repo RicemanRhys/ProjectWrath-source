@@ -1892,10 +1892,8 @@ int twoc_setup_verify(void)
 
 void twoc_setup_cancel(void)
 {
-    if (twoc_setup_busy()) {
-        InterlockedExchange(&g_cancel, 1);
-        fprintf(stderr, "[SETUP] cancel asked for\n");
-    }
+    if (twoc_setup_busy() && !InterlockedExchange(&g_cancel, 1))
+        fprintf(stderr, "[SETUP] cancel asked for\n");  /* once (a closing window asks every frame) */
 }
 
 void twoc_setup_status(setup_status_t *out)

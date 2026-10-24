@@ -32,6 +32,7 @@
 
 #include "imgui.h"
 #include "imgui_impl_dx11.h"
+#include "imgui_internal.h"                 /* the nav log's NavId (a test aid) */
 
 #include "setup_ui.h"
 #include "setup.h"
@@ -753,6 +754,19 @@ static void frame(void)
     char fb[96];
 
     io.DisplaySize = ImVec2((float)g.w, (float)g.h);
+    {   /* the frame's real time: ImGui's default 1/60 s a frame made a key held for 60 ms repeat at 240 Hz */
+        static LARGE_INTEGER f, last;
+        LARGE_INTEGER now;
+        if (!f.QuadPart)
+            QueryPerformanceFrequency(&f);
+        QueryPerformanceCounter(&now);
+        io.DeltaTime = last.QuadPart ? (float)((double)(now.QuadPart - last.QuadPart) / (double)f.QuadPart) : 1.0f / 60.0f;
+        if (io.DeltaTime <= 0.0f)
+            io.DeltaTime = 1.0f / 1000.0f;
+        if (io.DeltaTime > 0.25f)
+            io.DeltaTime = 0.25f;       /* after a file dialog: no huge step */
+        last = now;
+    }
     scale = g.dpi > 0 ? g.dpi : 1.0f;
     fit = g.w / (980.0f * scale) < g.h / (720.0f * scale) ? g.w / (980.0f * scale) : g.h / (720.0f * scale);
     if (fit < 1.0f)
@@ -822,6 +836,16 @@ static void frame(void)
         ImGui::EndGroup();
     }
     ImGui::End();
+    if (getenv("RECOMP_DEV_SETUP_NAVLOG")) {    /* test aid: the focused item each time it changes */
+        static ImGuiID last;
+        static unsigned frames;
+        ImGuiID id = GImGui->NavId;
+        frames++;
+        if (id != last)
+            fprintf(stderr, "[SETUP-UI] nav: frame %u focus %08X (down %d)\n", frames, id,
+                    ImGui::IsKeyDown(ImGuiKey_DownArrow));
+        last = id;
+    }
     ImGui::Render();
     {
         static const float bg[4] = { 0.06f, 0.06f, 0.08f, 1.0f };
