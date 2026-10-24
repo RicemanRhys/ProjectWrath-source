@@ -573,13 +573,23 @@ int d3d8_vsh_generate_hlsl(const NV2AVshProgram *program,
      * reserved constants c-38 and c-37). D3D11 wants clip space, so the
      * mapping is undone with the same two constants; the host viewport then
      * maps it to the same pixels. A program that writes screen space
-     * itself is inverted the same way. */
+     * itself is inverted the same way.
+     * A vertex exactly in the eye plane (w = 0, which the rounding of a
+     * large camera position makes now and then) was scaled by the tail's
+     * rcc(0), the clamp +-1.884467e19, and multiplying back by w gave
+     * (0, 0, 0, 0), which D3D11 keeps (0 <= z <= w) and draws at the
+     * picture's centre: a flat triangle from there to the screen's edge for
+     * a frame (twoc step 106, Smokey's road). It is undone through that
+     * factor instead, so it is clipped as the vertex behind the near plane
+     * it is. Every other vertex is computed as before. */
     sb_append(&sb,
         "    #undef R12\n"
         "    VS_OUT o;\n"
         "    float3 vs = c[58].xyz;\n"
         "    vs = vs != 0.0 ? vs : 1.0;\n"
         "    o.pos = float4((oPos.xyz - c[59].xyz) / vs * oPos.w, oPos.w);\n"
+        "    if (oPos.w == 0.0)\n"
+        "        o.pos.xyz = (oPos.xyz - c[59].xyz) / vs / ((asuint(oPos.w) & 0x80000000u) ? -1.884467e+19 : 1.884467e+19);\n"
         "    o.diffuse  = saturate(oD0);\n"
         "    o.specular = saturate(oD1);\n"
         "    o.tex0 = oT0;\n"
