@@ -124,6 +124,10 @@ set(GAME_SOURCES
     src/xdvdfs.c
     src/setup.c
     src/setup_ui.cpp
+    # Started by itself (no launcher): the launcher's switches, the logs, the first run's ini; and the narrow
+    # Windows functions in UTF-8 (the manifest), so a folder named in any language works (notes 18.110)
+    src/selfstart.c
+    src/crash_twoc.manifest
     # The power mode and the CPU's speed, logged from a thread of its own (step 91);
     # powrprof.dll and pdh.dll load at run time, so the exe imports nothing new
     src/power_log.c

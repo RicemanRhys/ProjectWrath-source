@@ -49,6 +49,7 @@
 #include "restart.h"
 #include "setup.h"
 #include "setup_ui.h"
+#include "selfstart.h"
 
 /*
  * If xboxrecomp.h is not an umbrella header in your setup, include
@@ -338,7 +339,8 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance,
     /* Step 107 (notes 18.110): the data folder (where game_files is: the working folder a launcher gave, or, started
      * by itself, the exe's folder or %LOCALAPPDATA%\CrashTWOC), then, before anything else touches game_files, a
      * setup that didn't finish cleaned up (setup.h). */
-    twoc_data_dir_init();
+    if (twoc_data_dir_init())
+        twoc_self_start();              /* double-clicked: Play Crash.bat's part done here (selfstart.h) */
     twoc_setup_recover();
 
     wt_out = clear_write_through(STD_OUTPUT_HANDLE);
@@ -354,7 +356,10 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance,
     /* Player settings (settings.c, notes 18.57): crash_twoc.ini next to the
      * exe fills in the RECOMP_* switches the launcher left unset, before
      * anything reads them. No file: nothing set. The game's volume is set
-     * only when one was asked for (Windows remembers it otherwise). */
+     * only when one was asked for (Windows remembers it otherwise). Step
+     * 107: the first start of a package or a double-clicked exe writes one
+     * with the settings that suit most PCs. */
+    twoc_first_ini();
     twoc_settings_load();
     /* Step 97: the processor logged, and the process opted out of Windows'
      * power throttling (cpu_info.h). */

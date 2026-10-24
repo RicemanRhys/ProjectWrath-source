@@ -1,0 +1,11 @@
+<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<!-- Step 107 (notes 18.110): the narrow ("A") Windows functions and the C runtime's file names in UTF-8, so the game
+     runs from a folder named in any language (Windows 10 1903 on; earlier, the system's code page as before). Merged
+     with the linker's own manifest (asInvoker). -->
+<assembly manifestVersion="1.0" xmlns="urn:schemas-microsoft-com:asm.v1">
+  <application xmlns="urn:schemas-microsoft-com:asm.v3">
+    <windowsSettings>
+      <activeCodePage xmlns="http://schemas.microsoft.com/SMI/2019/WindowsSettings">UTF-8</activeCodePage>
+    </windowsSettings>
+  </application>
+</assembly>
