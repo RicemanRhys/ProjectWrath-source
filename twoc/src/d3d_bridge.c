@@ -174,7 +174,7 @@ static char g_motion_on_path[MAX_PATH];
 static int g_motion_live;
 static unsigned g_motion_n;
 static uint32_t g_motion_vsc_ret[4], g_motion_draw_ret;  /* who last wrote c0 (a call chain), who drew */
-static double g_ovl_bias = 32.0;    /* step 105: RECOMP_D3D_BRIDGE_OVERLAY_BIAS, D24 steps (0 off), mirror_draw_vp */
+static double g_ovl_bias = 128.0;    /* step 105: RECOMP_D3D_BRIDGE_OVERLAY_BIAS, D24 steps (0 off), mirror_draw_vp */
 static volatile LONG g_ovl_biased;
 static int g_anom_on;               /* step 104: RECOMP_D3D_BRIDGE_ANOMALY (host_draw's check) */
 static CRITICAL_SECTION g_anom_cs;
@@ -4232,14 +4232,15 @@ static void mirror_draw_vp(const char *path, uint32_t xdk_prim, uint32_t n, cons
             InterlockedIncrement(&g_sprite_fails);
     }
     /* Step 105 (notes 18.108): a blended draw over geometry already drawn, testing LESSEQUAL without writing
-     * depth (Smokey's haze band along the canyon walls: copies of the wall's triangles, some corners at the
-     * wall's very screen z), drawn g_ovl_bias D24 steps nearer: clip z - e w through c98 (oPos.z is dp4 with
-     * it in every program the XDK makes, c96-c99 its transform). The NV2A takes the program's screen z as
-     * the depth, so a corner with the wall's screen z has the wall's depth and the band passes; here the
-     * screen z goes back to clip space through c58 and w (and D3D11 divides by w again), rounded with each
-     * draw's own w, and the band lost by a step or two near such a corner: a dark sliver of the wall in the
-     * haze, a different one each frame as the camera moved. Shadow marks (ZERO, ONE) and stencil draws
-     * are left as they are. */
+     * depth (Smokey's haze band along the canyon walls: strips laid on the wall, their corners on or a few
+     * millimetres off its surface), drawn g_ovl_bias D24 steps nearer: clip z - e w through c98 (oPos.z is
+     * dp4 with it in every program the XDK makes, c96-c99 its transform). The band's flat triangles cut
+     * behind the wall's folds in thin strips (by ~20 steps at 68 units, the game's own screen z), so it lost
+     * there: a dark sliver of the wall in the haze, a different one each frame as the camera moved, at Game
+     * (60) too; at the Xbox's 640x480 such a strip is a few pixels, at 4K a clear triangle. A depth gap of
+     * fixed size in the world grows as 1/w^2 in D24 steps: 128 steps cover it from ~28 units out (and are
+     * under 0.4 units of depth at the far plane). Shadow marks (ZERO, ONE) and stencil draws are left as
+     * they are. */
     if (g_ovl_bias != 0.0 && rs_x(XRS_ALPHABLENDENABLE) && rs_x(XRS_SRCBLEND) != 0 && rs_x(XRS_ZENABLE) &&
         !rs_x(XRS_ZWRITEENABLE) && rs_x(XRS_ZFUNC) == 0x203 && !rs_x(XRS_STENCILENABLE) &&
         MEM32(dev() + DEV_DEPTH_SURFACE)) {
