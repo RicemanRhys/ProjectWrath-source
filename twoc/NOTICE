@@ -18,7 +18,7 @@ This project's own code (MIT, LICENSE):
                                                           LGPL code it builds stays under the LGPL: below)
   data/disc_usa.tsv                                      the supported disc's file list: names, sizes and SHA-256
                                                           only, no game data
-  docs/SHARING.md, this file                             documents
+  docs/SHARING.md, docs/RELEASE_CHECKLIST.md, this file documents
   seed_functions.json                                    addresses of functions in the game's program, for the lift
 
 Not covered by LICENSE (each keeps its own licence and notices, unchanged):

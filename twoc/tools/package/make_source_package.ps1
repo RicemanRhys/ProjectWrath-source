@@ -29,7 +29,7 @@ if ((Test-Path -LiteralPath $Out) -and -not $Force) { throw "$Out exists; -Force
 $include = @('twoc/src', 'twoc/CMakeLists.txt', 'twoc/data', 'twoc/third_party', 'twoc/tools/lift_flag_join.py',
              'twoc/tools/lift_frndint.py', 'twoc/tools/wrap_callers.py', 'twoc/tools/build_info.cmake',
              'twoc/tools/package', 'twoc/lift.ps1', 'twoc/analyze.ps1', 'twoc/run_twoc.ps1', 'twoc/seed_functions.json',
-             'twoc/THIRD_PARTY_LICENSES.txt', 'twoc/LICENSE', 'twoc/NOTICE', 'twoc/docs/SHARING.md', 'twoc/.gitignore',
+             'twoc/THIRD_PARTY_LICENSES.txt', 'twoc/LICENSE', 'twoc/NOTICE', 'twoc/docs/SHARING.md', 'twoc/docs/RELEASE_CHECKLIST.md', 'twoc/.gitignore',
              'twoc/apu_dll')
 $exclude = @('twoc/tools/package/smoke104.py')     # a test script with this PC's paths
 $dirty = @(& git -C $repo status --porcelain --untracked-files=no -- @include 2>$null)

@@ -1,12 +1,18 @@
 # Sharing Crash TWOC: the checklist
 
-Step 107 (notes 18.110). This is a list of what to look at before the game goes to other people, in plain words.
-**It is not legal advice and makes no legal decisions.** Where something is a legal question it says so; those are
-for a lawyer (ideally one who knows software licensing and game emulation or porting).
+Step 107 (notes 18.110), updated in step 108 (notes 18.111). This is a list of what to look at before the game goes
+to other people, in plain words. **It is not legal advice and makes no legal decisions.** Where something is a legal
+question it says so; those are for a lawyer (ideally one who knows software licensing and game emulation or porting).
 
 The Share package (`make_package.ps1 -Target Share`) is built for sharing: it carries no game files, the player
 supplies their own disc image, and the first start sets the game up (notes 18.110). Whether and how to share it is
 still your call, after the points below.
+
+**Decided in step 108 (your choices):** this project's own code is MIT (part 2); the LGPL audio code is its own DLL,
+`xemu_apu.dll`, shipped with its source (part 1); the Visual C++ runtime is linked statically, so no runtime DLL
+ships (part 2). **Still open:** the copyright holder's name (a placeholder in `twoc/LICENSE`), the project's name
+(part 4), the recompiled code in the exe (part 3, a lawyer's question), where people report problems (part 7).
+**`docs/RELEASE_CHECKLIST.md`** is the short, ordered list of what to do before giving the Share package to anyone.
 
 ## 1. The LGPL audio code from xemu: xemu_apu.dll (decided in step 108)
 
@@ -164,11 +170,20 @@ lines, exit code 1):
    `twoc/data/disc_usa.tsv`), and no `.xbe`, `.iso` or `.xiso` at all;
 2. no trace of this PC: the home folder's path, the user name in a `\Users\<name>\` path, or the PC's name, in any
    file name or contents (text and binary, 8-bit and UTF-16);
-3. no logs, saves or dumps (`*.log`, `*.dmp`, `*.sav`, `*.xbx`, `*.pdb`, `*.zip`, `logs\`, `UDATA\`,
-   `UDATA_backups\`, `TDATA\`), no setup leftovers, and no `crash_twoc.ini` in the Share package.
+3. no logs, saves or dumps (`*.log`, `*.dmp`, `*.sav`, `*.xbx`, `*.pdb`, `*.zip` except the source zips in
+   `Source\`, `logs\`, `UDATA\`, `UDATA_backups\`, `TDATA\`), no setup leftovers, and no `crash_twoc.ini` in the
+   Share package;
+4. the licences (step 108): `LICENSE.txt` is there and is the MIT licence with a copyright line, and
+   `THIRD_PARTY_LICENSES.txt` is there. While the copyright line still holds `[NAME TO BE CHOSEN BY THE OWNER]` it
+   **warns** loudly in yellow ("NOT READY TO SHARE") and ends "AUDIT PASSED WITH 1 WARNING(S)";
+5. the audio library (step 108): `xemu_apu.dll` beside every `crash_twoc.exe`; in the Share package
+   `Source\xemu_apu-source_*.zip`; every zip in `Source\` is unpacked into a temporary folder and audited the same
+   way (it must hold the LGPL text and its notice);
+6. no Microsoft runtime DLL (step 108: `vcruntime*`, `msvcp*`, `concrt*`, `vccorlib*`, `ucrtbase`,
+   `api-ms-win-crt-*`).
 
-`make_package.ps1 -Target Share` runs it at the end and fails if it fails; `make_source_package.ps1` runs it before
-zipping. The test packages (Legion Go, Nitro 5) carry `game_files\` for your own devices: the audit says so and skips
+`make_package.ps1 -Target Share` runs it at the end and fails if it fails; `make_source_package.ps1` and
+`make_apu_source_package.ps1` run it before zipping. The test packages (Legion Go, Nitro 5) carry `game_files\` for your own devices: the audit says so and skips
 the game-file check inside it only. Run it again on anything you are about to send.
 
 ## 6. Logs and privacy
