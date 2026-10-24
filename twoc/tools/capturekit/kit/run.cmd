@@ -31,7 +31,10 @@ if "%~2"=="60" set RECOMP_FRAMERATE=60
 set RECOMP_D3D_BRIDGE_ROLLING=
 set RECOMP_D3D_BRIDGE_ANOMALY=
 set RECOMP_D3D_BRIDGE_ROLLING_TRIGGER=
+set RECOMP_D3D_BRIDGE_ROLLING_FULL=
 if "%~2"=="rolling" set "RECOMP_D3D_BRIDGE_ROLLING=%KIT%\captures"
+rem step 105: the draws in full (vertices, indices, states, programs), for tools\diag\rollpix.py
+if "%~2"=="rolling" set RECOMP_D3D_BRIDGE_ROLLING_FULL=1
 if "%~2"=="rolling" set "RECOMP_D3D_BRIDGE_ROLLING_TRIGGER=%OUT%\rolling.trig"
 if "%~2"=="rolling" set RECOMP_D3D_BRIDGE_ANOMALY=1
 if "%~3"=="wav" set "RECOMP_APU_OUT_WAV=%OUT%\sound.wav"

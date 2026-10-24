@@ -6430,14 +6430,75 @@ static void rb_put(rbuf_t *b, const void *p, size_t n)
     b->n += n;
 }
 
+/* Step 105: `full` (the rolling capture's RECOMP_D3D_BRIDGE_ROLLING_FULL): after each draw's record, all it takes
+ * to draw it again offline: a header (prim, counts, stride, the program's input registers and microcode length,
+ * the states' counts, each stage's texture key, format, size and Data, the viewport, the target, the pixel
+ * shader's token, flags), then the states (rs, each stage's tss, the pixel shader's), the microcode, the vertices
+ * as the host draws them and the indices; the frame's header is "FREF" instead of "FREC"
+ * (tools/diag/interp_recio.py reads both). */
+static void rec_full(rbuf_t *b, const d3dh_draw_t *d, uint32_t inputs)
+{
+    uint32_t h[48];
+    unsigned s;
+
+    memset(h, 0, sizeof(h));
+    h[0] = 0x4C4C5546u;                 /* "FULL" */
+    h[1] = d->prim;
+    h[2] = d->prim_count;
+    h[3] = d->stride;
+    h[4] = d->verts ? d->vert_count : 0;
+    h[5] = d->indices ? d->index_count : 0;
+    h[6] = d->vprog ? inputs : 0;   /* the slot's (never d3dh_vs_inputs: the render thread mustn't take rec_lock) */
+    h[7] = d->vprog && d->vprog->code ? d->vprog->n_insns : 0;
+    h[8] = d->rs ? d->n_rs : 0;
+    for (s = 0; s < 4; s++) {
+        h[9 + s] = d->tss[s] ? d->n_tss[s] : 0;
+        if (d->tex[s]) {
+            h[13 + s] = d->tex[s]->key;
+            h[17 + s] = d->tex[s]->format;
+            h[21 + s] = d->tex[s]->width | d->tex[s]->height << 16;
+            h[25 + s] = d->tex[s]->data;
+        }
+    }
+    h[29] = d->vp_x;
+    h[30] = d->vp_y;
+    h[31] = d->vp_w;
+    h[32] = d->vp_h;
+    memcpy(&h[33], &d->vp_minz, 4);
+    memcpy(&h[34], &d->vp_maxz, 4);
+    h[35] = d->target.data;
+    h[36] = d->target.width | d->target.height << 16;
+    h[37] = d->target.format;
+    h[38] = d->ps ? d->ps->token : 0;
+    h[39] = d->ps ? d->ps->n_rs : 0;
+    h[40] = d->overlay | d->world_list << 1 | (uint32_t)(d->pillar != 0) << 2 | d->world_cam << 3;
+    memcpy(&h[41], &d->hud_dx, 4);
+    h[42] = d->hud;
+    h[43] = d->fvf;
+    rb_put(b, h, sizeof(h));
+    if (h[8])
+        rb_put(b, d->rs, 8 * h[8]);
+    for (s = 0; s < 4; s++)
+        if (h[9 + s])
+            rb_put(b, d->tss[s], 8 * h[9 + s]);
+    if (h[39])
+        rb_put(b, d->ps->rs, 8 * h[39]);
+    if (h[7])
+        rb_put(b, d->vprog->code, 16 * h[7]);
+    if (h[4])
+        rb_put(b, d->verts, (size_t)h[4] * d->stride);
+    if (h[5])
+        rb_put(b, d->indices, 2 * (size_t)h[5]);
+}
+
 /* A frame's draws as interpolation sees them, RECOMP_D3D_BRIDGE_INTERP_REC's records, appended to `b` (step 104:
  * the rolling capture keeps them too). */
-static void ic_rec_frame(rbuf_t *b, unsigned swap_no)
+static void ic_rec_frame(rbuf_t *b, unsigned swap_no, int full)
 {
     unsigned i, cur = (unsigned)g_ic;
 
     {
-        uint32_t h[4] = { 0x46524543u, swap_no, g_ps->rc_n, g_icam_n[cur] };
+        uint32_t h[4] = { full ? 0x46524546u : 0x46524543u, swap_no, g_ps->rc_n, g_icam_n[cur] };
         rb_put(b, h, 16);
         for (i = 0; i < g_icam_n[cur]; i++) {
             uint32_t ci[2] = { g_icam[cur][i].draws, (uint32_t)g_icam[cur][i].p_ok | (uint32_t)g_icam[cur][i].rot_ok << 1 };
@@ -6484,6 +6545,8 @@ static void ic_rec_frame(rbuf_t *b, unsigned swap_no)
             } else
                 rb_put(b, zero, 4 * 768);
             rb_put(b, slot >= 0 ? g_vs[slot].cmask : (const uint32_t *)zero, 4 * 6);
+            if (full)
+                rec_full(b, d, slot >= 0 ? g_vs[slot].inputs : 0);
         } else {
             rb_put(b, r, 4 * 12);
         }
@@ -6514,7 +6577,7 @@ static void ic_rec_dump(unsigned swap_no)
     f = fopen(g_irec_trigger, "ab");
     if (!f)
         return;
-    ic_rec_frame(&b, swap_no);          /* step 104: built, then written */
+    ic_rec_frame(&b, swap_no, 0);       /* step 104: built, then written */
     if (b.n)
         fwrite(b.p, 1, b.n, f);
     free(b.p);
@@ -10561,13 +10624,15 @@ static void present_mode(double t_s)
  *   - info.txt: when, the level, the picture's size, the frame-rate plan and
  *     every RECOMP_ setting in effect.
  * Memory: the pictures at most RECOMP_D3D_BRIDGE_ROLLING_SECS seconds (2.5)
- * of the display's rate within ROLL_PIC_MB, the records ROLL_REC_MB; both
+ * of the display's rate within ROLL_PIC_MB, the records ROLL_REC_MB (step 105: RECOMP_D3D_BRIDGE_ROLLING_FULL=1
+ * keeps every draw in full, rec_full, within ROLL_FULL_MB; RECOMP_D3D_BRIDGE_ROLLING_REC_MB another); both
  * allocated at the first frame and logged ([ROLL]). Writing happens on a
  * thread of its own; the rings start again after it. Off: one flag test a
  * present and a game frame. */
 #define ROLL_W 480u
 #define ROLL_PIC_MB 192u
 #define ROLL_REC_MB 96u
+#define ROLL_FULL_MB 512u
 #define ROLL_STAGES 3
 typedef struct {
     unsigned swap, sub, k;
@@ -10591,6 +10656,8 @@ static struct {
     volatile LONG want, saving;
     unsigned poll;
     int failed;
+    int full;                           /* step 105: RECOMP_D3D_BRIDGE_ROLLING_FULL */
+    unsigned rec_mb;                    /* the records' budget */
 } g_roll;
 
 static int roll_init(void)
@@ -10605,6 +10672,10 @@ static int roll_init(void)
         snprintf(g_roll.trig, sizeof(g_roll.trig), "%s", e);
     e = getenv("RECOMP_D3D_BRIDGE_ROLLING_SECS");
     g_roll.secs = e && atof(e) > 0.2 ? atof(e) : 2.5;
+    e = getenv("RECOMP_D3D_BRIDGE_ROLLING_FULL");      /* step 105 */
+    g_roll.full = e && *e && *e != '0';
+    e = getenv("RECOMP_D3D_BRIDGE_ROLLING_REC_MB");
+    g_roll.rec_mb = e && atoi(e) >= 16 ? (unsigned)atoi(e) : g_roll.full ? ROLL_FULL_MB : ROLL_REC_MB;
     g_roll.on = 1;
     fprintf(stderr, "[ROLL] rolling capture on: the last %.1f s kept, written to %s\\rolling_<time> on F9%s%s\n",
             g_roll.secs, g_roll.dir, g_roll.trig[0] ? " or when this appears: " : "", g_roll.trig);
@@ -10654,13 +10725,13 @@ static void roll_grab(ID3D11Texture2D *src, unsigned swap_no, unsigned sub, unsi
             g_roll.npic = (unsigned)(((size_t)ROLL_PIC_MB << 20) / one);
         g_roll.pic = g_roll.failed ? NULL : (uint8_t *)malloc((size_t)g_roll.npic * one);
         g_roll.meta = (roll_meta_t *)calloc(g_roll.npic, sizeof(roll_meta_t));
-        g_roll.nrec = 600;              /* at most 10 s of game frames, within ROLL_REC_MB */
+        g_roll.nrec = 600;              /* at most 10 s of game frames, within the records' budget */
         g_roll.rec = (rbuf_t *)calloc(g_roll.nrec, sizeof(rbuf_t));
         if (!g_roll.pic || !g_roll.meta || !g_roll.rec)
             g_roll.failed = 1;
         fprintf(stderr, "[ROLL] %s: pictures %ux%u, %u of them (%.1f s at %.0f Hz, %.0f MB), draw records up to "
                 "%u MB (with a frame rate above Game (60))\n", g_roll.failed ? "can't start" : "ready", g_roll.w,
-                g_roll.h, g_roll.npic, g_roll.npic / hz, hz, (double)g_roll.npic * one / 1048576.0, ROLL_REC_MB);
+                g_roll.h, g_roll.npic, g_roll.npic / hz, hz, (double)g_roll.npic * one / 1048576.0, g_roll.rec_mb);
         if (g_roll.failed)
             return;
     }
@@ -10708,12 +10779,12 @@ static void roll_rec(unsigned swap_no)
     b = &g_roll.rec[g_roll.rhead];
     g_roll.rbytes -= b->n;
     b->n = 0;
-    ic_rec_frame(b, swap_no);
+    ic_rec_frame(b, swap_no, g_roll.full);
     g_roll.rbytes += b->n;
     g_roll.rhead = (g_roll.rhead + 1) % g_roll.nrec;
     if (g_roll.rn < g_roll.nrec)
         g_roll.rn++;
-    while (g_roll.rn > 1 && g_roll.rbytes > (size_t)ROLL_REC_MB << 20) {     /* the oldest out */
+    while (g_roll.rn > 1 && g_roll.rbytes > (size_t)g_roll.rec_mb << 20) {     /* the oldest out */
         rbuf_t *o = &g_roll.rec[(g_roll.rhead + g_roll.nrec - g_roll.rn) % g_roll.nrec];
         g_roll.rbytes -= o->n;
         o->n = 0;
@@ -10803,8 +10874,9 @@ static DWORD WINAPI roll_save_thread(LPVOID arg)
         fprintf(f, "Pictures: %u, %ux%u, the last %.2f s, every frame shown (each in-between frame); named\n"
                    "  NNNNN_sSWAP_K-of-N.bmp: the game frame (guest swap) and which of its N frames shown.\n",
                 n, w, h, span);
-        fprintf(f, "Draw records: %u game frames (%.1f MB) in interp.bin%s\n", g_roll.rn, recb / 1048576.0,
-                g_roll.rn ? "" : " (none: they are kept with a frame rate above Game (60))");
+        fprintf(f, "Draw records: %u game frames (%.1f MB) in interp.bin%s%s\n", g_roll.rn, recb / 1048576.0,
+                g_roll.rn ? "" : " (none: they are kept with a frame rate above Game (60))",
+                g_roll.full ? ", in full (every draw's vertices, indices, states and program: tools/diag/rollpix.py)" : "");
         fprintf(f, "Display: %.2f Hz; picture drawn at %ux%u, shown at %ux%u; frame plan: %s\n", d3dh_display_hz(),
                 g_w, g_h, g_vw, g_vh, g_fp.on ? g_fp.note : "Game (60)");
         fprintf(f, "Settings in effect:\n");
