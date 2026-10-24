@@ -48,6 +48,9 @@ try {
     & git -C $xr archive --format=zip -o $z2 HEAD
     if ($LASTEXITCODE) { throw 'git archive (xboxrecomp) failed' }
     Expand-Archive -LiteralPath $z2 -DestinationPath (Join-Path $st 'xboxrecomp')
+    # xboxrecomp's own test program (upstream's, not the game's; not needed to build): the audit allows no .xbe
+    $tx = Join-Path $st 'xboxrecomp\tools\conformance\test.xbe'
+    if (Test-Path -LiteralPath $tx) { Remove-Item -LiteralPath $tx }
     $base = Git1 $xr @('merge-base', 'HEAD', 'origin/main')
     $local = @(& git -C $xr log --format='%h %ad %s' --date=short "$base..HEAD")
     $pd = Join-Path $st 'xboxrecomp-local-commits'
@@ -88,7 +91,9 @@ try {
         '  - the game''s files (your own disc), saves, settings and logs;',
         '  - twoc\docs\option_b (a disassembly listing of the D3D library inside the game''s program);',
         '  - the test harness (twoc\tools\diag, capturekit) and the project notes (they hold this PC''s',
-        '    paths and the development history; nothing in them is needed to build).',
+        '    paths and the development history; nothing in them is needed to build);',
+        '  - xboxrecomp\tools\conformance\test.xbe (upstream''s own test program for its conformance tests,',
+        '    not the game''s; left out because the package audit allows no Xbox program at all).',
         '',
         'xboxrecomp''s local commits:'
     ) + ($local | ForEach-Object { "  $_" })
