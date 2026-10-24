@@ -132,7 +132,13 @@ def clip_of(c):
         k = c["consts"]
         sc = np.where(k[58, :3] != 0, k[58, :3], 1.0)
         w = op[:, 3:4]
-        return np.hstack([(op[:, :3] - k[59, :3]) / sc * w, w])
+        xyz = (op[:, :3] - k[59, :3]) / sc * w
+        # step 106: a vertex at w = 0 exactly, through the tail's rcc(0) clamp, as xbox_d3d8 now undoes it
+        z0 = (w[:, 0] == 0)
+        if z0.any():
+            r = np.where(np.signbit(w[z0, 0]), -1.884467e19, 1.884467e19)[:, None]
+            xyz[z0] = (op[z0, :3] - k[59, :3]) / sc / r
+        return np.hstack([xyz, w])
     pos = raw[:, :16].copy().view(F).reshape(f["nv"], 4).astype(np.float64)
     if (f["fvf"] & 0xE) == 0x4:          # XYZRHW: viewport pixels, as xbox_d3d8 takes them
         vx, vy, vw, vh = f["vp"][:4]
