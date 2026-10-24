@@ -2250,6 +2250,8 @@ extern "C" int ovl_frame(ID3D11RenderTargetView *rtv, unsigned w, unsigned h, fl
             if (hcap > 1e8f || fabsf(hc - hcap) > hcap * 0.02f)
                 hcap = hc;              /* a real change only: rounding alone would have the menu re-measured */
             g_ms_shown = (int)(g_scale / s0 * 100.0f + 0.5f);
+            if (g_ms_shown < 100 && s->menu_scale >= 100)
+                g_ms_shown = 100;       /* the height's estimate a hair under the menu's own size: that size */
             g_ms_limited = g_ms_shown + 1 < s->menu_scale;
         }
         {   /* test only: the window's place and size whenever they or the tab change */
