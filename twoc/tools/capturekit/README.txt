@@ -1,4 +1,4 @@
-Crash TWOC capture kit (step 100; exe refreshed in step 105)
+Crash TWOC capture kit (step 100; exe refreshed in step 106)
 ============================================================
 
 What this is
@@ -90,32 +90,45 @@ The problems
    If you can, also take a screenshot of the same spot in xemu: the "real
    hardware" picture is from a video and I can't tell which console it shows.
 
-7  Rolling capture: glitches that come and go (steps 104 and 105)
-   The dark slate triangle on Smokey's canyon wall (your video) is fixed
-   in step 105. Keep this launcher for anything like it that is left: a
-   flat-coloured wedge over the road (your still picture), a black box on
-   a wall, a texture stretched across the screen. Since step 105 it keeps
-   every draw in full (its vertices, states and program), so one capture
-   is enough to find the draw that made the glitch, without me having to
-   get to the same spot. Use Frame rate: Match display for it (the draws
-   are kept only above Game (60); the pictures are kept either way).
+7  Rolling capture: glitches that come and go (steps 104 to 106)
+   The silver triangle on Smokey's road is fixed in step 106 (and the
+   dark one on the canyon wall in step 105). Keep this launcher for
+   anything else that shows for a frame or two: a flat-coloured shape,
+   a black box on a wall, a texture stretched across the screen. It keeps every draw in full (its vertices,
+   states and program), so one capture is enough to find the draw that
+   made the glitch, without me having to get to the same spot. Use Frame
+   rate: Match display for it (the draws are kept only above Game (60);
+   the pictures are kept either way).
+   NEW in step 106: it saves BY ITSELF. The game now looks at every frame
+   it shows; when one has a flat, one-colour patch where the frames just
+   before and after are textured (what the stray triangle on Smokey's road
+   looks like), or when its check of the draws finds broken numbers, it
+   writes the capture a moment later without you pressing anything. At
+   most 5 such captures a run, and never more than 4 GB of them (nor when
+   the disk would be left with less than 1 GB free). In my tests (a build
+   with the triangle put back) it saved on every stray triangle it met, 18
+   of them, and falsely once in about 20 minutes of play in seven levels
+   and the hub (a leaf passing right in front of the camera). So you can
+   simply play; if you see a glitch anyway, F9 still works as before.
    This launcher keeps the last 2 seconds or so in memory all the time:
    every frame shown (the in-between ones too) as a small picture, the
    game's draws of the last second or so (with Match display), and a check
    of every draw for broken numbers. Play normally at your usual settings.
-   Right AFTER you see the glitch, press F9 in the game window (or
+   Right AFTER you see a glitch, press F9 in the game window (or
    double-click "capture now.cmd"); the seconds just before the key are
    written to captures\rolling_<date>_<time>\. Pressing it a second or so
    late is fine. You can press it again any time after 5 seconds; each
-   press makes its own folder. It uses about 700 MB of memory at 240 Hz
-   (192 MB of pictures, the same at 4K and 1080p since they are always
-   480 pixels wide, and up to 512 MB of draws: about 1.3 s of Smokey),
-   about 60 MB at Game (60), and each capture folder is about 700 MB on
-   disk (zip it: it shrinks a lot). The game kept 60 updates and 240
-   frames a second while it ran (1080p, render thread on). F9 is never
-   passed to the game. Please send the rolling_ folders and the 7_rolling_
-   folder (its run.err.log has the check's lines), with a line saying
-   what you saw and roughly where on the screen.
+   press makes its own folder. Each folder's info.txt says whether it was
+   saved by itself (and which frame it found) or by your key. It uses
+   about 700 MB of memory at 240 Hz (192 MB of pictures, the same at 4K
+   and 1080p since they are always 480 pixels wide, and up to 512 MB of
+   draws: about 1.3 s of Smokey), about 60 MB at Game (60), and each
+   capture folder is about 700 MB on disk (zip it: it shrinks a lot). The
+   game kept 60 updates and 240 frames a second while it ran (1080p,
+   render thread on). F9 is never passed to the game. Please send the
+   rolling_ folders and the 7_rolling_ folder (its run.err.log has the
+   check's lines), with a line saying what you saw and roughly where on
+   the screen.
 
 What gets written (in the capture folder)
 -----------------------------------------
@@ -129,4 +142,4 @@ power.log       the usual power log
 rolling_<time>\  (problem 7, beside the other folders in captures\) frames\*.bmp, every frame
                 shown in the last ~2 s at 480 pixels wide; interp.bin, the draws of the last game
                 frames in full (Match display only; read with tools\diag\rollpix.py); anomalies.txt;
-                info.txt (the level, the settings)
+                info.txt (the level, the settings, and whether it saved by itself and why)

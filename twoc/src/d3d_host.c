@@ -10622,7 +10622,17 @@ static void present_mode(double t_s)
  *     frames as fit their budget;
  *   - the anomaly check's lines (RECOMP_D3D_BRIDGE_ANOMALY), anomalies.txt;
  *   - info.txt: when, the level, the picture's size, the frame-rate plan and
- *     every RECOMP_ setting in effect.
+ *     every RECOMP_ setting in effect, and what asked for the save.
+ * Step 106 (notes 18.109): RECOMP_D3D_BRIDGE_ROLLING_AUTO=N (the kit's
+ * launcher 7: 5) also saves it by itself, at most N times a run and within
+ * RECOMP_D3D_BRIDGE_ROLLING_AUTO_MB of disk (default 4096; and never with
+ * less than that save plus 1 GB free), a few presents after either
+ *   - a picture with a flat, one-colour region where the pictures around it
+ *     are textured (roll_detect: the stray triangle on Smokey's road: one
+ *     frame of an untextured triangle from the bottom of the picture), or
+ *   - a new line from the anomaly check (RECOMP_D3D_BRIDGE_ANOMALY).
+ * The save keeps the flagged frame's draws in full (with ..._ROLLING_FULL)
+ * and says in info.txt which picture was flagged and why.
  * Memory: the pictures at most RECOMP_D3D_BRIDGE_ROLLING_SECS seconds (2.5)
  * of the display's rate within ROLL_PIC_MB, the records ROLL_REC_MB (step 105: RECOMP_D3D_BRIDGE_ROLLING_FULL=1
  * keeps every draw in full, rec_full, within ROLL_FULL_MB; RECOMP_D3D_BRIDGE_ROLLING_REC_MB another); both
@@ -10658,7 +10668,18 @@ static struct {
     int failed;
     int full;                           /* step 105: RECOMP_D3D_BRIDGE_ROLLING_FULL */
     unsigned rec_mb;                    /* the records' budget */
+    float *tst;                         /* step 106: each picture's ROLL_T tiles: grey mean and std */
+    unsigned tx, ty;                    /* tiles across and down */
+    unsigned since;                     /* pictures since the rings (re)started */
+    int auto_max, auto_n, auto_tiles;   /* ..._ROLLING_AUTO: saves at most, done; ..._AUTO_TILES: tiles to flag */
+    unsigned auto_mb;                   /* ..._ROLLING_AUTO_MB: the automatic saves' disk budget */
+    double auto_bytes;
+    int pending;                        /* presents until an automatic save */
+    unsigned anom_seen;
+    char why[320];                      /* what asked for the save, for info.txt */
 } g_roll;
+#define ROLL_T 8u                       /* step 106: the detector's tiles, 8x8 pixels of the small picture */
+#define ROLL_AUTO_WAIT 12               /* presents from the flag to the save: a few frames after it kept too */
 
 static int roll_init(void)
 {
@@ -10676,10 +10697,143 @@ static int roll_init(void)
     g_roll.full = e && *e && *e != '0';
     e = getenv("RECOMP_D3D_BRIDGE_ROLLING_REC_MB");
     g_roll.rec_mb = e && atoi(e) >= 16 ? (unsigned)atoi(e) : g_roll.full ? ROLL_FULL_MB : ROLL_REC_MB;
+    e = getenv("RECOMP_D3D_BRIDGE_ROLLING_AUTO");      /* step 106 */
+    g_roll.auto_max = e && atoi(e) > 0 ? atoi(e) : 0;
+    e = getenv("RECOMP_D3D_BRIDGE_ROLLING_AUTO_MB");
+    g_roll.auto_mb = e && atoi(e) > 0 ? (unsigned)atoi(e) : 4096u;
+    e = getenv("RECOMP_D3D_BRIDGE_ROLLING_AUTO_TILES");
+    g_roll.auto_tiles = e && atoi(e) > 0 ? atoi(e) : 12;
     g_roll.on = 1;
+    if (g_roll.auto_max)
+        fprintf(stderr, "[ROLL] automatic saves: at most %d, within %u MB, on a flat region of %d tiles or an "
+                "anomaly line\n", g_roll.auto_max, g_roll.auto_mb, g_roll.auto_tiles);
     fprintf(stderr, "[ROLL] rolling capture on: the last %.1f s kept, written to %s\\rolling_<time> on F9%s%s\n",
             g_roll.secs, g_roll.dir, g_roll.trig[0] ? " or when this appears: " : "", g_roll.trig);
     return 1;
+}
+
+/* Step 106: picture `at`'s tiles: the grey level's mean and standard deviation in each ROLL_T square. */
+static void roll_tiles(unsigned at)
+{
+    const uint8_t *p = g_roll.pic + (size_t)at * g_roll.w * g_roll.h * 3;
+    float *o = g_roll.tst + (size_t)at * g_roll.tx * g_roll.ty * 2;
+    unsigned tx, ty, x, y;
+
+    for (ty = 0; ty < g_roll.ty; ty++)
+        for (tx = 0; tx < g_roll.tx; tx++, o += 2) {
+            unsigned sum = 0, sq = 0;   /* of r + g + b: at most 64 * 765 and 64 * 765^2, within 32 bits */
+            double m, v;
+            for (y = 0; y < ROLL_T; y++) {
+                const uint8_t *r = p + ((size_t)(ty * ROLL_T + y) * g_roll.w + tx * ROLL_T) * 3;
+                for (x = 0; x < ROLL_T * 3; x += 3) {
+                    unsigned g = (unsigned)r[x] + r[x + 1] + r[x + 2];
+                    sum += g;
+                    sq += g * g;
+                }
+            }
+            m = sum / (double)(ROLL_T * ROLL_T);
+            v = sq / (double)(ROLL_T * ROLL_T) - m * m;
+            o[0] = (float)(m / 3.0);
+            o[1] = (float)(v > 0 ? sqrt(v) / 3.0 : 0.0);
+        }
+}
+
+static int cmp_float(const void *a, const void *b)
+{
+    float x = *(const float *)a, y = *(const float *)b;
+    return x < y ? -1 : x > y;
+}
+
+/* Step 106: after each picture, the one K back (K = 1, and 2 when it is one of a frame's 2 or more sub-frames: a
+ * stray draw for one picture, or two) against the pictures K before and K after it: its tiles that are flat (grey std
+ * under 2) where both of those are textured (std over 5), of one colour (within 8 grey levels of their median), not
+ * near black or white (mean 8 to 245: snowflakes in front of the camera and empty space are flat white and black),
+ * the largest 4-connected region of them; auto_tiles tiles spanning 2 or more each way flag it. Not across a cut (the
+ * pictures before and after differ by over 12 grey levels on average: the camera jumped), and not before the ring
+ * holds half its pictures again after a save (so a capture has the time before the flag too). Tuned on Smokey and
+ * six other places (tools/diag/sweep/flat106.py, notes 18.109): every stray triangle in the test drives flagged, one
+ * false flag (a leaf right in front of the camera) in about 20 minutes of play. The save follows ROLL_AUTO_WAIT presents later. About 0.1 ms a picture. */
+static void roll_detect(void)
+{
+    static const unsigned span[2] = { 1, 2 };
+    static float mean[4096];
+    static unsigned char flag[4096];
+    static unsigned short stack[4096];
+    unsigned s, t, nt = g_roll.tx * g_roll.ty, np = g_roll.npic;
+
+    if (!g_roll.auto_max || g_roll.auto_n >= g_roll.auto_max || g_roll.pending || g_roll.saving || nt > 4096 ||
+        g_roll.since < np / 2)
+        return;
+    for (s = 0; s < 2; s++) {
+        unsigned K = span[s], ib, ic, ia, n = 0, best = 0, bx0 = 0, bx1 = 0, by0 = 0, by1 = 0;
+        const float *A, *B, *C;
+        double cut = 0;
+        float med;
+        if (g_roll.since < 2 * K + 1 || g_roll.pn < 2 * K + 1 || 2 * K + 1 > np)
+            continue;
+        ib = (g_roll.phead + np - 1) % np;
+        ic = (g_roll.phead + np - 1 - K) % np;
+        ia = (g_roll.phead + np - 1 - 2 * K) % np;
+        if (K > 1 && K > g_roll.meta[ic].k)
+            continue;
+        A = g_roll.tst + (size_t)ia * nt * 2;
+        B = g_roll.tst + (size_t)ib * nt * 2;
+        C = g_roll.tst + (size_t)ic * nt * 2;
+        for (t = 0; t < nt; t++)
+            if (C[2 * t + 1] < 2.0f && A[2 * t + 1] > 5.0f && B[2 * t + 1] > 5.0f && C[2 * t] >= 8.0f &&
+                C[2 * t] <= 245.0f)
+                mean[n++] = C[2 * t];
+        if (n < (unsigned)g_roll.auto_tiles)
+            continue;
+        for (t = 0; t < nt; t++)
+            cut += fabs((double)A[2 * t] - B[2 * t]);
+        if (cut / nt > 12.0)
+            continue;
+        qsort(mean, n, sizeof(float), cmp_float);
+        med = mean[n / 2];
+        for (t = 0; t < nt; t++)
+            flag[t] = C[2 * t + 1] < 2.0f && A[2 * t + 1] > 5.0f && B[2 * t + 1] > 5.0f && C[2 * t] >= 8.0f &&
+                      C[2 * t] <= 245.0f && fabsf(C[2 * t] - med) <= 8.0f;
+        for (t = 0; t < nt; t++) {      /* the largest 4-connected region */
+            unsigned sp = 0, cnt = 0, x0 = ~0u, x1 = 0, y0 = ~0u, y1 = 0;
+            if (flag[t] != 1)
+                continue;
+            flag[t] = 2;
+            stack[sp++] = (unsigned short)t;
+            while (sp) {
+                unsigned u = stack[--sp], x = u % g_roll.tx, y = u / g_roll.tx, nb[4], j;
+                cnt++;
+                x0 = x < x0 ? x : x0;
+                x1 = x > x1 ? x : x1;
+                y0 = y < y0 ? y : y0;
+                y1 = y > y1 ? y : y1;
+                nb[0] = x > 0 ? u - 1 : ~0u;
+                nb[1] = x + 1 < g_roll.tx ? u + 1 : ~0u;
+                nb[2] = y > 0 ? u - g_roll.tx : ~0u;
+                nb[3] = y + 1 < g_roll.ty ? u + g_roll.tx : ~0u;
+                for (j = 0; j < 4; j++)
+                    if (nb[j] != ~0u && flag[nb[j]] == 1) {
+                        flag[nb[j]] = 2;
+                        stack[sp++] = (unsigned short)nb[j];
+                    }
+            }
+            if (cnt > best) {
+                best = cnt;
+                bx0 = x0, bx1 = x1, by0 = y0, by1 = y1;
+            }
+        }
+        if (best < (unsigned)g_roll.auto_tiles || bx1 == bx0 || by1 == by0)
+            continue;       /* a patch, not a line (the hub's LOAD/SAVE screen) */
+        snprintf(g_roll.why, sizeof(g_roll.why), "automatically (%d of %d): the picture of guest swap %u (%u of %u) "
+                 "has a region of %u flat tiles of one colour (grey %.0f) where the pictures %u before and after are "
+                 "textured, in x %u-%u, y %u-%u of %ux%u", g_roll.auto_n + 1, g_roll.auto_max, g_roll.meta[ic].swap,
+                 g_roll.meta[ic].sub ? g_roll.meta[ic].sub : 1, g_roll.meta[ic].k ? g_roll.meta[ic].k : 1, best, med,
+                 K, bx0 * ROLL_T, bx1 * ROLL_T + ROLL_T - 1, by0 * ROLL_T, by1 * ROLL_T + ROLL_T - 1, g_roll.w,
+                 g_roll.h);
+        g_roll.pending = ROLL_AUTO_WAIT;
+        fprintf(stderr, "[ROLL] flagged: %s\n", g_roll.why);
+        return;
+    }
 }
 
 /* At a present (g_lock held): this picture, small, into the ring; the one from two presents back read. */
@@ -10725,6 +10879,12 @@ static void roll_grab(ID3D11Texture2D *src, unsigned swap_no, unsigned sub, unsi
             g_roll.npic = (unsigned)(((size_t)ROLL_PIC_MB << 20) / one);
         g_roll.pic = g_roll.failed ? NULL : (uint8_t *)malloc((size_t)g_roll.npic * one);
         g_roll.meta = (roll_meta_t *)calloc(g_roll.npic, sizeof(roll_meta_t));
+        g_roll.tx = g_roll.w / ROLL_T;  /* step 106 */
+        g_roll.ty = g_roll.h / ROLL_T;
+        if (g_roll.auto_max)
+            g_roll.tst = (float *)malloc((size_t)g_roll.npic * g_roll.tx * g_roll.ty * 2 * sizeof(float));
+        if (g_roll.auto_max && !g_roll.tst)
+            g_roll.auto_max = 0;
         g_roll.nrec = 600;              /* at most 10 s of game frames, within the records' budget */
         g_roll.rec = (rbuf_t *)calloc(g_roll.nrec, sizeof(rbuf_t));
         if (!g_roll.pic || !g_roll.meta || !g_roll.rec)
@@ -10764,9 +10924,14 @@ static void roll_grab(ID3D11Texture2D *src, unsigned swap_no, unsigned sub, unsi
     ID3D11DeviceContext_Unmap(ctx, (ID3D11Resource *)g_roll.stage[i], 0);
     g_roll.meta[g_roll.phead] = g_roll.smeta[i];
     g_roll.sused[i] = 0;
+    if (g_roll.tst)
+        roll_tiles(g_roll.phead);       /* step 106 */
     g_roll.phead = (g_roll.phead + 1) % g_roll.npic;
     if (g_roll.pn < g_roll.npic)
         g_roll.pn++;
+    g_roll.since++;
+    if (g_roll.tst)
+        roll_detect();
 }
 
 /* A game frame's records (ic_begin, interpolating), into the ring, the oldest let go past the budget. */
@@ -10793,6 +10958,7 @@ static void roll_rec(unsigned swap_no)
 }
 
 extern void d3db_anomaly_tail(FILE *f);
+extern void d3db_anomalies(unsigned *draws, unsigned *bad);    /* step 106 */
 extern void d3db_set_overlay_bias(double steps);       /* step 105: the trigger file's ovlbias */
 extern const char *twoc_level_name(void);
 extern char **_environ;
@@ -10813,7 +10979,14 @@ static DWORD WINAPI roll_save_thread(LPVOID arg)
     snprintf(dir, sizeof(dir), "%s\\rolling_%04u-%02u-%02u_%02u-%02u-%02u", g_roll.dir, st.wYear, st.wMonth, st.wDay,
              st.wHour, st.wMinute, st.wSecond);
     CreateDirectoryA(g_roll.dir, NULL);
-    CreateDirectoryA(dir, NULL);
+    if (!CreateDirectoryA(dir, NULL) && GetLastError() == ERROR_ALREADY_EXISTS) {
+        size_t L = strlen(dir);         /* step 106: a second save in the same second gets _2, _3 ... */
+        for (i = 2; i < 100; i++) {
+            snprintf(dir + L, sizeof(dir) - L, "_%u", i);
+            if (CreateDirectoryA(dir, NULL))
+                break;
+        }
+    }
     snprintf(p, sizeof(p), "%s\\frames", dir);
     CreateDirectoryA(p, NULL);
     first = (g_roll.phead + g_roll.npic - g_roll.pn) % g_roll.npic;
@@ -10870,6 +11043,7 @@ static DWORD WINAPI roll_save_thread(LPVOID arg)
         char **e;
         fprintf(f, "Rolling capture, %04u-%02u-%02u %02u:%02u:%02u (the key pressed at the end of it)\n", st.wYear,
                 st.wMonth, st.wDay, st.wHour, st.wMinute, st.wSecond);
+        fprintf(f, "Saved: %s\n", g_roll.why[0] ? g_roll.why : "asked");     /* step 106 */
         fprintf(f, "Level: %s\n", twoc_level_name()[0] ? twoc_level_name() : "not known");
         fprintf(f, "Pictures: %u, %ux%u, the last %.2f s, every frame shown (each in-between frame); named\n"
                    "  NNNNN_sSWAP_K-of-N.bmp: the game frame (guest swap) and which of its N frames shown.\n",
@@ -10892,6 +11066,8 @@ static DWORD WINAPI roll_save_thread(LPVOID arg)
         g_roll.rec[i].n = 0;
     g_roll.rn = 0;
     g_roll.rbytes = 0;
+    g_roll.since = 0;                   /* step 106 */
+    g_roll.why[0] = 0;
     InterlockedExchange(&g_roll.saving, 0);
     return 0;
 }
@@ -10909,6 +11085,34 @@ static void roll_poll(void)
     }
     if (InterlockedExchange(&g_roll_key_want, 0))
         InterlockedExchange(&g_roll.want, 1);   /* F9 */
+    if (g_roll.want && !g_roll.pending && !g_roll.why[0])
+        snprintf(g_roll.why, sizeof(g_roll.why), "asked (F9 or the trigger file)");
+    if (g_roll.auto_max && g_roll.auto_n < g_roll.auto_max && !g_roll.pending && !g_roll.saving && !g_roll.want) {
+        unsigned d, bad;                /* step 106: a new line from the anomaly check */
+        d3db_anomalies(&d, &bad);
+        if (bad > g_roll.anom_seen) {
+            g_roll.anom_seen = bad;
+            snprintf(g_roll.why, sizeof(g_roll.why), "automatically (%d of %d): the anomaly check flagged a draw "
+                     "(anomalies.txt)", g_roll.auto_n + 1, g_roll.auto_max);
+            g_roll.pending = ROLL_AUTO_WAIT;
+            fprintf(stderr, "[ROLL] flagged: %s\n", g_roll.why);
+        }
+    }
+    if (g_roll.pending > 0 && --g_roll.pending == 0 && !g_roll.saving && g_roll.pic) {
+        double est = (double)g_roll.pn * (54.0 + (double)g_roll.w * g_roll.h * 3) + (double)g_roll.rbytes;
+        ULARGE_INTEGER fr;
+        if (g_roll.auto_bytes + est > (double)g_roll.auto_mb * 1048576.0 ||
+            (GetDiskFreeSpaceExA(g_roll.dir, &fr, NULL, NULL) && (double)fr.QuadPart < est + 1073741824.0)) {
+            fprintf(stderr, "[ROLL] automatic save not made: %.0f MB more is over the budget (%u MB) or the disk's "
+                    "free space; no more this run\n", est / 1048576.0, g_roll.auto_mb);
+            g_roll.auto_n = g_roll.auto_max;
+            g_roll.why[0] = 0;
+        } else {
+            g_roll.auto_n++;
+            g_roll.auto_bytes += est;
+            InterlockedExchange(&g_roll.want, 1);
+        }
+    }
     if (!g_roll.want || g_roll.saving || !g_roll.pic)
         return;
     InterlockedExchange(&g_roll.want, 0);

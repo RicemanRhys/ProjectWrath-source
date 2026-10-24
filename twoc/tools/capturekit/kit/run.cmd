@@ -32,17 +32,20 @@ set RECOMP_D3D_BRIDGE_ROLLING=
 set RECOMP_D3D_BRIDGE_ANOMALY=
 set RECOMP_D3D_BRIDGE_ROLLING_TRIGGER=
 set RECOMP_D3D_BRIDGE_ROLLING_FULL=
+set RECOMP_D3D_BRIDGE_ROLLING_AUTO=
 if "%~2"=="rolling" set "RECOMP_D3D_BRIDGE_ROLLING=%KIT%\captures"
 rem step 105: the draws in full (vertices, indices, states, programs), for tools\diag\rollpix.py
 if "%~2"=="rolling" set RECOMP_D3D_BRIDGE_ROLLING_FULL=1
 if "%~2"=="rolling" set "RECOMP_D3D_BRIDGE_ROLLING_TRIGGER=%OUT%\rolling.trig"
 if "%~2"=="rolling" set RECOMP_D3D_BRIDGE_ANOMALY=1
+rem step 106: it also saves by itself (a flat patch for a frame, or the check's lines), 5 times a run at most
+if "%~2"=="rolling" set RECOMP_D3D_BRIDGE_ROLLING_AUTO=5
 if "%~3"=="wav" set "RECOMP_APU_OUT_WAV=%OUT%\sound.wav"
 echo.
 echo Crash is running (%~1). Play to the spot in README.txt, then double-click "capture now.cmd".
 if defined RECOMP_FRAMERATE echo This run is at Frame rate: Game (60), for the comparison.
 if defined RECOMP_APU_OUT_WAV echo The game's sound is being recorded to sound.wav.
-if defined RECOMP_D3D_BRIDGE_ROLLING echo Rolling capture on: right AFTER you see the glitch, press F9 in the game window.
+if defined RECOMP_D3D_BRIDGE_ROLLING echo Rolling capture on: it saves by itself when it sees a glitch; you can also press F9 in the game window right AFTER one.
 echo Close the game window when you're done; this window closes with it.
 cd /d "%KIT%\game"
 "%KIT%\game\crash_twoc.exe" >"%OUT%\run.out.log" 2>"%OUT%\run.err.log"
