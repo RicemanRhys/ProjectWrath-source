@@ -17,6 +17,15 @@ which opens every warp room (all crystals), so every level in the tests can be r
 *** hold comfortably, close the game and let it cool down.
 
 New in this package:
+  - Smokey and the Bandicoot: the flat grey ("silver") triangle that flashed over the road
+    for a frame while driving, late in the race, is gone. It always pointed at the exact
+    centre of the picture: a piece of ground right beside the camera came out at the
+    centre for one frame when one of its corners lay exactly beside the camera, neither
+    in front of it nor behind it (rare: about once in a thousand frames, and only while
+    moving). Both Frame rate settings; nothing else should look different. The flat
+    wedge over the road in your earlier still picture was the same thing.
+
+From the last package:
   - Smokey and the Bandicoot: the dark slate triangle that came and went on the far canyon
     wall (left of the cactus, near the finish gate) is gone. It was a piece of the light haze
     painted along the foot of the canyon walls going missing, so the darker wall showed
@@ -24,7 +33,7 @@ New in this package:
     would be a few pixels at most; at 1080p and 4K they were clear triangles. Both Frame
     rate settings. Nothing else should look different.
 
-From the last package:
+From the package before:
   - The settings menu's tabs are now Display, Graphics, Audio, Controls, Saves, Extras,
     About (LB / RB still go round all of them). Graphics holds Anisotropic filtering,
     Anti-aliasing and Ambient occlusion (with its Strength and Half resolution), moved from
@@ -62,14 +71,6 @@ From the last package:
     sensitivity, Field of view (the game's, or 30 to 110 degrees), Invert look and a reset.
     Freeze and Photo mode can't take a key the game uses.
 
-From the package before:
-  - With Frame rate "Match display" (or any rate above 60), buildings, walls and ground no
-    longer shake or shift sideways while Crash moves, and textures on them no longer pop
-    in and out (late in Gold Rush and Medieval Madness most of all; the further a level
-    goes from its start, the worse it was). Part of the scenery was drawn a few pixels off
-    in every in-between frame and put back on the game's own frames. Crash, Coco and the
-    enemies move as smoothly as before. Frame rate "Game (60)" is unchanged.
-
 Known quirks of the original game (the Xbox version does these too; not bugs of the port):
   - Droid Void's drone plays for the whole level, also after Crash dies and while the
     level restarts. "Mute Droid Void's background drone" (Audio tab) silences it.
@@ -78,6 +79,12 @@ Known quirks of the original game (the Xbox version does these too; not bugs of 
     only" keeps it, since it is Coco's.
 
 From the packages before that (also new to this folder if you skipped them):
+  - With Frame rate "Match display" (or any rate above 60), buildings, walls and ground no
+    longer shake or shift sideways while Crash moves, and textures on them no longer pop
+    in and out (late in Gold Rush and Medieval Madness most of all; the further a level
+    goes from its start, the worse it was). Part of the scenery was drawn a few pixels off
+    in every in-between frame and put back on the game's own frames. Crash, Coco and the
+    enemies move as smoothly as before. Frame rate "Game (60)" is unchanged.
   - "Character fur" (now on the Extras tab) replaces the older "Crash's
     fur" and has three choices: On (the Xbox's look, the default), Off for Crash only (Crash
     without his layer of fur, as on the PlayStation 2; Coco, Crunch, Pura and the others
