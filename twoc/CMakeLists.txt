@@ -120,9 +120,10 @@ set(GAME_SOURCES
     # The save's backups and the game files' check at the start (notes 18.86)
     src/saves.c
     src/gamefiles.c
-    # The first-run setup: the disc image reader, the manifest check and the safe extraction (notes 18.110)
+    # The first-run setup: the disc image reader, the manifest check and the safe extraction, its screen (notes 18.110)
     src/xdvdfs.c
     src/setup.c
+    src/setup_ui.cpp
     # The power mode and the CPU's speed, logged from a thread of its own (step 91);
     # powrprof.dll and pdh.dll load at run time, so the exe imports nothing new
     src/power_log.c
@@ -182,6 +183,7 @@ file(STRINGS "${TWOC_DISC_TSV}" _dm_lines ENCODING UTF-8)
 set(_dm_meta "")
 set(_dm_rows "")
 foreach(_dm IN LISTS _dm_lines)
+    string(REGEX REPLACE "\r$" "" _dm "${_dm}")    # a checkout with CRLF line ends
     if(_dm MATCHES "^#! ([a-z_0-9]+) (.*)$")
         string(TOUPPER "${CMAKE_MATCH_1}" _dm_k)
         if(_dm_k STREQUAL "TITLE" OR _dm_k STREQUAL "XBE_SHA256")

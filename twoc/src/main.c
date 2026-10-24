@@ -48,6 +48,7 @@
 #include "cpu_info.h"
 #include "restart.h"
 #include "setup.h"
+#include "setup_ui.h"
 
 /*
  * If xboxrecomp.h is not an umbrella header in your setup, include
@@ -385,11 +386,41 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance,
     AddVectoredExceptionHandler(1, veh_handler);
 
     /* Step 83 (notes 18.86): default.xbe and Crashdat against the disc's,
-     * saying what is wrong and how to fix it (gamefiles.c; step 107: every
-     * file's size against the disc's manifest). */
-    if (!twoc_game_files_check())
-        return 1;
-    twoc_setup_old_cleanup();           /* step 107: the files a replace took out, once a start passed the check */
+     * saying what is wrong and how to fix it (gamefiles.c). Step 107 (notes
+     * 18.110): missing or failing files, a setup that didn't finish, or the
+     * F1 menu's "Choose another disc image..." open the setup screen first
+     * (setup_ui.h); the game starts once the files are ready, in this
+     * process. Step 83's boxes only if the screen can't be shown. */
+    {
+        char why[1400];
+        int code = twoc_game_files_check_quiet(why, sizeof(why));
+        int asked = twoc_setup_request_take();
+        const setup_recovery_t *rec = twoc_setup_recovery();
+
+        if (code != GF_OK || asked || rec->happened) {
+            int mode = rec->happened ? SETUP_UI_RECOVERY : asked ? SETUP_UI_REPLACE :
+                       code == GF_NONE ? SETUP_UI_FIRST : SETUP_UI_BROKEN;
+            int r = twoc_setup_ui_run(mode, why, code == GF_OK);
+
+            if (r == SETUP_UI_NO_WINDOW) {
+                if (code != GF_OK && !twoc_game_files_check())
+                    return 1;
+            } else if (r == SETUP_UI_QUIT) {
+                fprintf(stderr, "[FILES] the setup screen was closed (Quit): the game doesn't start\n");
+                return 0;
+            } else if (r == SETUP_UI_READY) {
+                code = twoc_game_files_check_quiet(why, sizeof(why));
+                if (code != GF_OK) {
+                    MessageBoxA(NULL, why, "Crash TWOC - game files", MB_ICONERROR | MB_OK | MB_SETFOREGROUND);
+                    return 1;
+                }
+                twoc_game_files_note("set up or checked by the setup screen this start");
+            } else
+                twoc_game_files_note(code == GF_OK ? "the setup screen was shown; the current files kept" :
+                                     "started anyway from the setup screen");
+        } else
+            twoc_setup_old_cleanup();   /* the files a replace took out, once a start passed the check */
+    }
 
     /* Step 1: Load XBE */
     if (!load_xbe(YOUR_GAME_XBE_PATH, &xbe_data, &xbe_size)) {

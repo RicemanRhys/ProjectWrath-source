@@ -34,6 +34,7 @@
 #include "pads.h"
 #include "saves.h"
 #include "gpu.h"
+#include "setup.h"
 
 /* xboxrecomp apu.h: the output's channels (2 or 6) and the device's */
 extern "C" int mcpx_apu_output_channels(int *device_channels);
@@ -73,6 +74,9 @@ static int g_reset_req;                 /* step 104: a tab's reset button presse
 #define QUIT_ASK "Quit the game?"
 #define RESTART_ASK "Restart the game?"
 static bool g_quit_open, g_restart_open;   /* up (last frame) */
+#define SETUP_ASK "Choose another disc image?"  /* step 107: the About tab's button */
+static bool g_setup_open;               /* ... up (last frame) */
+static int g_setup_req;                 /* ... pressed (opened by build) */
 static bool g_q_shut;                   /* the overlay opened again: neither is left open */
 static char g_restart_text[320];        /* the restart question's words */
 static unsigned g_pend_seen;            /* the settings waiting for a restart when last looked at */
@@ -150,7 +154,7 @@ static int pad_nav(const ovl_info_t *in)
         if (press & OVL_PAD_B)
             r |= OVL_CLOSE;
     }
-    if (g_reset_open || g_quit_open || g_restart_open)
+    if (g_reset_open || g_quit_open || g_restart_open || g_setup_open)
         press &= ~(OVL_PAD_LB | OVL_PAD_RB);    /* step 93: the question answered first, on its own tab */
     if (press & OVL_PAD_LB)
         g_tab_want = (g_tab_cur + N_TABS - 1) % N_TABS;
@@ -257,7 +261,8 @@ extern "C" void ovl_opened(void)
     g_reset_shut = true;                /* step 93 */
     g_reset_open = false;
     g_q_shut = true;                    /* step 97 */
-    g_quit_open = g_restart_open = false;
+    g_quit_open = g_restart_open = g_setup_open = false;
+    g_setup_req = 0;
     g_pend_init = 0;
     g_meas_need = 1;
     if (g_ready) {
@@ -412,6 +417,7 @@ static void help(const char *text)
 
 /* Step 97: a line in the menu's amber, wrapped, for something to notice. */
 static const ImVec4 k_amber(1.0f, 0.8f, 0.3f, 1.0f);
+static const ImVec4 k_green(0.55f, 0.9f, 0.55f, 1.0f);  /* step 107: a check that passed */
 
 static void amber(const char *text)
 {
@@ -1817,6 +1823,44 @@ static void tab_about(const ovl_info_t *in)
         ImGui::EndTable();
     }
     help("The same lines are in the log ([ABOUT]). Third-party parts and their licences: THIRD_PARTY_LICENSES.txt next to the game.");
+
+    /* Step 107 (notes 18.110): the game files: a full check, or another disc image through the setup screen. */
+    {
+        setup_status_t st;
+        bool busy = twoc_setup_busy() != 0;
+        twoc_setup_status(&st);
+        ImGui::SeparatorText("Game files");
+        ImGui::TextWrapped("%s\\game_files%s", twoc_data_dir_utf8(), twoc_data_dir_fallback() ?
+                           " (in your user folder: the game's own folder can't be written to)" : "");
+        if (g_measure || (st.verify_only && st.state == SETUP_VERIFYING)) {
+            char l[64];
+            snprintf(l, sizeof(l), "%.0f of %.0f MB, %u of %u files", (double)st.bytes_done / 1048576.0,
+                     (double)st.bytes_total / 1048576.0, st.files_done, st.files_total);
+            ImGui::ProgressBar(st.bytes_total ? (float)((double)st.bytes_done / (double)st.bytes_total) : 0.0f,
+                               ImVec2(-FLT_MIN, 0), l);
+        }
+        if (g_measure || (st.verify_only && (st.state == SETUP_DONE || st.state == SETUP_FAILED))) {
+            ImGui::PushTextWrapPos(ImGui::GetContentRegionAvail().x + ImGui::GetCursorPosX());
+            if (st.state == SETUP_FAILED)
+                ImGui::TextColored(k_amber, "%s %s", st.why, st.hint);
+            else
+                ImGui::TextColored(k_green, "%s", g_measure ? "All 2267 game files are the disc's (every size and "
+                                   "SHA-256), checked in 9.9 s." : st.note);
+            ImGui::PopTextWrapPos();
+        }
+        ImGui::BeginDisabled(busy);
+        if (ImGui::Button(busy ? "Checking..." : "Verify game files")) {
+            fprintf(stderr, "[OVL] About: Verify game files\n");
+            twoc_setup_verify();
+        }
+        ImGui::SameLine();
+        if (ImGui::Button("Choose another disc image..."))
+            g_setup_req = 1;
+        ImGui::EndDisabled();
+        help("Verify reads every game file and compares its size and SHA-256 with the disc's (about 1 GB; the game "
+             "keeps running). Choose another disc image restarts the game into its setup screen; the current files "
+             "stay until the new ones are copied and checked, and your saves are kept.");
+    }
 }
 
 /* Step 97: one tab's contents, into the window's child for it or (g_measure) the measuring window. */
@@ -2119,6 +2163,19 @@ static int build(twoc_settings_t *s, const ovl_info_t *in)
         r |= OVL_QUIT;
     if (ask(RESTART_ASK, g_restart_text, "Restart now", "Later", &g_restart_open))
         r |= OVL_RESTART;
+    if (g_setup_req && !g_measure) {    /* step 107 */
+        ImGui::OpenPopup(SETUP_ASK);
+        fprintf(stderr, "[OVL] asks: %s\n", SETUP_ASK);
+    }
+    g_setup_req = 0;
+    if (ask(SETUP_ASK, "The game closes and starts again with its setup screen, where you choose the disc image or "
+            "folder. Your current game files stay until the new ones are copied and checked, and your saves are "
+            "kept. Unsaved progress will be lost.", "Restart", "No", &g_setup_open)) {
+        if (twoc_setup_request_write() == 0)
+            r |= OVL_RESTART;
+        else
+            fprintf(stderr, "[OVL] the setup request couldn't be written: no restart\n");
+    }
     g_q_shut = false;
     if (r & (OVL_QUIT | OVL_RESTART))
         g_end_kind = r & OVL_RESTART ? OVL_RESTART : OVL_QUIT;
