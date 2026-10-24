@@ -287,11 +287,12 @@ foreach ($f in Get-ChildItem -Recurse -File $work) {
         $pairs += ,@([regex]::Escape($homeDir), '<user-home>')
         $pairs += ,@([regex]::Escape($homeDir.Replace('\', '/')), '<user-home>')
     }
+    # (each pattern in brackets: a comma binds tighter than +, and would glue the replacement onto it)
     if ($user) {
-        $pairs += ,@('(?i)([\\/]Users[\\/])' + [regex]::Escape($user) + '(?=[\\/"'' ]|$)', '$1<user>')
-        $pairs += ,@('(?<![A-Za-z0-9_])' + [regex]::Escape($user) + '(?![A-Za-z0-9_])', '<user>')
+        $pairs += ,@(('(?i)([\\/]Users[\\/])' + [regex]::Escape($user) + '(?=[\\/"'' ]|$)'), '$1<user>')
+        $pairs += ,@(('(?<![A-Za-z0-9_])' + [regex]::Escape($user) + '(?![A-Za-z0-9_])'), '<user>')
     }
-    if ($pcName) { $pairs += ,@('(?i)(?<![A-Za-z0-9_-])' + [regex]::Escape($pcName) + '(?![A-Za-z0-9_-])', '<pc>') }
+    if ($pcName) { $pairs += ,@(('(?i)(?<![A-Za-z0-9_-])' + [regex]::Escape($pcName) + '(?![A-Za-z0-9_-])'), '<pc>') }
     foreach ($p in $pairs) {
         $rx = $p[0]
         if (-not $rx.StartsWith('(?i)') -and $rx -notlike '(?<!*') { $rx = '(?i)' + $rx }
