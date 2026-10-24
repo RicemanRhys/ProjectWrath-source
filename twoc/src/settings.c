@@ -10,6 +10,7 @@
 #include <ctype.h>
 
 #include "settings.h"
+#include "setup.h"
 #include "pads.h"
 
 typedef struct {
@@ -364,16 +365,11 @@ int twoc_show_fps_parse(const char *v)
 
 const char *twoc_settings_path(void)
 {
-    static char path[MAX_PATH + 32];
-    char *slash;
+    static char path[MAX_PATH * 4];
 
-    if (!path[0]) {
-        DWORD n = GetModuleFileNameA(NULL, path, MAX_PATH);
-        if (n == 0 || n >= MAX_PATH)
-            snprintf(path, sizeof(path), "crash_twoc.ini");
-        else if ((slash = strrchr(path, '\\')) != NULL)
-            snprintf(slash + 1, sizeof(path) - (size_t)(slash + 1 - path), "crash_twoc.ini");
-    }
+    /* step 107: beside the exe, or in %LOCALAPPDATA%\CrashTWOC when the exe's folder can't be written to */
+    if (!path[0] && twoc_settings_file("crash_twoc.ini", path, sizeof(path)))
+        snprintf(path, sizeof(path), "crash_twoc.ini");
     return path;
 }
 

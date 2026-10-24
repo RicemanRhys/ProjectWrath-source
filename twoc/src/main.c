@@ -47,6 +47,7 @@
 #include "gamefiles.h"
 #include "cpu_info.h"
 #include "restart.h"
+#include "setup.h"
 
 /*
  * If xboxrecomp.h is not an umbrella header in your setup, include
@@ -333,6 +334,12 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance,
      * (restart.h). */
     twoc_restart_init();
 
+    /* Step 107 (notes 18.110): the data folder (where game_files is: the working folder a launcher gave, or, started
+     * by itself, the exe's folder or %LOCALAPPDATA%\CrashTWOC), then, before anything else touches game_files, a
+     * setup that didn't finish cleaned up (setup.h). */
+    twoc_data_dir_init();
+    twoc_setup_recover();
+
     wt_out = clear_write_through(STD_OUTPUT_HANDLE);
     wt_err = clear_write_through(STD_ERROR_HANDLE);
 
@@ -378,9 +385,11 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance,
     AddVectoredExceptionHandler(1, veh_handler);
 
     /* Step 83 (notes 18.86): default.xbe and Crashdat against the disc's,
-     * saying what is wrong and how to fix it (gamefiles.c). */
+     * saying what is wrong and how to fix it (gamefiles.c; step 107: every
+     * file's size against the disc's manifest). */
     if (!twoc_game_files_check())
         return 1;
+    twoc_setup_old_cleanup();           /* step 107: the files a replace took out, once a start passed the check */
 
     /* Step 1: Load XBE */
     if (!load_xbe(YOUR_GAME_XBE_PATH, &xbe_data, &xbe_size)) {

@@ -28,6 +28,7 @@
 #include <string.h>
 
 #include "settings.h"
+#include "setup.h"
 
 static volatile LONG g_want = -1;       /* the latest level asked for, -1: none pending */
 static volatile LONG g_want_mute = -1;  /* 1 mute, 0 unmute, -1 none pending */
@@ -35,16 +36,11 @@ static HANDLE g_wake;
 
 static const char *marker_path(void)
 {
-    static char path[MAX_PATH + 32];
-    char *slash;
+    static char path[MAX_PATH * 4];
 
-    if (!path[0]) {
-        DWORD n = GetModuleFileNameA(NULL, path, MAX_PATH);
-        if (n == 0 || n >= MAX_PATH)
-            snprintf(path, sizeof(path), "crash_twoc.muted");
-        else if ((slash = strrchr(path, '\\')) != NULL)
-            snprintf(slash + 1, sizeof(path) - (size_t)(slash + 1 - path), "crash_twoc.muted");
-    }
+    /* step 107: beside the exe, or in the data folder when the exe's folder can't be written to (setup.h) */
+    if (!path[0] && twoc_settings_file("crash_twoc.muted", path, sizeof(path)))
+        snprintf(path, sizeof(path), "crash_twoc.muted");
     return path;
 }
 
