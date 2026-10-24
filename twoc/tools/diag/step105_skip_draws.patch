@@ -1,0 +1,52 @@
+diff --git a/twoc/src/d3d_bridge.c b/twoc/src/d3d_bridge.c
+index c548652..854d34b 100644
+--- a/twoc/src/d3d_bridge.c
++++ b/twoc/src/d3d_bridge.c
+@@ -4154,6 +4154,47 @@ static int host_draw(d3dh_draw_t *dr)
+ 
+     if (g_anom_on)
+         anom_check(dr);                 /* step 104 */
++    {                                   /* TEMP step 105: RECOMP_DEV_SKIP=n:A-B | ff | vp | vpk:KEY | fvf:X | imm */
++        static long sk_swap = -1;
++        static unsigned sk_n;
++        const char *e = getenv("RECOMP_DEV_SKIP");
++        if (sk_swap != (long)g_swaps) {
++            sk_swap = (long)g_swaps;
++            sk_n = 0;
++        }
++        sk_n++;
++        if (e && *e) {
++            unsigned a = 0, b = 0, x = 0;
++            int skip_it = 0;
++            if (sscanf(e, "n:%u-%u", &a, &b) == 2)
++                skip_it = sk_n >= a && sk_n <= b;
++            else if (strcmp(e, "ff") == 0)
++                skip_it = dr->vprog == NULL && dr->ff != NULL;
++            else if (strcmp(e, "vp") == 0)
++                skip_it = dr->vprog != NULL;
++            else if (sscanf(e, "vpk:%x", &x) == 1)
++                skip_it = dr->vprog && dr->vprog->key == x;
++            else if (sscanf(e, "fvf:%x", &x) == 1)
++                skip_it = !dr->vprog && dr->fvf == x;
++            else if (strcmp(e, "mark") == 0)
++                skip_it = rs_x(XRS_STENCILENABLE) && rs_x(XRS_STENCILPASS) == 0x1E01;
++            else if (strcmp(e, "dark") == 0)
++                skip_it = rs_x(XRS_STENCILENABLE) && rs_x(XRS_STENCILFUNC) != 0x207;
++            else if (strcmp(e, "imm") == 0)
++                skip_it = !dr->vprog && dr->indices == NULL && dr->ff != NULL;
++            if (getenv("RECOMP_DEV_SKIPLOG") && drawlog_on())
++                fprintf(stderr, "[SKIP] swap %ld draw %u%s\n", (long)g_swaps + 1, sk_n, skip_it ? " skipped" : "");
++            if (skip_it)
++                return 0;
++        }
++        e = getenv("RECOMP_DEV_BANDZ");     /* TEMP: the band's (429E4FE1, blended) depth function: ALWAYS (8) or N */
++        if (e && dr->vprog && dr->vprog->key == 0x429E4FE1 && rs_x(XRS_ALPHABLENDENABLE)) {
++            unsigned j;
++            for (j = 0; j < dr->n_rs; j++)
++                if (dr->rs[j].state == 23)
++                    ((d3dh_state_t *)dr->rs)[j].value = (uint32_t)atoi(e);
++        }
++    }
+ 
+     if (g_item_fur && g_fur_mode != TWOC_FUR_ON) {     /* step 101: the fur off; step 102: or Crash's */
+         if (g_fur_mode == TWOC_FUR_OFF || fur_is_crash()) {
