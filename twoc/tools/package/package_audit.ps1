@@ -8,8 +8,12 @@
 #   4. the licences (step 108): LICENSE.txt is there and is the MIT licence for this project's own code, and
 #      THIRD_PARTY_LICENSES.txt is there. While LICENSE.txt's copyright line still holds the placeholder
 #      "[NAME TO BE CHOSEN BY THE OWNER]" it WARNS loudly (yellow), without failing: the owner replaces it in
-#      twoc\LICENSE (the one place) before sharing.
-# It fails loudly (red lines, exit code 1) on any of 1-4.
+#      twoc\LICENSE (the one place) before sharing;
+#   5. the audio library (step 108): xemu_apu.dll beside every crash_twoc.exe, and in the Share package its source
+#      zip in Source\ (each zip there is unpacked and audited the same way: its own game-file, PC, licence checks).
+# It fails loudly (red lines, exit code 1) on any of 1-5.
+# What it audits: a package (PACKAGE.txt), the whole-program source folder (make_source_package.ps1: twoc\LICENSE)
+# or the audio library's source folder (make_apu_source_package.ps1: xemu_apu_dll.c, LICENSES\, NOTICE.txt).
 #
 #   powershell -NoProfile -ExecutionPolicy Bypass -File twoc\tools\package\package_audit.ps1 -Dir PACKAGE
 #
@@ -36,6 +40,8 @@ if (Test-Path -LiteralPath $pk) {
     if ($m) { $target = $m.Matches[0].Groups[1].Value }
 }
 $share = $target -eq 'Share'
+$apuSrc = $target -eq 'unknown' -and (Test-Path -LiteralPath (Join-Path $Dir 'xemu_apu_dll.c'))
+if ($apuSrc) { $target = 'the audio library''s source' }
 Write-Host "Auditing $Dir (target $target)"
 
 # The manifest: names, sizes, hashes.
@@ -128,7 +134,8 @@ foreach ($f in $all) {
         if ($f.Name -in 'logs', 'UDATA', 'UDATA_backups', 'TDATA', 'captures') { Fail "a folder of logs or saves: $rel" }
         continue
     }
-    if ($f.Extension -in '.log', '.dmp', '.sav', '.xbx', '.pdb', '.zip', '.map' -or $f.Name -eq 'crash_twoc.muted') { Fail "a stray log, save or dump: $rel" }
+    $srcZip = $f.Extension -eq '.zip' -and $rel -like 'Source\*.zip' -and $rel.Split('\').Count -eq 2   # step 108: audited below
+    if (-not $srcZip -and ($f.Extension -in '.log', '.dmp', '.sav', '.xbx', '.pdb', '.zip', '.map' -or $f.Name -eq 'crash_twoc.muted')) { Fail "a stray log, save or dump: $rel" }
     if ($share -and $f.Name -eq 'crash_twoc.ini') { Fail "crash_twoc.ini in a Share package (the first start writes one): $rel" }
     if ($f.Name -like 'game_files.*') { Fail "a setup leftover: $rel" }
 }
@@ -137,6 +144,16 @@ foreach ($f in $all) {
 Write-Host "4. licences"
 $licPath = Join-Path $Dir 'LICENSE.txt'
 if ($target -eq 'unknown' -and -not (Test-Path -LiteralPath $licPath)) { $licPath = Join-Path $Dir 'twoc\LICENSE' }
+if ($apuSrc) {      # the audio library's source: the LGPL's text, the notice, and this project's MIT text for its own files
+    $licPath = Join-Path $Dir 'LICENSES\MIT-twoc.txt'
+    $lg = Join-Path $Dir 'LICENSES\LGPL-2.1.txt'
+    if (-not (Test-Path -LiteralPath $lg)) { Fail "no LICENSES\LGPL-2.1.txt" }
+    else {
+        $lt = [IO.File]::ReadAllText($lg)
+        if ($lt -notmatch 'GNU LESSER GENERAL PUBLIC LICENSE' -or $lt -notmatch 'Version 2\.1') { Fail "LICENSES\LGPL-2.1.txt isn't the LGPL 2.1" }
+    }
+    if (-not (Test-Path -LiteralPath (Join-Path $Dir 'NOTICE.txt'))) { Fail "no NOTICE.txt (xemu's attribution, what was changed)" }
+}
 if (-not (Test-Path -LiteralPath $licPath)) { Fail "no LICENSE.txt (this project's own code: MIT)" }
 else {
     $lic = [IO.File]::ReadAllText($licPath)
@@ -154,7 +171,34 @@ else {
     } else { Note "copyright line: $($cr.Value)" }
 }
 $tpl = if ($target -eq 'unknown') { Join-Path $Dir 'twoc\THIRD_PARTY_LICENSES.txt' } else { Join-Path $Dir 'THIRD_PARTY_LICENSES.txt' }
-if (-not (Test-Path -LiteralPath $tpl)) { Fail "no THIRD_PARTY_LICENSES.txt" }
+if (-not $apuSrc -and -not (Test-Path -LiteralPath $tpl)) { Fail "no THIRD_PARTY_LICENSES.txt" }
+
+# 5. The audio library (step 108): xemu_apu.dll beside the exe; in the Share package its source zip in Source\,
+# unpacked into a temporary folder and audited by this same script.
+Write-Host "5. the audio library"
+foreach ($exe in @($files | Where-Object { $_.Name -eq 'crash_twoc.exe' })) {
+    $dll = Join-Path $exe.DirectoryName 'xemu_apu.dll'
+    $rel = $exe.FullName.Substring($Dir.Length + 1)
+    if (-not (Test-Path -LiteralPath $dll)) { Fail "no xemu_apu.dll beside $rel (the game doesn't start without it)" }
+    else { Note "xemu_apu.dll beside $rel" }
+}
+$zips = @($files | Where-Object { $_.Extension -eq '.zip' -and $_.FullName.Substring($Dir.Length + 1) -like 'Source\*.zip' })
+if ($share -and -not @($zips | Where-Object { $_.Name -like 'xemu_apu-source*.zip' }).Count) {
+    Fail "no Source\xemu_apu-source*.zip (the audio library's source, which goes with its DLL)"
+}
+foreach ($z in $zips) {
+    $zt = Join-Path $env:TEMP ('twoc_audit_' + [guid]::NewGuid().ToString('N').Substring(0, 8))
+    try {
+        Add-Type -AssemblyName System.IO.Compression.FileSystem
+        [IO.Compression.ZipFile]::ExtractToDirectory($z.FullName, $zt)
+        $top = @(Get-ChildItem -LiteralPath $zt)
+        $inner = if ($top.Count -eq 1 -and $top[0].PSIsContainer) { $top[0].FullName } else { $zt }
+        Write-Host "   --- $($z.Name), unpacked: ---"
+        & powershell -NoProfile -ExecutionPolicy Bypass -File $PSCommandPath -Dir $inner -Manifest $Manifest
+        if ($LASTEXITCODE) { Fail "the zip Source\$($z.Name) failed its own audit (above)" }
+        Write-Host "   --- end of $($z.Name) ---"
+    } finally { if (Test-Path -LiteralPath $zt) { Remove-Item -Recurse -Force -LiteralPath $zt } }
+}
 
 $size = ($files | Measure-Object Length -Sum).Sum
 Write-Host ("{0} files, {1:N1} MB" -f $files.Count, ($size / 1MB))

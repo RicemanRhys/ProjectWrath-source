@@ -20,6 +20,9 @@
 #   crash_twoc.exe and the Visual C++ runtime DLLs it imports (vcruntime140.dll, vcruntime140_1.dll,
 #     copied app-local from Visual Studio's redist folder); every other DLL it imports is part of
 #     Windows 10/11 (checked here with dumpbin /dependents; the list goes into PACKAGE.txt)
+#   xemu_apu.dll (step 108, notes 18.111): the audio library (the APU from xemu, LGPL), from the exe's own build
+#     folder; its imports are checked the same way. The Share package also gets Source\xemu_apu-source_*.zip, its
+#     complete source (make_apu_source_package.ps1)
 #   game_files\ (default.xbe and Crashdat\ from -GameFiles; never UDATA (saves), UDATA_backups, TDATA
 #     or our analysis files; -Save DIR copies DIR in as game_files\UDATA, only when asked)
 #   tools\vrrprobe.exe (built from twoc\tools\diag\vrrprobe.cpp) and tools\collect_logs.ps1
@@ -133,7 +136,7 @@ if ($Pgo) {
             (Join-Path $h 'pgi') | Out-Null
         Copy-Item (Join-Path $GameFiles 'default.xbe') (Join-Path $h 'root\game_files')
         New-Item -ItemType Junction -Path $junction -Target (Join-Path $GameFiles 'Crashdat') | Out-Null
-        Copy-Item (Join-Path $pb 'Release\crash_twoc.exe'), $pgort (Join-Path $h 'pgi')
+        Copy-Item (Join-Path $pb 'Release\crash_twoc.exe'), (Join-Path $pb 'Release\xemu_apu.dll'), $pgort (Join-Path $h 'pgi')
         Write-Host "PGO: training (cast_bug, avalanch, upstairs) in $h"
         $t1 = Get-Date
         & $bash (Join-Path $h 'pgo_train.sh') ($h -replace '\\', '/') (Join-Path $h 'pgi\crash_twoc.exe') $pb $pgosweep
@@ -166,8 +169,17 @@ $newer = Get-ChildItem -Recurse -File (Join-Path $twoc 'src'), (Join-Path $repo 
          Where-Object { $_.LastWriteTime -gt $exeTime } | Select-Object -First 3
 if ($newer) { Write-Warning ("Sources newer than the exe (rebuild?): " + (($newer | ForEach-Object Name) -join ', ')) }
 
-# The exe's imports, each placed: shipped beside it, or part of Windows.
-$deps = & $dumpbin.FullName /nologo /dependents $Exe | Where-Object { $_ -match '^\s+\S+\.dll\s*$' } | ForEach-Object { $_.Trim() }
+# The audio library (step 108): built beside the exe.
+$apuDll = Join-Path (Split-Path -Parent $Exe) 'xemu_apu.dll'
+if (-not (Test-Path $apuDll)) { throw "No xemu_apu.dll beside $Exe (the game doesn't start without it): build first" }
+$apuNewer = Get-ChildItem -File (Join-Path $repo 'xboxrecomp\src\apu'), (Join-Path $twoc 'apu_dll') |
+            Where-Object { $_.LastWriteTime -gt (Get-Item $apuDll).LastWriteTime } | Select-Object -First 3
+if ($apuNewer) { Write-Warning ("Sources newer than xemu_apu.dll (rebuild?): " + (($apuNewer | ForEach-Object Name) -join ', ')) }
+
+# The exe's and the DLL's imports, each placed: shipped beside it, or part of Windows.
+function Imports([string]$f) { & $dumpbin.FullName /nologo /dependents $f | Where-Object { $_ -match '^\s+\S+\.dll\s*$' } | ForEach-Object { $_.Trim() } }
+$deps = @(Imports $Exe)
+$apuDeps = @(Imports $apuDll)
 $shipped = @('vcruntime140.dll', 'vcruntime140_1.dll', 'msvcp140.dll', 'msvcp140_1.dll', 'msvcp140_2.dll', 'concrt140.dll')
 $windows = @{
     'kernel32.dll' = 'Windows'; 'user32.dll' = 'Windows'; 'gdi32.dll' = 'Windows'; 'imm32.dll' = 'Windows';
@@ -182,15 +194,18 @@ $windows = @{
     'mfreadwrite.dll' = 'Windows (Media Foundation; missing on N editions without the Media Feature Pack)'
 }
 $depLines = @()
-foreach ($d in $deps) {
+$apuLines = @()
+foreach ($d in ($deps + $apuDeps | Select-Object -Unique)) {
     $k = $d.ToLower()
     if ($shipped -contains $k) { $where = 'shipped in this folder (Visual C++ runtime ' + (Split-Path -Leaf (Split-Path -Parent (Split-Path -Parent $crt.FullName))) + ')' }
     elseif ($k -like 'api-ms-win-crt-*') { $where = 'Windows 10+ (the Universal C runtime)' }
     elseif ($windows.ContainsKey($k)) { $where = $windows[$k] }
     else { throw "The exe imports $d, which this script doesn't know: decide whether to ship it" }
     if ($shipped -contains $k -and -not (Test-Path (Join-Path $crt.FullName $d))) { throw "$d not in $($crt.FullName)" }
-    $depLines += ('  {0,-40} {1}' -f $d, $where)
+    if ($deps -contains $d) { $depLines += ('  {0,-40} {1}' -f $d, $where) }
+    if ($apuDeps -contains $d) { $apuLines += ('  {0,-40} {1}' -f $d, $where) }
 }
+if ($apuDeps -contains 'crash_twoc.exe') { throw 'xemu_apu.dll imports from crash_twoc.exe: it must not' }
 
 # The folder.
 if (Test-Path $Out) {
@@ -203,7 +218,17 @@ $Out = (Resolve-Path $Out).Path
 
 Write-Host "Packaging into $Out"
 Copy-Item $Exe (Join-Path $Out 'crash_twoc.exe')
-foreach ($d in $deps) { if ($shipped -contains $d.ToLower()) { Copy-Item (Join-Path $crt.FullName $d) $Out } }
+Copy-Item $apuDll (Join-Path $Out 'xemu_apu.dll')
+foreach ($d in ($deps + $apuDeps | Select-Object -Unique)) { if ($shipped -contains $d.ToLower()) { Copy-Item (Join-Path $crt.FullName $d) $Out } }
+# The Share package: the audio library's complete source beside it (step 108; the LGPL's terms for the DLL).
+if ($share) {
+    $srcDir = Join-Path $Out 'Source'
+    New-Item -ItemType Directory -Force -Path $srcDir | Out-Null
+    $xh = (& git -C (Join-Path $repo 'xboxrecomp') rev-parse --short HEAD); $th = (& git -C $repo rev-parse --short HEAD)
+    & powershell -NoProfile -ExecutionPolicy Bypass -File (Join-Path $here 'make_apu_source_package.ps1') `
+        -Out (Join-Path $srcDir "xemu_apu-source_xboxrecomp-${xh}_twoc-${th}.zip")
+    if ($LASTEXITCODE) { throw 'make_apu_source_package.ps1 failed' }
+}
 
 # vrrprobe, built for the package (a temporary .cmd: vcvars64 needs cmd, and cmd wants CRLF). Not in the Share
 # package (a display test for the test devices).
@@ -284,6 +309,7 @@ $dirty = if (Git1 $repo @('status', '--porcelain', '--untracked-files=no', '--',
 $xr = Git1 $xrDir @('log', '-1', '--format=%h %ad', '--date=iso')
 if (Git1 $xrDir @('status', '--porcelain', '--untracked-files=no')) { $xr += ' (with uncommitted changes)' }
 $hash = (Get-FileHash -Algorithm SHA256 (Join-Path $Out 'crash_twoc.exe')).Hash
+$apuHash = (Get-FileHash -Algorithm SHA256 (Join-Path $Out 'xemu_apu.dll')).Hash
 # Link-time code generation (notes 18.87): the exe's build folder's CMakeCache.txt (build\Release\..).
 $cache = Join-Path (Split-Path -Parent (Split-Path -Parent $Exe)) 'CMakeCache.txt'
 $ltcg = if (-not (Test-Path $cache)) { "unknown (no CMakeCache.txt beside the exe's folder)" }
@@ -305,10 +331,15 @@ $pkg = @(
     "crash_twoc.exe: $((Get-Item $Exe).Length) bytes, built $($exeTime.ToString('yyyy-MM-dd HH:mm:ss')), SHA-256 $hash",
     "                link-time code generation: $ltcg",
     "                profile-guided optimisation: $pgoLine",
+    "xemu_apu.dll:   $((Get-Item $apuDll).Length) bytes, built $((Get-Item $apuDll).LastWriteTime.ToString('yyyy-MM-dd HH:mm:ss')), SHA-256 $apuHash",
+    "                the audio library (xboxrecomp's src\apu from xemu, LGPL-2.1-or-later), loaded by the exe at the start$(if ($share) { '; its source: Source\' })",
     $gfLine,
     "",
     "DLLs the exe imports (dumpbin /dependents) and where they come from:"
 ) + $depLines + @(
+    "",
+    "DLLs xemu_apu.dll imports:"
+) + $apuLines + @(
     "",
     "Loaded at run time when present: nvapi64.dll (NVIDIA only; the variable-refresh query), xaudio2_9.dll,",
     "powrprof.dll and pdh.dll (Windows; the power log, notes 18.94), the GPU's own driver DLLs. Needs: 64-bit",

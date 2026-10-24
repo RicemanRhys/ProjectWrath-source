@@ -203,6 +203,7 @@ What's in the folder
   crash_twoc.ini                  the game's settings, already set up for the Legion Go
   Test notes.txt                  write what you see here; it goes into the zip
   crash_twoc.exe, vcruntime140.dll, vcruntime140_1.dll    the game and its C++ runtime
+  xemu_apu.dll                    the game's audio library (the game needs it beside the exe)
   game_files\                     the disc files (default.xbe and Crashdat\)
   tools\                          vrrprobe.exe (a display test) and the log collector
   PACKAGE.txt                     which build this is

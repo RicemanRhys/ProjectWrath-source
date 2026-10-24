@@ -57,6 +57,7 @@ What's in the folder
   crash_twoc.ini                         the game's settings, set up for this laptop
   Test notes.txt                         write what you see here; it goes into the zip
   crash_twoc.exe, vcruntime140*.dll      the game and its C++ runtime
+  xemu_apu.dll                           the game's audio library (needed beside the exe)
   game_files\                            the disc files
   tools\, PACKAGE.txt                    the log collector and a display test; which build
                                          this is

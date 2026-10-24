@@ -142,6 +142,8 @@ set(GAME_SOURCES
     src/mem_log.c
     # The F1 menu's About tab: the build, the graphics card and driver, the display, Windows (step 93)
     src/about.c
+    # The emulated APU (from xemu, LGPL) is xemu_apu.dll beside the exe: loaded and checked here (step 108)
+    src/apu_dll.c
     # The graphics cards: listed at the start, the one the device is made on, the display's (step 97)
     src/gpu.c
     # The processor (hybrid or not) and the process's power throttling, opted out (step 97)
@@ -240,8 +242,20 @@ add_custom_target(twoc_build_info
     VERBATIM)
 add_dependencies(${PROJECT_NAME} twoc_build_info)
 
-# Link against the xboxrecomp umbrella target (all 6 runtime libraries)
-target_link_libraries(${PROJECT_NAME} PRIVATE xboxrecomp SDL3::SDL3-static)
+# xboxrecomp's runtime libraries, each by name: the umbrella target 'xboxrecomp' less xbox_apu (step 108, notes
+# 18.111: the APU, from xemu under the LGPL, is the DLL below, not linked into the exe) and xbox_dsound (a
+# DirectSound stand-in on the APU's software mixer, which the game never used: it has its own DirectSound).
+target_link_libraries(${PROJECT_NAME} PRIVATE
+    xbox_kernel xbox_d3d8 xbox_input xbox_usb xbox_nv2a xbox_video SDL3::SDL3-static)
+set_target_properties(xbox_apu xbox_dsound PROPERTIES EXCLUDE_FROM_ALL TRUE)
+
+# xemu_apu.dll (step 108, notes 18.111): xboxrecomp's src/apu, unchanged, built as a DLL of its own (apu_dll/)
+# beside crash_twoc.exe, which loads it at the start (src/apu_dll.c). Nothing links to it: the exe finds it by
+# full path, so the build only has to make it first.
+set(XEMU_APU_SRC "${XBOXRECOMP_DIR}/src")
+add_subdirectory(apu_dll)
+set_target_properties(xemu_apu PROPERTIES RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}")
+add_dependencies(${PROJECT_NAME} xemu_apu)
 
 # Include paths for generated recomp headers
 target_include_directories(${PROJECT_NAME} PRIVATE
@@ -253,6 +267,8 @@ target_include_directories(${PROJECT_NAME} PRIVATE
     ${CMAKE_CURRENT_SOURCE_DIR}/third_party/smaa
     ${CMAKE_CURRENT_SOURCE_DIR}/third_party/vulkan/include
     ${CMAKE_CURRENT_SOURCE_DIR}/third_party/volk
+    ${CMAKE_CURRENT_SOURCE_DIR}/apu_dll
+    ${XBOXRECOMP_DIR}/src/audio     # dsound_xbox.h (xbox_runtime.h), once xbox_dsound's own include path
     ${TWOC_GENERATED_DIR}
 )
 set_source_files_properties(src/vk_probe.c third_party/volk/volk.c PROPERTIES

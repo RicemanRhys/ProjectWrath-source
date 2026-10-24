@@ -70,9 +70,12 @@ the Xbox disc and is not covered here.
     4. SMAA .............................. MIT
     5. volk 1.4.350 ...................... MIT
     6. Vulkan-Headers 1.4.363 ............ Apache-2.0 or MIT (MIT used here)
-    7. xboxrecomp ........................ MIT, with its audio (APU) code from xemu: LGPL-2.1-or-later (see
-                                            "The LGPL status of the audio code" below)
+    7. xboxrecomp ........................ MIT; its audio (APU) code from xemu, LGPL-2.1-or-later, is not
+                                            built in: it is xemu_apu.dll (below)
   Shipped beside it
+   (7) xemu_apu.dll (the audio library) . LGPL-2.1-or-later (xemu's APU files), with xboxrecomp's and this
+                                            project's MIT glue; its source is in Source\\ (see "The audio
+                                            library, xemu_apu.dll" below)
     8. The Visual C++ runtime DLLs (vcruntime140.dll, vcruntime140_1.dll) ... Microsoft Visual Studio 2022
                                             licence terms, "Distributable Code"
     9. DXVK 3.1.1 (the DXVK test folder only: d3d11.dll, dxgi.dll) ........ zlib/libpng
@@ -120,31 +123,35 @@ part("6. Vulkan-Headers vulkan-sdk-1.4.363.0 (twoc/third_party/vulkan)",
      read(TP, "vulkan", "LICENSES", "MIT.txt"))
 
 notice = read(XR, "NOTICE")
-part("7. xboxrecomp (the toolkit the recompilation runs on, linked static)",
-     "The Xbox kernel, D3D8 on D3D11 (xbox_d3d8), input and audio libraries. MIT, except the audio (APU) files\n"
-     "extracted from xemu, LGPL-2.1-or-later: its NOTICE's section on them, then the LGPL's text.",
-     "MIT; the APU files LGPL-2.1-or-later",
+part("7. xboxrecomp (the toolkit the recompilation runs on), and xemu_apu.dll",
+     "The Xbox kernel, D3D8 on D3D11 (xbox_d3d8), input and USB libraries, linked static into crash_twoc.exe: MIT.\n"
+     "Its audio (APU) files extracted from xemu, LGPL-2.1-or-later, are built into xemu_apu.dll instead, with\n"
+     "xboxrecomp's own XAudio2 output and register decoder (MIT): its NOTICE's sections on them, then the LGPL's text.",
+     "MIT; the APU files (xemu_apu.dll) LGPL-2.1-or-later",
      read(XR, "LICENSE") + "\n\n--- NOTICE: " +
      between(notice, "LGPL-2.1-or-later — extracted from xemu", "Derived algorithms").strip() +
      "\n\n--- NOTICE: " + between(notice, "Derived algorithms", "Reference material").strip() +
      "\n\n--- LICENSES/LGPL-2.1.txt ---\n\n" + read(XR, "LICENSES", "LGPL-2.1.txt"))
 
 out.append(RULE)
-out.append("The LGPL status of the audio code")
+out.append("The audio library, xemu_apu.dll")
 out.append(RULE)
-out.append("""The game's sound runs on xboxrecomp's emulated MCPX APU (src/apu: apu_core.c, apu_dsp.c, apu_vp.c and their
-headers), code extracted from xemu (https://github.com/xemu-project/xemu) and licensed LGPL-2.1-or-later. It is
-compiled into crash_twoc.exe, statically linked with code under MIT and the other licences above. The LGPL
-allows that, on conditions (its section 6): the notices above stay with the program; whoever receives the exe
-can get the complete source of the LGPL parts as built, including every change made to them, and can relink the
-program with a modified version of them (the source of the rest, or its object files, has to be available for
-that too).
+out.append("""The game's sound runs on xboxrecomp's emulated MCPX APU: apu_core.c, apu_dsp.c, apu_vp.c and their headers,
+code extracted from xemu (https://github.com/xemu-project/xemu) and licensed LGPL-2.1-or-later. Since step 108
+it is not part of crash_twoc.exe: it is xemu_apu.dll, a library of its own beside the exe, built from those
+files unchanged (with xboxrecomp's MIT output and register decoder and this project's MIT export). The exe loads
+it at the start from its own folder and uses it only through a small C interface (xemu_apu_api.h, version 1);
+nothing else of the exe is in it.
 
-This build's APU files carry local changes not published anywhere yet (xboxrecomp commits made on this PC: the
-voice processor's per-kind gains, 5.1 output, the HRTF and its scaling, the output thread's wakeup log, among
-others; notes 18.44-18.93). So: for testing on your own devices this is fine; before giving the package to anyone
-else, publish (or ship with it) the xboxrecomp source as built, with those commits, and twoc's source and build
-files, so the exe can be rebuilt with a modified APU. Until then the package is for personal testing only.
+Its source: the zip in the Source folder of the package for other people (xemu_apu-source_*.zip; made by
+twoc/tools/package/make_apu_source_package.ps1): the complete source of the DLL as built, including this
+project's changes to xemu's files (xboxrecomp commits made for this project and not published upstream; each
+as a patch in changes\\), the LGPL's text, a notice (xemu's attribution, each file's licence, what was changed)
+and the build files.
+
+To replace it with your own: change the source, run build.cmd (Visual Studio 2022 with C++), close the game and
+copy the new xemu_apu.dll over the one next to crash_twoc.exe. The game's log names the DLL it loaded, with its
+size and SHA-256. If your DLL offers another interface version, the game says so and doesn't start.
 """)
 
 part("8. The Visual C++ runtime DLLs (vcruntime140.dll, vcruntime140_1.dll; app-local in the package and the DXVK folder)",

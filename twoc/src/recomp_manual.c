@@ -25,7 +25,7 @@
 
 /* xbox_bridge_resolve_handle: resolves a guest handle token back to the real
  * native HANDLE, for the hand-written GetExitCodeThread below. */
-#include <xbox/xboxrecomp.h>
+#include "xbox_runtime.h"       /* xboxrecomp's umbrella header less the APU's (step 108) */
 
 /* The generated-code headers: register aliases (eax, ecx, esp ...), MEM32/MEM8,
  * PUSH32, RECOMP_ABI_CALL and the declarations of every lifted function. The

@@ -8,48 +8,50 @@ The Share package (`make_package.ps1 -Target Share`) is built for sharing: it ca
 supplies their own disc image, and the first start sets the game up (notes 18.110). Whether and how to share it is
 still your call, after the points below.
 
-## 1. The LGPL audio code from xemu
+## 1. The LGPL audio code from xemu: xemu_apu.dll (decided in step 108)
 
-**What it is.** The Xbox audio processor emulation (`xboxrecomp/src/apu`) comes from xemu and is under the GNU Lesser
-General Public License, version 2.1 or later (`xboxrecomp/NOTICE`, `LICENSES/`, and part 7 of
-`THIRD_PARTY_LICENSES.txt`). It is compiled into `crash_twoc.exe` (linked statically). This build's copy has local
-changes: xboxrecomp is 41 commits ahead of its upstream (`origin/main`), never pushed, 13 of them in `src/apu`.
+**What it is.** The Xbox audio processor emulation (`xboxrecomp/src/apu`: `apu_core.c`, `apu_vp.c`, `apu_dsp.c` and
+their headers) comes from xemu and is under the GNU Lesser General Public License, version 2.1 or later
+(`xboxrecomp/NOTICE`, `LICENSES/`, part 7 of `THIRD_PARTY_LICENSES.txt`). This build's copy has this project's
+changes: 13 local xboxrecomp commits in `src/apu`, never pushed upstream.
 
-**What the LGPL asks for, in short** (read the licence itself: section 6 is the one about programs that use the
-library): someone who gets the program must be able to get the library's source as it was built, including your
-changes, and must be able to change that library and rebuild or relink the program with their changed copy.
+**Your choice (step 108): the audio code is its own DLL, shipped with its source and licence, so a recipient can
+swap it.** Since step 108:
 
-**What a recipient would need, concretely:**
+- **The DLL.** `xemu_apu.dll`, beside `crash_twoc.exe` in every package. It is built by `twoc/apu_dll/CMakeLists.txt`
+  from xboxrecomp's APU files, unchanged (the xemu-derived files, plus xboxrecomp's own MIT `apu_xaudio2.c` and
+  `apu_mmio_hook.c`), and this project's `xemu_apu_dll.c` (its one export, MIT). The exe no longer contains any of
+  that code (it links xboxrecomp's other libraries one by one, without `xbox_apu`), and the DLL contains nothing
+  else of the exe.
+- **The interface** (`twoc/apu_dll/xemu_apu_api.h`, version 1): one export, `xemu_apu_get_api(version)`, handing the
+  exe a table of C functions: start the APU over the guest's memory, a register access the exe's exception handler
+  caught (decoded and done in the DLL), register read and write by offset, the music / effects gains, the HRTF,
+  the output's channel count. Nothing calls back into the exe.
+- **Loading.** At the start, from the exe's own folder by full path (never the current folder or PATH), its
+  interface version checked. Missing, damaged or another version: a message box in plain words (what is wrong,
+  the file's full path, what to do) and the game doesn't start. The log names the DLL loaded, with its size and
+  SHA-256 (`[APU-DLL]`).
+- **Its source.** `twoc/tools/package/make_apu_source_package.ps1` makes `xemu_apu-source_xboxrecomp-<commit>_twoc-<commit>.zip`:
+  the DLL's files exactly as committed (it refuses if any has changes not committed), this project's changes to
+  them (the 13 local commits as patches, listed in `NOTICE.txt`), the LGPL-2.1 text and the two MIT texts,
+  `NOTICE.txt` (xemu's attribution as xboxrecomp gives it, each file's licence, what was changed, the commits),
+  `README.txt` (how to rebuild and swap) and `build.cmd` (Visual Studio 2022's compiler through CMake). The Share
+  package carries it in `Source\`. Built with the same compiler, the rebuilt DLL is byte for byte the shipped one
+  (`/Brepro`; proved in step 108 from the unpacked zip alone).
+- **How a recipient replaces it:** change the source, run `build.cmd`, close the game, copy the new `xemu_apu.dll`
+  over the one next to `crash_twoc.exe`. Nothing else is rebuilt or relinked.
 
-- the source of `xboxrecomp/src/apu` exactly as built, with the local commits;
-- the rest of xboxrecomp as built (the APU links against it), and its build files;
-- twoc's own source and build files (`twoc/src`, `CMakeLists.txt`, the lift scripts), so the whole exe can be
-  rebuilt with a changed APU;
-- build instructions;
-- the licence texts (already in `THIRD_PARTY_LICENSES.txt`) and a written offer or the source itself with the
-  program.
+**What `make_source_package.ps1` is for now.** It still makes a zip of the whole program's source (twoc's source and
+build files, xboxrecomp at the commits built, its local commits as patches), without the recompiled code, the
+game's files, `docs/option_b`, the harness and the notes. It is **no longer the LGPL mechanism** (the DLL's own zip
+is); keep it for developers or for a public repository later. It includes no game-derived generated code: the
+recompiled code is made by each builder from their own disc (its `BUILD.txt`, step 3).
 
-**The script.** `twoc/tools/package/make_source_package.ps1` makes that zip (default
-`Desktop\Crash\SourcePackage\crash-twoc-source_twoc-<commit>_xboxrecomp-<commit>.zip`): twoc's source and build
-files and xboxrecomp at the commits built (from git, so uncommitted changes are left out and it warns), the 41 local
-commits again as patch files, `SOURCE.txt` (what is in and what is left out) and `BUILD.txt` (the steps). It runs the
-package audit on the folder before zipping (no game files, no trace of this PC). **It publishes nothing.**
+**Still open (yours):**
 
-**Left out of it, on purpose:** the recompiled game code (`twoc/src/recomp/gen`, 32 MB of C made from the game's
-`default.xbe` by `lift.ps1`), the disc's files, `twoc/docs/option_b` (a disassembly listing of the D3D library inside
-the game's program), the test harness and the project notes.
-
-**Open questions (yours, or a lawyer's):**
-
-- With static linking, rebuilding needs the rest of the program too. A recipient can only rebuild the exe with
-  their own copy of the game (the recompiled code comes from it, `BUILD.txt` step 3). Is that enough, or would the
-  object files of the rest of the program have to be offered (which contain the recompiled game code; see part 3)?
-- An engineering option that changes the question: build the APU as its own DLL (`xbox_apu.dll`), so a recipient
-  can swap in a changed copy without rebuilding anything else. Work: a CMake change, an exported C interface
-  (`mcpx_apu_init_standalone`, the MMIO hook, the output functions; about a dozen functions), a DLL in the package,
-  a day or two with testing; no change to how the game plays. Not done: it is a choice to make first.
-- Where the source would be hosted (with the package, or a link that stays up for as long as the program is
-  shared), and pushing or publishing xboxrecomp's local commits (a fork) so upstream and recipients can see them.
+- Where the source would be hosted besides the package (the zip travels with the Share package; a public link is
+  optional), and whether to publish xboxrecomp's local commits (a fork) so upstream can see them.
+- Whether to offer the changes to xemu's code upstream (to xboxrecomp): not needed for the licence, a courtesy.
 
 ## 2. Licence texts
 
@@ -96,8 +98,10 @@ and `README.twoc.txt`, the files' own headers, unchanged since they were added).
 | `twoc/third_party/volk` (volk.c, volk.h) | Arseny Kapoulkine | MIT, `LICENSE.md` |
 | `twoc/third_party/vulkan` (Vulkan-Headers) | The Khronos Group | Apache-2.0 or MIT, `LICENSE.md`, `LICENSES/` |
 | SDL 3.4.18 (fetched by CMake into the build folder, built static) | SDL's authors; HIDAPI; SunPro (libm) | zlib; HIDAPI BSD-style; SunPro's notice |
+| `twoc/apu_dll/` (`CMakeLists.txt`, `xemu_apu_dll.c`, `xemu_apu_api.h`, `build.cmd`) | this project | MIT (the LGPL files it builds keep the LGPL) |
 | `xboxrecomp/` (the toolkit: kernel, D3D8 on D3D11, input, the recompiler) | xboxrecomp's authors | MIT, `xboxrecomp/LICENSE` |
-| `xboxrecomp/src/apu/apu_core.c`, `apu_dsp.c`, `apu_vp.c`, `apu_regs.h`, `apu_state.h`, `apu_debug.h`, `fpconv.h`, `apu_shim.h`; `xboxrecomp/src/nv2a/nv2a_regs.h` | xemu's authors (espes, Jannik Vogel, Matt Borgerson) | LGPL-2.1-or-later, `xboxrecomp/NOTICE`, `LICENSES/LGPL-2.1.txt` |
+| `xboxrecomp/src/apu/apu_core.c`, `apu_dsp.c`, `apu_vp.c`, `apu_regs.h`, `apu_state.h`, `apu_debug.h`, `fpconv.h`, `apu_shim.h`, and `apu.h` (its header says it is extracted from xemu; NOTICE doesn't list it, so it is treated as LGPL too); `xboxrecomp/src/nv2a/nv2a_regs.h` (not used by the DLL) | xemu's authors (espes, Jannik Vogel, Matt Borgerson) | LGPL-2.1-or-later, `xboxrecomp/NOTICE`, `LICENSES/LGPL-2.1.txt`: in `xemu_apu.dll` only (part 1) |
+| `xboxrecomp/src/apu/apu_xaudio2.c`, `apu_xaudio2.h`, `apu_mmio_hook.c`, `src/nv2a/qemu_shim.h`, `src/platform/xbox_winnt.h` | xboxrecomp's authors | MIT; built into `xemu_apu.dll` with the files above |
 | `twoc/src/recomp/gen` (the recompiled code, made by `lift.ps1` from the game's `default.xbe`; gitignored) | translated from the game's program | the MIT licence is **not** claimed for it; part 3's open question |
 | `twoc/docs/option_b` (a disassembly listing of the D3D library in the game's program) | from the game's program | not claimed; never packaged |
 | the game's files (`game_files`, the disc) | the game's owners | not included anywhere; the player's own copy |

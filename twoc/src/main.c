@@ -39,7 +39,7 @@
 #include <math.h>
 
 /* xboxrecomp runtime headers */
-#include <xbox/xboxrecomp.h>
+#include "xbox_runtime.h"       /* xboxrecomp's umbrella header less the APU's (step 108) */
 
 #include "settings.h"
 #include "pads.h"
@@ -50,6 +50,7 @@
 #include "setup.h"
 #include "setup_ui.h"
 #include "selfstart.h"
+#include "apu_dll.h"
 
 /*
  * If xboxrecomp.h is not an umbrella header in your setup, include
@@ -361,6 +362,12 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance,
      * with the settings that suit most PCs. */
     twoc_first_ini();
     twoc_settings_load();
+    /* Step 108 (notes 18.111): the emulated APU is xemu_apu.dll beside the exe (LGPL, from xemu: a DLL of its own
+     * so a player can rebuild and swap it). Loaded from the exe's folder by full path and its interface version
+     * checked, here, before anything calls it (the music and effects gains just below); without it the game
+     * doesn't start, after a message box saying what is wrong and what to do (apu_dll.h). */
+    if (!twoc_apu_dll_load())
+        return 1;
     /* Step 97: the processor logged, and the process opted out of Windows'
      * power throttling (cpu_info.h). */
     twoc_cpu_start();

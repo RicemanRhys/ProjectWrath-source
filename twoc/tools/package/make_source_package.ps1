@@ -1,7 +1,8 @@
-# The source package (step 107, notes 18.110; docs\SHARING.md part 1): one zip with what a recipient of the game's
-# exe would need to rebuild it with a changed copy of the LGPL audio code (xboxrecomp's src\apu, from xemu): that
-# code as built, every local xboxrecomp commit (never pushed upstream; as patches too), twoc's own source and build
-# files, and the build instructions. Made locally; this script publishes nothing.
+# The whole program's source package (step 107, notes 18.110; docs\SHARING.md part 1): one zip with twoc's own source
+# and build files, xboxrecomp as built with every local commit (never pushed upstream; as patches too), and the
+# build instructions, for developers or a public repository later. Since step 108 (notes 18.111) it is NOT the LGPL
+# mechanism: the LGPL audio code is xemu_apu.dll, whose own source zip (make_apu_source_package.ps1) goes with it.
+# Made locally; this script publishes nothing.
 #
 #   powershell -NoProfile -ExecutionPolicy Bypass -File twoc\tools\package\make_source_package.ps1 [-Out ZIP] [-Force]
 #
@@ -28,7 +29,8 @@ if ((Test-Path -LiteralPath $Out) -and -not $Force) { throw "$Out exists; -Force
 $include = @('twoc/src', 'twoc/CMakeLists.txt', 'twoc/data', 'twoc/third_party', 'twoc/tools/lift_flag_join.py',
              'twoc/tools/lift_frndint.py', 'twoc/tools/wrap_callers.py', 'twoc/tools/build_info.cmake',
              'twoc/tools/package', 'twoc/lift.ps1', 'twoc/analyze.ps1', 'twoc/run_twoc.ps1', 'twoc/seed_functions.json',
-             'twoc/THIRD_PARTY_LICENSES.txt', 'twoc/LICENSE', 'twoc/NOTICE', 'twoc/docs/SHARING.md', 'twoc/.gitignore')
+             'twoc/THIRD_PARTY_LICENSES.txt', 'twoc/LICENSE', 'twoc/NOTICE', 'twoc/docs/SHARING.md', 'twoc/.gitignore',
+             'twoc/apu_dll')
 $exclude = @('twoc/tools/package/smoke104.py')     # a test script with this PC's paths
 $dirty = @(& git -C $repo status --porcelain --untracked-files=no -- @include 2>$null)
 if ($dirty.Count) { Write-Warning ("twoc has changes not committed (not in the zip): " + (($dirty | Select-Object -First 5) -join '; ')) }
@@ -71,8 +73,9 @@ try {
         '              also already applied in xboxrecomp\)',
         '',
         'The LGPL part: xboxrecomp\src\apu (the Xbox audio processor, from xemu; LGPL-2.1-or-later, see',
-        'xboxrecomp\LICENSE, xboxrecomp\NOTICE and twoc\THIRD_PARTY_LICENSES.txt). It is linked statically',
-        'into crash_twoc.exe.',
+        'xboxrecomp\LICENSE, xboxrecomp\NOTICE and twoc\THIRD_PARTY_LICENSES.txt). It is built as its own',
+        'library, xemu_apu.dll (twoc\apu_dll), beside crash_twoc.exe; its own source zip (make_apu_source_package.ps1)',
+        'is what goes with the DLL. This zip is the whole program''s source, for developers.',
         '',
         'What is in here:',
         '  twoc\src, CMakeLists.txt, data, third_party   the port''s source, its build file, the disc''s',
@@ -125,7 +128,8 @@ try {
         ' 4. cmake -S twoc -B twoc\build   and   cmake --build twoc\build --config Release --parallel',
         '    (CMake downloads SDL 3 and builds xboxrecomp\ as part of it; without git the About tab''s build',
         '    line says "unknown"). The exe: twoc\build\Release\crash_twoc.exe.',
-        ' 5. To change the LGPL audio code: edit xboxrecomp\src\apu, then step 4 again.',
+        ' 5. To change the LGPL audio code: edit xboxrecomp\src\apu, then step 4 again (it rebuilds',
+        '    twoc\build\Release\xemu_apu.dll beside the exe; only that file changes).',
         '',
         'To make the program''s folder: twoc\tools\package\make_package.ps1 -Target Share.'
     )

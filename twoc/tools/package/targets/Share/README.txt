@@ -198,3 +198,8 @@ LICENSE.txt says it in plain words: this project's own code is under the MIT lic
 other people's code in this program keeps its own licence (THIRD_PARTY_LICENSES.txt lists
 each one with its full text); no game files and no rights to the game are included or
 granted: you supply your own disc.
+
+xemu_apu.dll, next to crash_twoc.exe, is the game's audio library: the Xbox sound chip's
+emulation from the xemu emulator, under the GNU LGPL. The game needs it in the same folder.
+Source\xemu_apu-source_....zip is its complete source, with the licence and the steps to
+build your own copy and use it in place of this one (its README.txt).
