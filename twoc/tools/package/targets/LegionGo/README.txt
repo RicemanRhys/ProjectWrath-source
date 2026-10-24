@@ -17,6 +17,14 @@ which opens every warp room (all crystals), so every level in the tests can be r
 *** hold comfortably, close the game and let it cool down.
 
 New in this package:
+  - Smokey and the Bandicoot: the dark slate triangle that came and went on the far canyon
+    wall (left of the cactus, near the finish gate) is gone. It was a piece of the light haze
+    painted along the foot of the canyon walls going missing, so the darker wall showed
+    through; the haze now always draws over its wall. At the Xbox's own 640x480 the gaps
+    would be a few pixels at most; at 1080p and 4K they were clear triangles. Both Frame
+    rate settings. Nothing else should look different.
+
+From the last package:
   - The settings menu's tabs are now Display, Graphics, Audio, Controls, Saves, Extras,
     About (LB / RB still go round all of them). Graphics holds Anisotropic filtering,
     Anti-aliasing and Ambient occlusion (with its Strength and Half resolution), moved from
@@ -54,7 +62,7 @@ New in this package:
     sensitivity, Field of view (the game's, or 30 to 110 degrees), Invert look and a reset.
     Freeze and Photo mode can't take a key the game uses.
 
-From the last package:
+From the package before:
   - With Frame rate "Match display" (or any rate above 60), buildings, walls and ground no
     longer shake or shift sideways while Crash moves, and textures on them no longer pop
     in and out (late in Gold Rush and Medieval Madness most of all; the further a level
@@ -62,7 +70,14 @@ From the last package:
     in every in-between frame and put back on the game's own frames. Crash, Coco and the
     enemies move as smoothly as before. Frame rate "Game (60)" is unchanged.
 
-From the package before:
+Known quirks of the original game (the Xbox version does these too; not bugs of the port):
+  - Droid Void's drone plays for the whole level, also after Crash dies and while the
+    level restarts. "Mute Droid Void's background drone" (Audio tab) silences it.
+  - In Crashteroids, Coco looks green and furry: her fur is seen through the cockpit's
+    green glass. Character fur (Extras tab) "Off for everyone" removes it; "Off for Crash
+    only" keeps it, since it is Coco's.
+
+From the packages before that (also new to this folder if you skipped them):
   - "Character fur" (now on the Extras tab) replaces the older "Crash's
     fur" and has three choices: On (the Xbox's look, the default), Off for Crash only (Crash
     without his layer of fur, as on the PlayStation 2; Coco, Crunch, Pura and the others
@@ -83,15 +98,6 @@ From the package before:
     stay in front of their wall as in the game's own frames. Medieval Madness's flicker
     looks the same kind and should be gone too, but couldn't be checked on the desktop
     (Test notes asks). Frame rate "Game (60)" is unchanged.
-
-Known quirks of the original game (the Xbox version does these too; not bugs of the port):
-  - Droid Void's drone plays for the whole level, also after Crash dies and while the
-    level restarts. "Mute Droid Void's background drone" (Audio tab) silences it.
-  - In Crashteroids, Coco looks green and furry: her fur is seen through the cockpit's
-    green glass. Character fur (Extras tab) "Off for everyone" removes it; "Off for Crash
-    only" keeps it, since it is Coco's.
-
-From the packages before that (also new to this folder if you skipped them):
   - Fahrenheit Frenzy's X-ray room shows its X-ray (a green negative of the room, Crash
     as a skeleton) instead of a black screen.
   - The "HUD margin" slider is gone: with HUD position "Screen edges" the counters sit at
