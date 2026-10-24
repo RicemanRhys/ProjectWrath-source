@@ -1784,6 +1784,8 @@ static int tab_extras(twoc_settings_t *s, const ovl_info_t *in)
 }
 
 /* Step 93: what this build is and what it runs on (about.c). */
+static void about_game_files(void);
+
 static void tab_about(const ovl_info_t *in)
 {
     static const char *const names[] = { "Build", "Link-time build", "SDL", "Graphics card", "Driver",
@@ -1793,6 +1795,7 @@ static void tab_about(const ovl_info_t *in)
     const char *vals[12];
     int i;
 
+    about_game_files();                 /* step 107 */
     ImGui::SeparatorText("Crash Bandicoot: The Wrath of Cortex, PC port");
     if (!a) {
         help("Not collected.");
@@ -1823,13 +1826,32 @@ static void tab_about(const ovl_info_t *in)
         ImGui::EndTable();
     }
     help("The same lines are in the log ([ABOUT]). Third-party parts and their licences: THIRD_PARTY_LICENSES.txt next to the game.");
+}
 
-    /* Step 107 (notes 18.110): the game files: a full check, or another disc image through the setup screen. */
+/* Step 107 (notes 18.110): the About tab's first part, the game files: a full check, or another disc image through
+ * the setup screen. First, with its buttons at the top, because the tab's information below scrolls and holds
+ * nothing the controller can stop on: Down from the tabs reaches these buttons, not the menu's footer. */
+static void about_game_files(void)
+{
     {
         setup_status_t st;
         bool busy = twoc_setup_busy() != 0;
         twoc_setup_status(&st);
         ImGui::SeparatorText("Game files");
+        ImGui::BeginDisabled(busy);
+        if (ImGui::Button(busy ? "Checking..." : "Verify game files")) {
+            fprintf(stderr, "[OVL] About: Verify game files\n");
+            twoc_setup_verify();
+        }
+        ImGui::SameLine();
+        if (ImGui::Button("Choose another disc image...")) {
+            fprintf(stderr, "[OVL] About: Choose another disc image...\n");
+            g_setup_req = 1;
+        }
+        ImGui::EndDisabled();
+        more("Verify reads every game file and compares its size and SHA-256 with the disc's (about 1 GB; the game "
+             "keeps running). Choose another disc image restarts the game into its setup screen; the current files "
+             "stay until the new ones are copied and checked, and your saves are kept.");
         ImGui::TextWrapped("%s\\game_files%s", twoc_data_dir_utf8(), twoc_data_dir_fallback() ?
                            " (in your user folder: the game's own folder can't be written to)" : "");
         if (g_measure || (st.verify_only && st.state == SETUP_VERIFYING)) {
@@ -1848,18 +1870,6 @@ static void tab_about(const ovl_info_t *in)
                                    "SHA-256), checked in 9.9 s." : st.note);
             ImGui::PopTextWrapPos();
         }
-        ImGui::BeginDisabled(busy);
-        if (ImGui::Button(busy ? "Checking..." : "Verify game files")) {
-            fprintf(stderr, "[OVL] About: Verify game files\n");
-            twoc_setup_verify();
-        }
-        ImGui::SameLine();
-        if (ImGui::Button("Choose another disc image..."))
-            g_setup_req = 1;
-        ImGui::EndDisabled();
-        help("Verify reads every game file and compares its size and SHA-256 with the disc's (about 1 GB; the game "
-             "keeps running). Choose another disc image restarts the game into its setup screen; the current files "
-             "stay until the new ones are copied and checked, and your saves are kept.");
     }
 }
 

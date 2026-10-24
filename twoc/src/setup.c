@@ -265,19 +265,28 @@ int twoc_data_dir_init(void)
             const wchar_t *dev = _wgetenv(L"RECOMP_DEV_LOCALAPPDATA");  /* a test's stand-in, in its scratch */
             if (dev && *dev) {
                 _snwprintf_s(g_dir, SETUP_PATH_MAX, _TRUNCATE, L"%s\\CrashTWOC", dev);
-                CreateDirectoryW(g_dir, NULL);
                 g_fallback = 1;
             } else if (SUCCEEDED(SHGetFolderPathW(NULL, CSIDL_LOCAL_APPDATA | CSIDL_FLAG_CREATE, NULL, 0, la))) {
                 _snwprintf_s(g_dir, SETUP_PATH_MAX, _TRUNCATE, L"%s\\CrashTWOC", la);
-                CreateDirectoryW(g_dir, NULL);
                 g_fallback = 1;
             } else
                 _snwprintf_s(g_dir, SETUP_PATH_MAX, _TRUNCATE, L"%s", exe);
+            if (g_fallback)
+                SHCreateDirectoryExW(NULL, g_dir, NULL);    /* with every folder on the way */
         }
-        SetCurrentDirectoryW(g_dir);
+        if (!SetCurrentDirectoryW(g_dir) && g_fallback) {   /* not even there: the exe's folder, read-only */
+            _snwprintf_s(g_dir, SETUP_PATH_MAX, _TRUNCATE, L"%s", exe);
+            g_fallback = 0;
+            SetCurrentDirectoryW(g_dir);
+        }
     }
     if (!g_dir[0] && !GetCurrentDirectoryW(SETUP_PATH_MAX, g_dir))
         wcscpy_s(g_dir, SETUP_PATH_MAX, L".");
+    {   /* backslashes only, no "." or "..": the \\?\ form below takes the path as it is */
+        wchar_t full[SETUP_PATH_MAX];
+        if (GetFullPathNameW(g_dir, SETUP_PATH_MAX, full, NULL))
+            wcscpy_s(g_dir, SETUP_PATH_MAX, full);
+    }
     n = (DWORD)wcslen(g_dir);
     if (n > 3 && g_dir[n - 1] == L'\\')
         g_dir[n - 1] = 0;
@@ -697,23 +706,82 @@ static unsigned count_left(const wchar_t *dir, char *names, size_t cap)
 
 /* Deletes the disc's files in `dir` and the folders they leave empty, then `dir` if empty. Nothing else is
  * touched. Returns the entries left (0: `dir` is gone). */
+/* A linked folder (a junction or a symbolic link): never followed when deleting, so nothing outside is touched. */
+static int is_link(const wchar_t *p)
+{
+    DWORD a = GetFileAttributesW(p);
+    return a != INVALID_FILE_ATTRIBUTES && (a & FILE_ATTRIBUTE_REPARSE_POINT);
+}
+
+/* `rel` (a disc path) lies below a linked folder inside `dir`. */
+static int below_link(const wchar_t *dir, const char *rel)
+{
+    char d[1100];
+    size_t j;
+    for (j = 0; rel[j]; j++)
+        if (rel[j] == '/') {
+            wchar_t p[SETUP_PATH_MAX];
+            memcpy(d, rel, j);
+            d[j] = 0;
+            joinu(dir, d, p, SETUP_PATH_MAX);
+            if (is_link(p))
+                return 1;
+        }
+    return 0;
+}
+
+/* Folders below `dir` left with nothing in them, deepest first (never through a link). Empty folders hold no
+ * data, so this never loses any. */
+static void remove_empty_dirs(const wchar_t *dir)
+{
+    wchar_t pat[SETUP_PATH_MAX + 4], sub[SETUP_PATH_MAX];
+    WIN32_FIND_DATAW fd;
+    HANDLE h;
+
+    _snwprintf_s(pat, sizeof(pat) / sizeof(pat[0]), _TRUNCATE, L"%s\\*", dir);
+    h = FindFirstFileExW(pat, FindExInfoBasic, &fd, FindExSearchLimitToDirectories, NULL, 0);
+    if (h == INVALID_HANDLE_VALUE)
+        return;
+    do {
+        if (!(fd.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY) || (fd.dwFileAttributes & FILE_ATTRIBUTE_REPARSE_POINT) ||
+            !wcscmp(fd.cFileName, L".") || !wcscmp(fd.cFileName, L".."))
+            continue;
+        _snwprintf_s(sub, SETUP_PATH_MAX, _TRUNCATE, L"%s\\%s", dir, fd.cFileName);
+        remove_empty_dirs(sub);
+        RemoveDirectoryW(sub);          /* only if empty */
+    } while (FindNextFileW(h, &fd));
+    FindClose(h);
+}
+
 static unsigned delete_disc_files(const wchar_t *dir, char *left_names, size_t cap)
 {
     wchar_t p[SETUP_PATH_MAX];
     const char **dirs;
     size_t nd = 0, i, j;
-    unsigned left;
+    unsigned left, linked = 0;
 
     if (left_names)
         left_names[0] = 0;
     if (!is_dir(dir))
         return 0;
+    if (is_link(dir)) {                 /* the folder itself a link: nothing inside is ours to delete */
+        fprintf(stderr, "[SETUP] a linked folder, left as it is: nothing deleted through it\n");
+        return count_left(dir, left_names, cap) + 1;
+    }
     dirs = (const char **)malloc(DM_N * 16 * sizeof(char *));
     for (i = 0; i < DM_N; i++) {
+        if (below_link(dir, k_dm_files[i].path)) {
+            linked++;
+            continue;
+        }
         joinu(dir, k_dm_files[i].path, p, SETUP_PATH_MAX);
         delete_retry(p);
     }
-    /* Every folder on the way to a disc file, deepest first (a folder can be listed more than once). */
+    if (linked)
+        fprintf(stderr, "[SETUP] %u disc files below a linked folder (a junction or a link): left as they are\n",
+                linked);
+    /* Every folder on the way to a disc file and the disc's empty ones, deepest first (a folder can be listed
+     * more than once). */
     if (dirs) {
         for (i = 0; i < DM_N; i++) {
             const char *s = k_dm_files[i].path;
@@ -727,17 +795,24 @@ static unsigned delete_disc_files(const wchar_t *dir, char *left_names, size_t c
                     dirs[nd++] = d;
                 }
         }
+        for (i = 0; k_dm_empty_dirs[i] && nd < DM_N * 16; i++) {
+            char *d = _strdup(k_dm_empty_dirs[i]);
+            if (d)
+                dirs[nd++] = d;
+        }
         qsort((void *)dirs, nd, sizeof(char *), cmp_depth);
         for (i = 0; i < nd; i++) {
-            if (i == 0 || strcmp(dirs[i], dirs[i - 1])) {
+            if (dirs[i] && (i == 0 || !dirs[i - 1] || strcmp(dirs[i], dirs[i - 1]))) {
                 joinu(dir, dirs[i], p, SETUP_PATH_MAX);
-                RemoveDirectoryW(p);    /* only if empty */
+                if (!is_link(p))
+                    RemoveDirectoryW(p);    /* only if empty */
             }
         }
         for (i = 0; i < nd; i++)
             free((void *)dirs[i]);
         free((void *)dirs);
     }
+    remove_empty_dirs(dir);
     RemoveDirectoryW(dir);
     if (!is_dir(dir))
         return 0;
@@ -1509,6 +1584,11 @@ static int copy_all(const wchar_t *dest)
     }
     sha_close(&sha);
     free(order);
+    for (k = 0; k_dm_empty_dirs[k]; k++) {     /* the disc's folders with no file in them, made too */
+        char rel[1100];
+        snprintf(rel, sizeof(rel), "%s/", k_dm_empty_dirs[k]);
+        make_dirs_for(dest, rel);
+    }
     fprintf(stderr, "[SETUP] copied %u files, %llu bytes in %.1f s (%.0f MB/s)\n", DM_N, (unsigned long long)DM_BYTES,
             secs_since(t0), (double)DM_BYTES / 1048576.0 / (secs_since(t0) > 0 ? secs_since(t0) : 1));
     return 0;

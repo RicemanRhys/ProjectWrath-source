@@ -14,6 +14,8 @@
 #! xbe_sha256 e8d7cbf225d899eb88227c11d1f40434c34e27c1b23ed946fb2c3471168d2f4d
 #! files 2267
 #! bytes 972298886
+# The disc's one folder with no file in it (made by the setup too; step 107):
+#! empty_dir Crashdat/levels/b/space
 Crashdat/ats/AkuAku/AkuAku.ats	460	9bf6686d9eb3699c33ea5d03b54c896703ad8f67dbed8314cf998c8d85defcbd
 Crashdat/ats/AkuAku/Angel.ats.bak	456	c4cfe506fb363cfa77cfc73c8e3a2af28c5c1e06a23755ed310746fcd2309613
 Crashdat/ats/Coco/LeftEyeC.ats	1087	2af8cc8156bf2e230d9d86d30cca19785ec372c6a66ad0d563dfb91f6e7b1c4e

@@ -70,10 +70,23 @@ static void rotate(const wchar_t *name, const wchar_t *kind, const FILETIME *by)
     }
 }
 
+/* A stream onto `path`; NUL when that can't be opened (a folder nobody can write to), so the stream always
+ * exists: a failed freopen leaves it closed, and writing to it then ends the process. */
+static void reopen(const wchar_t *path, FILE *f)
+{
+    if (!_wfreopen(path, L"w", f))
+        _wfreopen(L"NUL", L"w", f);
+}
+
+/* The CRT's streams as the standard handles (restart.c hands them on). A stream that couldn't be opened is left
+ * alone: _get_osfhandle of no file ends the process (an invalid parameter). */
 static void to_handles(void)
 {
-    SetStdHandle(STD_OUTPUT_HANDLE, (HANDLE)_get_osfhandle(_fileno(stdout)));
-    SetStdHandle(STD_ERROR_HANDLE, (HANDLE)_get_osfhandle(_fileno(stderr)));
+    int o = _fileno(stdout), e = _fileno(stderr);
+    if (o >= 0)
+        SetStdHandle(STD_OUTPUT_HANDLE, (HANDLE)_get_osfhandle(o));
+    if (e >= 0)
+        SetStdHandle(STD_ERROR_HANDLE, (HANDLE)_get_osfhandle(e));
 }
 
 void twoc_self_start(void)
@@ -90,9 +103,9 @@ void twoc_self_start(void)
         if (!AttachConsole(ATTACH_PARENT_PROCESS))
             AllocConsole();
         if (!out)
-            _wfreopen(L"CONOUT$", L"w", stdout);
+            reopen(L"CONOUT$", stdout);
         if (!err)
-            _wfreopen(L"CONOUT$", L"w", stderr);
+            reopen(L"CONOUT$", stderr);
         to_handles();
     } else if (!out || !err) {
         if (AttachConsole(ATTACH_PARENT_PROCESS)) {     /* started from a console: say where the log is */
@@ -118,9 +131,9 @@ void twoc_self_start(void)
             rotate(L"run_twoc.power.log", L"power", has ? &by : NULL);
         }
         if (!out)
-            _wfreopen(L"run_twoc.out.log", L"w", stdout);
+            reopen(L"run_twoc.out.log", stdout);
         if (!err)
-            _wfreopen(L"run_twoc.err.log", L"w", stderr);
+            reopen(L"run_twoc.err.log", stderr);
         to_handles();
     }
     for (i = 0; i < sizeof(k_env) / sizeof(k_env[0]); i++)
