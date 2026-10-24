@@ -38,8 +38,15 @@
 # replaced only with -Force and only if it holds a PACKAGE.txt (one this script made).
 # Build first: cmake --build twoc\build --config Release --parallel
 # Then smoke-test a scratch copy (never the package itself): smoke_test.ps1 (notes 18.91).
+#
+# -Target Share (step 107, notes 18.110): the package for other people. NO game files: the exe's first-run setup
+# makes them from the player's own disc image. No crash_twoc.ini (the first start writes one), no test launchers,
+# no vrrprobe, no Test notes; README.txt for strangers, LICENSE.txt (no licence chosen yet), Play Crash.bat and
+# the safe-settings launcher, Collect logs.bat (which scrubs the user name, home folder and PC name). Default
+# folder Desktop\Crash\SharePackage. package_audit.ps1 checks it at the end (no game file by name, size or hash,
+# no user or PC name, no logs or saves) and the script fails if the audit does.
 param(
-    [ValidateSet('LegionGo', 'Nitro5')][string]$Target = 'LegionGo',
+    [ValidateSet('LegionGo', 'Nitro5', 'Share')][string]$Target = 'LegionGo',
     [string]$Out,
     [string]$Exe,
     [string]$GameFiles,
@@ -53,18 +60,27 @@ $twoc = Split-Path -Parent (Split-Path -Parent $here)
 $repo = Split-Path -Parent $twoc
 if (-not $Out) { $Out = Join-Path ([Environment]::GetFolderPath('Desktop')) "Crash\${Target}Package" }
 $targetDir = Join-Path $here "targets\$Target"
-foreach ($f in 'crash_twoc.ini', 'README.txt', 'Test notes.txt') {
+$share = $Target -eq 'Share'
+$need = if ($share) { @('README.txt', 'LICENSE.txt') } else { @('crash_twoc.ini', 'README.txt', 'Test notes.txt') }
+foreach ($f in $need) {
     if (-not (Test-Path (Join-Path $targetDir $f))) { throw "No $f in $targetDir" }
 }
-$leaveOut = @{ 'LegionGo' = @(); 'Nitro5' = @('Play Crash (Vulkan probe).bat') }[$Target]
-$targetName = @{ 'LegionGo' = 'Legion Go'; 'Nitro5' = 'Acer Nitro 5' }[$Target]
+$tests = @('Play Crash (72 fps test).bat', 'Play Crash (Vulkan probe).bat', 'Play Crash (ack wait test).bat',
+           'Play Crash (bake off).bat', 'Play Crash (fullscreen start test).bat', 'Play Crash (fullscreen old way).bat')
+$leaveOut = @{ 'LegionGo' = @(); 'Nitro5' = @('Play Crash (Vulkan probe).bat'); 'Share' = $tests }[$Target]
+$targetName = @{ 'LegionGo' = 'Legion Go'; 'Nitro5' = 'Acer Nitro 5'; 'Share' = 'Share (for other people, no game files)' }[$Target]
 if ($Pgo -and $Exe) { throw '-Pgo builds its own exe: leave -Exe out' }
+if ($share -and ($GameFiles -or $Save)) { throw '-Target Share ships no game files and no saves: leave -GameFiles and -Save out' }
 if (-not $Exe) { $Exe = Join-Path $twoc 'build\Release\crash_twoc.exe' }
 if (-not $GameFiles) { $GameFiles = Join-Path $repo 'game_files' }
 if (-not $Pgo) { $Exe = (Resolve-Path $Exe).Path }
-$GameFiles = (Resolve-Path $GameFiles).Path
-if (-not (Test-Path (Join-Path $GameFiles 'default.xbe'))) { throw "No default.xbe in $GameFiles" }
-if (-not (Test-Path (Join-Path $GameFiles 'Crashdat'))) { throw "No Crashdat\ in $GameFiles" }
+if (-not $share) {          # the Share package needs no game files (the PGO training uses them, below)
+    $GameFiles = (Resolve-Path $GameFiles).Path
+    if (-not (Test-Path (Join-Path $GameFiles 'default.xbe'))) { throw "No default.xbe in $GameFiles" }
+    if (-not (Test-Path (Join-Path $GameFiles 'Crashdat'))) { throw "No Crashdat\ in $GameFiles" }
+} elseif ($Pgo) {
+    $GameFiles = (Resolve-Path $GameFiles).Path
+}
 
 # Visual Studio: dumpbin, vcvars64 (for vrrprobe) and the redistributable C++ runtime.
 $vswhere = Join-Path ${env:ProgramFiles(x86)} 'Microsoft Visual Studio\Installer\vswhere.exe'
@@ -186,7 +202,9 @@ Write-Host "Packaging into $Out"
 Copy-Item $Exe (Join-Path $Out 'crash_twoc.exe')
 foreach ($d in $deps) { if ($shipped -contains $d.ToLower()) { Copy-Item (Join-Path $crt.FullName $d) $Out } }
 
-# vrrprobe, built for the package (a temporary .cmd: vcvars64 needs cmd, and cmd wants CRLF).
+# vrrprobe, built for the package (a temporary .cmd: vcvars64 needs cmd, and cmd wants CRLF). Not in the Share
+# package (a display test for the test devices).
+if (-not $share) {
 $tmp = Join-Path $env:TEMP ("twoc_pkg_" + [guid]::NewGuid().ToString('N').Substring(0, 8))
 New-Item -ItemType Directory -Path $tmp | Out-Null
 $src = Join-Path $twoc 'tools\diag\vrrprobe.cpp'
@@ -196,12 +214,15 @@ $cmd = "@echo off`r`ncall `"$vcvars`" >nul 2>nul`r`ncd /d `"$tmp`"`r`n" +
 & cmd.exe /d /c (Join-Path $tmp 'b.cmd')
 if (-not (Test-Path "$Out\tools\vrrprobe.exe")) { Get-Content "$tmp\cl.log"; throw 'vrrprobe build failed' }
 Remove-Item -Recurse -Force $tmp
+}
 
 # The disc files, without saves (UDATA), their backups (UDATA_backups, notes 18.86), the title cache (TDATA) or our
-# analysis output.
+# analysis output. None in the Share package.
+if (-not $share) {
 & robocopy $GameFiles (Join-Path $Out 'game_files') /E /XD (Join-Path $GameFiles 'UDATA') (Join-Path $GameFiles 'UDATA_backups') `
     (Join-Path $GameFiles 'TDATA') /XF crash_analysis.json /NFL /NDL /NJH /NJS /NP | Out-Null
 if ($LASTEXITCODE -ge 8) { throw "robocopy failed ($LASTEXITCODE)" }
+}
 if ($Save) {
     $Save = (Resolve-Path $Save).Path
     & robocopy $Save (Join-Path $Out 'game_files\UDATA') /E /NFL /NDL /NJH /NJS /NP | Out-Null
@@ -241,7 +262,9 @@ $ltcg = if (-not (Test-Path $cache)) { "unknown (no CMakeCache.txt beside the ex
 if (-not $Pgo -and (Test-Path $cache) -and (Select-String -Quiet -Pattern '^TWOC_PGO:STRING=USE' $cache)) {
     $pgoLine = "on (TWOC_PGO=USE: $(Split-Path -Leaf (Split-Path -Parent (Split-Path -Parent $Exe))), trained by an earlier -Pgo run)"
 }
-$gf = Get-ChildItem -Recurse -File (Join-Path $Out 'game_files')
+$gf = if ($share) { @() } else { Get-ChildItem -Recurse -File (Join-Path $Out 'game_files') }
+$gfLine = if ($share) { 'game_files: none (the player''s own disc image is set up at the first start; no saves)' }
+          else { "game_files: {0} files, {1:N0} MB{2}" -f $gf.Count, (($gf | Measure-Object Length -Sum).Sum / 1MB), $(if ($Save) { ", with a save copied in from $Save" } else { ', no saves' }) }
 $pkg = @(
     "Crash TWOC, $targetName package, made $(Get-Date -Format 'yyyy-MM-dd HH:mm:ss zzz') by twoc\tools\package\make_package.ps1",
     "Target: $Target",
@@ -251,7 +274,7 @@ $pkg = @(
     "crash_twoc.exe: $((Get-Item $Exe).Length) bytes, built $($exeTime.ToString('yyyy-MM-dd HH:mm:ss')), SHA-256 $hash",
     "                link-time code generation: $ltcg",
     "                profile-guided optimisation: $pgoLine",
-    ("game_files: {0} files, {1:N0} MB{2}" -f $gf.Count, (($gf | Measure-Object Length -Sum).Sum / 1MB), $(if ($Save) { ", with a save copied in from $Save" } else { ', no saves' })),
+    $gfLine,
     "",
     "DLLs the exe imports (dumpbin /dependents) and where they come from:"
 ) + $depLines + @(
@@ -265,3 +288,8 @@ $pkg = @(
 $all = Get-ChildItem -Recurse -File $Out
 Write-Host ("Done: {0}, {1} files, {2:N0} MB" -f $Out, $all.Count, (($all | Measure-Object Length -Sum).Sum / 1MB))
 $depLines | ForEach-Object { Write-Host $_ }
+# Step 107: the Share package is checked before anyone gets it (no game file, no user or PC name, no log or save).
+if ($share) {
+    & powershell -NoProfile -ExecutionPolicy Bypass -File (Join-Path $here 'package_audit.ps1') -Dir $Out
+    if ($LASTEXITCODE) { throw "package_audit.ps1 failed on ${Out}: see above" }
+}

@@ -9,13 +9,20 @@ in game_files\ are your own copy of the disc. There are no saves in this folder:
 game and name it WOMBAT, which opens every warp room, so every level in the tests can be
 reached.
 
-New in this build: Smokey and the Bandicoot's flat grey ("silver") triangle that flashed over
+New in this build: a first-run setup (the start of sharing the game with other people): when
+game_files\ is missing or fails its check, a setup screen opens before the game and copies
+the game files from a disc image (.iso) or an extracted folder, checking every file (this
+package has its game files, so you shouldn't see it). The About tab has a Game files part:
+"Verify game files" (all 2,267 files against the disc, about 10 seconds, the game running)
+and "Choose another disc image..." (restarts into the setup screen). crash_twoc.exe can be
+double-clicked on its own now; "Play Crash.bat" stays the way to start it for the tests.
+From the last build: Smokey and the Bandicoot's flat grey ("silver") triangle that flashed over
 the road for a frame while driving is gone (a piece of ground beside the camera drawn at the
 picture's centre for one frame; both Frame rate settings; nothing else should look different).
-From the last build: Smokey and the Bandicoot's dark slate triangle on the far canyon wall
+From the build before: Smokey and the Bandicoot's dark slate triangle on the far canyon wall
 (near the finish gate) is gone: the light haze along the foot of the canyon walls now always
 draws over its wall (at both Frame rate settings; nothing else should look different).
-From the build before: the settings menu's tabs are Display, Graphics, Audio, Controls, Saves,
+Earlier: the settings menu's tabs are Display, Graphics, Audio, Controls, Saves,
 Extras, About. Graphics holds Anisotropic filtering, Anti-aliasing and Ambient occlusion
 (moved from Display); Extras holds Character fur, See-through gems and crystals in the hub,
 Show the startup message, Pause the game while this menu is open, Pause when in the
@@ -216,8 +223,8 @@ F. If something goes wrong
   then alt+tab once and back. Note it either way.
 - The game won't start after a settings change: "Play Crash (safe settings).bat" (every
   setting at its default, in a window, crash_twoc.ini not read or changed).
-- A "Crash TWOC - game files" message at the start: game_files\ is missing files; copy
-  the whole folder from the desktop again.
+- The setup screen at the start ("The game files need attention: ..."): game_files\ is
+  missing files or has wrong ones; copy the whole folder from the desktop again.
 - "Crash can't write to its save folder": copy the folder somewhere you can write to (not
   C:\Program Files).
 - The game window opens and closes at once, or the laptop crashes: run "Collect logs.bat"

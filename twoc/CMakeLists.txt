@@ -88,6 +88,13 @@ FetchContent_Declare(SDL3
     DOWNLOAD_EXTRACT_TIMESTAMP TRUE
 )
 FetchContent_MakeAvailable(SDL3)
+# Step 107 (notes 18.110): no path of the PC it was built on in the exe (package_audit.ps1 checks). SDL's GPU
+# code names its own source files through __FILE__; MSVC's /d1trimfile takes the repo's folder off their front.
+if(MSVC AND TARGET SDL3-static)
+    get_filename_component(_twoc_root "${CMAKE_CURRENT_SOURCE_DIR}/.." ABSOLUTE)
+    file(TO_NATIVE_PATH "${_twoc_root}/" _twoc_root_native)
+    target_compile_options(SDL3-static PRIVATE "/d1trimfile:${_twoc_root_native}")
+endif()
 
 # ── Recompiled game executable ──────────────────────────────────
 

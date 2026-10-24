@@ -190,12 +190,12 @@ try {
         if ($v) { $name = $modes[$v]; if (-not $name) { $name = $v }; Add "Power mode ($(if ($n -eq 'ActiveOverlayAcPowerScheme') { 'plugged in' } else { 'on battery' })): $name" }
     }
 } catch { Add "power query failed: $_" }
-try {
+if ($target -ne 'Share') { try {     # step 107: not in the Share package's zip (what else the player runs is theirs)
     Section 'Busiest processes now (CPU seconds since they started)'
     Get-Process | Sort-Object CPU -Descending | Select-Object -First 15 | ForEach-Object {
         Add ("  {0,-32} {1,10:N1} s  {2,8:N0} MB" -f $_.ProcessName, $_.CPU, ($_.WorkingSet64 / 1MB))
     }
-} catch { Add "process list failed: $_" }
+} catch { Add "process list failed: $_" } }
 $sys | Set-Content -Encoding UTF8 (Join-Path $work 'system.txt')
 
 # 2b. Step 91 (notes 18.94): the System log's crash, power and display-driver events from the last
@@ -252,7 +252,9 @@ $ev | Set-Content -Encoding UTF8 (Join-Path $work 'events.txt')
 #    variable refresh every 11.1 ms.
 $probe = Join-Path $PSScriptRoot 'vrrprobe.exe'
 $out = Join-Path $work 'vrrprobe.txt'
-if (Test-Path $probe) {
+if ($target -eq 'Share') {
+    # step 107: the Share package has no display test
+} elseif (Test-Path $probe) {
     Write-Host "Testing the display: the screen goes grey with a moving bar twice, about 6 seconds each."
     $runs = @(@('0', '0'), @('90', '6'), @('90', '6', '--tear'))
     foreach ($a in $runs) {
@@ -269,6 +271,40 @@ if (Test-Path $probe) {
     Set-Content -Encoding UTF8 $out "vrrprobe.exe not found in $PSScriptRoot"
 }
 
+# 3b. Step 107 (notes 18.110): the scrub. In every text file going into the zip, the home folder's path becomes
+#     <user-home>, the Windows user name in a path (\Users\NAME) becomes \Users\<user>, the name on its own (as a
+#     whole word, its own case) <user>, and the PC's name <pc>. scrub.txt says what was replaced and how often.
+$scrub = New-Object System.Collections.Generic.List[string]
+$scrub.Add("Scrubbed $(Get-Date -Format 'yyyy-MM-dd HH:mm:ss'): the home folder -> <user-home>, the user name -> <user>, the PC's name -> <pc>.")
+$homeDir = $env:USERPROFILE; $user = $env:USERNAME; $pcName = $env:COMPUTERNAME
+$utf8 = New-Object Text.UTF8Encoding($false)
+foreach ($f in Get-ChildItem -Recurse -File $work) {
+    if ($f.Extension -notin '.log', '.txt', '.ini', '.csv') { continue }
+    $t = [IO.File]::ReadAllText($f.FullName, $utf8)
+    $n0 = $t.Length; $hits = 0
+    $pairs = @()
+    if ($homeDir) {
+        $pairs += ,@([regex]::Escape($homeDir), '<user-home>')
+        $pairs += ,@([regex]::Escape($homeDir.Replace('\', '/')), '<user-home>')
+    }
+    if ($user) {
+        $pairs += ,@('(?i)([\\/]Users[\\/])' + [regex]::Escape($user) + '(?=[\\/"'' ]|$)', '$1<user>')
+        $pairs += ,@('(?<![A-Za-z0-9_])' + [regex]::Escape($user) + '(?![A-Za-z0-9_])', '<user>')
+    }
+    if ($pcName) { $pairs += ,@('(?i)(?<![A-Za-z0-9_-])' + [regex]::Escape($pcName) + '(?![A-Za-z0-9_-])', '<pc>') }
+    foreach ($p in $pairs) {
+        $rx = $p[0]
+        if (-not $rx.StartsWith('(?i)') -and $rx -notlike '(?<!*') { $rx = '(?i)' + $rx }
+        $c = [regex]::Matches($t, $rx).Count
+        if ($c) { $t = [regex]::Replace($t, $rx, $p[1]); $hits += $c }
+    }
+    if ($hits) {
+        [IO.File]::WriteAllText($f.FullName, $t, $utf8)
+        $scrub.Add("  $($f.FullName.Substring($work.Length + 1)): $hits replaced")
+    }
+}
+$scrub | Set-Content -Encoding UTF8 (Join-Path $work 'scrub.txt')
+
 # 4. The zip.
 if (Test-Path $zip) { Remove-Item $zip }
 # Entry by entry: 5.1's Compress-Archive (and .NET Framework's CreateFromDirectory) write
@@ -284,5 +320,10 @@ try {
 Remove-Item -Recurse -Force $work
 $mb = (Get-Item $zip).Length / 1MB
 Write-Host ("Done: {0} ({1:N1} MB)" -f $zip, $mb)
-Write-Host "Copy this zip back to the desktop PC (USB stick, cloud folder or LocalSend)."
+if ($target -eq 'Share') {
+    Write-Host "Your Windows user name, home folder and PC name were replaced by <user>, <user-home> and <pc>"
+    Write-Host "(scrub.txt in the zip lists where). Look inside before you send it; nothing is sent by itself."
+} else {
+    Write-Host "Copy this zip back to the desktop PC (USB stick, cloud folder or LocalSend)."
+}
 if ($env:TWOC_COLLECT_QUIET -ne '1') { Start-Process explorer.exe -ArgumentList "/select,`"$zip`"" }

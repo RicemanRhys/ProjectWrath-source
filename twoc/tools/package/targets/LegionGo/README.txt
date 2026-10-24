@@ -17,6 +17,20 @@ which opens every warp room (all crystals), so every level in the tests can be r
 *** hold comfortably, close the game and let it cool down.
 
 New in this package:
+  - A first-run setup (the start of sharing the game with other people): when game_files\
+    is missing or fails its check, a setup screen opens before the game, instead of the
+    old message box, and copies the game files from a disc image (.iso) or an extracted
+    folder, checking every file. This package already has its game files, so you shouldn't
+    see it. The settings menu's About tab has a new Game files part at the bottom: "Verify
+    game files" (checks all 2,267 files against the disc, about 10 seconds; the game keeps
+    running) and "Choose another disc image..." (asks, then restarts into the setup
+    screen; only useful with a disc image on the Legion Go).
+  - crash_twoc.exe can be double-clicked on its own now: it sets itself up as
+    "Play Crash.bat" does and writes run_twoc.err.log. "Play Crash.bat" stays the way to
+    start it for the tests (its console window and the test launchers).
+  Nothing else changes for the tests.
+
+From the last package:
   - Smokey and the Bandicoot: the flat grey ("silver") triangle that flashed over the road
     for a frame while driving, late in the race, is gone. It always pointed at the exact
     centre of the picture: a piece of ground right beside the camera came out at the
@@ -25,7 +39,7 @@ New in this package:
     moving). Both Frame rate settings; nothing else should look different. The flat
     wedge over the road in your earlier still picture was the same thing.
 
-From the last package:
+From the package before:
   - Smokey and the Bandicoot: the dark slate triangle that came and went on the far canyon
     wall (left of the cactus, near the finish gate) is gone. It was a piece of the light haze
     painted along the foot of the canyon walls going missing, so the darker wall showed
@@ -33,7 +47,7 @@ From the last package:
     would be a few pixels at most; at 1080p and 4K they were clear triangles. Both Frame
     rate settings. Nothing else should look different.
 
-From the package before:
+Earlier:
   - The settings menu's tabs are now Display, Graphics, Audio, Controls, Saves, Extras,
     About (LB / RB still go round all of them). Graphics holds Anisotropic filtering,
     Anti-aliasing and Ambient occlusion (with its Strength and Half resolution), moved from
@@ -533,13 +547,13 @@ If something goes wrong
 - The Universal logo freezes at the start (the picture stops, the sound goes on): wait 10
   seconds (the game should get going by itself), then alt+tab once and back to the game.
   Note it in Test notes.txt either way.
-- At the start, a "Crash TWOC - game files" message: the game checks game_files\ against
-  the disc before it starts (default.xbe's size and checksum, and Crashdat's 2,266 files;
-  2,267 with default.xbe) and says what is wrong: game_files\ or default.xbe missing,
-  default.xbe from another release, or Crashdat with files missing (or extra). Copy
-  game_files\ from the desktop again (all of it: about 930 MB, 2,267 files), or extract
-  the disc image into it, and start again. Started some other way than "Play Crash.bat",
-  the game looks for game_files\ in the wrong folder: use the .bat.
+- At the start, the setup screen ("The game files need attention: ..."): the game checks
+  game_files\ against the disc before it starts (default.xbe's checksum, and every one of
+  the 2,267 files and its size) and says what is wrong: game_files\ or default.xbe missing,
+  default.xbe from another release, or files missing or with the wrong size. Copy
+  game_files\ from the desktop again (all of it: about 930 MB, 2,267 files) and start
+  again, or, with the disc image on the Legion Go, "Choose disc image (.iso)..." there sets
+  them up again (your saves are kept).
 - "Crash can't write to its save folder": copy the package somewhere you can write to
   (not C:\Program Files), or delete game_files\UDATA (the copies in UDATA_backups stay).
 - If the game won't start after a settings change, use "Play Crash (safe settings).bat": every

@@ -5,14 +5,11 @@ rem so this folder can be anywhere. The switches are the ones run_twoc.ps1 -Host
 rem desktop (notes 18.40): the host renderer alone. The title animation is sped up by
 rem crash_twoc.ini's fast_title = 1 (notes 18.93: the settings menu's "Skip the title animation";
 rem it was RECOMP_DEV_FAST_TITLE=1 here, which the menu couldn't turn off).
+rem Step 107 (notes 18.110): without game_files the game opens its setup screen (the player's own disc image), so
+rem this no longer stops there; the first start also writes crash_twoc.ini when there is none. Double-clicking
+rem crash_twoc.exe does all this by itself too; this launcher keeps the console window and the restart loop.
 setlocal
 cd /d "%~dp0"
-if not exist "game_files\default.xbe" (
-    echo game_files\default.xbe is missing from "%~dp0".
-    echo Copy the whole package folder, game_files included.
-    pause
-    exit /b 1
-)
 set RECOMP_VBLANK=1
 set RECOMP_AC97_READY=1
 set RECOMP_D3D_BRIDGE=1
