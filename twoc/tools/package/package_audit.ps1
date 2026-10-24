@@ -33,11 +33,12 @@ $share = $target -eq 'Share'
 Write-Host "Auditing $Dir (target $target)"
 
 # The manifest: names, sizes, hashes.
-$names = @{}; $sizes = @{}; $hashes = @{}; $nman = 0
+$names = @{}; $sizes = @{}; $hashes = @{}; $paths = @{}; $nman = 0
 foreach ($l in Get-Content -LiteralPath $Manifest) {
     if ($l.StartsWith('#') -or -not $l.Trim()) { continue }
     $p = $l.Split("`t")
     $nman++
+    $paths[$p[0].Replace('/', '\').ToLowerInvariant()] = [long]$p[1]
     $names[(Split-Path -Leaf $p[0].Replace('/', '\')).ToLowerInvariant()] = $p[0]
     $sizes[[long]$p[1]] = $true
     $hashes[$p[2].ToLowerInvariant()] = $p[0]
@@ -113,6 +114,10 @@ Write-Host "3. logs, saves and dumps"
 foreach ($f in $all) {
     if ((InGf $f) -and -not $f.PSIsContainer -and $f.Extension -notin '.sav', '.xbx', '.log') { continue }
     $rel = $f.FullName.Substring($Dir.Length + 1)
+    if ((InGf $f) -and -not $f.PSIsContainer) {     # a disc file of the test package's game_files (the disc has a
+        $g = $f.FullName.Substring($gfDir.Length + 1).ToLowerInvariant()   # result.log of its own): not a stray
+        if ($paths.ContainsKey($g) -and $paths[$g] -eq $f.Length) { continue }
+    }
     if ($f.PSIsContainer) {
         if ($f.Name -in 'logs', 'UDATA', 'UDATA_backups', 'TDATA', 'captures') { Fail "a folder of logs or saves: $rel" }
         continue
