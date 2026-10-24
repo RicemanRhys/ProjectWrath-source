@@ -30,6 +30,9 @@
 #     Collect logs.bat; from targets\<Target>\: crash_twoc.ini (the device's settings), README.txt, Test notes.txt
 #     (text files written with CRLF line ends)
 #   THIRD_PARTY_LICENSES.txt (twoc/, from third_party_licenses.py)
+#   LICENSE.txt (step 108): LICENSE.package.txt filled in: this project's own code under MIT (twoc\LICENSE's text,
+#     whose copyright line is the one place the owner's name is written), the third-party parts under their own
+#     licences, the audio code, and no game files or rights to the game included or granted
 #   PACKAGE.txt: the build (commits, exe hash, link-time code generation), the imported DLLs and
 #     where each comes from
 #
@@ -41,7 +44,7 @@
 #
 # -Target Share (step 107, notes 18.110): the package for other people. NO game files: the exe's first-run setup
 # makes them from the player's own disc image. No crash_twoc.ini (the first start writes one), no test launchers,
-# no vrrprobe, no Test notes; README.txt for strangers, LICENSE.txt (no licence chosen yet), Play Crash.bat and
+# no vrrprobe, no Test notes; README.txt for strangers, LICENSE.txt (as every package's), Play Crash.bat and
 # the safe-settings launcher, Collect logs.bat (which scrubs the user name, home folder and PC name). Default
 # folder Desktop\Crash\SharePackage. package_audit.ps1 checks it at the end (no game file by name, size or hash,
 # no user or PC name, no logs or saves) and the script fails if the audit does.
@@ -61,7 +64,7 @@ $repo = Split-Path -Parent $twoc
 if (-not $Out) { $Out = Join-Path ([Environment]::GetFolderPath('Desktop')) "Crash\${Target}Package" }
 $targetDir = Join-Path $here "targets\$Target"
 $share = $Target -eq 'Share'
-$need = if ($share) { @('README.txt', 'LICENSE.txt') } else { @('crash_twoc.ini', 'README.txt', 'Test notes.txt') }
+$need = if ($share) { @('README.txt') } else { @('crash_twoc.ini', 'README.txt', 'Test notes.txt') }
 foreach ($f in $need) {
     if (-not (Test-Path (Join-Path $targetDir $f))) { throw "No $f in $targetDir" }
 }
@@ -242,6 +245,34 @@ foreach ($f in Get-ChildItem -File $targetDir) { Put-Text $f.FullName (Join-Path
 Put-Text (Join-Path $files 'tools\collect_logs.ps1') (Join-Path $Out 'tools\collect_logs.ps1')
 # Every third-party component's licence (notes 18.96; twoc/tools/package/third_party_licenses.py writes it).
 Put-Text (Join-Path $twoc 'THIRD_PARTY_LICENSES.txt') (Join-Path $Out 'THIRD_PARTY_LICENSES.txt')
+# LICENSE.txt (step 108): this project's own code under MIT, from twoc\LICENSE (its copyright line names the owner:
+# the one place to change it), with what it covers and what it doesn't.
+$mit = ([IO.File]::ReadAllText((Join-Path $twoc 'LICENSE')) -replace "`r`n", "`n").Trim()
+if ($mit -notmatch '(?m)^MIT License$' -or $mit -notmatch '(?m)^Copyright \(c\) ') { throw "twoc\LICENSE isn't the MIT licence with a copyright line" }
+$audio = 'The Xbox audio emulation built into crash_twoc.exe comes from xemu and is under the GNU Lesser ' +
+         'General Public License, version 2.1 or later; THIRD_PARTY_LICENSES.txt (part 7) has its notice and the ' +
+         'licence''s text.'
+$gameLine = if ($share) { 'This package has no game files: the first start sets them up from your own disc image.' }
+            else { 'This test package''s game_files folder is a copy of the owner''s own disc, for the owner''s own devices only: it is not to be given to anyone.' }
+function Wrap([string]$s, [int]$width, [string]$indent) {     # words to lines of at most $width, $indent before each
+    $lines = @(); $cur = ''
+    foreach ($w in $s -split ' ') {
+        if ($cur -and ($cur.Length + 1 + $w.Length) -gt $width) { $lines += $cur; $cur = $indent + $w }
+        elseif ($cur) { $cur += ' ' + $w } else { $cur = $indent + $w }
+    }
+    if ($cur) { $lines += $cur }
+    $lines -join "`n"
+}
+$lic = [IO.File]::ReadAllText((Join-Path $here 'LICENSE.package.txt')) -replace "`r`n", "`n"
+$lic = $lic.Replace('3. The audio code. @AUDIO@', (Wrap ('3. The audio code. ' + $audio) 112 '   ').Substring(3))
+$lic = $lic.Replace("   original Xbox disc (USA release). @GAMEFILES@", (Wrap ('original Xbox disc (USA release). ' + $gameLine) 112 '   '))
+$lic = $lic.Replace('@MIT@', $mit)
+if ($lic -match '@[A-Z]+@') { throw "LICENSE.package.txt: a placeholder left unfilled ($($Matches[0]))" }
+[IO.File]::WriteAllText((Join-Path $Out 'LICENSE.txt'), ($lic -replace "`n", "`r`n"), (New-Object Text.UTF8Encoding($false)))
+$owner = ([regex]::Match($mit, '(?m)^Copyright \(c\) .*$')).Value
+if ($owner -match '\[NAME TO BE CHOSEN BY THE OWNER\]') {
+    Write-Warning "LICENSE: the copyright line still reads `"$owner`": replace the placeholder in twoc\LICENSE before sharing"
+}
 
 # PACKAGE.txt: what this is built from.
 function Git1([string]$dir, [string[]]$a) { try { (& git -C $dir @a 2>$null | Select-Object -First 1) } catch { '' } }

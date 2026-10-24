@@ -58,8 +58,9 @@ out.append("""Crash Bandicoot: The Wrath of Cortex, PC port (crash_twoc.exe) - t
 
 Every third-party component built into crash_twoc.exe or shipped beside it, with its licence's name and its
 licence text, copied from the licence file the component ships (twoc/tools/package/third_party_licenses.py
-writes this file from them). The game's own data (game_files: default.xbe and Crashdat) is your copy of the
-Xbox disc and is not covered here.
+writes this file from them). None of them is relicensed: each keeps its own licence. This project's own code is
+under the MIT licence (LICENSE.txt). The game's own data (game_files: default.xbe and Crashdat) is your copy of
+the Xbox disc and is not covered here.
 
   Built into crash_twoc.exe
     1. Dear ImGui 1.92.9b ................ MIT (and its stb_truetype / stb_rect_pack / stb_textedit: MIT or
@@ -101,7 +102,8 @@ part("2. SDL 3.4.18 (fetched by CMake, built static)",
 
 part("3. XeGTAO (twoc/third_party/xegtao)",
      "https://github.com/GameTechDev/XeGTAO, commit a5b1686. Ambient occlusion: GTAO (and SSAO's depth MIPs and\n"
-     "denoiser). XeGTAO.h and XeGTAO.hlsli, unchanged.",
+     "denoiser). XeGTAO.h and XeGTAO.hlsli, unchanged; twoc/src/ao.c's entry points follow its sample's vaGTAO.hlsl\n"
+     "and port XeGTAO::GTAOUpdateConstants to C, under this same notice.",
      "MIT", read(TP, "xegtao", "LICENSE.txt"))
 
 part("4. SMAA (twoc/third_party/smaa)",

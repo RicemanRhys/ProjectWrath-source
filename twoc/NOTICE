@@ -1,0 +1,42 @@
+Crash TWOC: what the MIT licence in LICENSE covers
+==================================================
+
+LICENSE (the MIT licence) covers this project's own code in this folder (twoc/), and only that. Its copyright
+line is the one place the copyright holder's name is written: the package scripts read it from there.
+docs/SHARING.md lists the files file by file. In short:
+
+This project's own code (MIT, LICENSE):
+  src/*.c, src/*.cpp, src/*.h, src/crash_twoc.manifest   the port: the bridge, the settings and menu, the setup,
+                                                          the audio glue; recomp_manual.c's hand-written
+                                                          replacements for some of the game's functions are written
+                                                          here, but come from studying its program: they share the
+                                                          open question of src/recomp/gen below
+  CMakeLists.txt, lift.ps1, analyze.ps1, run_twoc.ps1    the build and the launcher
+  tools/ (package, capturekit, diag, *.py, *.cmake)      the build, test and package tools
+  data/disc_usa.tsv                                      the supported disc's file list: names, sizes and SHA-256
+                                                          only, no game data
+  docs/SHARING.md, this file                             documents
+  seed_functions.json                                    addresses of functions in the game's program, for the lift
+
+Not covered by LICENSE (each keeps its own licence and notices, unchanged):
+  third_party/imgui     Dear ImGui (MIT, Omar Cornut; its stb files MIT or public domain): third_party/imgui/LICENSE.txt
+  third_party/smaa      SMAA (MIT, Jorge Jimenez et al.): third_party/smaa/LICENSE.txt
+  third_party/xegtao    XeGTAO (MIT, Intel Corporation): third_party/xegtao/LICENSE.txt. src/ao.c follows XeGTAO's
+                        sample shaders and ports its GTAOUpdateConstants to C; it names Intel's copyright where it
+                        does, and that part stays under XeGTAO's MIT notice.
+  third_party/volk      volk (MIT, Arseny Kapoulkine): third_party/volk/LICENSE.md
+  third_party/vulkan    Vulkan-Headers (Apache-2.0 or MIT, The Khronos Group): third_party/vulkan/LICENSE.md
+  SDL 3                 fetched by CMake into the build folder (zlib; HIDAPI BSD-style)
+  ../xboxrecomp         the toolkit (MIT, its own LICENSE and NOTICE), with its audio code from xemu under the
+                        GNU LGPL 2.1 or later (xboxrecomp/NOTICE)
+  src/recomp/gen        the recompiled code: C translated by machine (lift.ps1) from the game's own program
+                        (default.xbe). The MIT licence is not claimed for it; never committed, never packaged as source.
+                        Whether the compiled form may be given to others is an open question (docs/SHARING.md,
+                        part 3; a question for a lawyer).
+  docs/option_b         a disassembly listing of the Direct3D library inside the game's program: the MIT
+                        licence is not claimed for it; never packaged.
+  The game              Crash Bandicoot: The Wrath of Cortex and its files belong to their owners. Nothing here
+                        includes them or grants any right to them.
+
+THIRD_PARTY_LICENSES.txt (made by tools/package/third_party_licenses.py) has every third-party licence's full text.
+This is a description of what the project's owner chose, not legal advice.

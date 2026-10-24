@@ -208,6 +208,8 @@ What's in the folder
   PACKAGE.txt                     which build this is
   THIRD_PARTY_LICENSES.txt        the other people's code in the game and beside it, and
                                   their licences
+  LICENSE.txt                     this project's own code (MIT), what that covers, and that
+                                  no rights to the game are granted
 
 The game also makes these when it runs: logs\ (earlier runs' logs), run_twoc.err.log (the
 last run's log), run_twoc.power.log (the last run's power log), game_files\UDATA (saves),

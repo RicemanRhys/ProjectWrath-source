@@ -194,5 +194,7 @@ installed or changed on your PC (Windows remembers the game's volume in its volu
 
 Licences
 --------
-THIRD_PARTY_LICENSES.txt lists the other people's code in this program and its licences.
-LICENSE.txt is about this project's own code.
+LICENSE.txt says it in plain words: this project's own code is under the MIT licence; the
+other people's code in this program keeps its own licence (THIRD_PARTY_LICENSES.txt lists
+each one with its full text); no game files and no rights to the game are included or
+granted: you supply your own disc.

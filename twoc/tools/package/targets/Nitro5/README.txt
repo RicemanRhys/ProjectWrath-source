@@ -61,6 +61,7 @@ What's in the folder
   tools\, PACKAGE.txt                    the log collector and a display test; which build
                                          this is
   THIRD_PARTY_LICENSES.txt               other people's code in the game, and its licences
+  LICENSE.txt                            this project's own code (MIT) and what that covers
 When it runs the game also makes logs\, run_twoc.*.log, game_files\UDATA (saves) and
 game_files\UDATA_backups (copies of the save) in this folder.
 

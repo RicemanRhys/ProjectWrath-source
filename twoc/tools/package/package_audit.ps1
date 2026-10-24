@@ -4,8 +4,12 @@
 #   2. no trace of this PC: the Windows user name in a path (\Users\<name>), the home folder's path, or the PC's
 #      name, in any file's name or contents (text or binary, 8-bit and UTF-16);
 #   3. no stray logs, saves or dumps (*.log, *.dmp, *.sav, *.xbx, *.pdb, *.zip, crash_twoc.muted, logs\, UDATA\,
-#      UDATA_backups\, TDATA\), and no crash_twoc.ini in the Share package (its first start writes one).
-# It fails loudly (red lines, exit code 1) on any of them.
+#      UDATA_backups\, TDATA\), and no crash_twoc.ini in the Share package (its first start writes one);
+#   4. the licences (step 108): LICENSE.txt is there and is the MIT licence for this project's own code, and
+#      THIRD_PARTY_LICENSES.txt is there. While LICENSE.txt's copyright line still holds the placeholder
+#      "[NAME TO BE CHOSEN BY THE OWNER]" it WARNS loudly (yellow), without failing: the owner replaces it in
+#      twoc\LICENSE (the one place) before sharing.
+# It fails loudly (red lines, exit code 1) on any of 1-4.
 #
 #   powershell -NoProfile -ExecutionPolicy Bypass -File twoc\tools\package\package_audit.ps1 -Dir PACKAGE
 #
@@ -20,7 +24,9 @@ if (-not $Manifest) { $Manifest = Join-Path (Split-Path -Parent (Split-Path -Par
 $Dir = (Resolve-Path -LiteralPath $Dir).Path
 $fails = New-Object System.Collections.Generic.List[string]
 $notes = New-Object System.Collections.Generic.List[string]
+$warns = New-Object System.Collections.Generic.List[string]
 function Fail([string]$s) { $fails.Add($s); Write-Host "FAIL: $s" -ForegroundColor Red }
+function Warn([string]$s) { $warns.Add($s); Write-Host "WARNING: $s" -ForegroundColor Yellow }
 function Note([string]$s) { $notes.Add($s); Write-Host "  $s" }
 
 $target = 'unknown'
@@ -127,6 +133,29 @@ foreach ($f in $all) {
     if ($f.Name -like 'game_files.*') { Fail "a setup leftover: $rel" }
 }
 
+# 4. The licences (step 108). A source package (no PACKAGE.txt) carries twoc\LICENSE instead of LICENSE.txt.
+Write-Host "4. licences"
+$licPath = Join-Path $Dir 'LICENSE.txt'
+if ($target -eq 'unknown' -and -not (Test-Path -LiteralPath $licPath)) { $licPath = Join-Path $Dir 'twoc\LICENSE' }
+if (-not (Test-Path -LiteralPath $licPath)) { Fail "no LICENSE.txt (this project's own code: MIT)" }
+else {
+    $lic = [IO.File]::ReadAllText($licPath)
+    if ($lic -notmatch '(?m)^MIT License\r?$' -or $lic -notmatch 'Permission is hereby granted, free of charge') {
+        Fail "$(Split-Path -Leaf $licPath) doesn't hold the MIT licence"
+    }
+    $cr = [regex]::Match($lic, '(?m)^Copyright \(c\) [^\r\n]*')
+    if (-not $cr.Success) { Fail "$(Split-Path -Leaf $licPath) has no copyright line" }
+    elseif ($cr.Value -match '\[NAME TO BE CHOSEN BY THE OWNER\]') {
+        Warn "the copyright line still reads `"$($cr.Value)`""
+        Write-Host "  ******************************************************************************" -ForegroundColor Yellow
+        Write-Host "  *  NOT READY TO SHARE: replace [NAME TO BE CHOSEN BY THE OWNER] in twoc\LICENSE *" -ForegroundColor Yellow
+        Write-Host "  *  (the one place it is written), then make the packages again.              *" -ForegroundColor Yellow
+        Write-Host "  ******************************************************************************" -ForegroundColor Yellow
+    } else { Note "copyright line: $($cr.Value)" }
+}
+$tpl = if ($target -eq 'unknown') { Join-Path $Dir 'twoc\THIRD_PARTY_LICENSES.txt' } else { Join-Path $Dir 'THIRD_PARTY_LICENSES.txt' }
+if (-not (Test-Path -LiteralPath $tpl)) { Fail "no THIRD_PARTY_LICENSES.txt" }
+
 $size = ($files | Measure-Object Length -Sum).Sum
 Write-Host ("{0} files, {1:N1} MB" -f $files.Count, ($size / 1MB))
 if ($fails.Count) {
@@ -134,6 +163,12 @@ if ($fails.Count) {
     Write-Host "AUDIT FAILED: $($fails.Count) problem(s) in $Dir" -ForegroundColor Red
     foreach ($s in $fails) { Write-Host "  $s" -ForegroundColor Red }
     exit 1
+}
+if ($warns.Count) {
+    Write-Host ""
+    Write-Host "AUDIT PASSED WITH $($warns.Count) WARNING(S): $Dir" -ForegroundColor Yellow
+    foreach ($s in $warns) { Write-Host "  $s" -ForegroundColor Yellow }
+    exit 0
 }
 Write-Host "AUDIT PASSED: $Dir" -ForegroundColor Green
 exit 0

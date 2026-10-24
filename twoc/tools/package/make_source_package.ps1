@@ -28,7 +28,7 @@ if ((Test-Path -LiteralPath $Out) -and -not $Force) { throw "$Out exists; -Force
 $include = @('twoc/src', 'twoc/CMakeLists.txt', 'twoc/data', 'twoc/third_party', 'twoc/tools/lift_flag_join.py',
              'twoc/tools/lift_frndint.py', 'twoc/tools/wrap_callers.py', 'twoc/tools/build_info.cmake',
              'twoc/tools/package', 'twoc/lift.ps1', 'twoc/analyze.ps1', 'twoc/run_twoc.ps1', 'twoc/seed_functions.json',
-             'twoc/THIRD_PARTY_LICENSES.txt', 'twoc/docs/SHARING.md', 'twoc/.gitignore')
+             'twoc/THIRD_PARTY_LICENSES.txt', 'twoc/LICENSE', 'twoc/NOTICE', 'twoc/docs/SHARING.md', 'twoc/.gitignore')
 $exclude = @('twoc/tools/package/smoke104.py')     # a test script with this PC's paths
 $dirty = @(& git -C $repo status --porcelain --untracked-files=no -- @include 2>$null)
 if ($dirty.Count) { Write-Warning ("twoc has changes not committed (not in the zip): " + (($dirty | Select-Object -First 5) -join '; ')) }
@@ -82,6 +82,8 @@ try {
         '  twoc\lift.ps1, analyze.ps1, tools\*.py       the steps that make the recompiled code',
         '  twoc\tools\package                           the package scripts (and this one)',
         '  twoc\docs\SHARING.md                         the sharing checklist',
+        '  twoc\LICENSE, twoc\NOTICE                     this project''s own code: MIT (LICENSE); what that covers',
+        '                                                and what it doesn''t (NOTICE)',
         '  xboxrecomp\                                  the runtime and the recompiler, as built',
         '  BUILD.txt                                    how to build crash_twoc.exe from this',
         '',

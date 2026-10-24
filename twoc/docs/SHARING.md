@@ -72,8 +72,50 @@ part of the Share package).
   bcrypt): part of Windows, not shipped: nothing to include.
 - **Fonts**: the setup screen and the F1 menu load Segoe UI (and, when a path needs it, Microsoft YaHei, MS Gothic
   or Segoe UI Symbol) from the PC's own `C:\Windows\Fonts`; none is shipped.
-- **This project's own code: no licence chosen.** `LICENSE.txt` in the Share package says so. Which licence to use
-  is your decision (it has to sit with the LGPL part and the question in part 3). Not chosen here.
+- **This project's own code: MIT (step 108, your choice).** `twoc/LICENSE` holds the MIT text; its copyright line
+  reads `Copyright (c) 2026 [NAME TO BE CHOSEN BY THE OWNER]` until you put your name (or a group's) there. That
+  line is the one place the name is written: `make_package.ps1` copies it into every package's `LICENSE.txt`, the
+  source zips carry the file itself, and `package_audit.ps1` warns loudly (yellow, "NOT READY TO SHARE") while
+  the placeholder is there. `twoc/NOTICE` says what the MIT licence covers and what it doesn't (part 2a below).
+
+### 2a. Whose code is what
+
+What `twoc/LICENSE` (MIT) covers, and what keeps its own licence. Every third-party file is kept as it came, with
+its own notice and licence file, and none is relabelled MIT (checked in step 108: each folder's `LICENSE*` file
+and `README.twoc.txt`, the files' own headers, unchanged since they were added).
+
+| Files | Whose | Licence |
+|---|---|---|
+| `twoc/src/*.c`, `*.cpp`, `*.h`, `crash_twoc.manifest` (47 files) | this project | MIT (`twoc/LICENSE`); see the two notes below |
+| `twoc/CMakeLists.txt`, `lift.ps1`, `analyze.ps1`, `run_twoc.ps1`, `seed_functions.json`, `tools/` (package, capturekit, diag, the lift helpers) | this project | MIT |
+| `twoc/data/disc_usa.tsv` | this project (file names, sizes and SHA-256 of the disc: no game data) | MIT |
+| `twoc/docs/SHARING.md`, `twoc/NOTICE` | this project | MIT |
+| `twoc/third_party/imgui` (Dear ImGui 1.92.9b, with stb_truetype / rect_pack / textedit) | Omar Cornut; Sean Barrett | MIT (stb: MIT or public domain), `LICENSE.txt` |
+| `twoc/third_party/smaa` (SMAA.hlsl, AreaTex.h, SearchTex.h) | Jorge Jimenez et al. | MIT, `LICENSE.txt` |
+| `twoc/third_party/xegtao` (XeGTAO.h, XeGTAO.hlsli) | Intel Corporation | MIT, `LICENSE.txt` |
+| `twoc/third_party/volk` (volk.c, volk.h) | Arseny Kapoulkine | MIT, `LICENSE.md` |
+| `twoc/third_party/vulkan` (Vulkan-Headers) | The Khronos Group | Apache-2.0 or MIT, `LICENSE.md`, `LICENSES/` |
+| SDL 3.4.18 (fetched by CMake into the build folder, built static) | SDL's authors; HIDAPI; SunPro (libm) | zlib; HIDAPI BSD-style; SunPro's notice |
+| `xboxrecomp/` (the toolkit: kernel, D3D8 on D3D11, input, the recompiler) | xboxrecomp's authors | MIT, `xboxrecomp/LICENSE` |
+| `xboxrecomp/src/apu/apu_core.c`, `apu_dsp.c`, `apu_vp.c`, `apu_regs.h`, `apu_state.h`, `apu_debug.h`, `fpconv.h`, `apu_shim.h`; `xboxrecomp/src/nv2a/nv2a_regs.h` | xemu's authors (espes, Jannik Vogel, Matt Borgerson) | LGPL-2.1-or-later, `xboxrecomp/NOTICE`, `LICENSES/LGPL-2.1.txt` |
+| `twoc/src/recomp/gen` (the recompiled code, made by `lift.ps1` from the game's `default.xbe`; gitignored) | translated from the game's program | the MIT licence is **not** claimed for it; part 3's open question |
+| `twoc/docs/option_b` (a disassembly listing of the D3D library in the game's program) | from the game's program | not claimed; never packaged |
+| the game's files (`game_files`, the disc) | the game's owners | not included anywhere; the player's own copy |
+
+Two notes on `twoc/src`:
+
+- `ao.c` follows XeGTAO's sample shaders (`vaGTAO.hlsl`) and ports `XeGTAO::GTAOUpdateConstants` to C; it names
+  Intel's copyright in its header, and that part stays under XeGTAO's MIT notice (part 3 of
+  `THIRD_PARTY_LICENSES.txt`). `aa.c`'s FXAA is written after Timothy Lottes' description (no code taken);
+  `d3d_host.c` uses NVAPI's call ids (numbers from NVIDIA's MIT headers, no header code).
+- `recomp_manual.c` holds hand-written C for some of the game's own functions (where the lifted code needed a fix
+  or a hook). It is written here, but from studying the game's program, so it belongs to the same open question
+  as the recompiled code (part 3).
+
+**Licence headers in the source files:** not added; `twoc/NOTICE` is the directory-level note instead. A comment at
+the top of each of the 47 files would be safe (no code changes), but it would say no more than `NOTICE` does for the
+whole folder, and the owner's name (still a placeholder) would then be in 48 places instead of one. If you want
+them later: a one-line `SPDX-License-Identifier: MIT` comment per file needs no name and can be added by a script.
 
 ## 3. The recompiled code is derived from the game's machine code
 
