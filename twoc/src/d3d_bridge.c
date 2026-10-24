@@ -174,6 +174,8 @@ static char g_motion_on_path[MAX_PATH];
 static int g_motion_live;
 static unsigned g_motion_n;
 static uint32_t g_motion_vsc_ret[4], g_motion_draw_ret;  /* who last wrote c0 (a call chain), who drew */
+static double g_ovl_bias = 32.0;    /* step 105: RECOMP_D3D_BRIDGE_OVERLAY_BIAS, D24 steps (0 off), mirror_draw_vp */
+static volatile LONG g_ovl_biased;
 static int g_anom_on;               /* step 104: RECOMP_D3D_BRIDGE_ANOMALY (host_draw's check) */
 static CRITICAL_SECTION g_anom_cs;
 static volatile LONG g_anom_cs_ok;
@@ -720,6 +722,8 @@ void d3db_init(void)
         g_drawlog_from = strtol(getenv("RECOMP_D3D_BRIDGE_DRAWLOG"), &e, 0);
         g_drawlog_to = *e == '-' ? strtol(e + 1, NULL, 0) : g_drawlog_from;
     }
+    if (getenv("RECOMP_D3D_BRIDGE_OVERLAY_BIAS") && *getenv("RECOMP_D3D_BRIDGE_OVERLAY_BIAS"))     /* step 105 */
+        g_ovl_bias = atof(getenv("RECOMP_D3D_BRIDGE_OVERLAY_BIAS"));
     g_anom_on = d3db_host_on && env_on("RECOMP_D3D_BRIDGE_ANOMALY");     /* step 104 */
     if (g_anom_on && !InterlockedExchange(&g_anom_cs_ok, 1))
         InitializeCriticalSection(&g_anom_cs);
@@ -3971,6 +3975,13 @@ static volatile LONG g_fur_mode = TWOC_FUR_ON;      /* RECOMP_FUR or the setting
 static int g_item_fur;                  /* the item being drawn is a fur shell */
 static volatile LONG g_fur_skipped, g_fur_kept;     /* draws not mirrored for it; kept with Crash's off */
 
+/* Step 105: mirror_draw_vp's depth bias for blended draws over drawn geometry, D24 steps (0 off), from the next
+ * draw (the trigger file's ovlbias, a test aid). */
+void d3db_set_overlay_bias(double steps)
+{
+    g_ovl_bias = steps;
+}
+
 void d3db_set_fur(int mode)
 {
     InterlockedExchange(&g_fur_mode, mode);
@@ -4219,6 +4230,22 @@ static void mirror_draw_vp(const char *path, uint32_t xdk_prim, uint32_t n, cons
         vc = sprite_patch(&p, consts, rs_x(XRS_POINTSPRITEENABLE) != 0);
         if (vc < 0)
             InterlockedIncrement(&g_sprite_fails);
+    }
+    /* Step 105 (notes 18.108): a blended draw over geometry already drawn, testing LESSEQUAL without writing
+     * depth (Smokey's haze band along the canyon walls: copies of the wall's triangles, some corners at the
+     * wall's very screen z), drawn g_ovl_bias D24 steps nearer: clip z - e w through c98 (oPos.z is dp4 with
+     * it in every program the XDK makes, c96-c99 its transform). The NV2A takes the program's screen z as
+     * the depth, so a corner with the wall's screen z has the wall's depth and the band passes; here the
+     * screen z goes back to clip space through c58 and w (and D3D11 divides by w again), rounded with each
+     * draw's own w, and the band lost by a step or two near such a corner: a dark sliver of the wall in the
+     * haze, a different one each frame as the camera moved. Shadow marks (ZERO, ONE) and stencil draws
+     * are left as they are. */
+    if (g_ovl_bias != 0.0 && rs_x(XRS_ALPHABLENDENABLE) && rs_x(XRS_SRCBLEND) != 0 && rs_x(XRS_ZENABLE) &&
+        !rs_x(XRS_ZWRITEENABLE) && rs_x(XRS_ZFUNC) == 0x203 && !rs_x(XRS_STENCILENABLE) &&
+        MEM32(dev() + DEV_DEPTH_SURFACE)) {
+        for (i = 0; i < 4; i++)
+            consts[4 * 98 + i] -= (float)(g_ovl_bias / 16777216.0) * consts[4 * 99 + i];
+        InterlockedIncrement(&g_ovl_biased);
     }
     hv.key = p.hash;
     hv.n_insns = p.n_insns;
@@ -5395,11 +5422,12 @@ static void mirror_swap(void)
                     " uploads %u, probes %u; linear textures scaled to 0..1 %ld (not patchable %ld); point sprites as quads %ld"
                     " (not patchable %ld); sampling a copy,"
                     " not mirrored %ld; gaps: undeclared register %ld, stream %ld, array type %ld, tessellator %ld,"
-                    " NORESERVEDCONSTANTS %ld\n", (long)g_mirrored_vp,
+                    " NORESERVEDCONSTANTS %ld; blended over drawn geometry, %g steps nearer: %ld\n", (long)g_mirrored_vp,
                     st.vp_draws, st.vs_created, st.vs_fails, st.vs_const_uploads, st.vs_probes,
                     (long)g_texel_draws, (long)g_texel_fails, (long)g_sprite_draws, (long)g_sprite_fails,
                     (long)g_skip[SKIP_VP_COPY], (long)g_vpgap[VPGAP_UNDECLARED], (long)g_vpgap[VPGAP_STREAM],
-                    (long)g_vpgap[VPGAP_FORMAT], (long)g_vpgap[VPGAP_TESS], (long)g_vpgap[VPGAP_NORESERVED]);
+                    (long)g_vpgap[VPGAP_FORMAT], (long)g_vpgap[VPGAP_TESS], (long)g_vpgap[VPGAP_NORESERVED],
+                    g_ovl_bias, (long)g_ovl_biased);
             if (g_vc_on > 0)            /* step 84 */
                 log_block_printf(&lb, "[D3DB] host vertex cache: %ld lookups, %ld hits, %ld new, %ld changed, %ld too"
                         " large, %ld emptied, %.1f MB held; checked %ld, %ld differ\n", (long)g_vc_n[0],

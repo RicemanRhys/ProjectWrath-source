@@ -10722,6 +10722,7 @@ static void roll_rec(unsigned swap_no)
 }
 
 extern void d3db_anomaly_tail(FILE *f);
+extern void d3db_set_overlay_bias(double steps);       /* step 105: the trigger file's ovlbias */
 extern const char *twoc_level_name(void);
 extern char **_environ;
 
@@ -11384,6 +11385,9 @@ static void trigger_file(unsigned swap_no)
             } else if (strcmp(k, "idecal") == 0) {          /* step 102: a test aid, D24 steps (0 off) */
                 g_idecal = atof(v);
                 fprintf(stderr, "[D3DB] trigger file: in-between decals' depth bias %g\n", g_idecal);
+            } else if (strcmp(k, "ovlbias") == 0) {        /* step 105: a test aid, D24 steps (0 off) */
+                d3db_set_overlay_bias(atof(v));
+                fprintf(stderr, "[D3DB] trigger file: blended-over draws' depth bias %g\n", atof(v));
             } else if (strcmp(k, "aohalf") == 0) {
                 ts.ao_half = atoi(v) > 0;
             } else if (strcmp(k, "pausebg") == 0) {         /* step 90: pause_unfocused */
