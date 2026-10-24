@@ -19,7 +19,8 @@ this folder and checks every file. Nothing is downloaded, and nothing is sent an
 
 What you need
 -------------
-- A Windows 10 or Windows 11 PC, 64-bit.
+- A Windows 10 or Windows 11 PC, 64-bit. Nothing to install first: the program carries
+  everything it needs besides Windows itself (no Visual C++ Redistributable needed).
 - A graphics card that can do Direct3D 11 (nearly every card from the last ten years,
   including the graphics built into most processors).
 - 4 GB of memory (RAM).

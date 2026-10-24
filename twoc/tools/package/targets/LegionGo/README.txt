@@ -202,7 +202,7 @@ What's in the folder
   Collect logs.bat                zips the logs and a PC summary to bring back
   crash_twoc.ini                  the game's settings, already set up for the Legion Go
   Test notes.txt                  write what you see here; it goes into the zip
-  crash_twoc.exe, vcruntime140.dll, vcruntime140_1.dll    the game and its C++ runtime
+  crash_twoc.exe                  the game (its C++ runtime is built in: no runtime DLLs)
   xemu_apu.dll                    the game's audio library (the game needs it beside the exe)
   game_files\                     the disc files (default.xbe and Crashdat\)
   tools\                          vrrprobe.exe (a display test) and the log collector
@@ -256,8 +256,8 @@ A. Set up the Legion Go (once)
     finish first. Nothing else should be running while you test.
 
 The Legion Go already has everything else the game needs: Windows 11 includes DirectX 11,
-the shader compiler, XAudio2, XInput and Media Foundation. The Visual C++ runtime is in
-the folder. (Only a Windows "N" edition lacks Media Foundation; the Legion Go doesn't ship
+the shader compiler, XAudio2, XInput and Media Foundation. The Visual C++ runtime is built
+into the game. (Only a Windows "N" edition lacks Media Foundation; the Legion Go doesn't ship
 one.)
 
 

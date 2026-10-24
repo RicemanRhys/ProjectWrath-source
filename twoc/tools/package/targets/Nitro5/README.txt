@@ -56,7 +56,7 @@ What's in the folder
   Collect logs.bat                       zips the logs and a PC summary to bring back
   crash_twoc.ini                         the game's settings, set up for this laptop
   Test notes.txt                         write what you see here; it goes into the zip
-  crash_twoc.exe, vcruntime140*.dll      the game and its C++ runtime
+  crash_twoc.exe                         the game (its C++ runtime built in)
   xemu_apu.dll                           the game's audio library (needed beside the exe)
   game_files\                            the disc files
   tools\, PACKAGE.txt                    the log collector and a display test; which build
@@ -106,8 +106,8 @@ fast cores; nothing to set. The game also tells Windows not to slow it down as a
 program would (its log and the About tab say so: "Power throttling: not throttled").
 
 The laptop already has everything else the game needs: Windows 11 includes DirectX 11, the
-shader compiler, XAudio2, XInput and Media Foundation; the Visual C++ runtime is in the
-folder.
+shader compiler, XAudio2, XInput and Media Foundation; the Visual C++ runtime is built into
+the game.
 
 
 B. Start the game [laptop]

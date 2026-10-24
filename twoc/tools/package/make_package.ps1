@@ -17,9 +17,11 @@
 # then linked again with the counts (TWOC_PGO=USE). /fp stays precise. PACKAGE.txt says so.
 #
 # Makes DIR (default: Desktop\Crash\<Target>Package) with:
-#   crash_twoc.exe and the Visual C++ runtime DLLs it imports (vcruntime140.dll, vcruntime140_1.dll,
-#     copied app-local from Visual Studio's redist folder); every other DLL it imports is part of
-#     Windows 10/11 (checked here with dumpbin /dependents; the list goes into PACKAGE.txt)
+#   crash_twoc.exe; every DLL it imports is part of Windows 10/11 (checked here with dumpbin /dependents; the list
+#     goes into PACKAGE.txt). Since step 108 the Visual C++ runtime is linked static (TWOC_STATIC_CRT, /MT): no
+#     runtime DLL is shipped, and an exe or DLL that still imports one (vcruntime140*.dll, msvcp140*.dll,
+#     api-ms-win-crt-*) stops the script. A build with -DTWOC_STATIC_CRT=OFF ships vcruntime140*.dll app-local as
+#     before (from Visual Studio's redist folder)
 #   xemu_apu.dll (step 108, notes 18.111): the audio library (the APU from xemu, LGPL), from the exe's own build
 #     folder; its imports are checked the same way. The Share package also gets Source\xemu_apu-source_*.zip, its
 #     complete source (make_apu_source_package.ps1)
@@ -193,6 +195,13 @@ $windows = @{
     'mfplat.dll' = 'Windows (Media Foundation; missing on N editions without the Media Feature Pack)';
     'mfreadwrite.dll' = 'Windows (Media Foundation; missing on N editions without the Media Feature Pack)'
 }
+# Step 108: the runtime linked static (the exe's build folder's CMakeCache.txt says so) imports no runtime DLL.
+$cache0 = Join-Path (Split-Path -Parent (Split-Path -Parent $Exe)) 'CMakeCache.txt'
+$staticCrt = (Test-Path $cache0) -and -not (Select-String -Quiet -Pattern '^TWOC_STATIC_CRT:BOOL=OFF' $cache0)
+if ($staticCrt) {
+    $rt = @($deps + $apuDeps | Where-Object { $_ -match '^(vcruntime|msvcp|concrt|vccorlib|ucrtbase)|^api-ms-win-crt-' } | Select-Object -Unique)
+    if ($rt.Count) { throw "The runtime is meant to be linked static, but these are imported: $($rt -join ', ') (rebuild?)" }
+}
 $depLines = @()
 $apuLines = @()
 foreach ($d in ($deps + $apuDeps | Select-Object -Unique)) {
@@ -331,6 +340,7 @@ $pkg = @(
     "crash_twoc.exe: $((Get-Item $Exe).Length) bytes, built $($exeTime.ToString('yyyy-MM-dd HH:mm:ss')), SHA-256 $hash",
     "                link-time code generation: $ltcg",
     "                profile-guided optimisation: $pgoLine",
+    "                Visual C++ runtime: $(if ($staticCrt) { 'linked static (/MT): no runtime DLL needed or shipped' } else { 'DLL (/MD): vcruntime140*.dll shipped beside it' })",
     "xemu_apu.dll:   $((Get-Item $apuDll).Length) bytes, built $((Get-Item $apuDll).LastWriteTime.ToString('yyyy-MM-dd HH:mm:ss')), SHA-256 $apuHash",
     "                the audio library (xboxrecomp's src\apu from xemu, LGPL-2.1-or-later), loaded by the exe at the start$(if ($share) { '; its source: Source\' })",
     $gfLine,

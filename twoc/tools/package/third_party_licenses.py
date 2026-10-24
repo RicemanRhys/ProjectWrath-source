@@ -1,8 +1,8 @@
 """third_party_licenses.py [--dxvk LICENSE] [--out FILE] -- step 93 (notes 18.96): writes THIRD_PARTY_LICENSES.txt
 (default twoc/THIRD_PARTY_LICENSES.txt) from the real licence files of every third-party component built into
 crash_twoc.exe or shipped beside it (the Legion Go package; the DXVK test folder). Each text is read from the file
-the component itself ships; a missing file stops the script. The Visual C++ runtime's terms aren't in Visual
-Studio's install folder, so its part quotes Microsoft's published redistribution list (fetched 2026-10-19).
+the component itself ships; a missing file stops the script. The Visual C++ runtime is linked statically since
+step 108 (no runtime DLL shipped); its part names Microsoft's terms and links them (their text isn't installed).
 
   python twoc/tools/package/third_party_licenses.py
   --dxvk: DXVK's LICENSE (default Desktop/Crash/vulkan-tools/dxvk-3.1.1/LICENSE, the DXVK 3.1.1 release the DXVK
@@ -76,8 +76,8 @@ the Xbox disc and is not covered here.
    (7) xemu_apu.dll (the audio library) . LGPL-2.1-or-later (xemu's APU files), with xboxrecomp's and this
                                             project's MIT glue; its source is in Source\\ (see "The audio
                                             library, xemu_apu.dll" below)
-    8. The Visual C++ runtime DLLs (vcruntime140.dll, vcruntime140_1.dll) ... Microsoft Visual Studio 2022
-                                            licence terms, "Distributable Code"
+    8. The Visual C++ runtime ............ linked statically into the exe and the DLL (no runtime DLL
+                                            shipped): Microsoft's Visual Studio 2022 / Windows SDK terms
     9. DXVK 3.1.1 (the DXVK test folder only: d3d11.dll, dxgi.dll) ........ zlib/libpng
 
   Written here, no third-party code: FXAA (twoc/src/aa.c, written after Timothy Lottes' FXAA 3.11 description);
@@ -154,37 +154,18 @@ copy the new xemu_apu.dll over the one next to crash_twoc.exe. The game's log na
 size and SHA-256. If your DLL offers another interface version, the game says so and doesn't start.
 """)
 
-part("8. The Visual C++ runtime DLLs (vcruntime140.dll, vcruntime140_1.dll; app-local in the package and the DXVK folder)",
-     "Microsoft Visual C++ 2015-2022 runtime, from Visual Studio 2022's VC\\Redist\\MSVC\\14.44.35112\\x64\\\n"
-     "Microsoft.VC143.CRT, unmodified. They are governed by the \"Distributable Code\" section of the Microsoft\n"
-     "Software License Terms for Visual Studio 2022 (here Community; https://visualstudio.microsoft.com/\n"
-     "license-terms/vs2022-ga-community/). Those terms are not installed with Visual Studio here; the redistribution\n"
-     "list they refer to is Microsoft's published one, quoted below from https://learn.microsoft.com/en-us/\n"
-     "visualstudio/releases/2022/redistribution (fetched 2026-10-19).",
-     "Microsoft Software License Terms (Visual Studio 2022), Distributable Code",
-     """This is the "Distributable List" or "REDIST.txt" that is referenced in the "Distributable Code" section of the
-Microsoft Software License Terms for Visual Studio Enterprise 2022, Visual Studio Professional 2022, Visual
-Studio Community 2022 ("the software"). If you have a validly licensed copy of such software, you may copy and
-distribute with your program the unmodified form of the files listed below, subject to the License Terms for
-the software.
-
-Visual C++ Runtime Files
-(the merge modules listed first are left out here; then:)
-Subject to the License Terms for the software, you may copy and distribute with your program any of the files
-within the following folder and its subfolders except as noted below. You may not modify these files.
-
-- [VisualStudioFolder]\\VC\\redist
-
-The same Visual C++ Runtime Redistributable package is available from Latest supported Visual C++
-Redistributable downloads and Download Visual Studio Tools. Distribution of the Visual C++ Runtime
-Redistributable package, merge modules, and individual binaries obtained from those pages is limited to
-licensed Visual Studio users and is subject to its license terms.
-
-Note: You may not distribute the contents of the following folders (please see List of Utilities and Build
-Tools for Visual Studio 2022 for allowed usage for development/testing purposes):
-
-- [VisualStudioFolder]VC\\Redist\\MSVC\\[version]\\debug_nonredist
-- [VisualStudioFolder]\\VC\\Redist\\MSVC\\[version]\\onecore\\debug_nonredist""")
+part("8. The Visual C++ runtime (linked statically: no runtime DLL is shipped)",
+     "Since step 108 crash_twoc.exe and xemu_apu.dll are built with the Visual C++ runtime linked statically (/MT:\n"
+     "the C and C++ runtime libraries of Visual Studio 2022's MSVC 14.44 and the Windows SDK's Universal C Runtime,\n"
+     "unmodified), so no Microsoft runtime DLL (vcruntime140*.dll, msvcp140*.dll) ships with the game and players\n"
+     "need no Visual C++ Redistributable. That runtime code is part of Microsoft Visual Studio 2022 (here\n"
+     "Community) and the Windows SDK, under Microsoft's licence terms for them:\n"
+     "https://visualstudio.microsoft.com/license-terms/ (Visual Studio 2022) and the Windows SDK's own licence\n"
+     "(https://developer.microsoft.com/windows/downloads/windows-sdk/). Their text isn't copied here: Visual\n"
+     "Studio doesn't install it on the PC this was built on, and Microsoft's page builds it with script, so it\n"
+     "couldn't be read from an official file.",
+     "Microsoft Software License Terms (Visual Studio 2022; the Windows SDK)",
+     "(not reproduced: see the links above)")
 
 part("9. DXVK 3.1.1 (the DXVK test folder only: d3d11.dll and dxgi.dll, x64)",
      "https://github.com/doitsujin/dxvk, release v3.1.1, unmodified. Not in the Legion Go package; the DXVK test\n"

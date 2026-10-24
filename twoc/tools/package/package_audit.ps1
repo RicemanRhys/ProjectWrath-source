@@ -11,7 +11,9 @@
 #      twoc\LICENSE (the one place) before sharing;
 #   5. the audio library (step 108): xemu_apu.dll beside every crash_twoc.exe, and in the Share package its source
 #      zip in Source\ (each zip there is unpacked and audited the same way: its own game-file, PC, licence checks).
-# It fails loudly (red lines, exit code 1) on any of 1-5.
+#   6. no Microsoft runtime DLL (step 108: the runtime is linked static): no vcruntime*.dll, msvcp*.dll,
+#      concrt*.dll, vccorlib*.dll, ucrtbase.dll or api-ms-win-crt-*.dll anywhere in a package.
+# It fails loudly (red lines, exit code 1) on any of 1-6.
 # What it audits: a package (PACKAGE.txt), the whole-program source folder (make_source_package.ps1: twoc\LICENSE)
 # or the audio library's source folder (make_apu_source_package.ps1: xemu_apu_dll.c, LICENSES\, NOTICE.txt).
 #
@@ -198,6 +200,14 @@ foreach ($z in $zips) {
         if ($LASTEXITCODE) { Fail "the zip Source\$($z.Name) failed its own audit (above)" }
         Write-Host "   --- end of $($z.Name) ---"
     } finally { if (Test-Path -LiteralPath $zt) { Remove-Item -Recurse -Force -LiteralPath $zt } }
+}
+
+# 6. No Microsoft runtime DLL (step 108).
+Write-Host "6. no Visual C++ runtime DLLs"
+foreach ($f in $files) {
+    if ($f.Name -match '^(vcruntime|msvcp|concrt|vccorlib).*\.dll$|^ucrtbase\.dll$|^api-ms-win-crt-.*\.dll$') {
+        Fail "a Microsoft runtime DLL (the runtime is linked static, step 108): $($f.FullName.Substring($Dir.Length + 1))"
+    }
 }
 
 $size = ($files | Measure-Object Length -Sum).Sum

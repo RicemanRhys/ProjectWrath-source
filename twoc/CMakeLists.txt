@@ -28,6 +28,15 @@ if(MSVC AND TWOC_LTCG)
     set(CMAKE_INTERPROCEDURAL_OPTIMIZATION_RELEASE ON)
 endif()
 
+# The Visual C++ runtime linked static (/MT; step 108, notes 18.111): every target below (the exe, xboxrecomp's
+# libraries, SDL, xemu_apu.dll) takes the runtime into itself, so no Microsoft runtime DLL (vcruntime140*.dll,
+# msvcp140*.dll) ships beside the game and players need no Visual C++ Redistributable. Set before any target is
+# made (FetchContent and add_subdirectory inherit it). -DTWOC_STATIC_CRT=OFF builds with the DLL runtime (/MD).
+option(TWOC_STATIC_CRT "Link the Visual C++ runtime statically (/MT)" ON)
+if(MSVC AND TWOC_STATIC_CRT)
+    set(CMAKE_MSVC_RUNTIME_LIBRARY "MultiThreaded$<$<CONFIG:Debug>:Debug>")
+endif()
+
 # Profile-guided optimisation (step 95, notes 18.98), for make_package.ps1
 # -Pgo in a build folder of its own: TWOC_PGO=GEN links the exe instrumented
 # (/GENPROFILE, its counts database TWOC_PGO_PGD), the training runs write

@@ -21,6 +21,8 @@ if(CMAKE_SOURCE_DIR STREQUAL CMAKE_CURRENT_SOURCE_DIR)
     set(CMAKE_C_STANDARD_REQUIRED ON)
     if(MSVC)
         set(CMAKE_INTERPROCEDURAL_OPTIMIZATION_RELEASE ON)
+        # The Visual C++ runtime linked static, as twoc builds it (step 108): the DLL needs no runtime DLL.
+        set(CMAKE_MSVC_RUNTIME_LIBRARY "MultiThreaded$<$<CONFIG:Debug>:Debug>")
     endif()
     add_compile_definitions(WIN32_LEAN_AND_MEAN NOMINMAX)
     set(XEMU_APU_SRC "${CMAKE_CURRENT_SOURCE_DIR}/src" CACHE PATH "The folder holding apu/, nv2a/ and platform/")

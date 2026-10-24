@@ -50,7 +50,8 @@ static void apu_dll_fail(const wchar_t *path, const wchar_t *what, const wchar_t
                L"emulator. It is under the GNU LGPL; its source is in the Share package's Source folder.)",
                what, path, todo);
     msg[sizeof(msg) / sizeof(msg[0]) - 1] = 0;
-    fprintf(stderr, "[APU-DLL] %s: %s\n", utf8(what, u1, sizeof(u1)), utf8(path, u2, sizeof(u2)));
+    fprintf(stderr, "[APU-DLL] The game can't start: %s The file: %s\n", utf8(what, u1, sizeof(u1)),
+            utf8(path, u2, sizeof(u2)));
     fflush(stderr);
     MessageBoxW(NULL, msg, L"Crash TWOC - audio library", MB_ICONERROR | MB_OK | MB_SETFOREGROUND);
 }

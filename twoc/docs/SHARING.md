@@ -60,16 +60,18 @@ file) covers Dear ImGui and stb_truetype, SDL 3 (with hidapi and the SunPro libm
 Vulkan-Headers, xboxrecomp with its NOTICE and the LGPL text, and DXVK (only for the DXVK test folder, which is not
 part of the Share package).
 
-**Gaps:**
+**What is not a licence text in the file, and why:**
 
-- **The Visual C++ runtime** (`vcruntime140.dll`, `vcruntime140_1.dll`, shipped next to the exe): Microsoft lets
-  them be redistributed under the Visual Studio 2022 licence terms' "Distributable Code" section. Part 8 of the
-  file quotes the published redistribution list (REDIST.txt) and the URL, **not the section's own words**: Visual
-  Studio doesn't install the licence terms on this PC and Microsoft's page builds them with script (notes 18.96).
-  To finish: open https://visualstudio.microsoft.com/license-terms/ (the Visual Studio 2022 Community or
-  Professional terms, whichever is installed), copy the "Distributable Code" section into part 8 of
-  `third_party_licenses.py`, and run it again. Or ship no DLLs and ask players to install the "Microsoft Visual C++
-  Redistributable for Visual Studio 2015-2022" (x64) instead (one more step for them, no text needed).
+- **The Visual C++ runtime: linked statically since step 108 (your choice 3).** `crash_twoc.exe` and
+  `xemu_apu.dll` are built with `/MT` (`TWOC_STATIC_CRT`, every target: the exe, xboxrecomp's libraries, SDL 3,
+  the DLL), so they import no Microsoft runtime DLL and **no `vcruntime140*.dll` ships in any package**;
+  `package_audit.ps1` fails if one appears, and `make_package.ps1` stops if the exe or the DLL imports one.
+  Players need no Visual C++ Redistributable. The runtime code inside them is Microsoft's (Visual Studio 2022's
+  MSVC 14.44 and the Windows SDK's Universal C Runtime); part 8 of `THIRD_PARTY_LICENSES.txt` says so and links
+  Microsoft's terms (https://visualstudio.microsoft.com/license-terms/), without pasting text that couldn't be
+  read from an official file here. The old gap (the "Distributable Code" section for shipped DLLs) no longer
+  applies, as no DLL is shipped. Measured in step 108: no slower (cast_bug's start, the game and render threads),
+  the same sound, the crash handler and logs as before; the exe 0.33 MB larger (14.78 MB) and the DLL 0.16 MB (0.23 MB).
 - **Windows components** the exe uses (Direct3D 11, DXGI, the HLSL compiler, XInput, XAudio2, Media Foundation,
   bcrypt): part of Windows, not shipped: nothing to include.
 - **Fonts**: the setup screen and the F1 menu load Segoe UI (and, when a path needs it, Microsoft YaHei, MS Gothic
