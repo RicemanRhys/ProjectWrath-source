@@ -1,0 +1,122 @@
+name: Bug report
+description: Something in Project Wrath doesn't work, crashes, freezes, sounds or looks wrong.
+title: "[Bug] "
+labels: ["bug"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thank you for reporting a problem. Project Wrath is an unofficial fan port; it is not affiliated with,
+        endorsed by or sponsored by the owners of the game. Please don't attach game files, disc images or
+        anything copied from the game.
+
+        The game sends nothing by itself: everything here is what you choose to write or attach. Before you
+        attach a file, look inside it.
+  - type: checkboxes
+    id: checked
+    attributes:
+      label: Before you report
+      options:
+        - label: I checked my game files with "Verify game files" (F1 menu, About tab), and it said all of them are the disc's.
+          required: true
+        - label: I searched the existing reports for this problem.
+          required: false
+  - type: textarea
+    id: build
+    attributes:
+      label: Build info
+      description: |
+        F1 menu, About tab, "Copy build info", then paste here. It holds the build, the Windows version, the
+        processor, the graphics card and driver, the display and its refresh rate, the Frame rate setting and the
+        settings changed from the defaults; no user name, PC name or folders.
+      render: text
+    validations:
+      required: true
+  - type: input
+    id: windows
+    attributes:
+      label: Windows version
+      description: If Build info above didn't paste, e.g. "Windows 11 24H2". Otherwise leave empty.
+    validations:
+      required: false
+  - type: input
+    id: gpu
+    attributes:
+      label: Graphics card and driver
+      description: If Build info above didn't paste, e.g. "NVIDIA GeForce RTX 3060, driver 576.88". Otherwise leave empty.
+    validations:
+      required: false
+  - type: input
+    id: display
+    attributes:
+      label: Display and refresh rate
+      description: e.g. "2560x1440 at 144 Hz, full screen" or "1920x1080 at 60 Hz, in a window".
+    validations:
+      required: true
+  - type: dropdown
+    id: framerate
+    attributes:
+      label: Frame rate setting (F1 menu, Display tab)
+      options:
+        - Match display
+        - Game (60)
+        - A fixed rate (72, 90, 120, 144, 165, 180 or 240 fps)
+        - I don't know
+    validations:
+      required: true
+  - type: dropdown
+    id: game60
+    attributes:
+      label: Does it also happen with Frame rate set to Game (60)?
+      options:
+        - "Yes, it happens with Game (60) too"
+        - "No, only with the other Frame rate settings"
+        - "I didn't try"
+    validations:
+      required: true
+  - type: input
+    id: where
+    attributes:
+      label: The level and where in it
+      description: e.g. "the hub, near the first lift" or "the third level, at the second checkpoint". "The menu" or "the setup screen" are fine too.
+    validations:
+      required: true
+  - type: textarea
+    id: did
+    attributes:
+      label: What I did
+      description: The steps to make it happen, as far as you know them.
+      placeholder: |
+        1. Started the game with "Play Project Wrath.bat"
+        2. ...
+    validations:
+      required: true
+  - type: textarea
+    id: happened
+    attributes:
+      label: What happened
+    validations:
+      required: true
+  - type: textarea
+    id: expected
+    attributes:
+      label: What should happen
+    validations:
+      required: true
+  - type: textarea
+    id: logs
+    attributes:
+      label: The Collect logs zip
+      description: |
+        Close the game, double-click "Collect logs.bat" in the game's folder, and attach the zip it makes
+        (ProjectWrath_logs_..._<date>_<time>.zip). It replaces your Windows user name, home folder and PC name
+        with <user> and <pc>; scrub.txt in the zip lists where. Look inside before you attach it.
+    validations:
+      required: false
+  - type: textarea
+    id: screenshots
+    attributes:
+      label: Screenshots or a short video
+      description: Anything you see is easier to fix with a picture. Drag the files here.
+    validations:
+      required: false

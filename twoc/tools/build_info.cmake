@@ -40,6 +40,20 @@ if(_dirty)
 else()
     set(_vtext "${_commit} (${_date})")
 endif()
+# Step 109: ISSUES_URL from twoc/ISSUES_URL.txt (-DISSUES=<file>), the one place it is written: "" while it is the
+# placeholder or isn't a plain https:// address (no quotes, spaces or backslashes), so the About tab shows no link.
+set(_issues "")
+if(ISSUES AND EXISTS "${ISSUES}")
+    file(STRINGS "${ISSUES}" _il REGEX "^[ \t]*ISSUES_URL[ \t]*=")
+    if(_il)
+        list(GET _il 0 _il)
+        string(REGEX REPLACE "^[ \t]*ISSUES_URL[ \t]*=[ \t]*" "" _il "${_il}")
+        string(STRIP "${_il}" _il)
+        if(_il MATCHES "^https://[A-Za-z0-9._~:/?#@!$&'()*+,;=%-]+$" AND NOT _il MATCHES "\\[")
+            set(_issues "${_il}")
+        endif()
+    endif()
+endif()
 if(LTCG)
     set(_ltcg 1)
 else()
@@ -55,6 +69,7 @@ file(WRITE "${OUT}.tmp"
      "#define TWOC_BUILD_VER_M ${_vm}\n"
      "#define TWOC_BUILD_VER_D ${_vd}\n"
      "#define TWOC_BUILD_VERSION_TEXT \"${_vtext}\"\n"
+     "#define TWOC_ISSUES_URL \"${_issues}\"\n"
      "#define TWOC_BUILD_LTCG ${_ltcg}\n")
 file(COPY_FILE "${OUT}.tmp" "${OUT}" ONLY_IF_DIFFERENT)
 file(REMOVE "${OUT}.tmp")

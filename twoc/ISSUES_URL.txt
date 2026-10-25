@@ -1,0 +1,12 @@
+# Where players report problems with Project Wrath (step 109, notes 18.112): ONE web address, https://..., on the
+# ISSUES_URL line below, for example the issue tracker of the repository the project is published in.
+#
+# This is the one place it is written. Read by:
+#   - the build (tools/build_info.cmake, at every build): the F1 menu's About tab shows a "Report a problem" button
+#     that opens this address in the browser;
+#   - make_package.ps1: the Share README's "Where to report problems" line, and PACKAGE.txt;
+#   - package_audit.ps1: a yellow warning while it is still the placeholder.
+# While it is the placeholder (or not an https:// address), the About tab shows no link, the README says "Where to
+# report problems: to be announced", and the audit warns. After changing it: build again, then make the packages
+# again (docs/RELEASE_CHECKLIST.md, "After choosing the copyright name or the URL").
+ISSUES_URL = [ISSUES URL TO BE CHOSEN BY THE OWNER]

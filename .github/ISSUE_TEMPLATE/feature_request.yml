@@ -1,0 +1,40 @@
+name: Feature request
+description: An idea for Project Wrath (a setting, an option, something that would make it better).
+title: "[Idea] "
+labels: ["enhancement"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thank you for the idea. Project Wrath is an unofficial fan port; it is not affiliated with, endorsed by or
+        sponsored by the owners of the game. It plays the original game: ideas that change the game itself (new
+        levels, characters or content) are out of its scope.
+  - type: textarea
+    id: idea
+    attributes:
+      label: The idea
+      description: What would you like, and where (which settings tab, which part of the game)?
+    validations:
+      required: true
+  - type: textarea
+    id: why
+    attributes:
+      label: Why
+      description: What it would make better or easier for you.
+    validations:
+      required: true
+  - type: textarea
+    id: now
+    attributes:
+      label: What you do now instead
+      description: Optional. How you get by without it today.
+    validations:
+      required: false
+  - type: textarea
+    id: build
+    attributes:
+      label: Build info
+      description: Optional. F1 menu, About tab, "Copy build info", then paste here (no user name, PC name or folders in it).
+      render: text
+    validations:
+      required: false

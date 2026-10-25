@@ -25,6 +25,11 @@ New in this package:
     folder. Nothing in the game itself changes. A crash_twoc.ini copied in from an earlier
     test folder is still read (until the game saves its own ProjectWrath.ini; the old file
     is left as it is).
+  - The settings menu's About tab, Problems: "Copy build info" puts the build, Windows,
+    the processor, the graphics card and driver, the display and its refresh rate, the
+    Frame rate setting and the settings changed from the defaults on the clipboard (no
+    user name, PC name or folders in it): paste it into Test notes.txt once, please.
+    "Open logs folder" opens this folder in Explorer with the last log selected.
   Nothing else changes for the tests.
 
 From the last package:

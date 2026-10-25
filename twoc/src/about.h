@@ -54,6 +54,24 @@ typedef struct {
  * (0: unknown). Logs one [ABOUT] block the first time. */
 void twoc_about_collect(twoc_about_t *a, void *dev, HWND hwnd, double display_hz);
 
+/* Step 109 (notes 18.112), problem reports. The game sends nothing by itself: these only put text on the
+ * clipboard, open Explorer, or open the browser, when the player presses the button.
+ *
+ * Copy build info: a text block to paste into a report (the build, Windows, the processor, the graphics card and
+ * driver, the display and its refresh rate, the picture `picture`, the frame-rate setting `framerate`, the
+ * settings changed from the defaults `changed`, the game files' check), scrubbed of the user's name, the PC's name
+ * and every folder path; onto the clipboard as text through `hwnd`. `out` (optional) gets the text. Returns its
+ * line count, or -1 when the clipboard couldn't be written. */
+int twoc_about_copy(const twoc_about_t *a, const char *picture, const char *framerate, const char *changed,
+                    HWND hwnd, char *out, size_t cap);
+/* Open logs folder: Explorer on the folder of this run's log, the log selected (the data folder when the log isn't
+ * a file). 0, or -1. */
+int twoc_about_open_logs(void);
+/* ISSUES_URL (twoc/ISSUES_URL.txt, the one place it is written; build_info.h): "" while it is the placeholder. */
+const char *twoc_issues_url(void);
+/* Report a problem: the browser on ISSUES_URL. 0, or -1 (none set, or Windows refused). */
+int twoc_about_open_issues(void);
+
 #ifdef __cplusplus
 }
 #endif

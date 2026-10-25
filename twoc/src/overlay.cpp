@@ -1790,8 +1790,9 @@ static int tab_extras(twoc_settings_t *s, const ovl_info_t *in)
 
 /* Step 93: what this build is and what it runs on (about.c). */
 static void about_game_files(void);
+static void about_report(const twoc_settings_t *s, const ovl_info_t *in);
 
-static void tab_about(const ovl_info_t *in)
+static void tab_about(const twoc_settings_t *s, const ovl_info_t *in)
 {
     static const char *const names[] = { "Build", "Link-time build", "SDL", "Graphics card", "Driver",
                                          "Chosen by", "Display's card", "Display", "Processor",
@@ -1801,6 +1802,7 @@ static void tab_about(const ovl_info_t *in)
     int i;
 
     about_game_files();                 /* step 107 */
+    about_report(s, in);                /* step 109 */
     ImGui::SeparatorText(twoc_app_name());     /* step 109: Project Wrath (names.h) */
     help("An unofficial fan port. It is not affiliated with, endorsed by or sponsored by the owners of the game.");
     if (!a) {
@@ -1879,6 +1881,68 @@ static void about_game_files(void)
     }
 }
 
+/* Step 109 (notes 18.112): problem reports, under the game files (where the controller reaches them): Copy build
+ * info (a text block for a report on the clipboard: no user name, PC name or folders, about.c), Open logs folder,
+ * and Report a problem only when ISSUES_URL is set (twoc/ISSUES_URL.txt). The game sends nothing by itself. */
+static void about_report(const twoc_settings_t *s, const ovl_info_t *in)
+{
+    static char note[200];
+    const char *url = twoc_issues_url();
+
+    ImGui::SeparatorText("Problems");
+    ImGui::BeginDisabled(!in->about);
+    if (ImGui::Button("Copy build info")) {
+        char picture[320], fr[320], changed[2048], rate[32];
+        int n;
+        if (s->framerate == 0)
+            snprintf(rate, sizeof(rate), "Game (60)");
+        else if (s->framerate == 1)
+            snprintf(rate, sizeof(rate), "Match display");
+        else
+            snprintf(rate, sizeof(rate), "%d fps", s->framerate);
+        snprintf(picture, sizeof(picture), "%s; aspect ratio %s; render size %s (%u x %u shown, %u x %u drawn)%s",
+                 s->fullscreen ? "full screen (borderless)" : "in a window", !s->widescreen ? "4:3" :
+                 s->wide_w == 16.0 && s->wide_h == 9.0 ? "16:9" : s->wide_w == 16.0 && s->wide_h == 10.0 ? "16:10" :
+                 s->wide_w == 21.0 && s->wide_h == 9.0 ? "21:9" : "custom", s->render_size[0] ? s->render_size :
+                 "game (480 lines)", in->view_w, in->view_h, in->host_w, in->host_h,
+                 in->display_hz > 0 ? "" : "; the display's rate not measured");
+        snprintf(fr, sizeof(fr), "%s, adaptive %s; render thread %s (%s now)%s", rate, s->adaptive ? "on" : "off",
+                 twoc_rt_name(s->render_thread), in->rt_on ? "on" : "off", in->meas_ok ? "" : "");
+        if (in->meas_ok)
+            snprintf(fr + strlen(fr), sizeof(fr) - strlen(fr), "; measured: the game %.1f updates and %.1f frames "
+                     "shown a second", in->game_ups, in->shown_fps);
+        twoc_settings_changed_text(s, changed, sizeof(changed));
+        n = twoc_about_copy(in->about, picture, fr, changed, in->hwnd, NULL, 0);
+        if (n >= 0)
+            snprintf(note, sizeof(note), "Copied: %d lines, ready to paste into a problem report (no user name, PC "
+                     "name or folders in it).", n);
+        else
+            snprintf(note, sizeof(note), "The clipboard couldn't be written: try again.");
+        fprintf(stderr, "[OVL] About: Copy build info (%s)\n", n >= 0 ? "copied" : "the clipboard refused");
+    }
+    ImGui::EndDisabled();
+    ImGui::SameLine();
+    if (ImGui::Button("Open logs folder")) {
+        fprintf(stderr, "[OVL] About: Open logs folder\n");
+        twoc_about_open_logs();
+    }
+    if (url[0]) {                       /* only with ISSUES_URL set: no link while it is the placeholder */
+        ImGui::SameLine();
+        if (ImGui::Button("Report a problem")) {
+            fprintf(stderr, "[OVL] About: Report a problem\n");
+            twoc_about_open_issues();
+        }
+    }
+    more("Copy build info puts a text block on the clipboard to paste into a problem report: this build, Windows, "
+         "the processor, the graphics card and driver, the display and its refresh rate, the frame rate setting, "
+         "the settings changed from the defaults and the game files' check. No user name, no PC name and no folders "
+         "are in it. Open logs folder shows the game's log files (the last run's, and earlier runs' in logs). The "
+         "game makes no network connections and sends nothing by itself.");
+    if (g_measure || note[0])
+        help(g_measure ? "Copied: 15 lines, ready to paste into a problem report (no user name, PC name or folders "
+                         "in it)." : note);
+}
+
 /* Step 97: one tab's contents, into the window's child for it or (g_measure) the measuring window. */
 static int tab_body(int t, twoc_settings_t *s, const ovl_info_t *in)
 {
@@ -1897,7 +1961,7 @@ static int tab_body(int t, twoc_settings_t *s, const ovl_info_t *in)
     case TAB_EXTRAS:                    /* step 104 */
         return tab_extras(s, in);
     default:
-        tab_about(in);
+        tab_about(s, in);
         return 0;
     }
 }

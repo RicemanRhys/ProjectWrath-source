@@ -14,7 +14,9 @@
 #      zip in Source\ (each zip there is unpacked and audited the same way: its own game-file, PC, licence checks).
 #   6. no Microsoft runtime DLL (step 108: the runtime is linked static): no vcruntime*.dll, msvcp*.dll,
 #      concrt*.dll, vccorlib*.dll, ucrtbase.dll or api-ms-win-crt-*.dll anywhere in a package.
-# It fails loudly (red lines, exit code 1) on any of 1-6.
+#   7. where players report problems (step 109): PACKAGE.txt's "Where to report problems" line; while ISSUES_URL
+#      (twoc\ISSUES_URL.txt) is the placeholder, it WARNS loudly (yellow), without failing.
+# It fails loudly (red lines, exit code 1) on any of 1-6, and on an unfilled @ISSUES_URL@.
 # What it audits: a package (PACKAGE.txt), the whole-program source folder (make_source_package.ps1: twoc\LICENSE)
 # or the audio library's source folder (make_apu_source_package.ps1: xemu_apu_dll.c, LICENSES\, NOTICE.txt).
 #
@@ -209,6 +211,27 @@ Write-Host "6. no Visual C++ runtime DLLs"
 foreach ($f in $files) {
     if ($f.Name -match '^(vcruntime|msvcp|concrt|vccorlib).*\.dll$|^ucrtbase\.dll$|^api-ms-win-crt-.*\.dll$') {
         Fail "a Microsoft runtime DLL (the runtime is linked static, step 108): $($f.FullName.Substring($Dir.Length + 1))"
+    }
+}
+
+# 7. Where players report problems (step 109, notes 18.112): PACKAGE.txt's line, filled from twoc\ISSUES_URL.txt
+#    (the one place it is written). While it is the placeholder ("to be announced") it WARNS loudly, without
+#    failing, as for the copyright name; an unfilled @ISSUES_URL@ left in any text file fails.
+if (Test-Path -LiteralPath $pk) {
+    Write-Host "7. where to report problems"
+    $il = Select-String -LiteralPath $pk -Pattern '^Where to report problems: (.*)$' | Select-Object -First 1
+    if (-not $il) { Warn "PACKAGE.txt has no `"Where to report problems`" line (made before step 109?)" }
+    elseif ($il.Matches[0].Groups[1].Value -like 'to be announced*') {
+        Warn "ISSUES_URL is still the placeholder: the README says `"Where to report problems: to be announced`" and the About tab shows no link"
+        Write-Host "  ******************************************************************************" -ForegroundColor Yellow
+        Write-Host "  *  NOT READY TO SHARE: put the address where problems are reported in        *" -ForegroundColor Yellow
+        Write-Host "  *  twoc\ISSUES_URL.txt (the one place it is written), build, make the        *" -ForegroundColor Yellow
+        Write-Host "  *  packages again.                                                           *" -ForegroundColor Yellow
+        Write-Host "  ******************************************************************************" -ForegroundColor Yellow
+    } else { Note "where to report problems: $($il.Matches[0].Groups[1].Value)" }
+    foreach ($f in $files) {
+        if ($f.Extension -notin '.txt', '.bat', '.ps1', '.ini', '.md') { continue }
+        if ([IO.File]::ReadAllText($f.FullName).Contains('@ISSUES_URL@')) { Fail "an unfilled @ISSUES_URL@ in $($f.FullName.Substring($Dir.Length + 1))" }
     }
 }
 

@@ -210,6 +210,10 @@ int twoc_settings_ignored(void);
 const char *twoc_settings_path(void);
 /* Step 109: crash_twoc.ini in the ini's place, read while <exe name>.ini isn't there yet ("" none; settings.c). */
 const char *twoc_settings_old_path(void);
+/* Step 109: the defaults (a run with no RECOMP_* variable), and the settings in `s` that differ from them as
+ * "key = value, ..." ("none"), for the About tab's Copy build info. */
+void twoc_settings_defaults(twoc_settings_t *s);
+void twoc_settings_changed_text(const twoc_settings_t *s, char *buf, size_t cap);
 const char *twoc_pacing_name(int pacing);
 int twoc_pacing_parse(const char *v);   /* TWOC_PACING_AUTO for anything unknown */
 int twoc_framerate_parse(const char *v);    /* step 77: 0 (60, unset, unknown), 1 (display), N Hz */

@@ -118,7 +118,8 @@ F1 (or Start held about a second, or View + Menu on the controller) opens it. Ta
              photo mode
   About      this build, your graphics card and display, the game files: "Verify game
              files" (checks every file against the disc) and "Choose another disc
-             image..." (sets the game files up again; your saves are kept)
+             image..." (sets the game files up again; your saves are kept); "Copy build
+             info" and "Open logs folder" for a problem report (below)
 Quit game is at the bottom of every tab. Settings are saved in ProjectWrath.ini; delete it
 to start over with the defaults. "Play Project Wrath (safe settings).bat" starts once with
 every setting at its default without reading or changing ProjectWrath.ini (if a setting
@@ -176,14 +177,75 @@ If something goes wrong
 -----------------------
 - The game won't start after a settings change: "Play Project Wrath (safe settings).bat".
 - It runs slowly: see Frame rate above.
-- It crashes, freezes or looks wrong: start it with "Play Project Wrath.bat", make it happen
-  again, close it, then double-click "Collect logs.bat". It makes a .zip of the game's logs
-  and a short summary of the PC (Windows version, processor, graphics card, displays) in
-  this folder, with your Windows user name and home folder replaced by <user> and the PC's
-  name by <pc>. Look inside before you send it to anyone; nothing is sent by itself.
+- It crashes, freezes or looks wrong: see "Reporting a problem" below.
 - The logs are in this folder: ProjectWrath.err.log (the last run) and logs\ (earlier runs).
   They hold the game's technical messages and the paths of its folders; no personal data
   besides your user name in those paths.
+- More in the FAQ below.
+
+
+Reporting a problem
+-------------------
+Where to report problems: @ISSUES_URL@
+
+1. Start the game with "Play Project Wrath.bat", make the problem happen again if you can,
+   and note the level and where in it.
+2. Open the settings menu (F1), About tab, and press "Copy build info". It puts a short text
+   on the clipboard: this build, your Windows version, processor, graphics card and driver,
+   display and refresh rate, the Frame rate setting and the settings you changed. It holds
+   no user name, no PC name and no folders. Paste it into your report.
+3. Close the game, then double-click "Collect logs.bat". It makes
+   ProjectWrath_logs_Share_<date>_<time>.zip in this folder: the game's logs and a short
+   summary of the PC (Windows version, processor, graphics card, displays), with your
+   Windows user name and home folder replaced by <user> and the PC's name by <pc>
+   (scrub.txt in the zip lists where). Look inside before you send it to anyone.
+4. Say what you did, what happened, and what you expected; whether it also happens with
+   Frame rate: Game (60) (Display tab); and whether "Verify game files" (About tab) says
+   all the game files are the disc's. A screenshot helps for anything you see.
+The game makes no network connections and sends nothing by itself: a report holds only
+what you choose to send. "Open logs folder" (About tab) shows the log files.
+
+
+FAQ
+---
+The setup fails.
+  The setup screen says why and what to try; "If the setup fails" above lists the usual
+  messages. Most often the image is of another release (only the USA Xbox disc works), was
+  cut short while copying, or the folder can't be written to (move it to Documents).
+
+The first logo freezes (the picture stops at the start).
+  Wait about 10 seconds: the game notices when the screen stops taking its frames and
+  recovers by itself. If it stays frozen, press Alt+Tab twice, or Alt+Enter for a window.
+  It has only been seen with full screen on: the game starts in a window by default, and
+  "Play Project Wrath (safe settings).bat" starts in a window with every setting at its
+  default.
+
+A message says xemu_apu.dll is missing, or can't be loaded.
+  xemu_apu.dll (the game's audio library) has to be in the same folder as
+  ProjectWrath.exe. Copy it back from the package you received (or unpack the package
+  again). If it keeps disappearing, your antivirus program may have moved it (see below).
+
+Windows says "Windows protected your PC" (SmartScreen).
+  Windows shows this for programs that aren't signed with a code-signing certificate and
+  that few people have run yet. ProjectWrath.exe isn't signed. The message doesn't say the
+  program is harmful; it says Windows doesn't know it. If you trust where you got it, click
+  "More info", then "Run anyway". Nothing else needs changing in Windows.
+
+An antivirus program warns about ProjectWrath.exe or xemu_apu.dll.
+  New, unsigned programs are sometimes flagged by mistake (a "false positive"), and this
+  one works in unusual ways (it runs a translated Xbox program and emulates its sound
+  chip). PACKAGE.txt lists both files' SHA-256: compare them with what you have (in
+  PowerShell: Get-FileHash ProjectWrath.exe). Most antivirus makers have a page for
+  reporting a false positive. If in doubt, don't run it.
+
+Where are my saves and the logs?
+  Saves: game_files\UDATA in this folder, with copies in game_files\UDATA_backups (see
+  "Saving and backups"). Logs: ProjectWrath.err.log and logs\ in this folder. Settings:
+  ProjectWrath.ini. If the game said it keeps its files in %LOCALAPPDATA%\ProjectWrath
+  (when this folder can't be written to), they are all there instead.
+
+How do I report a problem?
+  See "Reporting a problem" above.
 
 
 Removing it

@@ -286,9 +286,27 @@ if ($Save) {
     if ($LASTEXITCODE -ge 8) { throw "robocopy of the save failed ($LASTEXITCODE)" }
 }
 
+# Step 109: where players report problems, ISSUES_URL in twoc\ISSUES_URL.txt (the one place it is written; the build
+# reads it too, tools\build_info.cmake): an https:// address, else (the placeholder) "to be announced". Every text file
+# below gets it in place of @ISSUES_URL@ (the Share README's "Where to report problems" line).
+$issuesFile = Join-Path $twoc 'ISSUES_URL.txt'
+$issues = ''
+if (Test-Path $issuesFile) {
+    $il = @(Get-Content $issuesFile | Where-Object { $_ -match '^\s*ISSUES_URL\s*=' }) | Select-Object -First 1
+    if ($il) {
+        $iv = ($il -replace '^\s*ISSUES_URL\s*=\s*', '').Trim()
+        if ($iv -match '^https://[A-Za-z0-9._~:/?#@!$&''()*+,;=%-]+$' -and $iv -notmatch '\[') { $issues = $iv }
+    }
+}
+$issuesText = if ($issues) { $issues } else { 'to be announced' }
+if (-not $issues) {
+    Write-Warning "ISSUES_URL in twoc\ISSUES_URL.txt is still the placeholder: the README says `"Where to report problems: to be announced`" and the About tab shows no link"
+}
+
 # The text files, with CRLF line ends whatever git checked out (cmd needs them in .bat files).
 function Put-Text([string]$from, [string]$to) {
     $t = [IO.File]::ReadAllText($from) -replace "`r`n", "`n" -replace "`n", "`r`n"
+    $t = $t.Replace('@ISSUES_URL@', $issuesText)
     [IO.File]::WriteAllText($to, $t, (New-Object Text.UTF8Encoding($false)))
 }
 $files = Join-Path $here 'files'
@@ -365,6 +383,7 @@ $pkg = @(
     "xemu_apu.dll:     $((Get-Item $apuDll).Length) bytes, built $((Get-Item $apuDll).LastWriteTime.ToString('yyyy-MM-dd HH:mm:ss')), SHA-256 $apuHash",
     "                  the audio library (xboxrecomp's src\apu from xemu, LGPL-2.1-or-later), loaded by the exe at the start$(if ($share) { '; its source: Source\' })",
     $gfLine,
+    "Where to report problems: $issuesText$(if (-not $issues) { ' (ISSUES_URL in twoc\ISSUES_URL.txt is still the placeholder)' })",
     "",
     "DLLs the exe imports (dumpbin /dependents) and where they come from:"
 ) + $depLines + @(

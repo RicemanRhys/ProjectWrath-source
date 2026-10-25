@@ -16,7 +16,10 @@ ProjectWrath.err.log, and "Collect logs.bat" makes ProjectWrath_logs_Nitro5_<dat
 package is the ProjectWrath-Nitro5 folder. Nothing in the game itself changes. Windows keeps its
 Graphics setting (part A step 6) per program file, so set it again for ProjectWrath.exe even if you
 set it for the earlier package's exe. A crash_twoc.ini copied in from the earlier test folder is still
-read (until the game saves its own ProjectWrath.ini).
+read (until the game saves its own ProjectWrath.ini). The About tab has "Copy build info" (the build,
+Windows, the processor, the graphics card and driver, the display, the Frame rate setting and the changed
+settings on the clipboard, with no user name, PC name or folders: paste it into Test notes.txt once,
+please) and "Open logs folder".
 From the last build: a first-run setup (the start of sharing the game with other people): when
 game_files\ is missing or fails its check, a setup screen opens before the game and copies
 the game files from a disc image (.iso) or an extracted folder, checking every file (this

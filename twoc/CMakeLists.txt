@@ -250,6 +250,7 @@ add_executable(${PROJECT_NAME} WIN32
 add_custom_target(twoc_build_info
     COMMAND ${CMAKE_COMMAND} -DREPO=${CMAKE_CURRENT_SOURCE_DIR}/.. -DXR=${XBOXRECOMP_DIR}
             -DOUT=${TWOC_GENERATED_DIR}/build_info.h -DLTCG=${TWOC_LTCG}
+            -DISSUES=${CMAKE_CURRENT_SOURCE_DIR}/ISSUES_URL.txt
             -P ${CMAKE_CURRENT_SOURCE_DIR}/tools/build_info.cmake
     BYPRODUCTS ${TWOC_GENERATED_DIR}/build_info.h
     VERBATIM)

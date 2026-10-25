@@ -497,16 +497,14 @@ void twoc_settings_load(void)
     twoc_settings_current(&g_start);
 }
 
-static int env_on(const char *name)
+static int env_on(const char *v)
 {
-    const char *v = getenv(name);
     return v && *v && strcmp(v, "0") != 0;
 }
 
-/* A 0-100 level from `name`, -1 when unset. */
-static int env_percent(const char *name)
+/* A 0-100 level from a variable's value, -1 when unset. */
+static int env_percent(const char *v)
 {
-    const char *v = getenv(name);
     int p;
 
     if (!v || !*v)
@@ -527,72 +525,74 @@ int twoc_menu_scale_parse(const char *v)
     return p < TWOC_MENU_SCALE_MIN ? TWOC_MENU_SCALE_MIN : p > TWOC_MENU_SCALE_MAX ? TWOC_MENU_SCALE_MAX : p;
 }
 
-void twoc_settings_current(twoc_settings_t *s)
+/* The settings from the RECOMP_* variables; `d` (step 109): as a run without any of them, i.e. the defaults. */
+#define EV(name) (d ? NULL : getenv(name))
+static void settings_read(twoc_settings_t *s, int d)
 {
     const char *v;
     int a;
     size_t i;
 
     memset(s, 0, sizeof(*s));
-    s->fullscreen = env_on("RECOMP_FULLSCREEN");
+    s->fullscreen = env_on(EV("RECOMP_FULLSCREEN"));
     s->wide_w = 16.0;
     s->wide_h = 9.0;
-    if (env_on("RECOMP_WIDESCREEN")) {
+    if (env_on(EV("RECOMP_WIDESCREEN"))) {
         double w, h;
-        v = getenv("RECOMP_WIDESCREEN");
+        v = EV("RECOMP_WIDESCREEN");
         s->widescreen = 1;
         if (strchr(v, ':') && sscanf(v, "%lf:%lf", &w, &h) == 2 && w > 0 && h > 0) {
             s->wide_w = w;
             s->wide_h = h;
         }
     }
-    v = getenv("RECOMP_RENDER_SIZE");
+    v = EV("RECOMP_RENDER_SIZE");
     if (v && *v && strcmp(v, "0") != 0)
         snprintf(s->render_size, sizeof(s->render_size), "%s", v);
-    s->pacing = twoc_pacing_parse(getenv("RECOMP_PACING"));
-    v = getenv("RECOMP_ANISOTROPY");
+    s->pacing = twoc_pacing_parse(EV("RECOMP_PACING"));
+    v = EV("RECOMP_ANISOTROPY");
     a = v ? atoi(v) : 1;
     s->anisotropy = a >= 16 ? 16 : a >= 8 ? 8 : a >= 4 ? 4 : a >= 2 ? 2 : 1;
-    s->antialiasing = twoc_aa_parse(getenv("RECOMP_ANTIALIASING"));
-    s->framerate = twoc_framerate_parse(getenv("RECOMP_FRAMERATE"));
-    v = getenv("RECOMP_FRAMERATE_ADAPTIVE");
+    s->antialiasing = twoc_aa_parse(EV("RECOMP_ANTIALIASING"));
+    s->framerate = twoc_framerate_parse(EV("RECOMP_FRAMERATE"));
+    v = EV("RECOMP_FRAMERATE_ADAPTIVE");
     s->adaptive = !(v && strcmp(v, "0") == 0);
-    s->render_thread = twoc_rt_parse(getenv("RECOMP_RENDER_THREAD"));
-    s->show_fps = twoc_show_fps_parse(getenv("RECOMP_SHOW_FPS"));    /* step 93: 2 Detailed */
-    v = getenv("RECOMP_STARTUP_MESSAGE");
+    s->render_thread = twoc_rt_parse(EV("RECOMP_RENDER_THREAD"));
+    s->show_fps = twoc_show_fps_parse(EV("RECOMP_SHOW_FPS"));    /* step 93: 2 Detailed */
+    v = EV("RECOMP_STARTUP_MESSAGE");
     s->startup_message = !(v && strcmp(v, "0") == 0);
-    v = getenv("RECOMP_HUD");
+    v = EV("RECOMP_HUD");
     s->hud = v && _stricmp(v, "edges") == 0;
-    s->fur = twoc_fur_parse(getenv("RECOMP_FUR"));     /* step 101; step 102: three ways */
-    v = getenv("RECOMP_HUB_SEETHROUGH");
+    s->fur = twoc_fur_parse(EV("RECOMP_FUR"));     /* step 101; step 102: three ways */
+    v = EV("RECOMP_HUB_SEETHROUGH");
     s->hub_seethrough = v && strcmp(v, "1") == 0;   /* step 102 */
-    v = getenv("RECOMP_VOLUME");
+    v = EV("RECOMP_VOLUME");
     s->volume = v && *v ? atoi(v) : -1;
     if (s->volume > 100)
         s->volume = 100;
     if (v && *v && s->volume < 0)
         s->volume = 0;
-    s->music = env_percent("RECOMP_MUSIC_VOLUME");
-    s->effects = env_percent("RECOMP_EFFECTS_VOLUME");
-    v = getenv("RECOMP_SPEAKERS");
+    s->music = env_percent(EV("RECOMP_MUSIC_VOLUME"));
+    s->effects = env_percent(EV("RECOMP_EFFECTS_VOLUME"));
+    v = EV("RECOMP_SPEAKERS");
     s->speakers = v && *v ? strcmp(v, "5.1") == 0 : -1;
-    v = getenv("RECOMP_HRTF");
+    v = EV("RECOMP_HRTF");
     s->hrtf = !(v && strcmp(v, "0") == 0);
-    v = getenv("RECOMP_MUTE_DROID_DRONE");
+    v = EV("RECOMP_MUTE_DROID_DRONE");
     s->mute_drone = v && strcmp(v, "1") == 0;      /* step 102 */
-    v = getenv("RECOMP_OVERLAY_PAUSE");
+    v = EV("RECOMP_OVERLAY_PAUSE");
     s->pause = !(v && strcmp(v, "0") == 0);
-    v = getenv("RECOMP_KEYBOARD");
+    v = EV("RECOMP_KEYBOARD");
     s->keyboard = !(v && strcmp(v, "0") == 0);
-    s->controller_input = pads_mode_parse(getenv("RECOMP_CONTROLLER_INPUT"));
-    s->render_scale = twoc_render_scale_parse(getenv("RECOMP_RENDER_SCALE"));     /* step 90 */
-    s->ao = twoc_ao_parse(getenv("RECOMP_AO"));                                   /* step 92 */
-    s->ao_strength = twoc_ao_strength_parse(getenv("RECOMP_AO_STRENGTH"));
-    s->ao_half = env_on("RECOMP_AO_HALF");
-    s->menu_scale = twoc_menu_scale_parse(getenv("RECOMP_MENU_SCALE"));     /* step 104 */
-    s->pause_unfocused = env_on("RECOMP_PAUSE_UNFOCUSED");
-    s->fast_title = env_on("RECOMP_DEV_FAST_TITLE");
-    v = getenv("RECOMP_GPU");           /* step 97: auto (and unset) is "" */
+    s->controller_input = pads_mode_parse(EV("RECOMP_CONTROLLER_INPUT"));
+    s->render_scale = twoc_render_scale_parse(EV("RECOMP_RENDER_SCALE"));     /* step 90 */
+    s->ao = twoc_ao_parse(EV("RECOMP_AO"));                                   /* step 92 */
+    s->ao_strength = twoc_ao_strength_parse(EV("RECOMP_AO_STRENGTH"));
+    s->ao_half = env_on(EV("RECOMP_AO_HALF"));
+    s->menu_scale = twoc_menu_scale_parse(EV("RECOMP_MENU_SCALE"));     /* step 104 */
+    s->pause_unfocused = env_on(EV("RECOMP_PAUSE_UNFOCUSED"));
+    s->fast_title = env_on(EV("RECOMP_DEV_FAST_TITLE"));
+    v = EV("RECOMP_GPU");           /* step 97: auto (and unset) is "" */
     if (v) {
         while (*v == ' ' || *v == '\t')
             v++;
@@ -606,15 +606,15 @@ void twoc_settings_current(twoc_settings_t *s)
     controls_default_pad(&s->controls);
     controls_default_keys(&s->controls);
     freecam_defaults(&s->fc);           /* step 104 */
-    if ((v = getenv("RECOMP_FC_SPEED")) != NULL && atoi(v) > 0)
+    if ((v = EV("RECOMP_FC_SPEED")) != NULL && atoi(v) > 0)
         s->fc.speed = atoi(v) > 100 ? 100 : atoi(v);
-    if ((v = getenv("RECOMP_FC_LOOK")) != NULL && atoi(v) > 0)
+    if ((v = EV("RECOMP_FC_LOOK")) != NULL && atoi(v) > 0)
         s->fc.look = atoi(v) > 100 ? 100 : atoi(v);
-    if ((v = getenv("RECOMP_FC_FOV")) != NULL && atoi(v) > 0)
+    if ((v = EV("RECOMP_FC_FOV")) != NULL && atoi(v) > 0)
         s->fc.fov = atoi(v) < FC_FOV_MIN ? FC_FOV_MIN : atoi(v) > FC_FOV_MAX ? FC_FOV_MAX : atoi(v);
-    s->fc.invert = env_on("RECOMP_FC_INVERT");
+    s->fc.invert = env_on(EV("RECOMP_FC_INVERT"));
     for (i = K_PAD; i < N_KEYS; i++)
-        if ((v = getenv(g_keys[i].var)) != NULL && *v) {
+        if ((v = EV(g_keys[i].var)) != NULL && *v) {
             if (i >= K_FCP)
                 freecam_parse_pad(v, (int)(i - K_FCP), &s->fc);
             else if (i >= K_FCK)
@@ -626,6 +626,19 @@ void twoc_settings_current(twoc_settings_t *s)
             else
                 controls_parse_extra(v, (int)(i - K_EXTRA) + XIN_COUNT, &s->controls);
         }
+}
+
+#undef EV
+
+void twoc_settings_current(twoc_settings_t *s)
+{
+    settings_read(s, 0);
+}
+
+/* Step 109: the defaults, as twoc_settings_current reads a run with no variable set. */
+void twoc_settings_defaults(twoc_settings_t *s)
+{
+    settings_read(s, 1);
 }
 
 void twoc_settings_display_defaults(twoc_settings_t *s)
@@ -767,6 +780,30 @@ static void key_text(const twoc_settings_t *s, size_t i, char *buf, size_t cap)
         if (strcmp(buf, def) == 0)
             buf[0] = 0;
     }
+}
+
+/* Step 109: the settings in `s` that differ from the defaults, as the ini writes them ("key = value", ", " between),
+ * for the About tab's Copy build info. "none" when there are none. */
+void twoc_settings_changed_text(const twoc_settings_t *s, char *buf, size_t cap)
+{
+    twoc_settings_t d;
+    size_t i, n = 0;
+
+    keys_init();
+    twoc_settings_defaults(&d);
+    buf[0] = 0;
+    for (i = 0; i < N_KEYS && n + 1 < cap; i++) {
+        char now[160], def[160];
+        key_text(s, i, now, sizeof(now));
+        key_text(&d, i, def, sizeof(def));
+        if (strcmp(now, def) == 0 || (!now[0] && !def[0]))
+            continue;
+        n += (size_t)snprintf(buf + n, cap - n, "%s%s = %s", n ? ", " : "", g_keys[i].key, now[0] ? now : "(default)");
+        if (n >= cap)
+            n = cap - 1;
+    }
+    if (!buf[0])
+        snprintf(buf, cap, "none");
 }
 
 int twoc_settings_save(const twoc_settings_t *s)
