@@ -4,6 +4,14 @@ game_files/
 *.xiso
 # Any XBE, including patched copies (keep private)
 *.xbe
+# Game data, saves, captures and zipped packages or logs, wherever they land
+*.sav
+*.zip
+*.wav
+*.mp4
+*.xwb
+*.xmv
+*.bin
 
 # Upstream toolkit: a separate clone, pinned by commit in the notes
 xboxrecomp/
