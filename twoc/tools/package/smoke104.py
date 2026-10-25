@@ -9,7 +9,8 @@ from ctypes import wintypes
 pkg, out = sys.argv[1], sys.argv[2]
 sizes = sys.argv[3].split(",") if len(sys.argv) > 3 else ["1280x800", "1920x1080", "3840x2160"]
 WGC = r"C:\Users\User\Desktop\Desktop Stuff\Claude Stuff\Crash TWOC decomp\twoc\tools\diag\wgcgrab.exe"
-TITLE = "Crash TWOC - D3D bridge (host)"
+NEW = os.path.exists(os.path.join(pkg, "ProjectWrath.exe"))      # step 109: the names follow the package's exe
+TITLE = "Project Wrath" if NEW else "Crash TWOC - D3D bridge (host)"
 u = ctypes.windll.user32
 os.makedirs(out, exist_ok=True)
 copy = os.path.join(out, "pkg copy")
@@ -17,7 +18,7 @@ if os.path.exists(copy):
     shutil.rmtree(copy)
 shutil.copytree(pkg, copy)
 xi = os.path.join(out, "xi.txt")
-log = os.path.join(copy, "run_twoc.err.log")
+log = os.path.join(copy, "ProjectWrath.err.log" if NEW else "run_twoc.err.log")
 report = open(os.path.join(out, "smoke.txt"), "w")
 
 def say(s):
@@ -57,7 +58,7 @@ for rs in sizes:
     env.update(RECOMP_RENDER_SIZE=rs, RECOMP_DEV_OVL_RECT="1", RECOMP_DEV_XINPUT_FILE=xi)
     if os.path.exists(log):
         os.remove(log)
-    p = subprocess.Popen(["cmd", "/c", os.path.join(copy, "Play Crash.bat")], cwd="C:\\", env=env,
+    p = subprocess.Popen(["cmd", "/c", os.path.join(copy, "Play Project Wrath.bat" if NEW else "Play Crash.bat")], cwd="C:\\", env=env,
                          creationflags=subprocess.CREATE_NEW_CONSOLE)
     t0 = time.time()
     while not hwnd() and time.time() - t0 < 60:

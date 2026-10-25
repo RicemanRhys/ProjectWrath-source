@@ -1,11 +1,12 @@
-Crash TWOC capture kit (step 100; exe refreshed in step 106)
-============================================================
+Project Wrath capture kit (step 100; exe refreshed in step 109)
+===============================================================
 
 What this is
 ------------
 A separate copy of the game for catching the playtest problems I couldn't
 reproduce on my own. It has its own exe (the latest build), its own copy of
-your settings (crash_twoc.ini, copied once from twoc\build\Release) and its
+your settings (crash_twoc.ini, copied once from twoc\build\Release; since step 109 the exe
+is game\ProjectWrath.exe, which reads that copy until it saves its own ProjectWrath.ini) and its
 own copy of your save (game\game_files\UDATA, copied once). Your build
 folder, your ini and your saves are never used or changed by it. The game
 data (Crashdat) is a link to the repo's, so the kit is small.

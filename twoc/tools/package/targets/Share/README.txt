@@ -1,20 +1,20 @@
-Crash Bandicoot: The Wrath of Cortex - an unofficial PC port (Crash TWOC)
-========================================================================
+Project Wrath - an unofficial fan port
+======================================
 
 What this is
 ------------
-A fan-made PC version of the original Xbox game Crash Bandicoot: The Wrath of Cortex (2001).
-The game's own Xbox program was translated into a Windows program ("static recompilation"):
-it is the same game, running natively on Windows, with extras such as widescreen, high
-frame rates and modern controllers.
+Project Wrath is an unofficial fan port. It is not affiliated with, endorsed by or sponsored by the
+owners of the game. You need your own copy of the game.
 
-It is unofficial. It is not made, approved or supported by the owners of Crash Bandicoot or
-of the original game, or by Microsoft. All trademarks belong to their owners.
+It is a PC version of an original Xbox game from 2001: the game's own Xbox program was translated into
+a Windows program ("static recompilation"), so it is the same game, running natively on Windows, with
+extras such as widescreen, high frame rates and modern controllers. All trademarks belong to their
+owners.
 
-NO GAME FILES ARE INCLUDED. This folder holds only the program. To play you need your own
-copy of the game: an image of the original Xbox disc (USA release) or the files extracted
-from one. The first time you start it, the game copies what it needs from your image into
-this folder and checks every file. Nothing is downloaded, and nothing is sent anywhere.
+NO GAME FILES ARE INCLUDED. This folder holds only the program. To play you need your own copy of the
+game: an image of the original Xbox disc (USA release) or the files extracted from one (see "What you
+need"). The first time you start it, Project Wrath copies what it needs from your image into this folder
+and checks every file. Nothing is downloaded, and nothing is sent anywhere.
 
 
 What you need
@@ -25,24 +25,24 @@ What you need
   including the graphics built into most processors).
 - 4 GB of memory (RAM).
 - About 1.2 GB of free disk space (the game files take 0.93 GB).
-- Your own copy of Crash Bandicoot: The Wrath of Cortex for the original Xbox, USA (NTSC-U)
-  release, as:
+- Your own copy of the game: Crash Bandicoot: The Wrath of Cortex, USA, original Xbox
+  (the NTSC-U release), as:
     * a disc image (.iso): a "trimmed" XISO, or a full dump of the disc; or
     * a folder with the extracted game (default.xbe and the Crashdat folder in it).
   Other regions (Europe/PAL, Japan), other versions, the PlayStation 2 or GameCube
-  versions, and other Crash games don't work: the port is built from the USA Xbox release's
-  program, and the setup checks for exactly that disc.
+  versions, and other games of the series don't work: the port is built from the USA Xbox
+  release's program, and the setup checks for exactly that disc.
 - A controller is best (any Xbox, PlayStation, Switch or Steam controller works), but the
   keyboard plays too.
 
 
 Starting for the first time
 ---------------------------
-1. Put this folder somewhere you can write to, for example Documents\Crash TWOC or
-   C:\Games\Crash TWOC. Spaces and any letters in the folder names are fine.
+1. Put this folder somewhere you can write to, for example Documents\Project Wrath or
+   C:\Games\Project Wrath. Spaces and any letters in the folder names are fine.
    (If you put it in C:\Program Files, the game keeps its files, settings and saves in
-   %LOCALAPPDATA%\CrashTWOC instead, and says so.)
-2. Double-click crash_twoc.exe.
+   %LOCALAPPDATA%\ProjectWrath instead, and says so.)
+2. Double-click ProjectWrath.exe.
    If Windows says "Windows protected your PC", click "More info", then "Run anyway"
    (the program isn't signed; that is all the message means).
 3. The setup screen opens: "The game files aren't set up yet." Choose one of:
@@ -54,17 +54,17 @@ Starting for the first time
      - drag the .iso file (or the folder) onto the setup window.
    The mouse, the keyboard (Tab or the arrows, then Enter) and a controller (D-pad, A to
    choose, B to go back) all work.
-4. The setup reads the image, says what it found (it should say "Crash Bandicoot: tWoC ...
-   region North America ... the supported disc"), copies the files (a progress bar with the
-   time left; usually well under a minute) and checks every one. Cancel stops it and
-   deletes the half-made copy.
+4. The setup reads the image, says what it found (the disc's own title, its region "North
+   America", and "the supported disc"), copies the files (a progress bar with the time
+   left; usually well under a minute) and checks every one. Cancel stops it and deletes the
+   half-made copy.
 5. "Game files ready." Then the game starts by itself.
 
-From then on, double-click crash_twoc.exe and the game starts directly.
-"Play Crash.bat" also starts it; it keeps a console window open beside the game, which is
-useful if something goes wrong (see below).
+From then on, double-click ProjectWrath.exe and the game starts directly.
+"Play Project Wrath.bat" also starts it; it keeps a console window open beside the game,
+which is useful if something goes wrong (see below).
 
-The first start also writes crash_twoc.ini, the settings, chosen to suit most PCs: the
+The first start also writes ProjectWrath.ini, the settings, chosen to suit most PCs: the
 picture at your screen's own size and shape, in a window, with extra frames drawn between
 the game's own at your display's refresh rate. Change them in the settings menu (F1).
 
@@ -119,10 +119,10 @@ F1 (or Start held about a second, or View + Menu on the controller) opens it. Ta
   About      this build, your graphics card and display, the game files: "Verify game
              files" (checks every file against the disc) and "Choose another disc
              image..." (sets the game files up again; your saves are kept)
-Quit game is at the bottom of every tab. Settings are saved in crash_twoc.ini; delete it to
-start over with the defaults. "Play Crash (safe settings).bat" starts once with every
-setting at its default without reading or changing crash_twoc.ini (if a setting stops the
-game from starting).
+Quit game is at the bottom of every tab. Settings are saved in ProjectWrath.ini; delete it
+to start over with the defaults. "Play Project Wrath (safe settings).bat" starts once with
+every setting at its default without reading or changing ProjectWrath.ini (if a setting
+stops the game from starting).
 
 
 Frame rate
@@ -150,12 +150,12 @@ reinstall the game, copy game_files\UDATA and game_files\UDATA_backups.
 Known quirks
 ------------
 - These are the original game's own (the Xbox does them too): Droid Void's background drone
-  plays for the whole level (the Audio tab can silence it); in Crashteroids Coco looks green
-  and furry through the cockpit glass (Extras, Character fur).
+  plays for the whole level (the Audio tab can silence it); in the asteroid level the pilot
+  looks green and furry through the cockpit glass (Extras, Character fur).
 - Full screen is "borderless": it covers the screen without changing the display's mode.
-- Still being looked into: Crash has been seen to go invisible for a moment in Drain Damage.
-  If you see something like it, "Collect logs.bat" (below) and a note of where it happened
-  help.
+- Still being looked into: the player's character has been seen to go invisible for a moment
+  in the Drain Damage boss level. If you see something like it, "Collect logs.bat" (below)
+  and a note of where it happened help.
 
 
 What has been tested
@@ -174,14 +174,14 @@ Legion Go.
 
 If something goes wrong
 -----------------------
-- The game won't start after a settings change: "Play Crash (safe settings).bat".
+- The game won't start after a settings change: "Play Project Wrath (safe settings).bat".
 - It runs slowly: see Frame rate above.
-- It crashes, freezes or looks wrong: start it with "Play Crash.bat", make it happen
+- It crashes, freezes or looks wrong: start it with "Play Project Wrath.bat", make it happen
   again, close it, then double-click "Collect logs.bat". It makes a .zip of the game's logs
   and a short summary of the PC (Windows version, processor, graphics card, displays) in
   this folder, with your Windows user name and home folder replaced by <user> and the PC's
   name by <pc>. Look inside before you send it to anyone; nothing is sent by itself.
-- The logs are in this folder: run_twoc.err.log (the last run) and logs\ (earlier runs).
+- The logs are in this folder: ProjectWrath.err.log (the last run) and logs\ (earlier runs).
   They hold the game's technical messages and the paths of its folders; no personal data
   besides your user name in those paths.
 
@@ -189,8 +189,10 @@ If something goes wrong
 Removing it
 -----------
 Delete this folder (copy game_files\UDATA first if you want to keep your saves). If the game
-said it keeps its files in %LOCALAPPDATA%\CrashTWOC, delete that folder too. Nothing else is
-installed or changed on your PC (Windows remembers the game's volume in its volume mixer).
+said it keeps its files in %LOCALAPPDATA%\ProjectWrath, delete that folder too. The game
+also keeps the Xbox's hard-disk stand-in in %LOCALAPPDATA%\xboxrecomp (a few MB on the disk:
+no saves; safe to delete once the game is gone). Nothing else is installed or changed on your
+PC (Windows remembers the game's volume in its volume mixer).
 
 
 Licences
@@ -200,7 +202,7 @@ other people's code in this program keeps its own licence (THIRD_PARTY_LICENSES.
 each one with its full text); no game files and no rights to the game are included or
 granted: you supply your own disc.
 
-xemu_apu.dll, next to crash_twoc.exe, is the game's audio library: the Xbox sound chip's
+xemu_apu.dll, next to ProjectWrath.exe, is the game's audio library: the Xbox sound chip's
 emulation from the xemu emulator, under the GNU LGPL. The game needs it in the same folder.
 Source\xemu_apu-source_....zip is its complete source, with the licence and the steps to
 build your own copy and use it in place of this one (its README.txt).

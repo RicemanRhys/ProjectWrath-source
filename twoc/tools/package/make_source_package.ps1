@@ -22,7 +22,7 @@ $xr = Join-Path $repo 'xboxrecomp'
 function Git1([string]$dir, [string[]]$a) { (& git -C $dir @a 2>$null | Select-Object -First 1) }
 $th = Git1 $repo @('rev-parse', '--short', 'HEAD')
 $xh = Git1 $xr @('rev-parse', '--short', 'HEAD')
-if (-not $Out) { $Out = Join-Path ([Environment]::GetFolderPath('Desktop')) "Crash\SourcePackage\crash-twoc-source_twoc-${th}_xboxrecomp-${xh}.zip" }
+if (-not $Out) { $Out = Join-Path ([Environment]::GetFolderPath('Desktop')) "Crash\SourcePackage\ProjectWrath-source_${th}_xboxrecomp-${xh}.zip" }
 if ((Test-Path -LiteralPath $Out) -and -not $Force) { throw "$Out exists; -Force replaces it" }
 
 # twoc: the source and build files, as committed.
@@ -38,7 +38,7 @@ $xdirty = @(& git -C $xr status --porcelain --untracked-files=no 2>$null)
 if ($xdirty.Count) { Write-Warning ("xboxrecomp has changes not committed (not in the zip): " + (($xdirty | Select-Object -First 5) -join '; ')) }
 
 $tmp = Join-Path $env:TEMP ('twoc_src_' + [guid]::NewGuid().ToString('N').Substring(0, 8))
-$st = Join-Path $tmp 'crash-twoc-source'
+$st = Join-Path $tmp 'ProjectWrath-source'
 New-Item -ItemType Directory -Force -Path $st | Out-Null
 try {
     $z1 = Join-Path $tmp 'twoc.zip'
@@ -62,8 +62,8 @@ try {
     Remove-Item -LiteralPath $z1, $z2
 
     $src = @(
-        'Crash TWOC: the source package',
-        '=============================',
+        'Project Wrath: the source package',
+        '================================',
         '',
         "Made $(Get-Date -Format 'yyyy-MM-dd') by twoc\tools\package\make_source_package.ps1 from:",
         "  twoc        $(Git1 $repo @('log', '-1', '--format=%h %ad %s', '--date=short'))",
@@ -74,7 +74,7 @@ try {
         '',
         'The LGPL part: xboxrecomp\src\apu (the Xbox audio processor, from xemu; LGPL-2.1-or-later, see',
         'xboxrecomp\LICENSE, xboxrecomp\NOTICE and twoc\THIRD_PARTY_LICENSES.txt). It is built as its own',
-        'library, xemu_apu.dll (twoc\apu_dll), beside crash_twoc.exe; its own source zip (make_apu_source_package.ps1)',
+        'library, xemu_apu.dll (twoc\apu_dll), beside the exe; its own source zip (make_apu_source_package.ps1)',
         'is what goes with the DLL. This zip is the whole program''s source, for developers.',
         '',
         'What is in here:',
@@ -88,7 +88,11 @@ try {
         '  twoc\LICENSE, twoc\NOTICE                     this project''s own code: MIT (LICENSE); what that covers',
         '                                                and what it doesn''t (NOTICE)',
         '  xboxrecomp\                                  the runtime and the recompiler, as built',
-        '  BUILD.txt                                    how to build crash_twoc.exe from this',
+        '  BUILD.txt                                    how to build the exe from this',
+        '',
+        'The repository keeps its working names (the twoc folder, the CMake target crash_twoc, which builds',
+        'crash_twoc.exe); the packages ship that exe as ProjectWrath.exe, and it takes its names from its own',
+        'file name (notes 18.112, twoc\src\names.h).',
         '',
         'Left out:',
         '  - the recompiled game code (twoc\src\recomp\gen, about 32 MB of C): it is made from the game''s',
@@ -104,8 +108,8 @@ try {
     ) + ($local | ForEach-Object { "  $_" })
     [IO.File]::WriteAllText((Join-Path $st 'SOURCE.txt'), (($src -join "`r`n") + "`r`n"), (New-Object Text.UTF8Encoding($false)))
     $build = @(
-        'Building crash_twoc.exe from the source package',
-        '===============================================',
+        'Building Project Wrath from the source package',
+        '==============================================',
         '',
         'As done on the development PC (Windows 11). Not yet re-run from this zip on a clean PC.',
         '',
@@ -127,7 +131,8 @@ try {
         '    then  powershell -File twoc\lift.ps1  (writes twoc\src\recomp\gen).',
         ' 4. cmake -S twoc -B twoc\build   and   cmake --build twoc\build --config Release --parallel',
         '    (CMake downloads SDL 3 and builds xboxrecomp\ as part of it; without git the About tab''s build',
-        '    line says "unknown"). The exe: twoc\build\Release\crash_twoc.exe.',
+        '    line says "unknown"). The exe: twoc\build\Release\crash_twoc.exe (the packages copy it as',
+        '    ProjectWrath.exe, the name it is meant to run under: make_package.ps1).',
         ' 5. To change the LGPL audio code: edit xboxrecomp\src\apu, then step 4 again (it rebuilds',
         '    twoc\build\Release\xemu_apu.dll beside the exe; only that file changes).',
         '',

@@ -4,7 +4,7 @@
 #
 #   powershell -NoProfile -ExecutionPolicy Bypass -File twoc\tools\package\make_apu_source_package.ps1 [-Out ZIP] [-Force]
 #
-# Default ZIP: Desktop\Crash\SourcePackage\xemu_apu-source_xboxrecomp-<commit>_twoc-<commit>.zip. In it, one folder,
+# Default ZIP: Desktop\Crash\SourcePackage\xemu_apu-source_xboxrecomp-<commit>_ProjectWrath-<commit>.zip. In it, one folder,
 # xemu_apu-source\:
 #   src\apu\        xboxrecomp's APU files the DLL is built from, as committed (git show <commit>:<path>): from xemu,
 #                   LGPL-2.1-or-later: apu_core.c, apu_vp.c, apu_dsp.c, apu_regs.h, apu_state.h, apu_debug.h,
@@ -13,7 +13,7 @@
 #   src\nv2a\qemu_shim.h, src\platform\xbox_winnt.h   xboxrecomp's own headers they include (MIT)
 #   CMakeLists.txt, xemu_apu_dll.c, xemu_apu_api.h, build.cmd   twoc\apu_dll (MIT): the build and the export
 #   changes\        this project's changes to those files: xboxrecomp's local commits that touch them, as patches
-#   LICENSES\       LGPL-2.1.txt, MIT-xboxrecomp.txt, MIT-twoc.txt
+#   LICENSES\       LGPL-2.1.txt, MIT-xboxrecomp.txt, MIT-ProjectWrath.txt
 #   NOTICE.txt      xemu's attribution, each file's licence, what was changed and the commits; README.txt: build and swap
 # Refuses if any of those files has changes not committed (it wouldn't be the source as built), and runs
 # package_audit.ps1 on the folder before zipping. -Out a .zip path; -Force replaces it.
@@ -27,7 +27,7 @@ $xr = Join-Path $repo 'xboxrecomp'
 function Git1([string]$dir, [string[]]$a) { (& git -C $dir @a 2>$null | Select-Object -First 1) }
 $th = Git1 $repo @('rev-parse', '--short', 'HEAD')
 $xh = Git1 $xr @('rev-parse', '--short', 'HEAD')
-if (-not $Out) { $Out = Join-Path ([Environment]::GetFolderPath('Desktop')) "Crash\SourcePackage\xemu_apu-source_xboxrecomp-${xh}_twoc-${th}.zip" }
+if (-not $Out) { $Out = Join-Path ([Environment]::GetFolderPath('Desktop')) "Crash\SourcePackage\xemu_apu-source_xboxrecomp-${xh}_ProjectWrath-${th}.zip" }
 if ((Test-Path -LiteralPath $Out) -and -not $Force) { throw "$Out exists; -Force replaces it" }
 
 $lgpl = @('apu_core.c', 'apu_vp.c', 'apu_dsp.c', 'apu_regs.h', 'apu_state.h', 'apu_debug.h', 'fpconv.h', 'apu_shim.h', 'apu.h')
@@ -62,7 +62,7 @@ try {
     $lic = Join-Path $st 'LICENSES'
     Put-Blob $xr 'LICENSES/LGPL-2.1.txt' (Join-Path $lic 'LGPL-2.1.txt')
     Put-Blob $xr 'LICENSE' (Join-Path $lic 'MIT-xboxrecomp.txt')
-    Put-Blob $repo 'twoc/LICENSE' (Join-Path $lic 'MIT-twoc.txt')
+    Put-Blob $repo 'twoc/LICENSE' (Join-Path $lic 'MIT-ProjectWrath.txt')
 
     # This project's changes to these files: xboxrecomp's commits since its upstream (origin/main) that touch them.
     $base = Git1 $xr @('merge-base', 'HEAD', 'origin/main')
@@ -80,13 +80,13 @@ try {
         'xemu_apu.dll: notice',
         '=====================',
         '',
-        'xemu_apu.dll is the Xbox audio processor (MCPX APU) emulation used by Crash TWOC (crash_twoc.exe). Its',
+        'xemu_apu.dll is the Xbox audio processor (MCPX APU) emulation used by Project Wrath (ProjectWrath.exe). Its',
         'emulation code comes from the xemu project (https://github.com/xemu-project/xemu), extracted by xboxrecomp',
         '(https://github.com/sp00nznet/xboxrecomp), and is licensed under the GNU Lesser General Public License,',
         'version 2.1 or (at your option) any later version: LICENSES\LGPL-2.1.txt.',
         '',
         "Built from: xboxrecomp $(Git1 $xr @('log', '-1', '--format=%h %ad', '--date=short')) (upstream branched at $base)",
-        "            twoc       $(Git1 $repo @('log', '-1', '--format=%h %ad', '--date=short'))",
+        "            this project $(Git1 $repo @('log', '-1', '--format=%h %ad', '--date=short'))",
         '',
         'The files and their licences',
         '----------------------------',
@@ -95,8 +95,8 @@ try {
         '  MIT, xboxrecomp''s own (LICENSES\MIT-xboxrecomp.txt): src\apu\apu_xaudio2.c, apu_xaudio2.h (the XAudio2',
         '    output), src\apu\apu_mmio_hook.c (decodes the game''s register accesses), src\nv2a\qemu_shim.h,',
         '    src\platform\xbox_winnt.h (type and threading shims the APU files include)',
-        '  MIT, Crash TWOC''s own (LICENSES\MIT-twoc.txt): xemu_apu_dll.c (the export), xemu_apu_api.h (the',
-        '    interface with crash_twoc.exe), CMakeLists.txt, build.cmd',
+        '  MIT, Project Wrath''s own (LICENSES\MIT-ProjectWrath.txt): xemu_apu_dll.c (the export), xemu_apu_api.h',
+        '    (the interface with ProjectWrath.exe), CMakeLists.txt, build.cmd',
         '',
         'xemu''s attribution, as xboxrecomp''s NOTICE gives it',
         '------------------------------------------------'
@@ -110,8 +110,10 @@ try {
         'src\ already include them:'
     ) + ($local | ForEach-Object { "  $_" }) + @(
         '',
-        'Twoc builds the DLL from these files unchanged (twoc\apu_dll\CMakeLists.txt, the same as this folder''s).',
-        'Before step 108 the same files were linked into crash_twoc.exe as a static library.'
+        'This project builds the DLL from these files unchanged (its apu_dll\CMakeLists.txt, the same as this',
+        'folder''s). Before step 108 the same files were linked into the game''s exe as a static library.',
+        'The files in src\ and the patches in changes\ are exactly as built and as committed, so their comments and',
+        'commit messages keep the names they were written with.'
     )
     Put-Text (Join-Path $st 'NOTICE.txt') $n
 
@@ -119,7 +121,7 @@ try {
         'xemu_apu.dll: the source',
         '=========================',
         '',
-        'This is the complete source of xemu_apu.dll, the audio library that comes with Crash TWOC (crash_twoc.exe),',
+        'This is the complete source of xemu_apu.dll, the audio library that comes with Project Wrath (ProjectWrath.exe),',
         'as it was built. The library is under the GNU LGPL 2.1 or later (NOTICE.txt, LICENSES\). You may change it,',
         'rebuild it and use your copy with the game in place of the one it came with.',
         '',
@@ -140,9 +142,9 @@ try {
         'Use your copy',
         '-------------',
         '1. Close the game.',
-        '2. In the game''s folder (where crash_twoc.exe is), keep the old xemu_apu.dll somewhere else if you may want',
+        '2. In the game''s folder (where ProjectWrath.exe is), keep the old xemu_apu.dll somewhere else if you may want',
         '   it back, then copy your xemu_apu.dll there.',
-        '3. Start the game. Its log (run_twoc.err.log) names the DLL it loaded, with its size and SHA-256',
+        '3. Start the game. Its log (ProjectWrath.err.log) names the DLL it loaded, with its size and SHA-256',
         '   ("[APU-DLL] ... loaded").',
         'The game loads xemu_apu.dll only from its own folder. Your build has to keep the interface in',
         'xemu_apu_api.h (version 1): one export, xemu_apu_get_api, handing over a table of functions. If the version',

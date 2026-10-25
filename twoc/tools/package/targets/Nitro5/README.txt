@@ -1,5 +1,5 @@
-Crash Bandicoot: The Wrath of Cortex (PC port) - Acer Nitro 5 test package
-=========================================================================
+Project Wrath - Acer Nitro 5 test package
+=========================================
 
 What this is: the PC port built on the desktop, with everything it needs, to try on the
 Acer Nitro 5 laptop (RTX 3050 Laptop GPU with 4 GB, Intel Core i5-12500H, 1920 x 1080 at
@@ -9,14 +9,22 @@ in game_files\ are your own copy of the disc. There are no saves in this folder:
 game and name it WOMBAT, which opens every warp room, so every level in the tests can be
 reached.
 
-New in this build: a first-run setup (the start of sharing the game with other people): when
+New in this build: the project has its name, Project Wrath. The game is ProjectWrath.exe (Task
+Manager shows "Project Wrath"), its window and settings menu say Project Wrath, the launchers are
+"Play Project Wrath.bat" and its variants, the settings ProjectWrath.ini, the logs
+ProjectWrath.err.log, and "Collect logs.bat" makes ProjectWrath_logs_Nitro5_<date>_<time>.zip. The
+package is the ProjectWrath-Nitro5 folder. Nothing in the game itself changes. Windows keeps its
+Graphics setting (part A step 6) per program file, so set it again for ProjectWrath.exe even if you
+set it for the earlier package's exe. A crash_twoc.ini copied in from the earlier test folder is still
+read (until the game saves its own ProjectWrath.ini).
+From the last build: a first-run setup (the start of sharing the game with other people): when
 game_files\ is missing or fails its check, a setup screen opens before the game and copies
 the game files from a disc image (.iso) or an extracted folder, checking every file (this
 package has its game files, so you shouldn't see it). The About tab has a Game files part:
 "Verify game files" (all 2,267 files against the disc, about 10 seconds, the game running)
-and "Choose another disc image..." (restarts into the setup screen). crash_twoc.exe can be
-double-clicked on its own now; "Play Crash.bat" stays the way to start it for the tests.
-From the last build: Smokey and the Bandicoot's flat grey ("silver") triangle that flashed over
+and "Choose another disc image..." (restarts into the setup screen). ProjectWrath.exe can be
+double-clicked on its own now; "Play Project Wrath.bat" stays the way to start it for the tests.
+From the builds before: Smokey and the Bandicoot's flat grey ("silver") triangle that flashed over
 the road for a frame while driving is gone (a piece of ground beside the camera drawn at the
 picture's centre for one frame; both Frame rate settings; nothing else should look different).
 From the build before: Smokey and the Bandicoot's dark slate triangle on the far canyon wall
@@ -44,33 +52,34 @@ Each step says which computer it is on: [desktop] or [laptop].
 
 What's in the folder
 --------------------
-  Play Crash.bat                         starts the game
-  Play Crash (fullscreen start test).bat starts it with full screen on (test 5)
-  Play Crash (fullscreen old way).bat    full screen at once, the older way (not needed now)
-  Play Crash (72 fps test).bat           one run at 72 fps (72 fps is in the menu's list too)
-  Play Crash (safe settings).bat         every setting at its default, crash_twoc.ini not
+  Play Project Wrath.bat                         starts the game
+  Play Project Wrath (fullscreen start test).bat starts it with full screen on (test 5)
+  Play Project Wrath (fullscreen old way).bat    full screen at once, the older way (not needed now)
+  Play Project Wrath (72 fps test).bat           one run at 72 fps (72 fps is in the menu's list too)
+  Play Project Wrath (safe settings).bat         every setting at its default, ProjectWrath.ini not
                                          read or written: if the game won't start after a
                                          settings change
-  Play Crash (ack wait test).bat         one run with the "ack wait" switch (not needed now)
-  Play Crash (bake off).bat              one run with "baked draws" off (not needed now)
+  Play Project Wrath (ack wait test).bat         one run with the "ack wait" switch (not needed now)
+  Play Project Wrath (bake off).bat              one run with "baked draws" off (not needed now)
   Collect logs.bat                       zips the logs and a PC summary to bring back
-  crash_twoc.ini                         the game's settings, set up for this laptop
+  ProjectWrath.ini                         the game's settings, set up for this laptop
   Test notes.txt                         write what you see here; it goes into the zip
-  crash_twoc.exe                         the game (its C++ runtime built in)
+  ProjectWrath.exe                         the game (its C++ runtime built in)
   xemu_apu.dll                           the game's audio library (needed beside the exe)
   game_files\                            the disc files
   tools\, PACKAGE.txt                    the log collector and a display test; which build
                                          this is
   THIRD_PARTY_LICENSES.txt               other people's code in the game, and its licences
   LICENSE.txt                            this project's own code (MIT) and what that covers
-When it runs the game also makes logs\, run_twoc.*.log, game_files\UDATA (saves) and
+When it runs the game also makes logs\, ProjectWrath.*.log, game_files\UDATA (saves) and
 game_files\UDATA_backups (copies of the save) in this folder.
 
 
 A. Set up the laptop (once)
 ---------------------------
-1.  [desktop] Copy the whole Nitro5Package folder to a USB stick (about 1 GB).
-2.  [laptop] Copy it from the stick to the laptop, for example to C:\Games\Nitro5Package.
+1.  [desktop] Copy the ProjectWrath-Nitro5 folder (in Desktop\Crash\Nitro5Package) to a USB stick
+    (about 1 GB).
+2.  [laptop] Copy it from the stick to the laptop, for example to C:\Games\ProjectWrath-Nitro5.
     Any folder works, spaces in the name too (not C:\Program Files).
 3.  [laptop] Plug the charger in. The first tests are plugged in.
 4.  [laptop] Windows' power mode (Settings > System > Power & battery > Power mode):
@@ -87,12 +96,14 @@ A. Set up the laptop (once)
     that hot session ran the game at 100 C and about 12% slower.
 6.  [laptop] Make sure the game uses the NVIDIA GPU, not the Intel one:
       a. Settings > System > Display > Graphics.
-      b. "Add desktop app" (or "Browse"), go to the Nitro5Package folder and pick
-         crash_twoc.exe.
-      c. Click crash_twoc.exe in the list, then Options (or the drop-down), choose
+      b. "Add desktop app" (or "Browse"), go to the ProjectWrath-Nitro5 folder and pick
+         ProjectWrath.exe. (Windows keeps this setting per program file: an entry for the
+         earlier package's crash_twoc.exe doesn't count for ProjectWrath.exe; you may remove
+         that old entry.)
+      c. Click ProjectWrath.exe in the list, then Options (or the drop-down), choose
          "High performance" (it names the NVIDIA GeForce RTX 3050), and Save.
       d. If the NVIDIA Control Panel is installed (right-click the desktop, or the Start
-         menu): Manage 3D settings > Program Settings > Add > crash_twoc.exe, and
+         menu): Manage 3D settings > Program Settings > Add > ProjectWrath.exe, and
          "Preferred graphics processor": High-performance NVIDIA processor > Apply.
          If it isn't installed, step c is enough.
     The game also asks for the NVIDIA GPU by itself, and its settings menu can name the
@@ -112,7 +123,7 @@ the game.
 
 B. Start the game [laptop]
 --------------------------
-1.  Double-click "Play Crash.bat". A black console window opens, then the game window.
+1.  Double-click "Play Project Wrath.bat". A black console window opens, then the game window.
     Leave the console open; it closes by itself when the game ends.
     If Windows says "Windows protected your PC", click "More info", then "Run anyway".
 2.  The game opens in a window as big as the screen. Alt+Enter switches to full screen and
@@ -158,7 +169,7 @@ C. The tests [laptop]
 Write what you see in Test notes.txt as you go. Plugged in, Balanced and NitroSense Default,
 unless a test says otherwise. Let the laptop cool a few minutes between tests.
 
-1. cast_bug's start, standing 30 seconds. Start "Play Crash.bat", new game WOMBAT, skip the
+1. cast_bug's start, standing 30 seconds. Start "Play Project Wrath.bat", new game WOMBAT, skip the
    intro. In the hub, walk Crash onto the round lift in the middle; it takes him up to the
    bonus warp room. Go through its gate to the first pad; the level is cast_bug. When it has
    loaded, let go of everything: Crash stands at the start. After 30 seconds write down the
@@ -170,7 +181,7 @@ unless a test says otherwise. Let the laptop cool a few minutes between tests.
    the menu, 30 s, write down the corner's lines. Then Frame rate back to "Match display".
 4. Plugged in against battery: unplug the charger, wait a minute, cast_bug's start for 30 s,
    the corner's lines (it shows the battery's watts now). Plug the charger back in.
-5. Ten full-screen starts: ten times "Play Crash (fullscreen start test).bat", each time
+5. Ten full-screen starts: ten times "Play Project Wrath (fullscreen start test).bat", each time
    leaving the game's window in front, waiting for the main menu (about 15 seconds), then
    Quit game (or Alt+F4), and about 5 seconds before the next. For each, note: fine / the
    Universal logo froze (did it start again by itself?) / stuttered / anything else.
@@ -178,7 +189,7 @@ unless a test says otherwise. Let the laptop cool a few minutes between tests.
 
 Optional, if there is time: Restart now once (F1, Display, Graphics card: pick the NVIDIA
 card by name, Restart now; the game comes back; About says the same card; then Automatic
-again, Restart now). "Play Crash (safe settings).bat" once: it starts in a small window with
+again, Restart now). "Play Project Wrath (safe settings).bat" once: it starts in a small window with
 an orange "Safe settings" line at the top of the menu, and asks no restart questions.
 
 
@@ -187,7 +198,7 @@ D. Bring the logs back
 1.  [laptop] Close the game.
 2.  [laptop] Double-click "Collect logs.bat". It takes about 20 seconds; the screen turns
     grey with a moving white bar twice (a display test).
-3.  [laptop] It makes Nitro5_logs_<date>_<time>.zip in this folder and opens Explorer on it.
+3.  [laptop] It makes ProjectWrath_logs_Nitro5_<date>_<time>.zip in this folder and opens Explorer on it.
 4.  [laptop -> desktop] Copy the zip to the desktop (USB stick, a cloud folder or
     LocalSend) and give it to Claude.
 
@@ -223,11 +234,11 @@ F. If something goes wrong
   run "Collect logs.bat".
 - The Universal logo freezes at the start: wait 10 seconds (it should get going by itself),
   then alt+tab once and back. Note it either way.
-- The game won't start after a settings change: "Play Crash (safe settings).bat" (every
-  setting at its default, in a window, crash_twoc.ini not read or changed).
+- The game won't start after a settings change: "Play Project Wrath (safe settings).bat" (every
+  setting at its default, in a window, ProjectWrath.ini not read or changed).
 - The setup screen at the start ("The game files need attention: ..."): game_files\ is
   missing files or has wrong ones; copy the whole folder from the desktop again.
-- "Crash can't write to its save folder": copy the folder somewhere you can write to (not
+- "Project Wrath can't write to its save folder": copy the folder somewhere you can write to (not
   C:\Program Files).
 - The game window opens and closes at once, or the laptop crashes: run "Collect logs.bat"
   and bring the zip back.

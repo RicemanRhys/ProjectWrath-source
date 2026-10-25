@@ -6,5 +6,5 @@ rem compare: the first test's e. For this run only; the log says
 rem "host baked draws: off: every pass translated (RECOMP_D3D_BRIDGE_BAKE)".
 setlocal
 set RECOMP_D3D_BRIDGE_BAKE=0
-call "%~dp0Play Crash.bat"
+call "%~dp0Play Project Wrath.bat"
 endlocal

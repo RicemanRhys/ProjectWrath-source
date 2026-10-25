@@ -1,20 +1,20 @@
 # Collect logs.bat (the test packages, twoc/tools/package): zips the game's logs (with the power
 # logs, notes 18.94), the settings, the tester's notes, a system summary (CPU, GPU, Windows, power,
 # the display's modes and refresh rate), the System log's crash and power events (events.txt) and
-# vrrprobe's display test into <Target>_logs_<time>.zip next to "Play Crash.bat" (the target from
-# PACKAGE.txt's "Target:" line, notes 18.100: LegionGo or Nitro5).
+# vrrprobe's display test into ProjectWrath_logs_<Target>_<time>.zip next to "Play Project Wrath.bat" (the target
+# from PACKAGE.txt's "Target:" line, notes 18.100: LegionGo, Nitro5 or Share; step 109: the project's name first).
 # Windows PowerShell 5.1; ASCII only (5.1 reads a script without a BOM as the ANSI code page).
 $ErrorActionPreference = 'Continue'
 $pkg   = Split-Path -Parent $PSScriptRoot
 $stamp = Get-Date -Format 'yyyy-MM-dd_HH-mm-ss'
-$work  = Join-Path $env:TEMP "twoc_logs_$stamp"
+$work  = Join-Path $env:TEMP "ProjectWrath_logs_$stamp"
 $target = 'LegionGo'
 $pk = Join-Path $pkg 'PACKAGE.txt'
 if (Test-Path -LiteralPath $pk) {
     $m = Select-String -LiteralPath $pk -Pattern '^Target: (\w+)' | Select-Object -First 1
     if ($m) { $target = $m.Matches[0].Groups[1].Value }
 }
-$zip   = Join-Path $pkg "${target}_logs_$stamp.zip"
+$zip   = Join-Path $pkg "ProjectWrath_logs_${target}_$stamp.zip"
 New-Item -ItemType Directory -Force -Path $work | Out-Null
 
 $sys = New-Object System.Collections.Generic.List[string]
@@ -24,19 +24,19 @@ Add "Collected $(Get-Date -Format 'yyyy-MM-dd HH:mm:ss zzz') on $env:COMPUTERNAM
 
 # 0. The game's process. Closing its window ends it at once (TerminateProcess), and the log's last
 #    line then says "host window closed: ending the process". On the Legion Go (notes 18.84) a
-#    crash_twoc process was still listed after that, until Windows restarted, and this script
+#    game process was still listed after that, until Windows restarted, and this script
 #    refused to collect. So: a process left over from a run whose log has ended is described in
 #    system.txt and ended; one whose log hasn't ended is the game running (or stuck), ended only
 #    if the tester says so.
-$game = @(Get-Process crash_twoc -ErrorAction SilentlyContinue)
+$game = @(Get-Process ProjectWrath -ErrorAction SilentlyContinue)
 if ($game.Count) {
-    $err = Join-Path $pkg 'run_twoc.err.log'
+    $err = Join-Path $pkg 'ProjectWrath.err.log'
     $last = if (Test-Path -LiteralPath $err) { "$(Get-Content -LiteralPath $err -Tail 1)" } else { '' }
     $ended = $last -like '*ending the process*' -or $last -like '`[BAT`]*'
     Section 'The game process at collection'
-    Add "run_twoc.err.log's last line: $last"
+    Add "ProjectWrath.err.log's last line: $last"
     foreach ($p in $game) {
-        $l = "crash_twoc pid $($p.Id)"
+        $l = "ProjectWrath pid $($p.Id)"
         try { $l += ", started $($p.StartTime.ToString('yyyy-MM-dd HH:mm:ss'))" } catch {}
         try { $l += (", CPU {0:N1} s, {1:N0} MB, {2} handles" -f $p.CPU, ($p.WorkingSet64 / 1MB), $p.HandleCount) } catch {}
         try { $l += ", window '$($p.MainWindowTitle)', responding $($p.Responding)" } catch {}
@@ -51,10 +51,10 @@ if ($game.Count) {
         } catch { Add "  threads: $_" }
     }
     if ($ended) {
-        Write-Host "The game's log is complete, but a crash_twoc process is still there (it didn't finish"
+        Write-Host "The game's log is complete, but a ProjectWrath process is still there (it didn't finish"
         Write-Host "exiting). Ending it; system.txt notes what was left."
     } else {
-        Write-Host "Crash is still running (or stuck). Close the game window first, then run Collect logs again."
+        Write-Host "Project Wrath is still running (or stuck). Close the game window first, then run Collect logs again."
         Write-Host "If it won't close: type Y and press Enter to end it and collect anyway."
         $a = if ($env:TWOC_COLLECT_QUIET -eq '1') { '' } else { Read-Host 'End it? (Y/N)' }
         if ($a -notmatch '^[Yy]') { Remove-Item -Recurse -Force $work; exit 1 }
@@ -74,7 +74,7 @@ if ($game.Count) {
 Write-Host "Collecting into $zip ..."
 
 # 1. The game's files: the last run's logs, the earlier runs' (logs\), the settings, the notes.
-foreach ($f in 'run_twoc.err.log', 'run_twoc.out.log', 'xbox_kernel.log', 'run_twoc.power.log', 'crash_twoc.ini', 'Test notes.txt', 'PACKAGE.txt') {
+foreach ($f in 'ProjectWrath.err.log', 'ProjectWrath.out.log', 'xbox_kernel.log', 'ProjectWrath.power.log', 'ProjectWrath.ini', 'Test notes.txt', 'PACKAGE.txt') {
     $p = Join-Path $pkg $f
     if (Test-Path -LiteralPath $p) { Copy-Item -LiteralPath $p -Destination $work }
 }
@@ -147,9 +147,9 @@ public static class TwocCpuSets {
     foreach ($l in [TwocCpuSets]::Describe()) { Add $l }
 } catch { Add "CPU set query failed: $_" }
 try {
-    $err = Join-Path $pkg 'run_twoc.err.log'
+    $err = Join-Path $pkg 'ProjectWrath.err.log'
     if (Test-Path -LiteralPath $err) {
-        Section "The game's processor lines (its last run, run_twoc.err.log)"
+        Section "The game's processor lines (its last run, ProjectWrath.err.log)"
         foreach ($m in Select-String -LiteralPath $err -Pattern '^\[(CPU|GPU)\]' | Select-Object -First 12) { Add $m.Line }
         # step 99: where the game and render threads ran (the kind of core) and each kind's MHz, its last 10 s
         $m = Select-String -LiteralPath $err -Pattern '^\[D3DB\] host cores:' | Select-Object -Last 1

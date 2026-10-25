@@ -1,7 +1,11 @@
 # The package's smoke test (notes 18.91; step 80's and 85's scratch pt.ps1, kept here).
 #
 #   powershell -NoProfile -ExecutionPolicy Bypass -File twoc\tools\package\smoke_test.ps1
-#       -Dir COPY -Out DIR [-Secs 60] [-Bat "Play Crash.bat"] [-Log run_twoc.err.log] [-F1] [-Probe] [-Quit]
+#       -Dir COPY -Out DIR [-Secs 60] [-Bat "Play Project Wrath.bat"] [-Log ProjectWrath.err.log] [-F1] [-Probe] [-Quit]
+#
+# Step 109 (notes 18.112): the names follow the copy's exe: ProjectWrath.exe (the window "Project Wrath", the
+# launcher "Play Project Wrath.bat", the log ProjectWrath.err.log), or a package from before with crash_twoc.exe
+# (the old names: "Crash TWOC - D3D bridge (host)", "Play Crash.bat", run_twoc.err.log).
 #
 # Starts BAT from COPY (a scratch copy of the package, or of the DXVK test folder beside a stand-in
 # LegionGoPackage) like a double-click: its own console, working directory C:\. Grabs the game window
@@ -17,17 +21,23 @@
 # Needs twoc\tools\diag\wgcgrab.exe (wgcgrab_build.bat) and Python. Never run it on the package itself
 # (the runs make saves and logs in the folder they start from).
 param([Parameter(Mandatory)][string]$Dir, [Parameter(Mandatory)][string]$Out, [int]$Secs = 60,
-      [string]$Bat = 'Play Crash.bat', [string]$Log = 'run_twoc.err.log', [switch]$F1, [switch]$Probe, [switch]$Quit)
+      [string]$Bat, [string]$Log, [switch]$F1, [switch]$Probe, [switch]$Quit)
 $ErrorActionPreference = 'Stop'
 $here = $PSScriptRoot
 $diag = Join-Path (Split-Path -Parent $here) 'diag'
 $grabExe = Join-Path $diag 'wgcgrab.exe'
 if (-not (Test-Path $grabExe)) { throw "$grabExe missing: build it with wgcgrab_build.bat" }
 New-Item -ItemType Directory -Force $Out | Out-Null
-if (Get-Process crash_twoc -ErrorAction SilentlyContinue) { throw 'crash_twoc already running' }
-$grab = Start-Process -FilePath $grabExe -ArgumentList '"Crash TWOC - D3D bridge (host)"', "`"$Out\g`"", '3', ([string]($Secs - 12)) -PassThru -WindowStyle Hidden -RedirectStandardOutput "$Out\grab.txt"
+$new = (Test-Path (Join-Path $Dir 'ProjectWrath.exe')) -or -not (Test-Path (Join-Path $Dir 'crash_twoc.exe'))
+$proc = if ($new) { 'ProjectWrath' } else { 'crash_twoc' }
+$app = if ($new) { 'Project Wrath' } else { 'Crash TWOC' }
+$title = if ($new) { 'Project Wrath' } else { 'Crash TWOC - D3D bridge (host)' }
+if (-not $Bat) { $Bat = if ($new) { 'Play Project Wrath.bat' } else { 'Play Crash.bat' } }
+if (-not $Log) { $Log = if ($new) { 'ProjectWrath.err.log' } else { 'run_twoc.err.log' } }
+if (Get-Process ProjectWrath, crash_twoc -ErrorAction SilentlyContinue) { throw 'the game is already running' }
+$grab = Start-Process -FilePath $grabExe -ArgumentList "`"$title`"", "`"$Out\g`"", '3', ([string]($Secs - 12)) -PassThru -WindowStyle Hidden -RedirectStandardOutput "$Out\grab.txt"
 if ($Probe) {
-    $pgrab = Start-Process -FilePath $grabExe -ArgumentList '"Crash TWOC - Vulkan probe (RECOMP_VULKAN=probe)"', "`"$Out\vk`"", '10', '30' -PassThru -WindowStyle Hidden -RedirectStandardOutput "$Out\vkgrab.txt"
+    $pgrab = Start-Process -FilePath $grabExe -ArgumentList "`"$app - Vulkan probe (RECOMP_VULKAN=probe)`"", "`"$Out\vk`"", '10', '30' -PassThru -WindowStyle Hidden -RedirectStandardOutput "$Out\vkgrab.txt"
 }
 $xi = Join-Path $Out 'xi.txt'
 function Pad([string]$line, [double]$hold = 0.12) {     # one press of the stand-in pad
@@ -52,7 +62,7 @@ if ($F1) {
 } else {
     Start-Sleep -Seconds $Secs
 }
-$g = Get-Process crash_twoc -ErrorAction SilentlyContinue
+$g = Get-Process $proc -ErrorAction SilentlyContinue
 if (-not $g) { "game not running after $Secs s" | Tee-Object "$Out\result.txt"; exit 1 }
 "game pid $($g.Id), started from $Dir" | Out-File "$Out\result.txt"
 $g.Modules | ForEach-Object { $_.FileName } | Sort-Object | Out-File "$Out\modules.txt"
@@ -74,10 +84,10 @@ if ($Quit) {
     Pad 'a=255'
     "Quit game pressed (Yes)" | Out-File -Append "$Out\result.txt"
 } else {
-    & python -I (Join-Path $diag 'sweep\wmclose.py') | Out-File -Append "$Out\result.txt"
+    & python -I "$here\windows.py" close | Out-File -Append "$Out\result.txt"
 }
 $ok = $p.WaitForExit(30000)
-"console ended: $ok after $([int]((Get-Date) - $t0).TotalSeconds) s; game still running: $([bool](Get-Process crash_twoc -ErrorAction SilentlyContinue))" | Out-File -Append "$Out\result.txt"
+"console ended: $ok after $([int]((Get-Date) - $t0).TotalSeconds) s; game still running: $([bool](Get-Process $proc -ErrorAction SilentlyContinue))" | Out-File -Append "$Out\result.txt"
 Copy-Item (Join-Path $Dir $Log) "$Out\" -ErrorAction SilentlyContinue
 $lf = Join-Path $Out (Split-Path -Leaf $Log)
 if (Test-Path $lf) {

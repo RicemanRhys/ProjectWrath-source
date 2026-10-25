@@ -7,5 +7,5 @@ setlocal
 set RECOMP_FULLSCREEN=1
 set RECOMP_FULLSCREEN_DEFER=0
 set RECOMP_FULLSCREEN_COMPOSED=0
-call "%~dp0Play Crash.bat"
+call "%~dp0Play Project Wrath.bat"
 endlocal

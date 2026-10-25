@@ -1,6 +1,6 @@
 """third_party_licenses.py [--dxvk LICENSE] [--out FILE] -- step 93 (notes 18.96): writes THIRD_PARTY_LICENSES.txt
 (default twoc/THIRD_PARTY_LICENSES.txt) from the real licence files of every third-party component built into
-crash_twoc.exe or shipped beside it (the Legion Go package; the DXVK test folder). Each text is read from the file
+ProjectWrath.exe or shipped beside it (the Legion Go package; the DXVK test folder). Each text is read from the file
 the component itself ships; a missing file stops the script. The Visual C++ runtime is linked statically since
 step 108 (no runtime DLL shipped); its part names Microsoft's terms and links them (their text isn't installed).
 
@@ -53,16 +53,16 @@ def part(title, what, licence, text):
     out.append("")
 
 
-out.append("""Crash Bandicoot: The Wrath of Cortex, PC port (crash_twoc.exe) - third-party components
-====================================================================================
+out.append("""Project Wrath (ProjectWrath.exe) - third-party components
+=========================================================
 
-Every third-party component built into crash_twoc.exe or shipped beside it, with its licence's name and its
+Every third-party component built into ProjectWrath.exe or shipped beside it, with its licence's name and its
 licence text, copied from the licence file the component ships (twoc/tools/package/third_party_licenses.py
 writes this file from them). None of them is relicensed: each keeps its own licence. This project's own code is
 under the MIT licence (LICENSE.txt). The game's own data (game_files: default.xbe and Crashdat) is your copy of
 the Xbox disc and is not covered here.
 
-  Built into crash_twoc.exe
+  Built into ProjectWrath.exe
     1. Dear ImGui 1.92.9b ................ MIT (and its stb_truetype / stb_rect_pack / stb_textedit: MIT or
                                             public domain)
     2. SDL 3.4.18 ........................ zlib (with HIDAPI: BSD-style; SunPro libm notice)
@@ -124,7 +124,7 @@ part("6. Vulkan-Headers vulkan-sdk-1.4.363.0 (twoc/third_party/vulkan)",
 
 notice = read(XR, "NOTICE")
 part("7. xboxrecomp (the toolkit the recompilation runs on), and xemu_apu.dll",
-     "The Xbox kernel, D3D8 on D3D11 (xbox_d3d8), input and USB libraries, linked static into crash_twoc.exe: MIT.\n"
+     "The Xbox kernel, D3D8 on D3D11 (xbox_d3d8), input and USB libraries, linked static into ProjectWrath.exe: MIT.\n"
      "Its audio (APU) files extracted from xemu, LGPL-2.1-or-later, are built into xemu_apu.dll instead, with\n"
      "xboxrecomp's own XAudio2 output and register decoder (MIT): its NOTICE's sections on them, then the LGPL's text.",
      "MIT; the APU files (xemu_apu.dll) LGPL-2.1-or-later",
@@ -138,7 +138,7 @@ out.append("The audio library, xemu_apu.dll")
 out.append(RULE)
 out.append("""The game's sound runs on xboxrecomp's emulated MCPX APU: apu_core.c, apu_dsp.c, apu_vp.c and their headers,
 code extracted from xemu (https://github.com/xemu-project/xemu) and licensed LGPL-2.1-or-later. Since step 108
-it is not part of crash_twoc.exe: it is xemu_apu.dll, a library of its own beside the exe, built from those
+it is not part of ProjectWrath.exe: it is xemu_apu.dll, a library of its own beside the exe, built from those
 files unchanged (with xboxrecomp's MIT output and register decoder and this project's MIT export). The exe loads
 it at the start from its own folder and uses it only through a small C interface (xemu_apu_api.h, version 1);
 nothing else of the exe is in it.
@@ -150,12 +150,12 @@ as a patch in changes\\), the LGPL's text, a notice (xemu's attribution, each fi
 and the build files.
 
 To replace it with your own: change the source, run build.cmd (Visual Studio 2022 with C++), close the game and
-copy the new xemu_apu.dll over the one next to crash_twoc.exe. The game's log names the DLL it loaded, with its
+copy the new xemu_apu.dll over the one next to ProjectWrath.exe. The game's log names the DLL it loaded, with its
 size and SHA-256. If your DLL offers another interface version, the game says so and doesn't start.
 """)
 
 part("8. The Visual C++ runtime (linked statically: no runtime DLL is shipped)",
-     "Since step 108 crash_twoc.exe and xemu_apu.dll are built with the Visual C++ runtime linked statically (/MT:\n"
+     "Since step 108 ProjectWrath.exe and xemu_apu.dll are built with the Visual C++ runtime linked statically (/MT:\n"
      "the C and C++ runtime libraries of Visual Studio 2022's MSVC 14.44 and the Windows SDK's Universal C Runtime,\n"
      "unmodified), so no Microsoft runtime DLL (vcruntime140*.dll, msvcp140*.dll) ships with the game and players\n"
      "need no Visual C++ Redistributable. That runtime code is part of Microsoft Visual Studio 2022 (here\n"

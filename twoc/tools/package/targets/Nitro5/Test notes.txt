@@ -3,7 +3,7 @@ Acer Nitro 5 test notes (this file goes into the zip "Collect logs.bat" makes)
 
 Windows power mode (Settings > System > Power & battery):
 NitroSense mode (Default / Performance / Turbo / none):
-Windows' Graphics setting for crash_twoc.exe (High performance? README part A step 6):
+Windows' Graphics setting for ProjectWrath.exe (High performance? README part A step 6):
 NVIDIA Control Panel setting (if there is one):
 Screen refresh rate and resolution (Settings > System > Display):
 
@@ -25,7 +25,7 @@ About tab (README part B step 3), copy the lines or take a photo:
 
 4. On battery, cast_bug's start, 30 s (all the corner's lines):
 
-5. Ten full-screen starts ("Play Crash (fullscreen start test).bat"), for each: fine / froze (did
+5. Ten full-screen starts ("Play Project Wrath (fullscreen start test).bat"), for each: fine / froze (did
    it start again by itself, or did you alt+tab?) / stuttered / anything else:
     1:
     2:

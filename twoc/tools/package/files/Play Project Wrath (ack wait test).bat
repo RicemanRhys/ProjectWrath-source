@@ -6,5 +6,5 @@ rem freed core may let the rest run faster. For this run only; the log says
 rem "NV2A ack thread: spins 2000 us after work, then waits 100 us a pass".
 setlocal
 set RECOMP_NV2A_ACK_WAIT=100
-call "%~dp0Play Crash.bat"
+call "%~dp0Play Project Wrath.bat"
 endlocal

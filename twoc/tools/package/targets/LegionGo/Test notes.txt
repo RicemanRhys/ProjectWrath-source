@@ -4,13 +4,13 @@ Legion Go test notes (this file goes into the zip "Collect logs.bat" makes)
 Legion Space thermal mode (set before each start):
 Windows power mode:
 Screen refresh rate and resolution (Settings):
-Did this folder's crash_twoc.ini come from the earlier test folder (it may start full screen)?
+Did this folder's settings come from the earlier test folder (its crash_twoc.ini copied in; it may start full screen)?
 
 1. The fullscreen start, plugged in (README part C, test 1): the game's window left in front,
    to the main menu and closed, about 5 seconds between starts. For each: fine / froze (and did
    it unfreeze by itself, or did you alt+tab?) / stuttered / anything else (the window first, a
    flash):
-   a. "Play Crash (fullscreen start test).bat", ten starts:
+   a. "Play Project Wrath (fullscreen start test).bat", ten starts:
     1:
     2:
     3:
@@ -21,7 +21,7 @@ Did this folder's crash_twoc.ini come from the earlier test folder (it may start
     8:
     9:
    10:
-   b. "Play Crash (fullscreen old way).bat", ten starts:
+   b. "Play Project Wrath (fullscreen old way).bat", ten starts:
     1:
     2:
     3:
@@ -36,12 +36,12 @@ Did this folder's crash_twoc.ini come from the earlier test folder (it may start
    Full screen on for the other tests, or the window?
 
 2. Ten minutes at cast_bug's start, plugged in, Performance, from cool (README part C, test 2).
-   a. "Play Crash.bat":
+   a. "Play Project Wrath.bat":
       after 1 minute:   Game:        /s    Shown:        /s
       after 5 minutes:  Game:        /s    Shown:        /s
       after 10 minutes: Game:        /s    Shown:        /s
       Warmth, fan, anything odd:
-   b. "Play Crash (ack wait test).bat", after cooling again:
+   b. "Play Project Wrath (ack wait test).bat", after cooling again:
       after 1 minute:   Game:        /s    Shown:        /s
       after 5 minutes:  Game:        /s    Shown:        /s
       after 10 minutes: Game:        /s    Shown:        /s
@@ -83,7 +83,7 @@ between tests).
    72 fps from the list: did the line under it say even, 2 refreshes?
    Reset display settings: No left everything as it was? Yes put the defaults back?
    About tab (copy its lines):
-   Safe settings launcher: small window, the orange line in the menu, and Play Crash.bat
+   Safe settings launcher: small window, the orange line in the menu, and Play Project Wrath.bat
    afterwards with your settings?
    View + Menu held: did it open and close the settings menu?
    Pause when in the background: did the game stop and go quiet, and go on again?

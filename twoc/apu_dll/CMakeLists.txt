@@ -3,13 +3,13 @@
 # The sources are xboxrecomp's src/apu, unchanged: apu_core.c, apu_vp.c, apu_dsp.c and their headers (extracted
 # from xemu, GNU LGPL 2.1 or later), apu_xaudio2.c (the output) and apu_mmio_hook.c (the register-access
 # decoder), both xboxrecomp's own (MIT), plus xemu_apu_dll.c here (the export, MIT). The same flags as the static
-# library xbox_apu that crash_twoc.exe linked before step 108 (xboxrecomp/src/apu/CMakeLists.txt), so the code
+# library xbox_apu that the game's exe linked before step 108 (xboxrecomp/src/apu/CMakeLists.txt), so the code
 # is the same, and /Brepro so that a rebuild from the same source with the same compiler is byte for byte the
 # same file.
 #
 # Two ways in:
 #   - from twoc/CMakeLists.txt (add_subdirectory), XEMU_APU_SRC = xboxrecomp/src; the DLL lands beside
-#     crash_twoc.exe;
+#     the exe (the build's crash_twoc.exe, packaged as ProjectWrath.exe: step 109);
 #   - on its own, from the source package (make_apu_source_package.ps1): cmake -S . -B build, then
 #     cmake --build build --config Release; XEMU_APU_SRC = ./src. build.cmd does both.
 cmake_minimum_required(VERSION 3.20)

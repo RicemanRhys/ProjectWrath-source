@@ -1,6 +1,7 @@
 @echo off
 rem run.cmd NAME [60|rolling] [wav] -- the issue launchers call this. Starts this kit's own copy of the game
-rem (game\crash_twoc.exe, with its own crash_twoc.ini and its own copy of your save; your build folder,
+rem (game\ProjectWrath.exe since step 109, with its own copy of your settings, crash_twoc.ini, which it reads
+rem until it writes its own ProjectWrath.ini, and its own copy of your save; your build folder,
 rem your ini and your saves are never touched) with the capture switches on. Its logs and pictures go
 rem to captures\NAME_<date>_<time>\. "60" plays this run at Frame rate: Game (60) for the comparison,
 rem "wav" also records the game's sound to sound.wav in that folder. "rolling" (step 104) keeps the last
@@ -42,14 +43,14 @@ rem step 106: it also saves by itself (a flat patch for a frame, or the check's 
 if "%~2"=="rolling" set RECOMP_D3D_BRIDGE_ROLLING_AUTO=5
 if "%~3"=="wav" set "RECOMP_APU_OUT_WAV=%OUT%\sound.wav"
 echo.
-echo Crash is running (%~1). Play to the spot in README.txt, then double-click "capture now.cmd".
+echo Project Wrath is running (%~1). Play to the spot in README.txt, then double-click "capture now.cmd".
 if defined RECOMP_FRAMERATE echo This run is at Frame rate: Game (60), for the comparison.
 if defined RECOMP_APU_OUT_WAV echo The game's sound is being recorded to sound.wav.
 if defined RECOMP_D3D_BRIDGE_ROLLING echo Rolling capture on: it saves by itself when it sees a glitch; you can also press F9 in the game window right AFTER one.
 echo Close the game window when you're done; this window closes with it.
 cd /d "%KIT%\game"
-"%KIT%\game\crash_twoc.exe" >"%OUT%\run.out.log" 2>"%OUT%\run.err.log"
->>"%OUT%\run.err.log" echo [KIT] crash_twoc.exe ended with code %errorlevel% at %date% %time%
+"%KIT%\game\ProjectWrath.exe" >"%OUT%\run.out.log" 2>"%OUT%\run.err.log"
+>>"%OUT%\run.err.log" echo [KIT] ProjectWrath.exe ended with code %errorlevel% at %date% %time%
 echo.
 echo Done. Send the folder: %OUT%
 pause

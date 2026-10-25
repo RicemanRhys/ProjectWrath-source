@@ -1,5 +1,5 @@
-Crash TWOC: what the MIT licence in LICENSE covers
-==================================================
+Project Wrath: what the MIT licence in LICENSE covers
+=====================================================
 
 LICENSE (the MIT licence) covers this project's own code in this folder (twoc/), and only that. Its copyright
 line is the one place the copyright holder's name is written: the package scripts read it from there.

@@ -2,10 +2,12 @@ The capture kit (step 100, notes 18.103): the user plays to a problem and double
 
 These are its scripts. To make a kit folder (Desktop\Crash\CaptureKit in step 100):
   - copy this folder's .cmd files, README.txt and kit\run.cmd there, and make an empty captures\;
-  - game\crash_twoc.exe: the build to test (it needs RECOMP_D3D_BRIDGE_DUMP_ASKED, step 100);
+  - game\ProjectWrath.exe: the build to test, the build's crash_twoc.exe copied under the package's name (step 109;
+    it needs RECOMP_D3D_BRIDGE_DUMP_ASKED, step 100);
   - game\xemu_apu.dll: the audio library, from the exe's own build folder (step 108: the game doesn't
     start without it beside the exe);
-  - game\crash_twoc.ini: a copy of the user's ini (twoc\build\Release\crash_twoc.ini), so the runs have
+  - game\crash_twoc.ini: a copy of the user's ini (twoc\build\Release\crash_twoc.ini; ProjectWrath.exe reads it
+    until it saves its own ProjectWrath.ini, never changing it), so the runs have
     their settings without touching theirs;
   - game\game_files\: default.xbe, crash_analysis.json, TDATA\ and UDATA\ copied from the repo's
     game_files (UDATA holds the user's save: a copy), and Crashdat as a junction

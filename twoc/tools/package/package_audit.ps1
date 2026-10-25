@@ -3,13 +3,14 @@
 #      manifest), and no disc image or XBE at all;
 #   2. no trace of this PC: the Windows user name in a path (\Users\<name>), the home folder's path, or the PC's
 #      name, in any file's name or contents (text or binary, 8-bit and UTF-16);
-#   3. no stray logs, saves or dumps (*.log, *.dmp, *.sav, *.xbx, *.pdb, *.zip, crash_twoc.muted, logs\, UDATA\,
-#      UDATA_backups\, TDATA\), and no crash_twoc.ini in the Share package (its first start writes one);
+#   3. no stray logs, saves or dumps (*.log, *.dmp, *.sav, *.xbx, *.pdb, *.zip, *.muted, logs\, UDATA\,
+#      UDATA_backups\, TDATA\), and no ini of the game's in the Share package (its first start writes one);
 #   4. the licences (step 108): LICENSE.txt is there and is the MIT licence for this project's own code, and
 #      THIRD_PARTY_LICENSES.txt is there. While LICENSE.txt's copyright line still holds the placeholder
 #      "[NAME TO BE CHOSEN BY THE OWNER]" it WARNS loudly (yellow), without failing: the owner replaces it in
 #      twoc\LICENSE (the one place) before sharing;
-#   5. the audio library (step 108): xemu_apu.dll beside every crash_twoc.exe, and in the Share package its source
+#   5. the audio library (step 108): xemu_apu.dll beside every game exe (ProjectWrath.exe since step 109; the
+#      developer's crash_twoc.exe), and in the Share package its source
 #      zip in Source\ (each zip there is unpacked and audited the same way: its own game-file, PC, licence checks).
 #   6. no Microsoft runtime DLL (step 108: the runtime is linked static): no vcruntime*.dll, msvcp*.dll,
 #      concrt*.dll, vccorlib*.dll, ucrtbase.dll or api-ms-win-crt-*.dll anywhere in a package.
@@ -137,8 +138,8 @@ foreach ($f in $all) {
         continue
     }
     $srcZip = $f.Extension -eq '.zip' -and $rel -like 'Source\*.zip' -and $rel.Split('\').Count -eq 2   # step 108: audited below
-    if (-not $srcZip -and ($f.Extension -in '.log', '.dmp', '.sav', '.xbx', '.pdb', '.zip', '.map' -or $f.Name -eq 'crash_twoc.muted')) { Fail "a stray log, save or dump: $rel" }
-    if ($share -and $f.Name -eq 'crash_twoc.ini') { Fail "crash_twoc.ini in a Share package (the first start writes one): $rel" }
+    if (-not $srcZip -and ($f.Extension -in '.log', '.dmp', '.sav', '.xbx', '.pdb', '.zip', '.map', '.muted')) { Fail "a stray log, save or dump: $rel" }
+    if ($share -and $f.Name -in 'ProjectWrath.ini', 'crash_twoc.ini') { Fail "$($f.Name) in a Share package (the first start writes one): $rel" }
     if ($f.Name -like 'game_files.*') { Fail "a setup leftover: $rel" }
 }
 
@@ -147,7 +148,8 @@ Write-Host "4. licences"
 $licPath = Join-Path $Dir 'LICENSE.txt'
 if ($target -eq 'unknown' -and -not (Test-Path -LiteralPath $licPath)) { $licPath = Join-Path $Dir 'twoc\LICENSE' }
 if ($apuSrc) {      # the audio library's source: the LGPL's text, the notice, and this project's MIT text for its own files
-    $licPath = Join-Path $Dir 'LICENSES\MIT-twoc.txt'
+    $licPath = Join-Path $Dir 'LICENSES\MIT-ProjectWrath.txt'     # step 109 (MIT-twoc.txt before)
+    if (-not (Test-Path -LiteralPath $licPath)) { $licPath = Join-Path $Dir 'LICENSES\MIT-twoc.txt' }
     $lg = Join-Path $Dir 'LICENSES\LGPL-2.1.txt'
     if (-not (Test-Path -LiteralPath $lg)) { Fail "no LICENSES\LGPL-2.1.txt" }
     else {
@@ -178,7 +180,7 @@ if (-not $apuSrc -and -not (Test-Path -LiteralPath $tpl)) { Fail "no THIRD_PARTY
 # 5. The audio library (step 108): xemu_apu.dll beside the exe; in the Share package its source zip in Source\,
 # unpacked into a temporary folder and audited by this same script.
 Write-Host "5. the audio library"
-foreach ($exe in @($files | Where-Object { $_.Name -eq 'crash_twoc.exe' })) {
+foreach ($exe in @($files | Where-Object { $_.Name -in 'ProjectWrath.exe', 'crash_twoc.exe' })) {
     $dll = Join-Path $exe.DirectoryName 'xemu_apu.dll'
     $rel = $exe.FullName.Substring($Dir.Length + 1)
     if (-not (Test-Path -LiteralPath $dll)) { Fail "no xemu_apu.dll beside $rel (the game doesn't start without it)" }

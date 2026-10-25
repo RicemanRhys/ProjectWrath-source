@@ -1,5 +1,5 @@
 /*
- * xemu_apu_api.h -- the interface between crash_twoc.exe and xemu_apu.dll (step 108, notes 18.111).
+ * xemu_apu_api.h -- the interface between the game's exe (ProjectWrath.exe) and xemu_apu.dll (step 108, notes 18.111).
  *
  * This project's own file (MIT, twoc/LICENSE). xemu_apu.dll is the Xbox audio processor (MCPX APU) emulation
  * that xboxrecomp extracted from xemu, under the GNU LGPL 2.1 or later; it is built on its own so that anyone can

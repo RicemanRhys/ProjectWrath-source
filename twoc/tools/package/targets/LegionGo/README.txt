@@ -1,5 +1,5 @@
-Crash Bandicoot: The Wrath of Cortex (PC port) - Legion Go test package
-=======================================================================
+Project Wrath - Legion Go test package
+======================================
 
 What this is: the PC port built on the desktop, with everything it needs, to try on the
 Legion Go. The aim is to see how 144 Hz frame rates and the "render thread" (frames drawn
@@ -17,6 +17,17 @@ which opens every warp room (all crystals), so every level in the tests can be r
 *** hold comfortably, close the game and let it cool down.
 
 New in this package:
+  - The project has its name, Project Wrath. The game is ProjectWrath.exe (Task Manager
+    shows "Project Wrath"), its window and settings menu say Project Wrath, the launchers
+    are "Play Project Wrath.bat" and its variants, the settings are ProjectWrath.ini, the
+    logs ProjectWrath.err.log, and "Collect logs.bat" makes
+    ProjectWrath_logs_LegionGo_<date>_<time>.zip. The package is the ProjectWrath-LegionGo
+    folder. Nothing in the game itself changes. A crash_twoc.ini copied in from an earlier
+    test folder is still read (until the game saves its own ProjectWrath.ini; the old file
+    is left as it is).
+  Nothing else changes for the tests.
+
+From the last package:
   - A first-run setup (the start of sharing the game with other people): when game_files\
     is missing or fails its check, a setup screen opens before the game, instead of the
     old message box, and copies the game files from a disc image (.iso) or an extracted
@@ -25,12 +36,11 @@ New in this package:
     game files" (checks all 2,267 files against the disc, about 10 seconds; the game keeps
     running) and "Choose another disc image..." (asks, then restarts into the setup
     screen; only useful with a disc image on the Legion Go).
-  - crash_twoc.exe can be double-clicked on its own now: it sets itself up as
-    "Play Crash.bat" does and writes run_twoc.err.log. "Play Crash.bat" stays the way to
-    start it for the tests (its console window and the test launchers).
-  Nothing else changes for the tests.
+  - ProjectWrath.exe can be double-clicked on its own now: it sets itself up as
+    "Play Project Wrath.bat" does and writes ProjectWrath.err.log. "Play Project Wrath.bat"
+    stays the way to start it for the tests (its console window and the test launchers).
 
-From the last package:
+From the packages before:
   - Smokey and the Bandicoot: the flat grey ("silver") triangle that flashed over the road
     for a frame while driving, late in the race, is gone. It always pointed at the exact
     centre of the picture: a piece of ground right beside the camera came out at the
@@ -38,8 +48,6 @@ From the last package:
     in front of it nor behind it (rare: about once in a thousand frames, and only while
     moving). Both Frame rate settings; nothing else should look different. The flat
     wedge over the road in your earlier still picture was the same thing.
-
-From the package before:
   - Smokey and the Bandicoot: the dark slate triangle that came and went on the far canyon
     wall (left of the cactus, near the finish gate) is gone. It was a piece of the light haze
     painted along the foot of the canyon walls going missing, so the darker wall showed
@@ -103,7 +111,7 @@ From the packages before that (also new to this folder if you skipped them):
     fur" and has three choices: On (the Xbox's look, the default), Off for Crash only (Crash
     without his layer of fur, as on the PlayStation 2; Coco, Crunch, Pura and the others
     keep theirs) and Off for everyone (no fur
-    on anyone, as "Crash's fur" Off did). Applies at once. A crash_twoc.ini from the last
+    on anyone, as "Crash's fur" Off did). Applies at once. A ProjectWrath.ini from the last
     package keeps its choice (fur off there is "Off for everyone").
   - "See-through gems and crystals in the hub" (now on the Extras tab; Off in
     this package, the game's own look): the crystal and the gems shown at each warp room
@@ -122,7 +130,7 @@ From the packages before that (also new to this folder if you skipped them):
   - Fahrenheit Frenzy's X-ray room shows its X-ray (a green negative of the room, Crash
     as a skeleton) instead of a black screen.
   - The "HUD margin" slider is gone: with HUD position "Screen edges" the counters sit at
-    the screen's edges (as at 0% before). An older crash_twoc.ini's hud_margin line is
+    the screen's edges (as at 0% before). An older ProjectWrath.ini's hud_margin line is
     ignored and dropped the next time the settings are saved.
   - Quit game: a button next to Resume at the bottom of the settings menu, on every tab.
     It asks "Quit the game? Unsaved progress will be lost." with Yes / No (No is first;
@@ -167,42 +175,42 @@ Still from last time:
     adaptive frame rate's step, the processor's speed (MHz and % of its rated speed), the
     battery's watts (or "Plugged in"), Windows' power mode and the temperature if Windows
     has one. This package starts on Simple.
-  - "Play Crash (safe settings).bat": every setting at its default, in a window, and
-    crash_twoc.ini neither read nor written (the settings menu says so at its top). If the
+  - "Play Project Wrath (safe settings).bat": every setting at its default, in a window, and
+    ProjectWrath.ini neither read nor written (the settings menu says so at its top). If the
     game won't start after a settings change, use this.
   - An About tab in the settings menu (now the last; LB / RB): the build, the graphics chip and
     its driver, the screen's mode and refresh rate, the processor, the Windows version and
     the game files' check. THIRD_PARTY_LICENSES.txt lists the other people's code inside
     the game and beside it, with their licences.
-  - And from before: the power log (run_twoc.power.log, written straight to the disk,
+  - And from before: the power log (ProjectWrath.power.log, written straight to the disk,
     and Windows' crash records in Collect logs' zip), the render sizes grouped by shape,
     the frozen-splash fix (if the splash ever freezes: alt+tab once), Render scale, MSAA +
     SMAA, Pause when in the background, Skip the title animation.
 
 What's in the folder
 --------------------
-  Play Crash.bat                  starts the game
-  Play Crash (fullscreen start test).bat     starts the game with full screen on (the
+  Play Project Wrath.bat                  starts the game
+  Play Project Wrath (fullscreen start test).bat     starts the game with full screen on (the
                                   first test, part C)
-  Play Crash (fullscreen old way).bat        full screen at once, as the package before
+  Play Project Wrath (fullscreen old way).bat        full screen at once, as the package before
                                   last did, with only the recovery to unfreeze it (the
                                   first test's second half)
-  Play Crash (safe settings).bat  starts the game with every setting at its default, in a
-                                  window, without reading or writing crash_twoc.ini (the
+  Play Project Wrath (safe settings).bat  starts the game with every setting at its default, in a
+                                  window, without reading or writing ProjectWrath.ini (the
                                   settings menu says so while it is on). If the game won't
                                   start after a settings change, use this.
-  Play Crash (72 fps test).bat    starts the game at 72 fps for one run (an optional test;
+  Play Project Wrath (72 fps test).bat    starts the game at 72 fps for one run (an optional test;
                                   72 fps is in the Frame rate list now too)
-  Play Crash (ack wait test).bat  starts the game with the "ack wait" switch on (test 2b;
+  Play Project Wrath (ack wait test).bat  starts the game with the "ack wait" switch on (test 2b;
                                   part C says what it is)
-  Play Crash (bake off).bat       starts the game with "baked draws" off, to compare (an
+  Play Project Wrath (bake off).bat       starts the game with "baked draws" off, to compare (an
                                   optional test)
-  Play Crash (Vulkan probe).bat   an optional one-minute test: a second small window that
+  Play Project Wrath (Vulkan probe).bat   an optional one-minute test: a second small window that
                                   tries Vulkan
   Collect logs.bat                zips the logs and a PC summary to bring back
-  crash_twoc.ini                  the game's settings, already set up for the Legion Go
+  ProjectWrath.ini                  the game's settings, already set up for the Legion Go
   Test notes.txt                  write what you see here; it goes into the zip
-  crash_twoc.exe                  the game (its C++ runtime is built in: no runtime DLLs)
+  ProjectWrath.exe                  the game (its C++ runtime is built in: no runtime DLLs)
   xemu_apu.dll                    the game's audio library (the game needs it beside the exe)
   game_files\                     the disc files (default.xbe and Crashdat\)
   tools\                          vrrprobe.exe (a display test) and the log collector
@@ -212,8 +220,8 @@ What's in the folder
   LICENSE.txt                     this project's own code (MIT), what that covers, and that
                                   no rights to the game are granted
 
-The game also makes these when it runs: logs\ (earlier runs' logs), run_twoc.err.log (the
-last run's log), run_twoc.power.log (the last run's power log), game_files\UDATA (saves),
+The game also makes these when it runs: logs\ (earlier runs' logs), ProjectWrath.err.log (the
+last run's log), ProjectWrath.power.log (the last run's power log), game_files\UDATA (saves),
 game_files\UDATA_backups (copies of the save,
 part E) and game_files\TDATA, and, outside this folder,
 %LOCALAPPDATA%\xboxrecomp (the Xbox's empty hard-disk images: about 5 GB on paper, but
@@ -222,11 +230,11 @@ part E) and game_files\TDATA, and, outside this folder,
 
 A. Set up the Legion Go (once)
 ------------------------------
-1.  Copy the whole LegionGoPackage folder from the desktop to the Legion Go, for example
-    to C:\Games\LegionGoPackage. Any folder works, spaces in the name too. It needs about
-    1 GB. A USB stick or a USB-C drive is quickest. An older LegionGoPackage already on
-    the Legion Go: delete it (after "Collect logs.bat" if it has runs you haven't brought
-    back); this one replaces it. Steps 2-8 are on the Legion Go.
+1.  Copy the ProjectWrath-LegionGo folder (on the desktop, in Desktop\Crash\LegionGoPackage)
+    to the Legion Go, for example to C:\Games\ProjectWrath-LegionGo. Any folder works,
+    spaces in the name too. It needs about 1 GB. A USB stick or a USB-C drive is quickest.
+    An older LegionGoPackage already on the Legion Go: delete it (after its "Collect
+    logs.bat" if it has runs you haven't brought back); this one replaces it. Steps 2-8 are on the Legion Go.
 2.  Set the screen to 144 Hz: Settings > System > Display > Advanced display >
     "Choose a refresh rate" > 144 Hz (Legion Space's quick settings have the same switch).
     If the list offers "Dynamic", pick 144 instead.
@@ -263,7 +271,7 @@ one.)
 
 B. Start the game (on the Legion Go)
 ------------------------------------
-1.  Double-click "Play Crash.bat". A black console window opens, then the game window.
+1.  Double-click "Play Project Wrath.bat". A black console window opens, then the game window.
     Leave the console open; it closes by itself when the game ends.
     If Windows says "Windows protected your PC", click "More info", then "Run anyway".
 2.  The game starts in a window nearly as big as the screen. Alt+Enter switches to full
@@ -300,7 +308,7 @@ B. Start the game (on the Legion Go)
       Show the startup message, Pause the game while this menu is open, Pause when in the
       background, Skip the title animation
     On the Audio tab: Mute Droid Void's background drone (from the level's next start).
-    Changes apply at once and are saved to crash_twoc.ini when you close the menu.
+    Changes apply at once and are saved to ProjectWrath.ini when you close the menu.
     This package starts with: Render size "Monitor (native, ...)" (the screen's own size),
     Frame rate "Match display", Anisotropic filtering 4x (Graphics tab), Anti-aliasing Off, Render scale
     100%, Render thread Auto, Adaptive frame rate On. The tests below say which of these
@@ -309,7 +317,7 @@ B. Start the game (on the Legion Go)
     (or Alt+F4). The black console window should close with it within a second or two. If
     it stays open (still saying "Crash is running"), the game's process didn't finish
     exiting: note that in Test notes.txt, with whether Task Manager > Details still lists
-    crash_twoc.exe. "Collect logs.bat" ends it.
+    ProjectWrath.exe. "Collect logs.bat" ends it.
 
 
 C. The tests
@@ -322,9 +330,9 @@ All on the Legion Go. Write what you see in Test notes.txt as you go.
        black console window or anything else while it starts),
      - wait for the main menu (about 15 seconds), close the game (the window's X, or
        Alt+F4), and wait about 5 seconds before the next start.
-   a. Ten times "Play Crash (fullscreen start test).bat" (full screen after the first
+   a. Ten times "Play Project Wrath (fullscreen start test).bat" (full screen after the first
       frames are shown, as players will run it).
-   b. Then ten times "Play Crash (fullscreen old way).bat" (full screen at once, as the
+   b. Then ten times "Play Project Wrath (fullscreen old way).bat" (full screen at once, as the
       package before last did: it froze 3 times in 12 then; here a freeze should clear by
       itself within about two seconds).
    c. Then run "Collect logs.bat" before anything else (each start's log is kept in logs\,
@@ -333,18 +341,19 @@ All on the Legion Go. Write what you see in Test notes.txt as you go.
    stuttered, or the window flashed up first (it should show for about a second, then go
    full screen). If one froze: wait 10 seconds before touching anything (the game should
    unfreeze itself), and only then alt+tab if it is still frozen; note which.
-   Note: if you copied crash_twoc.ini from your earlier test folder into this one, plain
-   "Play Crash.bat" may start full screen too (that copy has fullscreen = 1 saved); this
+   Note: if you copied the ini from your earlier test folder into this one (crash_twoc.ini there,
+   which ProjectWrath.exe reads until it saves its own), plain
+   "Play Project Wrath.bat" may start full screen too (that copy has fullscreen = 1 saved); this
    package's own ini starts in a window. Either is fine for the tests below; say which.
 
 2. Ten minutes at cast_bug's start, twice (plugged in, Legion Space Performance and
    Windows' Best performance set before starting, the package's settings).
    a. Start cool: leave the Legion Go about 10 minutes with the game closed first. Start
-      "Play Crash.bat", go to cast_bug (below), put the controller down and let Crash
+      "Play Project Wrath.bat", go to cast_bug (below), put the controller down and let Crash
       stand for 10 minutes. Write down the counter's two numbers after 1, 5 and 10
       minutes, then close the game.
    b. Let it cool about 10 minutes again, then the same 10 minutes with
-      "Play Crash (ack wait test).bat".
+      "Play Project Wrath (ack wait test).bat".
    Then "Collect logs.bat". The power log shows where the processor's speed settles (a
    "CPU clock down" line now marks a drop of more than a tenth that lasts 10 seconds).
 
@@ -353,11 +362,11 @@ All on the Legion Go. Write what you see in Test notes.txt as you go.
 
 3. The power-mode round: where it crashed (plugged in; avalanch and the snow boss). Set
    the mode before each start, never while the game runs:
-     a. With the game closed, Legion Space: Performance. Start "Play Crash.bat" and keep the
+     a. With the game closed, Legion Space: Performance. Start "Play Project Wrath.bat" and keep the
         package's settings (Render size "Monitor (native, ...)", Frame rate "Match display",
         Anisotropic filtering 4x). Play avalanch and the snow boss for about 10 minutes.
         Close the game.
-     b. With the game closed, Legion Space: Balanced. Start "Play Crash.bat", open the
+     b. With the game closed, Legion Space: Balanced. Start "Play Project Wrath.bat", open the
         settings menu, and set three things: on the Display tab Render size 1280x800 (in
         the 16:10 group) and Frame rate 72 fps, on the Graphics tab Anisotropic filtering
         2x. Leave everything else as it is. Play the same for about 10 minutes. Close the game.
@@ -373,7 +382,7 @@ All on the Legion Go. Write what you see in Test notes.txt as you go.
 
 4. The lighter settings on battery (cast_bug's start, then avalanch). Unplug the charger
    and write down the time and the percentage. With the game closed, set Legion Space to
-   Balanced. Start "Play Crash.bat", and in the settings menu set Render size 1280x800 and
+   Balanced. Start "Play Project Wrath.bat", and in the settings menu set Render size 1280x800 and
    Frame rate 72 fps (Display tab), Anisotropic filtering 2x (Graphics tab) (as in test 3b; they are saved,
    so if you did 3b last they are still set). Go to cast_bug and stand 30 s: write down the
    counter and the Measured line. Then play avalanch for 5 minutes. Close the game, write
@@ -412,14 +421,14 @@ All on the Legion Go. Write what you see in Test notes.txt as you go.
        its settings? Afterwards set the package's settings again (the Aspect ratio stays
        16:10): Render size "Monitor (native, ...)", Frame rate "Match display", Render
        thread Auto, Show frame rate Simple, HUD position Screen edges (Display tab),
-       Anisotropic filtering 4x (Graphics tab). (Or close the game and copy crash_twoc.ini
+       Anisotropic filtering 4x (Graphics tab). (Or close the game and copy ProjectWrath.ini
        from the desktop again.)
      - The About tab: does it name the Legion Go's graphics chip (AMD Radeon) and driver,
        1920x1200 (or your resolution) at 144 Hz, and Windows 11? Copy its lines into Test
        notes.txt.
-     - "Play Crash (safe settings).bat" once: does it start in a small window with the
+     - "Play Project Wrath (safe settings).bat" once: does it start in a small window with the
        orange "Safe settings" line at the top of the settings menu? Close it; then
-       "Play Crash.bat" should start with your settings as before.
+       "Play Project Wrath.bat" should start with your settings as before.
      - View + Menu held about a second: does it open and close the settings menu?
      - Quit game with the controller only (D-pad down to it, A; No first, then again and
        Yes): does the game close, and the black window with it?
@@ -442,20 +451,20 @@ line).
 What baked draws are (the optional "bake off" launcher): at 144 Hz each game frame is shown
 2 or 3 times, each time drawn again, a little further along. The first drawing works out
 every draw's settings; the others reuse what it set up. Last round it took about a quarter
-off the render thread here. "Play Crash (bake off).bat" turns it off for one run.
+off the render thread here. "Play Project Wrath (bake off).bat" turns it off for one run.
 
-The Vulkan probe (optional, about a minute, plugged in): start "Play Crash (Vulkan
-probe).bat". A second small window, "Crash TWOC - Vulkan probe", opens beside the game and
+The Vulkan probe (optional, about a minute, plugged in): start "Play Project Wrath (Vulkan
+probe).bat". A second small window, "Project Wrath - Vulkan probe", opens beside the game and
 shows a colour that keeps changing. Let the game reach the hub and stay a minute, then
 close the game. Write down only whether the second window opened; this time it should also
 measure how evenly its frames are shown (the log, which "Collect logs.bat" takes).
 
 What the ack wait test is: one of the game's helper threads (the one that answers the
 game's graphics commands) keeps a CPU core busy all the time, waiting for the next one.
-"Play Crash (ack wait test).bat" makes it rest between commands instead, which gives back
+"Play Project Wrath (ack wait test).bat" makes it rest between commands instead, which gives back
 about half a core. Plugged in it made no difference to the frame rate before; with the
 power limit cutting the processor's speed a few minutes in, the freed half core might keep
-it faster. Test 2b compares it; otherwise play with "Play Crash.bat".
+it faster. Test 2b compares it; otherwise play with "Play Project Wrath.bat".
 
 Then bring the logs back (part D).
 
@@ -468,9 +477,9 @@ Steps 1-3 on the Legion Go, step 4 on the desktop.
     game hadn't ended).
 2.  Double-click "Collect logs.bat". It takes about 20 seconds; the screen turns grey
     with a moving white bar twice (that's vrrprobe testing how the display shows frames).
-3.  It makes LegionGo_logs_<date>_<time>.zip in this folder and opens Explorer on it.
+3.  It makes ProjectWrath_logs_LegionGo_<date>_<time>.zip in this folder and opens Explorer on it.
     The zip has the last run's log and power log, the earlier runs' (logs\),
-    crash_twoc.ini, Test notes.txt, a summary of the PC (CPU, GPU and driver, Windows
+    ProjectWrath.ini, Test notes.txt, a summary of the PC (CPU, GPU and driver, Windows
     version, power mode, plugged in or not, the screen's modes and refresh rate), Windows'
     crash and power records of the last 3 days (events.txt) and vrrprobe's results.
 4.  Copy the zip to the desktop PC (USB stick, a cloud folder or LocalSend) and give it
@@ -503,7 +512,7 @@ the copies too) into the other folder's game_files\.
 
 F. The new settings
 -------------------
-All in the settings menu (Menu held, or F1), saved to crash_twoc.ini.
+All in the settings menu (Menu held, or F1), saved to ProjectWrath.ini.
   On battery or in Legion Space's Balanced mode, lighter settings keep the chip cooler,
   quieter and longer on battery: Render size 1280x800, Frame rate 72 fps (Display tab) and
   Anisotropic filtering 2x (Graphics tab). Plugged in, the package's own: Render size
@@ -544,7 +553,7 @@ If something goes wrong
 - The Legion Go crashes, restarts or freezes while the game runs: note the time, start it
   again (hold the power button about 10 seconds to switch off a frozen one), and run
   "Collect logs.bat" first, before starting the game again. The power log
-  (run_twoc.power.log) and Windows' own records (events.txt in the zip) show what the
+  (ProjectWrath.power.log) and Windows' own records (events.txt in the zip) show what the
   chip did up to then. Note in Test notes.txt what you were doing and which Legion Space
   mode was on.
 - The Universal logo freezes at the start (the picture stops, the sound goes on): wait 10
@@ -557,13 +566,13 @@ If something goes wrong
   game_files\ from the desktop again (all of it: about 930 MB, 2,267 files) and start
   again, or, with the disc image on the Legion Go, "Choose disc image (.iso)..." there sets
   them up again (your saves are kept).
-- "Crash can't write to its save folder": copy the package somewhere you can write to
+- "Project Wrath can't write to its save folder": copy the package somewhere you can write to
   (not C:\Program Files), or delete game_files\UDATA (the copies in UDATA_backups stay).
-- If the game won't start after a settings change, use "Play Crash (safe settings).bat": every
-  setting at its default, in a window, and crash_twoc.ini neither read nor changed. Then put
-  the setting back in crash_twoc.ini (or delete the file) and start "Play Crash.bat" again.
+- If the game won't start after a settings change, use "Play Project Wrath (safe settings).bat": every
+  setting at its default, in a window, and ProjectWrath.ini neither read nor changed. Then put
+  the setting back in ProjectWrath.ini (or delete the file) and start "Play Project Wrath.bat" again.
 - The game window opens and closes at once: run "Collect logs.bat" and bring the zip back.
 - A black screen or a crash at the start on the Legion Go only: the same; the log says
   which step failed.
-- To go back to the package's settings: copy crash_twoc.ini from the desktop again (or
+- To go back to the package's settings: copy ProjectWrath.ini from the desktop again (or
   delete it for the game's own defaults: 4:3, 640 x 480 lines, 60 fps).

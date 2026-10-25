@@ -5,10 +5,18 @@
 #       [-Target LegionGo | Nitro5] [-Out DIR] [-Exe crash_twoc.exe] [-GameFiles DIR] [-Save UDATA_DIR] [-Force] [-Pgo]
 #
 # -Target (step 97): LegionGo (the default; Desktop\Crash\LegionGoPackage) or Nitro5 (the Acer Nitro 5 laptop;
-# Desktop\Crash\Nitro5Package). Each has its own crash_twoc.ini, README.txt and Test notes.txt in
+# Desktop\Crash\Nitro5Package). Each has its own ProjectWrath.ini, README.txt and Test notes.txt in
 # targets\<Target>\; the launchers and tools in files\ are shared, less those a target leaves out (Nitro5: the
 # Vulkan probe's). Two packages of one exe: -Pgo for the first, then -Exe twoc\build_pgo\Release\crash_twoc.exe
 # for the second (PACKAGE.txt reads PGO from that build's CMakeCache.txt).
+#
+# Step 109 (notes 18.112): the project is Project Wrath. The build's crash_twoc.exe goes in as ProjectWrath.exe (the
+# exe takes its names from its own file name: ProjectWrath.ini, ProjectWrath.*.log, the window "Project Wrath"), the
+# launchers are "Play Project Wrath*.bat", and each package is a folder named ProjectWrath-<Target> inside the
+# user's own folder for it (Desktop\Crash\LegionGoPackage\ProjectWrath-LegionGo, ...\Nitro5Package\ProjectWrath-Nitro5,
+# ...\SharePackage\ProjectWrath-Share): the folder a player is given carries the name, the user's folders stay
+# where they are. A package of the layout before (PACKAGE.txt directly in the user's folder) is replaced with
+# -Force.
 #
 # -Pgo (step 95, notes 18.98): the exe built with profile-guided optimisation in a build folder of its own
 # (twoc\build_pgo; twoc\build, the ordinary build, untouched): linked instrumented (TWOC_PGO=GEN), trained by
@@ -16,8 +24,8 @@
 # room, ~6 minutes with the menu, intro and hub on the way; needs Git Bash, the repo's .venv and this PC's display),
 # then linked again with the counts (TWOC_PGO=USE). /fp stays precise. PACKAGE.txt says so.
 #
-# Makes DIR (default: Desktop\Crash\<Target>Package) with:
-#   crash_twoc.exe; every DLL it imports is part of Windows 10/11 (checked here with dumpbin /dependents; the list
+# Makes DIR (default: Desktop\Crash\<Target>Package\ProjectWrath-<Target>) with:
+#   ProjectWrath.exe (the build's crash_twoc.exe); every DLL it imports is part of Windows 10/11 (checked here with dumpbin /dependents; the list
 #     goes into PACKAGE.txt). Since step 108 the Visual C++ runtime is linked static (TWOC_STATIC_CRT, /MT): no
 #     runtime DLL is shipped, and an exe or DLL that still imports one (vcruntime140*.dll, msvcp140*.dll,
 #     api-ms-win-crt-*) stops the script. A build with -DTWOC_STATIC_CRT=OFF ships vcruntime140*.dll app-local as
@@ -28,11 +36,11 @@
 #   game_files\ (default.xbe and Crashdat\ from -GameFiles; never UDATA (saves), UDATA_backups, TDATA
 #     or our analysis files; -Save DIR copies DIR in as game_files\UDATA, only when asked)
 #   tools\vrrprobe.exe (built from twoc\tools\diag\vrrprobe.cpp) and tools\collect_logs.ps1
-#   files\: Play Crash.bat, Play Crash (72 fps test).bat, Play Crash (ack wait test).bat,
-#     Play Crash (bake off).bat, Play Crash (Vulkan probe).bat (notes 18.90),
-#     Play Crash (fullscreen start test).bat, Play Crash (fullscreen old way).bat (notes 18.93),
-#     Play Crash (safe settings).bat (notes 18.96: RECOMP_IGNORE_INI=1, the defaults, the ini untouched),
-#     Collect logs.bat; from targets\<Target>\: crash_twoc.ini (the device's settings), README.txt, Test notes.txt
+#   files\: Play Project Wrath.bat, Play Project Wrath (72 fps test).bat, Play Project Wrath (ack wait test).bat,
+#     Play Project Wrath (bake off).bat, Play Project Wrath (Vulkan probe).bat (notes 18.90),
+#     Play Project Wrath (fullscreen start test).bat, Play Project Wrath (fullscreen old way).bat (notes 18.93),
+#     Play Project Wrath (safe settings).bat (notes 18.96: RECOMP_IGNORE_INI=1, the defaults, the ini untouched),
+#     Collect logs.bat; from targets\<Target>\: ProjectWrath.ini (the device's settings), README.txt, Test notes.txt
 #     (text files written with CRLF line ends)
 #   THIRD_PARTY_LICENSES.txt (twoc/, from third_party_licenses.py)
 #   LICENSE.txt (step 108): LICENSE.package.txt filled in: this project's own code under MIT (twoc\LICENSE's text,
@@ -41,17 +49,17 @@
 #   PACKAGE.txt: the build (commits, exe hash, link-time code generation), the imported DLLs and
 #     where each comes from
 #
-# The exe finds game_files\ in its working directory (Play Crash.bat sets it to its own folder)
-# and crash_twoc.ini next to itself, so the folder runs from anywhere. An existing DIR is
+# The exe finds game_files\ in its working directory (Play Project Wrath.bat sets it to its own folder)
+# and ProjectWrath.ini next to itself, so the folder runs from anywhere. An existing DIR is
 # replaced only with -Force and only if it holds a PACKAGE.txt (one this script made).
 # Build first: cmake --build twoc\build --config Release --parallel
 # Then smoke-test a scratch copy (never the package itself): smoke_test.ps1 (notes 18.91).
 #
 # -Target Share (step 107, notes 18.110): the package for other people. NO game files: the exe's first-run setup
-# makes them from the player's own disc image. No crash_twoc.ini (the first start writes one), no test launchers,
-# no vrrprobe, no Test notes; README.txt for strangers, LICENSE.txt (as every package's), Play Crash.bat and
-# the safe-settings launcher, Collect logs.bat (which scrubs the user name, home folder and PC name). Default
-# folder Desktop\Crash\SharePackage. package_audit.ps1 checks it at the end (no game file by name, size or hash,
+# makes them from the player's own disc image. No ProjectWrath.ini (the first start writes one), no test launchers,
+# no vrrprobe, no Test notes; README.txt for strangers, LICENSE.txt (as every package's), Play Project Wrath.bat
+# and the safe-settings launcher, Collect logs.bat (which scrubs the user name, home folder and PC name). Default
+# folder Desktop\Crash\SharePackage\ProjectWrath-Share. package_audit.ps1 checks it at the end (no game file by name, size or hash,
 # no user or PC name, no logs or saves) and the script fails if the audit does.
 param(
     [ValidateSet('LegionGo', 'Nitro5', 'Share')][string]$Target = 'LegionGo',
@@ -66,16 +74,22 @@ $ErrorActionPreference = 'Stop'
 $here = $PSScriptRoot
 $twoc = Split-Path -Parent (Split-Path -Parent $here)
 $repo = Split-Path -Parent $twoc
-if (-not $Out) { $Out = Join-Path ([Environment]::GetFolderPath('Desktop')) "Crash\${Target}Package" }
+# Step 109: the package's own folder, ProjectWrath-<Target>, inside the user's folder for that target.
+$container = $null
+if (-not $Out) {
+    $container = Join-Path ([Environment]::GetFolderPath('Desktop')) "Crash\${Target}Package"
+    $Out = Join-Path $container "ProjectWrath-$Target"
+}
 $targetDir = Join-Path $here "targets\$Target"
 $share = $Target -eq 'Share'
-$need = if ($share) { @('README.txt') } else { @('crash_twoc.ini', 'README.txt', 'Test notes.txt') }
+$need = if ($share) { @('README.txt') } else { @('ProjectWrath.ini', 'README.txt', 'Test notes.txt') }
 foreach ($f in $need) {
     if (-not (Test-Path (Join-Path $targetDir $f))) { throw "No $f in $targetDir" }
 }
-$tests = @('Play Crash (72 fps test).bat', 'Play Crash (Vulkan probe).bat', 'Play Crash (ack wait test).bat',
-           'Play Crash (bake off).bat', 'Play Crash (fullscreen start test).bat', 'Play Crash (fullscreen old way).bat')
-$leaveOut = @{ 'LegionGo' = @(); 'Nitro5' = @('Play Crash (Vulkan probe).bat'); 'Share' = $tests }[$Target]
+$tests = @('Play Project Wrath (72 fps test).bat', 'Play Project Wrath (Vulkan probe).bat',
+           'Play Project Wrath (ack wait test).bat', 'Play Project Wrath (bake off).bat',
+           'Play Project Wrath (fullscreen start test).bat', 'Play Project Wrath (fullscreen old way).bat')
+$leaveOut = @{ 'LegionGo' = @(); 'Nitro5' = @('Play Project Wrath (Vulkan probe).bat'); 'Share' = $tests }[$Target]
 $targetName = @{ 'LegionGo' = 'Legion Go'; 'Nitro5' = 'Acer Nitro 5'; 'Share' = 'Share (for other people, no game files)' }[$Target]
 if ($Pgo -and $Exe) { throw '-Pgo builds its own exe: leave -Exe out' }
 if ($share -and ($GameFiles -or $Save)) { throw '-Target Share ships no game files and no saves: leave -GameFiles and -Save out' }
@@ -214,9 +228,15 @@ foreach ($d in ($deps + $apuDeps | Select-Object -Unique)) {
     if ($deps -contains $d) { $depLines += ('  {0,-40} {1}' -f $d, $where) }
     if ($apuDeps -contains $d) { $apuLines += ('  {0,-40} {1}' -f $d, $where) }
 }
-if ($apuDeps -contains 'crash_twoc.exe') { throw 'xemu_apu.dll imports from crash_twoc.exe: it must not' }
+if ($apuDeps -contains 'crash_twoc.exe' -or $apuDeps -contains 'ProjectWrath.exe') { throw 'xemu_apu.dll imports from the exe: it must not' }
 
-# The folder.
+# The folder. Step 109: the user's folder of the layout before (the package's files directly in it, PACKAGE.txt
+# there: a package this script made) is emptied first with -Force, then holds ProjectWrath-<Target>.
+if ($container -and (Test-Path (Join-Path $container 'PACKAGE.txt'))) {
+    if (-not $Force) { throw "$container holds a package of the layout before; -Force replaces it" }
+    Get-ChildItem -LiteralPath $container -Force | Where-Object { $_.Name -ne "ProjectWrath-$Target" } |
+        Remove-Item -Recurse -Force
+}
 if (Test-Path $Out) {
     if (-not $Force) { throw "$Out exists; -Force replaces it" }
     if (-not (Test-Path (Join-Path $Out 'PACKAGE.txt'))) { throw "$Out exists and has no PACKAGE.txt: not a package this script made, left alone" }
@@ -226,7 +246,7 @@ New-Item -ItemType Directory -Force -Path (Join-Path $Out 'tools') | Out-Null
 $Out = (Resolve-Path $Out).Path
 
 Write-Host "Packaging into $Out"
-Copy-Item $Exe (Join-Path $Out 'crash_twoc.exe')
+Copy-Item $Exe (Join-Path $Out 'ProjectWrath.exe')      # step 109: the build's crash_twoc.exe, as Project Wrath's
 Copy-Item $apuDll (Join-Path $Out 'xemu_apu.dll')
 foreach ($d in ($deps + $apuDeps | Select-Object -Unique)) { if ($shipped -contains $d.ToLower()) { Copy-Item (Join-Path $crt.FullName $d) $Out } }
 # The Share package: the audio library's complete source beside it (step 108; the LGPL's terms for the DLL).
@@ -235,7 +255,7 @@ if ($share) {
     New-Item -ItemType Directory -Force -Path $srcDir | Out-Null
     $xh = (& git -C (Join-Path $repo 'xboxrecomp') rev-parse --short HEAD); $th = (& git -C $repo rev-parse --short HEAD)
     & powershell -NoProfile -ExecutionPolicy Bypass -File (Join-Path $here 'make_apu_source_package.ps1') `
-        -Out (Join-Path $srcDir "xemu_apu-source_xboxrecomp-${xh}_twoc-${th}.zip")
+        -Out (Join-Path $srcDir "xemu_apu-source_xboxrecomp-${xh}_ProjectWrath-${th}.zip")
     if ($LASTEXITCODE) { throw 'make_apu_source_package.ps1 failed' }
 }
 
@@ -283,9 +303,9 @@ Put-Text (Join-Path $twoc 'THIRD_PARTY_LICENSES.txt') (Join-Path $Out 'THIRD_PAR
 # the one place to change it), with what it covers and what it doesn't.
 $mit = ([IO.File]::ReadAllText((Join-Path $twoc 'LICENSE')) -replace "`r`n", "`n").Trim()
 if ($mit -notmatch '(?m)^MIT License$' -or $mit -notmatch '(?m)^Copyright \(c\) ') { throw "twoc\LICENSE isn't the MIT licence with a copyright line" }
-$audio = 'The Xbox audio emulation built into crash_twoc.exe comes from xemu and is under the GNU Lesser ' +
-         'General Public License, version 2.1 or later; THIRD_PARTY_LICENSES.txt (part 7) has its notice and the ' +
-         'licence''s text.'
+$audio = 'The Xbox audio emulation, xemu_apu.dll beside ProjectWrath.exe, comes from xemu and is under the GNU ' +
+         'Lesser General Public License, version 2.1 or later; THIRD_PARTY_LICENSES.txt (part 7) has its notice and ' +
+         'the licence''s text' + $(if ($share) { ', and Source\ its complete source.' } else { '.' })
 $gameLine = if ($share) { 'This package has no game files: the first start sets them up from your own disc image.' }
             else { 'This test package''s game_files folder is a copy of the owner''s own disc, for the owner''s own devices only: it is not to be given to anyone.' }
 function Wrap([string]$s, [int]$width, [string]$indent) {     # words to lines of at most $width, $indent before each
@@ -317,7 +337,7 @@ $head = Git1 $repo @('log', '-1', '--format=%h %ad %s', '--date=iso', '--', 'two
 $dirty = if (Git1 $repo @('status', '--porcelain', '--untracked-files=no', '--', 'twoc/src', 'twoc/CMakeLists.txt', 'twoc/seed_functions.json')) { ' (with uncommitted changes)' } else { '' }
 $xr = Git1 $xrDir @('log', '-1', '--format=%h %ad', '--date=iso')
 if (Git1 $xrDir @('status', '--porcelain', '--untracked-files=no')) { $xr += ' (with uncommitted changes)' }
-$hash = (Get-FileHash -Algorithm SHA256 (Join-Path $Out 'crash_twoc.exe')).Hash
+$hash = (Get-FileHash -Algorithm SHA256 (Join-Path $Out 'ProjectWrath.exe')).Hash
 $apuHash = (Get-FileHash -Algorithm SHA256 (Join-Path $Out 'xemu_apu.dll')).Hash
 # Link-time code generation (notes 18.87): the exe's build folder's CMakeCache.txt (build\Release\..).
 $cache = Join-Path (Split-Path -Parent (Split-Path -Parent $Exe)) 'CMakeCache.txt'
@@ -332,17 +352,18 @@ $gf = if ($share) { @() } else { Get-ChildItem -Recurse -File (Join-Path $Out 'g
 $gfLine = if ($share) { 'game_files: none (the player''s own disc image is set up at the first start; no saves)' }
           else { "game_files: {0} files, {1:N0} MB{2}" -f $gf.Count, (($gf | Measure-Object Length -Sum).Sum / 1MB), $(if ($Save) { ", with a save copied in from $Save" } else { ', no saves' }) }
 $pkg = @(
-    "Crash TWOC, $targetName package, made $(Get-Date -Format 'yyyy-MM-dd HH:mm:ss zzz') by twoc\tools\package\make_package.ps1",
+    "Project Wrath, $targetName package, made $(Get-Date -Format 'yyyy-MM-dd HH:mm:ss zzz') by tools\package\make_package.ps1",
     "Target: $Target",
     "",
     "Build: twoc $head$dirty",
     "       xboxrecomp $xr",
-    "crash_twoc.exe: $((Get-Item $Exe).Length) bytes, built $($exeTime.ToString('yyyy-MM-dd HH:mm:ss')), SHA-256 $hash",
-    "                link-time code generation: $ltcg",
-    "                profile-guided optimisation: $pgoLine",
-    "                Visual C++ runtime: $(if ($staticCrt) { 'linked static (/MT): no runtime DLL needed or shipped' } else { 'DLL (/MD): vcruntime140*.dll shipped beside it' })",
-    "xemu_apu.dll:   $((Get-Item $apuDll).Length) bytes, built $((Get-Item $apuDll).LastWriteTime.ToString('yyyy-MM-dd HH:mm:ss')), SHA-256 $apuHash",
-    "                the audio library (xboxrecomp's src\apu from xemu, LGPL-2.1-or-later), loaded by the exe at the start$(if ($share) { '; its source: Source\' })",
+    "ProjectWrath.exe: $((Get-Item $Exe).Length) bytes, built $($exeTime.ToString('yyyy-MM-dd HH:mm:ss')), SHA-256 $hash",
+    "                  (the build's exe, copied under the project's name)",
+    "                  link-time code generation: $ltcg",
+    "                  profile-guided optimisation: $pgoLine",
+    "                  Visual C++ runtime: $(if ($staticCrt) { 'linked static (/MT): no runtime DLL needed or shipped' } else { 'DLL (/MD): vcruntime140*.dll shipped beside it' })",
+    "xemu_apu.dll:     $((Get-Item $apuDll).Length) bytes, built $((Get-Item $apuDll).LastWriteTime.ToString('yyyy-MM-dd HH:mm:ss')), SHA-256 $apuHash",
+    "                  the audio library (xboxrecomp's src\apu from xemu, LGPL-2.1-or-later), loaded by the exe at the start$(if ($share) { '; its source: Source\' })",
     $gfLine,
     "",
     "DLLs the exe imports (dumpbin /dependents) and where they come from:"

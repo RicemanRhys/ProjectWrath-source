@@ -1,10 +1,10 @@
-Crash TWOC: licences
-====================
+Project Wrath: licences
+=======================
 
 In plain words (what the project's owner chose; this is not legal advice):
 
 1. This project's own code is under the MIT licence; its text is at the end of this file. "Own code" means
-   the port's source written for this project and the parts of crash_twoc.exe built from it.
+   the port's source written for this project and the parts of ProjectWrath.exe built from it.
 
 2. Other people's code in this program keeps its own licence. THIRD_PARTY_LICENSES.txt lists each part with
    the full text of its licence: Dear ImGui, SDL 3, XeGTAO, SMAA, volk, the Vulkan headers and xboxrecomp.
@@ -12,7 +12,7 @@ In plain words (what the project's owner chose; this is not legal advice):
 
 3. The audio code. @AUDIO@
 
-4. crash_twoc.exe also holds code translated by machine from the game's own Xbox program (the "recompiled
+4. ProjectWrath.exe also holds code translated by machine from the game's own Xbox program (the "recompiled
    code"). The MIT licence is not claimed for it, and this file grants nothing for it.
 
 5. NO GAME FILES ARE INCLUDED, AND NO RIGHTS TO THE GAME ARE GRANTED. Crash Bandicoot: The Wrath of Cortex,

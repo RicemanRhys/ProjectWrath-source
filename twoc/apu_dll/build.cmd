@@ -5,7 +5,7 @@ rem Needs: 64-bit Windows 10 or 11 and Visual Studio 2022 (Community is free) or
 rem "Desktop development with C++" workload (MSVC x64, the Windows SDK and CMake are part of it).
 rem Run it by double-clicking it, or from a command prompt. It writes the new DLL here, as xemu_apu.dll,
 rem and keeps the build in the folder "build". To use it: close the game, copy this xemu_apu.dll over the
-rem one next to crash_twoc.exe (keep the old one somewhere if you want to go back), start the game.
+rem one next to ProjectWrath.exe (keep the old one somewhere if you want to go back), start the game.
 rem Keep this folder's path short (for example C:\xemu_apu-source): Visual Studio's build tools fail on
 rem paths over 260 characters, and the build adds about 120 of its own.
 setlocal
