@@ -15,7 +15,7 @@
 # and copies LOG (relative to COPY) into DIR. Read the log for [CFG], [FILES], "host baked draws",
 # "host startup message", [OVL] F1, [VK] and "[BAT] ... ended with code 0".
 # -Quit (step 97, notes 18.100): the game is closed by the settings menu's Quit game instead of its window,
-# through an XInput stand-in pad (RECOMP_DEV_XINPUT_FILE, a test aid): F1, RB three times (the Saves tab),
+# through an XInput stand-in pad (RECOMP_DEV_XINPUT_FILE, a test aid): F1, RB four times (the Saves tab; three before step 104's Graphics tab),
 # down to the bottom row, right to Quit game, A, Left to Yes, A; the log should end with the [QUIT] lines and
 # "[BAT] ... ended with code 0". The log's [GPU] and [CPU] lines are printed too.
 # Needs twoc\tools\diag\wgcgrab.exe (wgcgrab_build.bat) and Python. Never run it on the package itself
@@ -75,7 +75,7 @@ if ($Probe) { $pgrab.WaitForExit(30000) | Out-Null }
 if ($Quit) {
     & python -I "$here\windows.py" key F1 | Out-File -Append "$Out\keys.txt"
     Start-Sleep -Seconds 2
-    1..3 | ForEach-Object { Pad 'white=255' }
+    1..4 | ForEach-Object { Pad 'white=255' }
     1..10 | ForEach-Object { Pad 'buttons=0x2' }
     Pad 'buttons=0x8'
     Pad 'a=255'
