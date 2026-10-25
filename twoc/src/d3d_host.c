@@ -183,9 +183,10 @@
 #include "restart.h"
 #include "cpu_info.h"
 #include "mem_log.h"
+#include "names.h"
 
 #define WIN_CLASS          "TwocD3DBridge"
-#define WIN_TITLE           "Crash TWOC - D3D bridge (host)"
+#define WIN_TITLE           twoc_window_title()   /* step 109: "Project Wrath" (names.h) */
 #define DUMP_FIRST_FRAMES   8
 #define DUMP_PERIOD_MS      10000
 
@@ -1202,7 +1203,9 @@ static DWORD WINAPI win_thread(LPVOID p)
     {
         LONG cw = r.right, ch = r.bottom;
         AdjustWindowRect(&r, style, FALSE);
-        g_hwnd_dev = CreateWindowExA(0, WIN_CLASS, WIN_TITLE " (device)", style, 0, 0,
+        char dev_title[96];
+        snprintf(dev_title, sizeof(dev_title), "%s (device)", WIN_TITLE);
+        g_hwnd_dev = CreateWindowExA(0, WIN_CLASS, dev_title, style, 0, 0,
                                      r.right - r.left, r.bottom - r.top, NULL, NULL, wc.hInstance, NULL);
         g_hwnd = CreateWindowExA(0, WIN_CLASS, WIN_TITLE, style, CW_USEDEFAULT, CW_USEDEFAULT,
                                  r.right - r.left, r.bottom - r.top, NULL, NULL, wc.hInstance, NULL);
@@ -10093,6 +10096,24 @@ static int ovl_begin(void)
     return 0;
 }
 
+/* The F1 menu's note after a save (twoc_settings_save's result), with the ini's real name (step 109: ProjectWrath.ini
+ * beside ProjectWrath.exe, names.h). `resume`: the note while changes wait for the menu to close. */
+static const char *ini_note(int sv, int resume)
+{
+    static char t[3][160];
+    const char *n = twoc_ini_name();
+    if (resume) {
+        snprintf(t[2], sizeof(t[2]), "Saved to %s when you resume.", n);
+        return t[2];
+    }
+    if (sv > 0) {
+        snprintf(t[1], sizeof(t[1]), "Not saved: safe settings (%s is ignored this run).", n);
+        return t[1];
+    }
+    snprintf(t[0], sizeof(t[0]), sv == 0 ? "Saved to %s." : "%s couldn't be written.", n);
+    return t[0];
+}
+
 /* The overlay closed (Esc, Resume) and its last frame is shown. */
 static void ovl_end(void)
 {
@@ -10108,8 +10129,7 @@ static void ovl_end(void)
     InterlockedExchange(&g_ovl_session, 0);
     if (g_ovs.dirty) {
         int sv = twoc_settings_save(&g_ovs.s);
-        g_ovs.note = sv == 0 ? "Saved to crash_twoc.ini." : sv > 0 ? "Not saved: safe settings (crash_twoc.ini is ignored this run)."
-                                                           : "crash_twoc.ini couldn't be written.";
+        g_ovs.note = ini_note(sv, 0);
     }
     QueryPerformanceCounter(&now);
     fprintf(stderr, "[OVL] settings closed after %.1f s (%u overlay frames)%s\n",
@@ -10179,7 +10199,7 @@ static int ovl_draw(ID3D11Texture2D *dst, int running)
         in.interp_why = why;
     }
     in.save_note = g_ovs.dirty ? (twoc_settings_ignored() ? "Safe settings: not saved when you resume."
-                                                          : "Saved to crash_twoc.ini when you resume.")
+                                                          : ini_note(0, 1))
                                : g_ovs.note;
     if (SUCCEEDED(ID3D11Device_CreateRenderTargetView(d3d8_GetD3D11Device(), (ID3D11Resource *)dst, NULL, &rtv)))
         r = ovl_frame(rtv, g_buf_w, g_buf_h, overlay_scale(),
@@ -10267,8 +10287,7 @@ static void ovl_end_game(int restart)
     if (g_ovs.dirty) {
         int sv = twoc_settings_save(&g_ovs.s);
         g_ovs.dirty = 0;
-        g_ovs.note = sv == 0 ? "Saved to crash_twoc.ini." : sv > 0 ? "Not saved: safe settings (crash_twoc.ini is ignored this run)."
-                                                           : "crash_twoc.ini couldn't be written.";
+        g_ovs.note = ini_note(sv, 0);
     }
     if (twoc_end_begin(restart, restart ? ovl_restart_why() : "Yes to its question", g_hwnd, err, sizeof(err)) != 0)
         snprintf(g_ovs.end_note, sizeof(g_ovs.end_note), "%s", err);

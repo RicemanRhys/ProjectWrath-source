@@ -40,6 +40,7 @@
 #include "controls.h"     /* step 57: the controller map and the keyboard */
 #include "pads.h"         /* step 70: every other pad, through SDL */
 #include "saves.h"        /* step 83: the save's backups */
+#include "names.h"        /* step 109: Project Wrath's name in its message box */
 
 /* ── ICALL trace ring buffer ───────────────────────────────── */
 
@@ -2514,10 +2515,11 @@ static void hal_HalReturnToFirmware(void)
         fprintf(stderr, "[SAVE] the game could not open its save folder %s for writing, and quits"
                 " (the Xbox's \"hard disk\" error)\n", dir);
         fflush(stderr);
-        _snprintf(msg, sizeof(msg), "Crash can't write to its save folder:\n\n%s\n\n"
-                  "Make the folder writable (or delete it: the game makes a new one) and start again.", dir);
+        _snprintf(msg, sizeof(msg), "%s can't write to its save folder:\n\n%s\n\n"
+                  "Make the folder writable (or delete it: the game makes a new one) and start again.",
+                  twoc_app_name(), dir);
         msg[sizeof(msg) - 1] = 0;
-        MessageBoxA(NULL, msg, "Crash TWOC", MB_ICONERROR | MB_OK);
+        MessageBoxA(NULL, msg, twoc_app_name(), MB_ICONERROR | MB_OK);
     }
     t_coop_kernel_va = va;
     coop_kernel_call();

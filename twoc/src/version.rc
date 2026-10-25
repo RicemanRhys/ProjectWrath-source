@@ -1,0 +1,33 @@
+// The exe's Windows file properties (step 109, notes 18.112): Explorer's Details tab and Task Manager (which shows
+// the description as the process's name). The packages ship this exe as ProjectWrath.exe. No company and no
+// copyright are named: neither has been chosen (twoc/LICENSE's copyright line is the one place for the name).
+// The versions are the build's commit and its date (build/generated/build_info.h, tools/build_info.cmake).
+#include <winver.h>
+#include "build_info.h"
+
+VS_VERSION_INFO VERSIONINFO
+ FILEVERSION TWOC_BUILD_VER_Y,TWOC_BUILD_VER_M,TWOC_BUILD_VER_D,0
+ PRODUCTVERSION TWOC_BUILD_VER_Y,TWOC_BUILD_VER_M,TWOC_BUILD_VER_D,0
+ FILEFLAGSMASK VS_FFI_FILEFLAGSMASK
+ FILEFLAGS 0x0L
+ FILEOS VOS_NT_WINDOWS32
+ FILETYPE VFT_APP
+ FILESUBTYPE VFT2_UNKNOWN
+BEGIN
+    BLOCK "StringFileInfo"
+    BEGIN
+        BLOCK "040904B0"
+        BEGIN
+            VALUE "ProductName", "Project Wrath"
+            VALUE "FileDescription", "Project Wrath - an unofficial fan port (not affiliated with the owners of the game)"
+            VALUE "OriginalFilename", "ProjectWrath.exe"
+            VALUE "InternalName", "ProjectWrath"
+            VALUE "FileVersion", TWOC_BUILD_VERSION_TEXT
+            VALUE "ProductVersion", TWOC_BUILD_VERSION_TEXT
+        END
+    END
+    BLOCK "VarFileInfo"
+    BEGIN
+        VALUE "Translation", 0x409, 1200
+    END
+END

@@ -20,6 +20,7 @@
 
 #include "volk.h"               /* VK_USE_PLATFORM_WIN32_KHR from CMakeLists.txt */
 #include "vk_probe.h"
+#include "names.h"
 
 #define VKP_INFLIGHT 2
 #define VKP_MAX_IMAGES 8
@@ -143,9 +144,15 @@ static int make_window(void)
     wc.lpszClassName = L"TwocVulkanProbe";
     RegisterClassW(&wc);
     AdjustWindowRect(&r, WS_OVERLAPPEDWINDOW, FALSE);
-    g.hwnd = CreateWindowExW(0, wc.lpszClassName, L"Crash TWOC - Vulkan probe (RECOMP_VULKAN=probe)",
-                             WS_OVERLAPPEDWINDOW, CW_USEDEFAULT, CW_USEDEFAULT, r.right - r.left, r.bottom - r.top,
-                             NULL, NULL, wc.hInstance, NULL);
+    {
+        wchar_t title[128];             /* step 109: "Project Wrath - Vulkan probe ..." (names.h) */
+        _snwprintf(title, sizeof(title) / sizeof(title[0]) - 1, L"%ls - Vulkan probe (RECOMP_VULKAN=probe)",
+                   twoc_app_name_w());
+        title[sizeof(title) / sizeof(title[0]) - 1] = 0;
+        g.hwnd = CreateWindowExW(0, wc.lpszClassName, title,
+                                 WS_OVERLAPPEDWINDOW, CW_USEDEFAULT, CW_USEDEFAULT, r.right - r.left,
+                                 r.bottom - r.top, NULL, NULL, wc.hInstance, NULL);
+    }
     if (!g.hwnd)
         return -1;
     GetClientRect(g.hwnd, &r);
@@ -200,7 +207,11 @@ static int make_instance(void)
     }
     memset(&ai, 0, sizeof(ai));
     ai.sType = VK_STRUCTURE_TYPE_APPLICATION_INFO;
-    ai.pApplicationName = "Crash TWOC (Vulkan probe)";
+    {
+        static char an[64];
+        snprintf(an, sizeof(an), "%s (Vulkan probe)", twoc_app_name());
+        ai.pApplicationName = an;
+    }
     ai.pEngineName = "twoc";
     ai.apiVersion = ver >= VK_API_VERSION_1_3 ? VK_API_VERSION_1_3 : VK_API_VERSION_1_1;
     memset(&ci, 0, sizeof(ci));

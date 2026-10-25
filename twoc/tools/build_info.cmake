@@ -25,6 +25,21 @@ execute_process(COMMAND git -C "${XR}" log -1 --format=%h
 if(_xr STREQUAL "")
     set(_xr "unknown")
 endif()
+# Step 109: the commit's date as numbers, for the exe's file version (src/version.rc): 2026.10.25.0.
+if(_date MATCHES "^([0-9]+)-0?([0-9]+)-0?([0-9]+)$")
+    set(_vy ${CMAKE_MATCH_1})
+    set(_vm ${CMAKE_MATCH_2})
+    set(_vd ${CMAKE_MATCH_3})
+else()
+    set(_vy 0)
+    set(_vm 0)
+    set(_vd 0)
+endif()
+if(_dirty)
+    set(_vtext "${_commit} (${_date}, with changes not committed)")
+else()
+    set(_vtext "${_commit} (${_date})")
+endif()
 if(LTCG)
     set(_ltcg 1)
 else()
@@ -36,6 +51,10 @@ file(WRITE "${OUT}.tmp"
      "#define TWOC_BUILD_COMMIT_DATE \"${_date}\"\n"
      "#define TWOC_BUILD_DIRTY ${_dirty}\n"
      "#define TWOC_BUILD_XBOXRECOMP \"${_xr}\"\n"
+     "#define TWOC_BUILD_VER_Y ${_vy}\n"
+     "#define TWOC_BUILD_VER_M ${_vm}\n"
+     "#define TWOC_BUILD_VER_D ${_vd}\n"
+     "#define TWOC_BUILD_VERSION_TEXT \"${_vtext}\"\n"
      "#define TWOC_BUILD_LTCG ${_ltcg}\n")
 file(COPY_FILE "${OUT}.tmp" "${OUT}" ONLY_IF_DIFFERENT)
 file(REMOVE "${OUT}.tmp")

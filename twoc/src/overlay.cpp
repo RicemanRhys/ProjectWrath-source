@@ -35,6 +35,7 @@
 #include "saves.h"
 #include "gpu.h"
 #include "setup.h"
+#include "names.h"
 
 /* xboxrecomp apu.h: the output's channels (2 or 6) and the device's */
 extern "C" int mcpx_apu_output_channels(int *device_channels);
@@ -965,12 +966,16 @@ static int tab_display(twoc_settings_t *s, const ovl_info_t *in)
             }
             ImGui::EndCombo();
         }
-        more("Which graphics card draws the game. Automatic: the one Windows picks for it (its own Graphics "
-             "setting for crash_twoc.exe, under Settings > System > Display > Graphics, else the driver's "
-             "choice), and the game asks for the high-performance card, so a laptop's NVIDIA or AMD GPU rather "
-             "than its Intel one. A card chosen here is used whatever Windows says; it is remembered by its "
-             "name. On a laptop the screen may hang off another card than the one drawing: Windows copies "
-             "each frame across. From the next start.");
+        {
+            static char gh[640];        /* step 109: the exe's real name (ProjectWrath.exe; Windows keys it by path) */
+            snprintf(gh, sizeof(gh), "Which graphics card draws the game. Automatic: the one Windows picks for it "
+                     "(its own Graphics setting for %s, under Settings > System > Display > Graphics, else the "
+                     "driver's choice), and the game asks for the high-performance card, so a laptop's NVIDIA or AMD "
+                     "GPU rather than its Intel one. A card chosen here is used whatever Windows says; it is "
+                     "remembered by its name. On a laptop the screen may hang off another card than the one "
+                     "drawing: Windows copies each frame across. From the next start.", twoc_exe_name());
+            more(gh);
+        }
         snprintf(line, sizeof(line), "Now: %s.", twoc_gpu_in_use()[0] ? twoc_gpu_in_use() : "not known");
         if (_stricmp(s->gpu, twoc_gpu_asked()) != 0)
             snprintf(line + strlen(line), sizeof(line) - strlen(line), " %s from the next start.",
@@ -1796,7 +1801,8 @@ static void tab_about(const ovl_info_t *in)
     int i;
 
     about_game_files();                 /* step 107 */
-    ImGui::SeparatorText("Crash Bandicoot: The Wrath of Cortex, PC port");
+    ImGui::SeparatorText(twoc_app_name());     /* step 109: Project Wrath (names.h) */
+    help("An unofficial fan port. It is not affiliated with, endorsed by or sponsored by the owners of the game.");
     if (!a) {
         help("Not collected.");
         return;
@@ -2082,9 +2088,9 @@ static int build(twoc_settings_t *s, const ovl_info_t *in)
 
     if (twoc_settings_ignored()) {      /* step 93: the safe-settings launcher */
         ImGui::PushTextWrapPos(ImGui::GetContentRegionAvail().x + ImGui::GetCursorPosX());
-        ImGui::TextColored(k_amber, "Safe settings: crash_twoc.ini is ignored this run and "
+        ImGui::TextColored(k_amber, "Safe settings: %s is ignored this run and "
                            "won't be written. Every setting starts at its default; changes here last until the "
-                           "game closes. Start the game the usual way for your own settings again.");
+                           "game closes. Start the game the usual way for your own settings again.", twoc_ini_name());
         ImGui::PopTextWrapPos();
     }
     /* Step 104: the two pause settings that were here are on the Extras tab. Step 97: the tab bar picks the tab only; its contents go in a child of the same height on every tab
@@ -2289,8 +2295,10 @@ extern "C" int ovl_frame(ID3D11RenderTargetView *rtv, unsigned w, unsigned h, fl
     }
     ImGui::SetNextWindowSize(ImVec2(ImGui::GetFontSize() * 34, 0), ImGuiCond_Always);
     ImGui::SetNextWindowBgAlpha(info->running ? 0.8f : g_style_base.Colors[ImGuiCol_WindowBg].w);
-    ImGui::Begin(info->running ? "Crash TWOC - settings (the game runs)###settings"
-                               : "Crash TWOC - settings (paused)###settings", NULL,
+    char title[96];                     /* step 109: "Project Wrath - settings (paused)" (names.h); the same id */
+    snprintf(title, sizeof(title), "%s - settings (%s)###settings", twoc_app_name(),
+             info->running ? "the game runs" : "paused");
+    ImGui::Begin(title, NULL,
                  ImGuiWindowFlags_NoResize | ImGuiWindowFlags_NoMove | ImGuiWindowFlags_NoCollapse |
                      ImGuiWindowFlags_NoSavedSettings);
     r |= build(s, info);

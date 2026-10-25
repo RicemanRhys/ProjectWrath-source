@@ -49,16 +49,20 @@ extern "C" {
 /* ── The data folder (Part 1.4 and Part 3) ─────────────────────────────── */
 
 /* Chooses the data folder and makes it the working folder, when the exe was started by itself (no launcher, no
- * RECOMP_* variable): the exe's folder when it can be written to, else %LOCALAPPDATA%\CrashTWOC. Started by a
- * launcher: the working folder as it was. Called once, first thing. Returns 1 when started by itself. */
+ * RECOMP_* variable): the exe's folder when it can be written to, else %LOCALAPPDATA%\ProjectWrath (step 109;
+ * %LOCALAPPDATA%\CrashTWOC for the developer's crash_twoc.exe, names.h), whose first use copies an old
+ * %LOCALAPPDATA%\CrashTWOC's contents in, never changing that one. Started by a launcher: the working folder as it
+ * was. Called once, first thing. Returns 1 when started by itself. */
 int twoc_data_dir_init(void);
 const wchar_t *twoc_data_dir(void);     /* absolute, no trailing backslash */
-/* 1 when %LOCALAPPDATA%\CrashTWOC is used because the exe's folder can't be written to. */
+/* 1 when %LOCALAPPDATA%\ProjectWrath is used because the exe's folder can't be written to. */
 int twoc_data_dir_fallback(void);
+/* Step 109: the [DATA] line of the old data folder's copy ("" none), for the log once it is open. */
+const char *twoc_data_dir_note(void);
 /* The data folder as UTF-8, for the log and the screen. */
 const char *twoc_data_dir_utf8(void);
-/* A file kept beside the exe (crash_twoc.ini, crash_twoc.muted), or in the data folder when the exe's folder can't
- * be written to; in the narrow functions' code page. Returns 0 or -1. */
+/* A file kept beside the exe (ProjectWrath.ini, ProjectWrath.muted: names.h), or in the data folder when the exe's
+ * folder can't be written to. `name` in UTF-8; `out` in the narrow functions' code page. Returns 0 or -1. */
 int twoc_settings_file(const char *name, char *out, size_t cap);
 
 /* ── Recovery (at every start, before anything else) ───────────────────── */

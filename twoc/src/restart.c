@@ -11,6 +11,7 @@
 #include "restart.h"
 #include "saves.h"
 #include "settings.h"
+#include "names.h"
 
 static wchar_t *g_env0;                 /* the environment at the start, without TWOC_RESTART_PARENT */
 static size_t g_env0_n;                 /* ... its wchar_ts, the last NUL included */
@@ -78,7 +79,7 @@ void twoc_restart_init(void)
                     (unsigned long)parent);
             MessageBoxA(NULL, "The game was asked to start again, but its earlier copy is still running after 30 "
                         "seconds, so this copy closes (two must never run at once). Close the other one and start "
-                        "the game again.", "Crash TWOC", MB_ICONWARNING | MB_OK);
+                        "the game again.", twoc_app_name(), MB_ICONWARNING | MB_OK);
             TerminateProcess(GetCurrentProcess(), 1);
         }
         fprintf(stderr, "[RESTART] started again by the game itself (Restart now): the copy before (pid %lu) %s"
@@ -89,7 +90,8 @@ void twoc_restart_init(void)
     }
 }
 
-/* The loop guard: the restarts of the last minute (%TEMP%\crash_twoc_restarts.txt, one time a line). With
+/* The loop guard: the restarts of the last minute (%TEMP%\ProjectWrath_restarts.txt, one time a line; the
+ * developer's crash_twoc.exe keeps crash_twoc_restarts.txt, names.h). With
  * `add` and fewer than TWOC_RESTARTS_A_MINUTE, this one is added; returns the count before it. */
 static int history(int add)
 {
@@ -103,7 +105,7 @@ static int history(int add)
     now = (((unsigned long long)ft.dwHighDateTime << 32) | ft.dwLowDateTime) / 10000000ULL;
     if (!GetTempPathW(MAX_PATH, path))
         return 0;
-    wcscat(path, L"crash_twoc_restarts.txt");
+    wcscat(path, twoc_names_dev() ? L"crash_twoc_restarts.txt" : L"ProjectWrath_restarts.txt");
     if ((f = _wfopen(path, L"r")) != NULL) {
         while (n < 16 && fscanf(f, "%llu", &t) == 1)
             if (t <= now && now - t < 60)
@@ -236,7 +238,7 @@ int twoc_end_begin(int restart, const char *why, HWND hwnd, char *err, size_t ca
             wchar_t exe[MAX_PATH * 2];
             if (!GetModuleFileNameW(NULL, exe, sizeof(exe) / sizeof(exe[0])) ||
                 GetFileAttributesW(exe) == INVALID_FILE_ATTRIBUTES) {
-                snprintf(err, cap, "Not restarted: crash_twoc.exe can't be found to start again.");
+                snprintf(err, cap, "Not restarted: %s can't be found to start again.", twoc_exe_name());
                 fprintf(stderr, "[RESTART] refused: the exe's file isn't there\n");
                 return -1;
             }

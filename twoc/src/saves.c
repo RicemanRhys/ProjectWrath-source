@@ -29,6 +29,7 @@
 #include <string.h>
 
 #include "saves.h"
+#include "names.h"
 
 #define SV_GAME_DIR     L"game_files"
 #define SV_SAVE_SUB     L"UDATA\\56550003\\4D5C926D6357"
@@ -443,7 +444,7 @@ static int write_backup(const snap_t *s, const char *why, char made[32])
         if (!write_file(p, s->d[i], s->n[i], 0))
             goto fail;
     }
-    snprintf(info, sizeof(info), "Crash TWOC save backup (twoc/src/saves.c)\r\nwhy: %s\r\n", why);
+    snprintf(info, sizeof(info), "%s save backup\r\nwhy: %s\r\n", twoc_app_name(), why);
     swprintf(p, MAX_PATH, L"%s\\%s", part, SV_INFO);
     if (!write_file(p, info, (DWORD)strlen(info), 0))
         goto fail;
@@ -575,9 +576,9 @@ static int write_pending(const char *name)
     wchar_t p[MAX_PATH];
     char text[512];
     snprintf(text, sizeof(text),
-             "%s\r\n\r\nAt its next start Crash TWOC replaces its save (game_files\\UDATA\\56550003\\4D5C926D6357) "
+             "%s\r\n\r\nAt its next start %s replaces its save (game_files\\UDATA\\56550003\\4D5C926D6357) "
              "with the backup named on the first line, after backing up the save it replaces. Delete this file "
-             "to cancel.\r\n", name);
+             "to cancel.\r\n", name, twoc_app_name());
     swprintf(p, MAX_PATH, L"%s\\%s", g_bak, SV_PENDING);
     return ensure_backup_dir() && write_file(p, text, (DWORD)strlen(text), 1);
 }
@@ -904,7 +905,7 @@ void saves_startup(void)
             say("The restore of %s failed (%s); the save is as it was.", when_of(pend), err);
             snprintf(msg, sizeof(msg), "The save backup of %s could not be restored:\n\n%s\n\nThe save is as it "
                      "was, and the restore is cancelled. The backups are in\n%s", when_of(pend), err, g_dir_u8);
-            MessageBoxA(NULL, msg, "Crash TWOC", MB_ICONWARNING | MB_OK);
+            MessageBoxA(NULL, msg, twoc_app_name(), MB_ICONWARNING | MB_OK);
         }
     }
     prune();

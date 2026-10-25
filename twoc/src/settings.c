@@ -1,6 +1,9 @@
 /**
- * Player settings: crash_twoc.ini next to the exe (step 54, notes 18.57).
- * See settings.h for the keys and how they meet the command line.
+ * Player settings: crash_twoc.ini next to the exe (step 54, notes 18.57);
+ * since step 109 (notes 18.112) <exe name>.ini, ProjectWrath.ini beside
+ * ProjectWrath.exe (names.h), which reads an old crash_twoc.ini there until
+ * it writes its own. See settings.h for the keys and how they meet the
+ * command line.
  */
 
 #include <windows.h>
@@ -12,6 +15,7 @@
 #include "settings.h"
 #include "setup.h"
 #include "pads.h"
+#include "names.h"
 
 typedef struct {
     const char *key, *var, *note;
@@ -367,10 +371,26 @@ const char *twoc_settings_path(void)
 {
     static char path[MAX_PATH * 4];
 
-    /* step 107: beside the exe, or in %LOCALAPPDATA%\CrashTWOC when the exe's folder can't be written to */
-    if (!path[0] && twoc_settings_file("crash_twoc.ini", path, sizeof(path)))
-        snprintf(path, sizeof(path), "crash_twoc.ini");
+    /* step 107: beside the exe, or in %LOCALAPPDATA%\ProjectWrath when the exe's folder can't be written to;
+     * step 109: named after the exe (ProjectWrath.ini, names.h) */
+    if (!path[0] && twoc_settings_file(twoc_ini_name(), path, sizeof(path)))
+        snprintf(path, sizeof(path), "%s", twoc_ini_name());
     return path;
+}
+
+/* Step 109: the old name's file in the same place (crash_twoc.ini beside ProjectWrath.exe), while the new one isn't
+ * there yet: read in its place, never written or deleted; the next save writes the new one. "" otherwise (and for
+ * crash_twoc.exe, whose ini is that file). */
+const char *twoc_settings_old_path(void)
+{
+    static char old[MAX_PATH * 4];
+
+    if (_stricmp(twoc_ini_name(), TWOC_OLD_INI_NAME) == 0 ||
+        GetFileAttributesA(twoc_settings_path()) != INVALID_FILE_ATTRIBUTES)
+        return "";
+    if (!old[0] && twoc_settings_file(TWOC_OLD_INI_NAME, old, sizeof(old)))
+        return "";
+    return GetFileAttributesA(old) != INVALID_FILE_ATTRIBUTES ? old : "";
 }
 
 static char *trim(char *s)
@@ -423,9 +443,16 @@ void twoc_settings_load(void)
         return;
     }
     f = fopen(twoc_settings_path(), "r");
+    if (!f && twoc_settings_old_path()[0]) {    /* step 109: the old name's file, read in its place */
+        f = fopen(twoc_settings_old_path(), "r");
+        if (f)
+            fprintf(stderr, "[CFG] %s isn't there yet: the settings from %s (the name before Project Wrath; read "
+                    "only, left as it is: the next save writes %s)\n", twoc_ini_name(), twoc_settings_old_path(),
+                    twoc_ini_name());
+    } else if (f)
+        fprintf(stderr, "[CFG] settings from %s\n", twoc_settings_path());
     if (!f)
         return;                         /* no file: nothing set, the run as before */
-    fprintf(stderr, "[CFG] settings from %s\n", twoc_settings_path());
     while (fgets(line, sizeof(line), f)) {
         char *k = trim(line), *v, *c;
         size_t i;
@@ -758,8 +785,9 @@ int twoc_settings_save(const twoc_settings_t *s)
         fprintf(stderr, "[CFG] %s not written\n", twoc_settings_path());
         return -1;
     }
-    fprintf(f, "# Crash TWOC settings, written by the settings overlay (F1 in the game window).\n"
-               "# run_twoc.ps1 switches and RECOMP_* variables win over these. Delete the file for the defaults.\n");
+    fprintf(f, "# %s settings, written by the settings overlay (F1 in the game window).\n"
+               "# %s RECOMP_* variables win over these. Delete the file for the defaults.\n", twoc_app_name(),
+               twoc_names_dev() ? "run_twoc.ps1 switches and" : "A launcher's");
     for (i = 0; i < N_KEYS; i++) {
         char now[160], then[160];
         const char *v = now;

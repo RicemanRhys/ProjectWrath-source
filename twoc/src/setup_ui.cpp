@@ -38,8 +38,9 @@
 #include "setup.h"
 #include "xdvdfs.h"
 #include "pads.h"
+#include "names.h"
 
-#define WIN_TITLE L"Crash TWOC - Setup"
+#define WIN_TITLE (twoc_names_dev() ? L"Crash TWOC - Setup" : L"Project Wrath - Setup")   /* step 109, names.h */
 
 enum { SCR_HOME, SCR_WORK, SCR_CONFIRM };
 
@@ -560,10 +561,12 @@ static void home(float cw, unsigned press)
         ImGui::TextColored(k_amber, "The game files aren't set up yet.");
     ImGui::Spacing();
     ImGui::PushTextWrapPos(ImGui::GetCursorPosX() + cw);
-    ImGui::TextUnformatted("This game needs your own copy of the disc: an image of Crash Bandicoot: The Wrath of "
-                           "Cortex for the original Xbox (USA), as an .iso file, or the files extracted from one. The "
-                           "setup copies the game's files out of it into this game's folder and checks every one. "
-                           "Nothing is downloaded and nothing is sent anywhere.");
+    /* step 109 (notes 18.112): the agreed wording; the game named only for the disc it needs */
+    ImGui::TextUnformatted("Project Wrath is an unofficial fan port. It is not affiliated with, endorsed by or "
+                           "sponsored by the owners of the game. You need your own copy of the game: a disc image of "
+                           "Crash Bandicoot: The Wrath of Cortex, USA, original Xbox (an .iso file), or the files "
+                           "extracted from one. The setup copies the game's files out of it into this folder and "
+                           "checks every one. Nothing is downloaded and nothing is sent anywhere.");
     ImGui::PopTextWrapPos();
     ImGui::Spacing();
     focus_here();
@@ -804,9 +807,9 @@ static void frame(void)
         float x0 = ImGui::GetCursorPosX();
         ImGui::BeginGroup();
         ImGui::SetWindowFontScale(1.45f);
-        ImGui::TextUnformatted("Crash Bandicoot: The Wrath of Cortex");
+        ImGui::TextUnformatted(twoc_app_name());     /* step 109: Project Wrath (names.h) */
         ImGui::SetWindowFontScale(1.0f);
-        ImGui::TextColored(k_dim, "Crash TWOC, an unofficial PC port: first-run setup");
+        ImGui::TextColored(k_dim, "An unofficial fan port: first-run setup");
         ImGui::Separator();
         ImGui::Spacing();
         ImGui::SetCursorPosX(x0);

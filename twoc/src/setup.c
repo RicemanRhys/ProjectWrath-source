@@ -20,6 +20,7 @@
 #include "setup.h"
 #include "xdvdfs.h"
 #include "disc_manifest.h"
+#include "names.h"
 
 #define DM_N ((unsigned)(sizeof(k_dm_files) / sizeof(k_dm_files[0])))
 #define CHUNK (1u << 20)
@@ -220,12 +221,13 @@ static wchar_t g_dir[SETUP_PATH_MAX];   /* plain absolute */
 static wchar_t g_ldir[SETUP_PATH_MAX];  /* \\?\ form */
 static char g_dir8[SETUP_PATH_MAX * 3];
 static int g_fallback, g_self;
+static char g_dir_note[SETUP_PATH_MAX * 3 + 256];     /* step 109: the migration's line, logged once the log is open */
 
 static int writable(const wchar_t *dir)
 {
     wchar_t p[SETUP_PATH_MAX + 64];
     HANDLE h;
-    _snwprintf_s(p, sizeof(p) / sizeof(p[0]), _TRUNCATE, L"%s\\crash_twoc.write-test.%lu.tmp", dir,
+    _snwprintf_s(p, sizeof(p) / sizeof(p[0]), _TRUNCATE, L"%s\\write-test.%lu.tmp", dir,
                  (unsigned long)GetCurrentProcessId());
     h = CreateFileW(p, GENERIC_WRITE, 0, NULL, CREATE_NEW, FILE_ATTRIBUTE_TEMPORARY | FILE_FLAG_DELETE_ON_CLOSE, NULL);
     if (h == INVALID_HANDLE_VALUE)
@@ -249,6 +251,158 @@ static int started_by_itself(void)
     return self;
 }
 
+/* ── Step 109: the data folder's old name ──────────────────────────────────
+ * %LOCALAPPDATA%\CrashTWOC (the name before Project Wrath) into a new %LOCALAPPDATA%\ProjectWrath: when the new
+ * one holds no game_files and no ini yet and the old one is there, the old one's contents are copied into
+ * ProjectWrath.migrating (its game_files with the saves and backups, its crash_twoc.ini, anything else; not its
+ * logs, the mute marker or a setup's leftovers), then moved into ProjectWrath. The old folder is only read: never
+ * changed or deleted. A copy that stopped part-way (a power cut) leaves ProjectWrath.migrating, which the next
+ * start deletes (it is this code's own) and makes again. Links are never followed. */
+static int mig_skip(const wchar_t *name, int dir, int top)
+{
+    size_t n = wcslen(name);
+    if (!wcscmp(name, L".") || !wcscmp(name, L".."))
+        return 1;
+    if (top && dir && (!_wcsicmp(name, L"logs") || !_wcsicmp(name, N_NEW) || !_wcsicmp(name, N_OLD)))
+        return 1;
+    if (top && !dir && (!_wcsicmp(name, N_MARK) || !_wcsicmp(name, N_REQ) || !_wcsicmp(name, L"crash_twoc.muted")))
+        return 1;
+    return top && !dir && n > 4 && !_wcsicmp(name + n - 4, L".log");
+}
+
+/* Copies `from` into `to` (made here), recursively; counts files and bytes. 0, or a Windows error. */
+static DWORD mig_copy(const wchar_t *from, const wchar_t *to, int top, unsigned *files, unsigned long long *bytes)
+{
+    wchar_t pat[SETUP_PATH_MAX + 4], a[SETUP_PATH_MAX], b2[SETUP_PATH_MAX];
+    WIN32_FIND_DATAW fd;
+    HANDLE h;
+    DWORD e = 0;
+
+    if (!CreateDirectoryW(to, NULL) && GetLastError() != ERROR_ALREADY_EXISTS)
+        return GetLastError();
+    _snwprintf_s(pat, sizeof(pat) / sizeof(pat[0]), _TRUNCATE, L"%s\\*", from);
+    h = FindFirstFileExW(pat, FindExInfoBasic, &fd, FindExSearchNameMatch, NULL, 0);
+    if (h == INVALID_HANDLE_VALUE)
+        return GetLastError() == ERROR_FILE_NOT_FOUND ? 0 : GetLastError();
+    do {
+        int dir = (fd.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY) != 0;
+        if (mig_skip(fd.cFileName, dir, top) || (fd.dwFileAttributes & FILE_ATTRIBUTE_REPARSE_POINT))
+            continue;
+        _snwprintf_s(a, SETUP_PATH_MAX, _TRUNCATE, L"%s\\%s", from, fd.cFileName);
+        _snwprintf_s(b2, SETUP_PATH_MAX, _TRUNCATE, L"%s\\%s", to, fd.cFileName);
+        if (dir)
+            e = mig_copy(a, b2, 0, files, bytes);
+        else if (!CopyFileExW(a, b2, NULL, NULL, NULL, COPY_FILE_FAIL_IF_EXISTS))
+            e = GetLastError();
+        else {
+            (*files)++;
+            *bytes += ((unsigned long long)fd.nFileSizeHigh << 32) | fd.nFileSizeLow;
+        }
+    } while (!e && FindNextFileW(h, &fd));
+    FindClose(h);
+    return e;
+}
+
+/* Deletes `dir` (this code's own ProjectWrath.migrating) and everything in it; a link only as the link. */
+static void mig_delete(const wchar_t *dir)
+{
+    wchar_t pat[SETUP_PATH_MAX + 4], a[SETUP_PATH_MAX];
+    WIN32_FIND_DATAW fd;
+    HANDLE h;
+
+    _snwprintf_s(pat, sizeof(pat) / sizeof(pat[0]), _TRUNCATE, L"%s\\*", dir);
+    h = FindFirstFileExW(pat, FindExInfoBasic, &fd, FindExSearchNameMatch, NULL, 0);
+    if (h != INVALID_HANDLE_VALUE) {
+        do {
+            if (!wcscmp(fd.cFileName, L".") || !wcscmp(fd.cFileName, L".."))
+                continue;
+            _snwprintf_s(a, SETUP_PATH_MAX, _TRUNCATE, L"%s\\%s", dir, fd.cFileName);
+            if ((fd.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY) && !(fd.dwFileAttributes & FILE_ATTRIBUTE_REPARSE_POINT))
+                mig_delete(a);
+            else if (fd.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY)
+                RemoveDirectoryW(a);
+            else {
+                if (fd.dwFileAttributes & FILE_ATTRIBUTE_READONLY)
+                    SetFileAttributesW(a, fd.dwFileAttributes & ~FILE_ATTRIBUTE_READONLY);
+                DeleteFileW(a);
+            }
+        } while (FindNextFileW(h, &fd));
+        FindClose(h);
+    }
+    RemoveDirectoryW(dir);
+}
+
+/* `base` is %LOCALAPPDATA% (or a test's stand-in), `dir` the new data folder in it. */
+static void migrate_data_dir(const wchar_t *base, const wchar_t *dir)
+{
+    wchar_t old[SETUP_PATH_MAX], tmp[SETUP_PATH_MAX], p[SETUP_PATH_MAX], q[SETUP_PATH_MAX];
+    wchar_t pat[SETUP_PATH_MAX + 4];
+    char o8[SETUP_PATH_MAX * 3];
+    WIN32_FIND_DATAW fd;
+    HANDLE h;
+    unsigned files = 0, moved = 0, kept = 0;
+    unsigned long long bytes = 0;
+    ULONGLONG t0 = GetTickCount64();
+    DWORD e;
+
+    if (twoc_names_dev())               /* the developer's crash_twoc.exe uses the old folder itself */
+        return;
+    _snwprintf_s(old, SETUP_PATH_MAX, _TRUNCATE, L"%s\\%s", base, TWOC_OLD_DATA_FOLDER);
+    _snwprintf_s(tmp, SETUP_PATH_MAX, _TRUNCATE, L"%s.migrating", dir);
+    if (!is_dir(old) || is_link(old))
+        return;
+    _snwprintf_s(p, SETUP_PATH_MAX, _TRUNCATE, L"%s\\%s", dir, N_GAME);
+    if (is_dir(p))
+        return;                         /* the new folder is in use already */
+    {
+        char ini8[MAX_PATH * 3];
+        wchar_t iw[MAX_PATH];
+        snprintf(ini8, sizeof(ini8), "%s", twoc_ini_name());
+        MultiByteToWideChar(CP_UTF8, 0, ini8, -1, iw, MAX_PATH);
+        _snwprintf_s(p, SETUP_PATH_MAX, _TRUNCATE, L"%s\\%s", dir, iw);
+        _snwprintf_s(q, SETUP_PATH_MAX, _TRUNCATE, L"%s\\" TWOC_OLD_INI_NAME_W, dir);
+        if (exists(p) || exists(q))
+            return;
+    }
+    u8(old, o8, sizeof(o8));
+    if (is_dir(tmp))                    /* a copy that stopped part-way: this code's own, made again */
+        mig_delete(tmp);
+    e = mig_copy(old, tmp, 1, &files, &bytes);
+    if (e) {
+        mig_delete(tmp);
+        snprintf(g_dir_note, sizeof(g_dir_note), "[DATA] the old data folder %s couldn't be copied into the new one "
+                 "(Windows error %lu): the new one starts empty, the old one is as it was (tried again at the next "
+                 "start)", o8, (unsigned long)e);
+        return;
+    }
+    SHCreateDirectoryExW(NULL, dir, NULL);
+    _snwprintf_s(pat, sizeof(pat) / sizeof(pat[0]), _TRUNCATE, L"%s\\*", tmp);
+    h = FindFirstFileExW(pat, FindExInfoBasic, &fd, FindExSearchNameMatch, NULL, 0);
+    if (h != INVALID_HANDLE_VALUE) {
+        do {
+            if (!wcscmp(fd.cFileName, L".") || !wcscmp(fd.cFileName, L".."))
+                continue;
+            _snwprintf_s(p, SETUP_PATH_MAX, _TRUNCATE, L"%s\\%s", tmp, fd.cFileName);
+            _snwprintf_s(q, SETUP_PATH_MAX, _TRUNCATE, L"%s\\%s", dir, fd.cFileName);
+            if (MoveFileExW(p, q, 0))
+                moved++;
+            else
+                kept++;                 /* already in the new folder (its own logs): the new one's kept */
+        } while (FindNextFileW(h, &fd));
+        FindClose(h);
+    }
+    mig_delete(tmp);
+    snprintf(g_dir_note, sizeof(g_dir_note), "[DATA] the old data folder %s (the name before Project Wrath) copied "
+             "into the new one: %u files, %.1f MB, %u items moved in%s, %llu ms; the old folder is as it was (delete it "
+             "yourself once the game runs from the new one)", o8, files, (double)bytes / 1048576.0, moved,
+             kept ? ", some already there kept" : "", GetTickCount64() - t0);
+}
+
+const char *twoc_data_dir_note(void)
+{
+    return g_dir_note;
+}
+
 int twoc_data_dir_init(void)
 {
     wchar_t exe[SETUP_PATH_MAX], *slash;
@@ -264,11 +418,13 @@ int twoc_data_dir_init(void)
             wchar_t la[MAX_PATH];
             const wchar_t *dev = _wgetenv(L"RECOMP_DEV_LOCALAPPDATA");  /* a test's stand-in, in its scratch */
             if (dev && *dev) {
-                _snwprintf_s(g_dir, SETUP_PATH_MAX, _TRUNCATE, L"%s\\CrashTWOC", dev);
+                _snwprintf_s(g_dir, SETUP_PATH_MAX, _TRUNCATE, L"%s\\%s", dev, twoc_data_folder_w());
                 g_fallback = 1;
+                migrate_data_dir(dev, g_dir);      /* step 109: from the old name, CrashTWOC */
             } else if (SUCCEEDED(SHGetFolderPathW(NULL, CSIDL_LOCAL_APPDATA | CSIDL_FLAG_CREATE, NULL, 0, la))) {
-                _snwprintf_s(g_dir, SETUP_PATH_MAX, _TRUNCATE, L"%s\\CrashTWOC", la);
+                _snwprintf_s(g_dir, SETUP_PATH_MAX, _TRUNCATE, L"%s\\%s", la, twoc_data_folder_w());
                 g_fallback = 1;
+                migrate_data_dir(la, g_dir);
             } else
                 _snwprintf_s(g_dir, SETUP_PATH_MAX, _TRUNCATE, L"%s", exe);
             if (g_fallback)
@@ -314,16 +470,18 @@ const char *twoc_data_dir_utf8(void)
 
 int twoc_settings_file(const char *name, char *out, size_t cap)
 {
-    wchar_t w[SETUP_PATH_MAX], *slash;
+    wchar_t w[SETUP_PATH_MAX], nw[MAX_PATH], *slash;
     DWORD n;
 
+    if (!MultiByteToWideChar(CP_UTF8, 0, name, -1, nw, MAX_PATH))     /* step 109: UTF-8 (the exe's own name) */
+        wcscpy_s(nw, MAX_PATH, L"settings.ini");
     if (g_fallback)
-        _snwprintf_s(w, SETUP_PATH_MAX, _TRUNCATE, L"%s\\%S", g_dir, name);
+        _snwprintf_s(w, SETUP_PATH_MAX, _TRUNCATE, L"%s\\%s", g_dir, nw);
     else if ((n = GetModuleFileNameW(NULL, w, SETUP_PATH_MAX)) > 0 && n < SETUP_PATH_MAX &&
              (slash = wcsrchr(w, L'\\')) != NULL)
-        _snwprintf_s(slash + 1, SETUP_PATH_MAX - (slash + 1 - w), _TRUNCATE, L"%S", name);
+        _snwprintf_s(slash + 1, SETUP_PATH_MAX - (slash + 1 - w), _TRUNCATE, L"%s", nw);
     else
-        _snwprintf_s(w, SETUP_PATH_MAX, _TRUNCATE, L"%S", name);
+        _snwprintf_s(w, SETUP_PATH_MAX, _TRUNCATE, L"%s", nw);
     /* the narrow functions' code page: UTF-8 with the exe's manifest (Windows 10 1903 on) */
     return WideCharToMultiByte(CP_ACP, 0, w, -1, out, (int)cap, NULL, NULL) ? 0 : -1;
 }
@@ -637,9 +795,9 @@ static int journal(const char *phase)
     dpath(N_MARK, m, SETUP_PATH_MAX);
     if (!g_j_started[0])
         now_text(g_j_started, sizeof(g_j_started));
-    snprintf(t, sizeof(t), "Crash TWOC: a setup of the game files is under way, or was interrupted.\r\n"
+    snprintf(t, sizeof(t), "%s: a setup of the game files is under way, or was interrupted.\r\n"
              "The game deals with this file at its next start; there is no need to delete it by hand.\r\n"
-             "source=%s\r\nkind=%s\r\nstarted=%s\r\nreplacing=%d\r\nphase=%s\r\n", g_st.source_utf8,
+             "source=%s\r\nkind=%s\r\nstarted=%s\r\nreplacing=%d\r\nphase=%s\r\n", twoc_app_name(), g_st.source_utf8,
              g_src.kind == SETUP_SRC_IMAGE ? "image" : "folder", g_j_started, g_st.replace, phase);
     h = open_retry(m, GENERIC_WRITE, FILE_SHARE_READ, CREATE_ALWAYS, FILE_ATTRIBUTE_NORMAL | FILE_FLAG_WRITE_THROUGH, &e);
     if (h == INVALID_HANDLE_VALUE)
@@ -1030,8 +1188,9 @@ int twoc_setup_request_write(void)
     wchar_t r[SETUP_PATH_MAX];
     HANDLE h;
     DWORD put;
-    static const char t[] = "Crash TWOC: open the setup screen at the next start (F1 menu, Choose another disc "
-                            "image...). Deleted at that start.\r\n";
+    char t[200];
+    snprintf(t, sizeof(t), "%s: open the setup screen at the next start (F1 menu, Choose another disc image...). "
+             "Deleted at that start.\r\n", twoc_app_name());
     dpath(N_REQ, r, SETUP_PATH_MAX);
     h = CreateFileW(r, GENERIC_WRITE, 0, NULL, CREATE_ALWAYS, FILE_ATTRIBUTE_NORMAL | FILE_FLAG_WRITE_THROUGH, NULL);
     if (h == INVALID_HANDLE_VALUE)
@@ -1707,7 +1866,10 @@ static unsigned __stdcall install_thread(void *arg)
     if (wcslen(g_dir) > MAX_DATA_DIR) {
         snprintf(line, sizeof(line), "The game's folder is too deep: its path is %u characters long (%s), and the game "
                  "can't open its files below one longer than %u.", (unsigned)wcslen(g_dir), g_dir8, MAX_DATA_DIR);
-        fail(line, "Move the game's folder to a shorter path, such as C:\\Games\\Crash TWOC, then start it again.");
+        char hint[200];
+        snprintf(hint, sizeof(hint), "Move the game's folder to a shorter path, such as C:\\Games\\%s, then start "
+                 "it again.", twoc_app_name());
+        fail(line, hint);
         goto out;
     }
     /* Room on the disk: the disc's bytes and a little more (the files a replace takes out stay until the next

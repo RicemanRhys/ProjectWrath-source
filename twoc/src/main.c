@@ -51,6 +51,7 @@
 #include "setup_ui.h"
 #include "selfstart.h"
 #include "apu_dll.h"
+#include "names.h"
 
 /*
  * If xboxrecomp.h is not an umbrella header in your setup, include
@@ -338,8 +339,8 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance,
     twoc_restart_init();
 
     /* Step 107 (notes 18.110): the data folder (where game_files is: the working folder a launcher gave, or, started
-     * by itself, the exe's folder or %LOCALAPPDATA%\CrashTWOC), then, before anything else touches game_files, a
-     * setup that didn't finish cleaned up (setup.h). */
+     * by itself, the exe's folder or %LOCALAPPDATA%\ProjectWrath, step 109), then, before anything else touches
+     * game_files, a setup that didn't finish cleaned up (setup.h). */
     if (twoc_data_dir_init())
         twoc_self_start();              /* double-clicked: Play Crash.bat's part done here (selfstart.h) */
     twoc_setup_recover();
@@ -386,7 +387,10 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance,
         controls_set(&s.controls, s.keyboard);  /* step 57: the controller map (default: as is), the keys */
     }
 
-    printf("=== Crash Bandicoot: tWoC - Static Recompilation ===\n");
+    if (twoc_names_dev())               /* step 109: the developer's crash_twoc.exe as before (names.h) */
+        printf("=== Crash Bandicoot: tWoC - Static Recompilation ===\n");
+    else
+        printf("=== %s (%s) ===\n", twoc_app_name(), twoc_exe_name());
     printf("Loading XBE...\n");
 
     /* Install VEH handler (first handler in chain) */
@@ -423,7 +427,7 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance,
             } else if (r == SETUP_UI_READY) {
                 code = twoc_game_files_check_quiet(why, sizeof(why));
                 if (code != GF_OK) {
-                    MessageBoxA(NULL, why, "Crash TWOC - game files", MB_ICONERROR | MB_OK | MB_SETFOREGROUND);
+                    MessageBoxA(NULL, why, twoc_app_name(), MB_ICONERROR | MB_OK | MB_SETFOREGROUND);
                     return 1;
                 }
                 twoc_game_files_note("set up or checked by the setup screen this start");
@@ -437,7 +441,7 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance,
     /* Step 1: Load XBE */
     if (!load_xbe(YOUR_GAME_XBE_PATH, &xbe_data, &xbe_size)) {
         MessageBoxA(NULL, "Failed to read game_files\\default.xbe (the log says why).",
-                    "Crash TWOC", MB_ICONERROR);
+                    twoc_app_name(), MB_ICONERROR);
         return 1;
     }
     printf("XBE loaded: %zu bytes\n", xbe_size);
@@ -447,7 +451,7 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance,
     if (!xbox_MemoryLayoutInit(xbe_data, xbe_size)) {
         MessageBoxA(NULL, "Failed to initialize Xbox memory layout.\n"
                     "The required virtual address range may be unavailable.",
-                    "Recomp", MB_ICONERROR);
+                    twoc_app_name(), MB_ICONERROR);
         free(xbe_data);
         return 1;
     }

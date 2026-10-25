@@ -29,6 +29,7 @@
 
 #include "settings.h"
 #include "setup.h"
+#include "names.h"
 
 static volatile LONG g_want = -1;       /* the latest level asked for, -1: none pending */
 static volatile LONG g_want_mute = -1;  /* 1 mute, 0 unmute, -1 none pending */
@@ -39,8 +40,12 @@ static const char *marker_path(void)
     static char path[MAX_PATH * 4];
 
     /* step 107: beside the exe, or in the data folder when the exe's folder can't be written to (setup.h) */
-    if (!path[0] && twoc_settings_file("crash_twoc.muted", path, sizeof(path)))
-        snprintf(path, sizeof(path), "crash_twoc.muted");
+    if (!path[0]) {                     /* step 109: <exe name>.muted, beside <exe name>.ini (names.h) */
+        char name[MAX_PATH * 3];
+        snprintf(name, sizeof(name), "%s.muted", twoc_exe_stem());
+        if (twoc_settings_file(name, path, sizeof(path)))
+            snprintf(path, sizeof(path), "%s", name);
+    }
     return path;
 }
 

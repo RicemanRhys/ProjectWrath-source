@@ -12,6 +12,7 @@
 #include "selfstart.h"
 #include "setup.h"
 #include "settings.h"
+#include "names.h"
 
 static int g_self;
 
@@ -43,8 +44,8 @@ static int redirected(DWORD which)
     return t == FILE_TYPE_DISK || t == FILE_TYPE_PIPE;
 }
 
-/* The last run's log `name` into logs\run_<time>.<kind>.log, as Play Crash.bat does: the time run_twoc.err.log was
- * last written (`by`), or the file's own when there is none. */
+/* The last run's log `name` into logs\run_<time>.<kind>.log, as Play Project Wrath.bat does: the time the error log
+ * (ProjectWrath.err.log, names.h) was last written (`by`), or the file's own when there is none. */
 static void rotate(const wchar_t *name, const wchar_t *kind, const FILETIME *by)
 {
     WIN32_FILE_ATTRIBUTE_DATA fa;
@@ -91,12 +92,24 @@ static void to_handles(void)
 
 void twoc_self_start(void)
 {
+    static char power_log[MAX_PATH];
     static const struct { const char *var, *val; } k_env[] = {
         { "RECOMP_VBLANK", "1" }, { "RECOMP_AC97_READY", "1" }, { "RECOMP_D3D_BRIDGE", "1" },
-        { "RECOMP_POWER_LOG", "run_twoc.power.log" },
+        { "RECOMP_POWER_LOG", power_log },
     };
     int console = has_arg(L"--console"), out = redirected(STD_OUTPUT_HANDLE), err = redirected(STD_ERROR_HANDLE);
     size_t i;
+    /* Step 109: the logs' names, ProjectWrath.err.log / .out.log / .power.log (run_twoc.* for crash_twoc.exe) */
+    const wchar_t *lb = twoc_log_base_w();
+    wchar_t err_log[64], out_log[64], pow_log[64];
+    char err8[64], out8[64];
+
+    _snwprintf_s(err_log, 64, _TRUNCATE, L"%s.err.log", lb);
+    _snwprintf_s(out_log, 64, _TRUNCATE, L"%s.out.log", lb);
+    _snwprintf_s(pow_log, 64, _TRUNCATE, L"%s.power.log", lb);
+    WideCharToMultiByte(CP_UTF8, 0, err_log, -1, err8, sizeof(err8), NULL, NULL);
+    WideCharToMultiByte(CP_UTF8, 0, out_log, -1, out8, sizeof(out8), NULL, NULL);
+    WideCharToMultiByte(CP_UTF8, 0, pow_log, -1, power_log, sizeof(power_log), NULL, NULL);
 
     g_self = 1;
     if (console) {                      /* the console it was started from, or a new one */
@@ -113,8 +126,9 @@ void twoc_self_start(void)
             if (c != INVALID_HANDLE_VALUE) {
                 wchar_t line[MAX_PATH * 2 + 160];
                 DWORD put;
-                _snwprintf_s(line, sizeof(line) / sizeof(line[0]), _TRUNCATE, L"\r\nCrash TWOC is starting; its log "
-                             L"is %s\\run_twoc.err.log (--console shows it here instead).\r\n", twoc_data_dir());
+                _snwprintf_s(line, sizeof(line) / sizeof(line[0]), _TRUNCATE, L"\r\n%s is starting; its log "
+                             L"is %s\\%s (--console shows it here instead).\r\n", twoc_app_name_w(), twoc_data_dir(),
+                             err_log);
                 WriteConsoleW(c, line, (DWORD)wcslen(line), &put, NULL);
                 CloseHandle(c);
             }
@@ -123,27 +137,37 @@ void twoc_self_start(void)
         {
             WIN32_FILE_ATTRIBUTE_DATA fa;
             FILETIME by;
-            int has = GetFileAttributesExW(L"run_twoc.err.log", GetFileExInfoStandard, &fa);
+            int has = GetFileAttributesExW(err_log, GetFileExInfoStandard, &fa);
             by = fa.ftLastWriteTime;
-            rotate(L"run_twoc.err.log", L"err", has ? &by : NULL);
-            rotate(L"run_twoc.out.log", L"out", has ? &by : NULL);
+            rotate(err_log, L"err", has ? &by : NULL);
+            rotate(out_log, L"out", has ? &by : NULL);
             rotate(L"xbox_kernel.log", L"kernel", has ? &by : NULL);
-            rotate(L"run_twoc.power.log", L"power", has ? &by : NULL);
+            rotate(pow_log, L"power", has ? &by : NULL);
         }
         if (!out)
-            reopen(L"run_twoc.out.log", stdout);
+            reopen(out_log, stdout);
         if (!err)
-            reopen(L"run_twoc.err.log", stderr);
+            reopen(err_log, stderr);
         to_handles();
     }
     for (i = 0; i < sizeof(k_env) / sizeof(k_env[0]); i++)
         if (!getenv(k_env[i].var))
             _putenv_s(k_env[i].var, k_env[i].val);
-    fprintf(stderr, "[START] started by itself (no launcher): working folder %s%s; the launcher's switches set "
-            "(RECOMP_VBLANK, RECOMP_AC97_READY, RECOMP_D3D_BRIDGE, RECOMP_POWER_LOG); output %s\n", twoc_data_dir_utf8(),
-            twoc_data_dir_fallback() ? " (%LOCALAPPDATA%: the exe's folder can't be written to)" : " (the exe's folder)",
-            console ? "to the console (--console)" : out && err ? "where it was sent" : "to run_twoc.err.log and "
-            "run_twoc.out.log (the last run's in logs\\)");
+    {
+        char where[200];
+        if (console)
+            snprintf(where, sizeof(where), "to the console (--console)");
+        else if (out && err)
+            snprintf(where, sizeof(where), "where it was sent");
+        else
+            snprintf(where, sizeof(where), "to %s and %s (the last run's in logs\\)", err8, out8);
+        fprintf(stderr, "[START] started by itself (no launcher): working folder %s%s; the launcher's switches set "
+                "(RECOMP_VBLANK, RECOMP_AC97_READY, RECOMP_D3D_BRIDGE, RECOMP_POWER_LOG); output %s\n",
+                twoc_data_dir_utf8(), twoc_data_dir_fallback() ? " (%LOCALAPPDATA%: the exe's folder can't be written to)"
+                : " (the exe's folder)", where);
+    }
+    if (twoc_data_dir_note()[0])
+        fprintf(stderr, "%s\n", twoc_data_dir_note());     /* step 109: the old data folder's copy */
     fflush(stderr);
 }
 
@@ -162,16 +186,18 @@ void twoc_first_ini(void)
     HANDLE h;
     DWORD put;
 
-    if (!g_self && !(l && _strnicmp(l, "Play Crash", 10) == 0))
+    if (!g_self && !(l && (_strnicmp(l, "Play Crash", 10) == 0 || _strnicmp(l, "Play Project Wrath", 18) == 0)))
         return;
     if (twoc_settings_ignored())
         return;
     path = twoc_settings_path();
     if (GetFileAttributesA(path) != INVALID_FILE_ATTRIBUTES)
         return;
+    if (twoc_settings_old_path()[0])    /* step 109: an old crash_twoc.ini is read instead (settings.c) */
+        return;
     asp = aspect_word();
     snprintf(t, sizeof(t),
-             "# Crash TWOC settings, written by the settings menu (F1 in the game window).\r\n"
+             "# %s settings, written by the settings menu (F1 in the game window).\r\n"
              "# Written at the game's first start with the settings that suit most PCs (notes 18.110): the screen's own\r\n"
              "# size and shape in a window, frames drawn between the game's at the display's rate, the render thread\r\n"
              "# by core count, baked draws on (the default). Change them in the F1 menu; delete this file for the\r\n"
@@ -190,7 +216,8 @@ void twoc_first_ini(void)
              "render_thread = auto           # auto (on with 4 or more processor cores), on or off\r\n"
              "hud = edges           # centre (the game's 4:3 places) or edges: the HUD counters at the screen's edges\r\n"
              "fast_title = 1           # 1: the title animation runs fast, so the main menu opens sooner\r\n"
-             "gpu = auto           # auto (Windows' choice; the game asks for the high-performance card)\r\n", asp);
+             "gpu = auto           # auto (Windows' choice; the game asks for the high-performance card)\r\n",
+             twoc_app_name(), asp);
     h = CreateFileA(path, GENERIC_WRITE, 0, NULL, CREATE_NEW, FILE_ATTRIBUTE_NORMAL, NULL);
     if (h == INVALID_HANDLE_VALUE) {
         fprintf(stderr, "[CFG] first start: %s couldn't be written (Windows error %lu): the game's defaults\n", path,

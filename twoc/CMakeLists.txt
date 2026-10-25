@@ -159,6 +159,10 @@ set(GAME_SOURCES
     src/cpu_info.c
     # The F1 menu's Quit game and Restart now: a clean end, the launcher's code 75 or a start of its own (step 97)
     src/restart.c
+    # The names it shows and writes, from the exe's own file name (Project Wrath; step 109, notes 18.112), and the
+    # Windows file properties (version info: product, description, original file name; no company)
+    src/names.c
+    src/version.rc
     # Vulkan, stage 1: a probe behind RECOMP_VULKAN=probe (notes 18.89); volk loads
     # vulkan-1.dll at run time, so the exe imports nothing new
     src/vk_probe.c

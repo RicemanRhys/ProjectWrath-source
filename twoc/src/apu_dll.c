@@ -23,6 +23,7 @@
 
 #include "apu_dll.h"
 #include "xemu_apu_api.h"
+#include "names.h"
 
 typedef struct MCPXAPUState MCPXAPUState;
 
@@ -37,11 +38,17 @@ static const char *utf8(const wchar_t *w, char *buf, int cap)
     return buf;
 }
 
-static void apu_dll_fail(const wchar_t *path, const wchar_t *what, const wchar_t *todo)
+/* `todo` may name the exe with %ls (twice at most): the running exe's own file name goes there (step 109:
+ * ProjectWrath.exe in the packages, names.h). */
+static void apu_dll_fail(const wchar_t *path, const wchar_t *what, const wchar_t *todo_fmt)
 {
-    wchar_t msg[4096];
+    wchar_t msg[4096], todo[1024], title[96];
     static char u1[2048], u2[4 * 32768];
 
+    _snwprintf(todo, sizeof(todo) / sizeof(todo[0]) - 1, todo_fmt, twoc_exe_name_w(), twoc_exe_name_w());
+    todo[sizeof(todo) / sizeof(todo[0]) - 1] = 0;
+    _snwprintf(title, sizeof(title) / sizeof(title[0]) - 1, L"%ls", twoc_app_name_w());
+    title[sizeof(title) / sizeof(title[0]) - 1] = 0;
     _snwprintf(msg, sizeof(msg) / sizeof(msg[0]) - 1,
                L"The game can't start: %ls\n\n"
                L"The file:\n%ls\n\n"
@@ -53,7 +60,7 @@ static void apu_dll_fail(const wchar_t *path, const wchar_t *what, const wchar_t
     fprintf(stderr, "[APU-DLL] The game can't start: %s The file: %s\n", utf8(what, u1, sizeof(u1)),
             utf8(path, u2, sizeof(u2)));
     fflush(stderr);
-    MessageBoxW(NULL, msg, L"Crash TWOC - audio library", MB_ICONERROR | MB_OK | MB_SETFOREGROUND);
+    MessageBoxW(NULL, msg, title, MB_ICONERROR | MB_OK | MB_SETFOREGROUND);
 }
 
 /* The file's size and SHA-256 (hex), for the log. 0 if it can't be read. */
@@ -104,12 +111,12 @@ int twoc_apu_dll_load(void)
 
     if (n == 0 || n >= 32768 - 32 || !(slash = wcsrchr(path, L'\\')))
         return apu_dll_fail(L"(the game's own folder couldn't be found)", L"its folder couldn't be worked out",
-                            L"Start crash_twoc.exe from its folder."), 0;
+                            L"Start %ls from its folder."), 0;
     wcscpy(slash + 1, L"" XEMU_APU_DLL_NAME);
 
     if (GetFileAttributesW(path) == INVALID_FILE_ATTRIBUTES) {
         apu_dll_fail(path, L"its audio library, xemu_apu.dll, is missing.",
-                     L"It has to be in the same folder as crash_twoc.exe. Copy it back from the package the game "
+                     L"It has to be in the same folder as %ls. Copy it back from the package the game "
                      L"came in (or unpack the package again), then start the game again.");
         return 0;
     }
@@ -121,7 +128,7 @@ int twoc_apu_dll_load(void)
                    err == ERROR_MOD_NOT_FOUND ? L": a file it needs is missing" : L"");
         what[511] = 0;
         apu_dll_fail(path, what,
-                     L"Put back the xemu_apu.dll that came with this crash_twoc.exe (from the same package), then "
+                     L"Put back the xemu_apu.dll that came with this %ls (from the same package), then "
                      L"start the game again. If you built it yourself, build it again for 64-bit Windows "
                      L"(the source's build.cmd).");
         return 0;
@@ -130,7 +137,7 @@ int twoc_apu_dll_load(void)
     if (!get) {
         apu_dll_fail(path, L"the file named xemu_apu.dll isn't the game's audio library (it has no "
                            L"xemu_apu_get_api).",
-                     L"Put back the xemu_apu.dll that came with this crash_twoc.exe (from the same package), then "
+                     L"Put back the xemu_apu.dll that came with this %ls (from the same package), then "
                      L"start the game again.");
         FreeLibrary(h);
         return 0;
@@ -138,12 +145,12 @@ int twoc_apu_dll_load(void)
     api = get(XEMU_APU_INTERFACE_VERSION, &dll_version);
     if (!api || api->version != XEMU_APU_INTERFACE_VERSION || api->size < sizeof(XemuApuApi)) {
         _snwprintf(what, 511, L"its audio library, xemu_apu.dll, is a different version: it offers interface "
-                              L"version %lu, and this crash_twoc.exe needs version %d.",
-                   (unsigned long)(api ? api->version : dll_version), XEMU_APU_INTERFACE_VERSION);
+                              L"version %lu, and this %ls needs version %d.",
+                   (unsigned long)(api ? api->version : dll_version), twoc_exe_name_w(), XEMU_APU_INTERFACE_VERSION);
         what[511] = 0;
         apu_dll_fail(path, what,
-                     L"Use the xemu_apu.dll that came with this crash_twoc.exe (from the same package). If you "
-                     L"built it yourself, build it from the source that came with this crash_twoc.exe.");
+                     L"Use the xemu_apu.dll that came with this %ls (from the same package). If you "
+                     L"built it yourself, build it from the source that came with this %ls.");
         FreeLibrary(h);
         return 0;
     }

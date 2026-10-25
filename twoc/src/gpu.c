@@ -11,6 +11,7 @@
 
 #include "gpu.h"
 #include "settings.h"
+#include "names.h"
 
 /* xbox_d3d8 (d3d8_internal.h, local): the adapter its next CreateDevice uses. */
 extern void d3d8_SetPreferredAdapter(IDXGIAdapter *adapter);
@@ -158,13 +159,13 @@ void twoc_gpu_start(void)
         fprintf(stderr, "[GPU] no hardware graphics card listed by DXGI\n");
     if (want[0] && chosen) {
         d3d8_SetPreferredAdapter((IDXGIAdapter *)chosen);
-        fprintf(stderr, "[GPU] Graphics card: \"%s\" (gpu, crash_twoc.ini or RECOMP_GPU): the device is made on it\n",
-                want);
+        fprintf(stderr, "[GPU] Graphics card: \"%s\" (gpu, %s or RECOMP_GPU): the device is made on it\n",
+                want, twoc_ini_name());
     } else if (want[0]) {
         snprintf(g_note, sizeof(g_note), "The graphics card chosen before, \"%s\", isn't on this PC now: Automatic "
                  "is used.", want);
-        fprintf(stderr, "[GPU] Graphics card: \"%s\" (gpu, crash_twoc.ini or RECOMP_GPU) isn't on this PC: Automatic"
-                " instead\n", want);
+        fprintf(stderr, "[GPU] Graphics card: \"%s\" (gpu, %s or RECOMP_GPU) isn't on this PC: Automatic"
+                " instead\n", want, twoc_ini_name());
     } else if (g_n <= 1) {
         fprintf(stderr, "[GPU] Graphics card: Automatic%s, with one graphics card: D3D11's default adapter, as "
                 "before\n", twoc_settings_ignored() ? " (safe settings)" : "");

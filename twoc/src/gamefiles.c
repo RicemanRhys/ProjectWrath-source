@@ -24,6 +24,7 @@
 
 #include "gamefiles.h"
 #include "setup.h"
+#include "names.h"
 
 #define GF_DIR          L"game_files"
 
@@ -283,7 +284,7 @@ int twoc_game_files_check(void)
     snprintf(msg, sizeof(msg), "%s\n\nTo fix it, extract the disc image of Crash Bandicoot: The Wrath of Cortex (Xbox, "
              "USA) into\n%s\nso that default.xbe and the Crashdat folder are directly in it.%s", why, g_gd,
              code == GF_NONE || code == GF_MISSING ? "" : "\n\nStart anyway?");
-    r = MessageBoxA(NULL, msg, "Crash TWOC - game files", MB_SETFOREGROUND | (code == GF_NONE || code == GF_MISSING ?
+    r = MessageBoxA(NULL, msg, twoc_app_name(), MB_SETFOREGROUND | (code == GF_NONE || code == GF_MISSING ?
                     MB_ICONERROR | MB_OK : MB_ICONWARNING | MB_YESNO | MB_DEFBUTTON2));
     if (code == GF_NONE || code == GF_MISSING)
         return 0;
