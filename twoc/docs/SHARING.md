@@ -1,6 +1,6 @@
-# Sharing Crash TWOC: the checklist
+# Sharing Project Wrath: the checklist
 
-Step 107 (notes 18.110), updated in step 108 (notes 18.111). This is a list of what to look at before the game goes
+Step 107 (notes 18.110), updated in steps 108 and 109 (notes 18.111, 18.112). This is a list of what to look at before the game goes
 to other people, in plain words. **It is not legal advice and makes no legal decisions.** Where something is a legal
 question it says so; those are for a lawyer (ideally one who knows software licensing and game emulation or porting).
 
@@ -10,8 +10,10 @@ still your call, after the points below.
 
 **Decided in step 108 (your choices):** this project's own code is MIT (part 2); the LGPL audio code is its own DLL,
 `xemu_apu.dll`, shipped with its source (part 1); the Visual C++ runtime is linked statically, so no runtime DLL
-ships (part 2). **Still open:** the copyright holder's name (a placeholder in `twoc/LICENSE`), the project's name
-(part 4), the recompiled code in the exe (part 3, a lawyer's question), where people report problems (part 7).
+ships (part 2). **Decided in step 109:** the project's name, Project Wrath (part 4). **Still open:** the copyright
+holder's name (a placeholder in `twoc/LICENSE`), where people report problems (ISSUES_URL, a placeholder in
+`twoc/ISSUES_URL.txt`: part 7), whether the name is free to use (searches that are yours or a lawyer's: part 4), the
+recompiled code in the exe (part 3, a lawyer's question).
 **`docs/RELEASE_CHECKLIST.md`** is the short, ordered list of what to do before giving the Share package to anyone.
 
 ## 1. The LGPL audio code from xemu: xemu_apu.dll (decided in step 108)
@@ -24,7 +26,7 @@ changes: 13 local xboxrecomp commits in `src/apu`, never pushed upstream.
 **Your choice (step 108): the audio code is its own DLL, shipped with its source and licence, so a recipient can
 swap it.** Since step 108:
 
-- **The DLL.** `xemu_apu.dll`, beside `crash_twoc.exe` in every package. It is built by `twoc/apu_dll/CMakeLists.txt`
+- **The DLL.** `xemu_apu.dll`, beside `ProjectWrath.exe` in every package. It is built by `twoc/apu_dll/CMakeLists.txt`
   from xboxrecomp's APU files, unchanged (the xemu-derived files, plus xboxrecomp's own MIT `apu_xaudio2.c` and
   `apu_mmio_hook.c`), and this project's `xemu_apu_dll.c` (its one export, MIT). The exe no longer contains any of
   that code (it links xboxrecomp's other libraries one by one, without `xbox_apu`), and the DLL contains nothing
@@ -45,7 +47,7 @@ swap it.** Since step 108:
   package carries it in `Source\`. Built with the same compiler, the rebuilt DLL is byte for byte the shipped one
   (`/Brepro`; proved in step 108 from the unpacked zip alone).
 - **How a recipient replaces it:** change the source, run `build.cmd`, close the game, copy the new `xemu_apu.dll`
-  over the one next to `crash_twoc.exe`. Nothing else is rebuilt or relinked.
+  over the one next to `ProjectWrath.exe`. Nothing else is rebuilt or relinked.
 
 **What `make_source_package.ps1` is for now.** It still makes a zip of the whole program's source (twoc's source and
 build files, xboxrecomp at the commits built, its local commits as patches), without the recompiled code, the
@@ -68,7 +70,7 @@ part of the Share package).
 
 **What is not a licence text in the file, and why:**
 
-- **The Visual C++ runtime: linked statically since step 108 (your choice 3).** `crash_twoc.exe` and
+- **The Visual C++ runtime: linked statically since step 108 (your choice 3).** `ProjectWrath.exe` and
   `xemu_apu.dll` are built with `/MT` (`TWOC_STATIC_CRT`, every target: the exe, xboxrecomp's libraries, SDL 3,
   the DLL), so they import no Microsoft runtime DLL and **no `vcruntime140*.dll` ships in any package**;
   `package_audit.ps1` fails if one appears, and `make_package.ps1` stops if the exe or the DLL imports one.
@@ -131,7 +133,7 @@ them later: a one-line `SPDX-License-Identifier: MIT` comment per file needs no 
 
 ## 3. The recompiled code is derived from the game's machine code
 
-`crash_twoc.exe` holds C translated, function by function, from the game's own program (`default.xbe`), compiled to
+`ProjectWrath.exe` (the build's `crash_twoc.exe`) holds C translated, function by function, from the game's own program (`default.xbe`), compiled to
 x64. The exe does not contain the game's data (levels, models, textures, sounds, music: the player's disc supplies
 those), but its code is a mechanical translation of the game's code, and of the Microsoft XDK libraries linked into
 the game (D3D, DirectSound, XAPI). **Whether distributing that is allowed is a legal question, for a lawyer.** The
@@ -151,14 +153,28 @@ the player's own disc. Not studied here.
 "Crash Bandicoot" and "The Wrath of Cortex" are trademarks of their owners. Points to look at (decisions are
 yours):
 
-- The program's names say "Crash": the folder `Crash TWOC`, `crash_twoc.exe`, the window titles "Crash TWOC - D3D
-  bridge (host)" and "Crash TWOC - Setup", the zip and folder names `SharePackage`. A neutral project name with a
-  plain description ("a PC port of ... for your own copy") is the usual way fan projects keep clear of looking
-  official.
+- **Decided in step 109: the project's name is Project Wrath** (notes 18.112 has the inventory of every name a
+  player sees, renamed or kept, and why). The packaged exe is `ProjectWrath.exe` (Windows file properties: product
+  "Project Wrath", description "Project Wrath - an unofficial fan port (not affiliated with the owners of the
+  game)", no company), the window "Project Wrath", the setup "Project Wrath - Setup", `ProjectWrath.ini`,
+  `ProjectWrath.*.log`, `%LOCALAPPDATA%\ProjectWrath`, "Play Project Wrath.bat", `ProjectWrath_logs_*.zip`, the
+  folders `ProjectWrath-Share`, `ProjectWrath-LegionGo`, `ProjectWrath-Nitro5`. The name and the window title don't
+  contain the game's name; the game is named only to say which disc is needed (the setup, the README's "What you
+  need", `LICENSE.txt`'s point 5). The names follow the running exe's file name (`twoc/src/names.h`): the
+  repository's own build, `crash_twoc.exe`, keeps the old names for the development tools. The audit (part 5,
+  check 8) fails if the old names show in a Share package.
+- **Still to do, not by these tools:** whether "Project Wrath" is free to use. Search the exact name on GitHub
+  (repositories, organisations), the web (games, mods, apps, companies), the app stores, and the trademark
+  databases: the USPTO's trademark search (USA), EUIPO's eSearch (EU), WIPO's Global Brand Database (elsewhere).
+  Judging what a result means is a lawyer's job (or yours); nothing here decides it.
+- The settings menu's help lines name the game's own character where a setting is about him (Character fur "Off
+  for Crash only", the 3D sound help, the title animation), and the README names a few levels in its known
+  quirks. They describe the game's content, not the project; whether to keep them is your call.
 - The package uses no logo, box art, screenshots or music of the game; the setup screen and README use the game's
   name as text only. Keep it that way in anything published (a web page, a video, an icon).
-- The README and the setup screen say it is unofficial and not affiliated with the owners. Keep that wording
-  wherever the program is offered.
+- The README, the setup screen, the About tab and the exe's file description say it is an unofficial fan port,
+  not affiliated with, endorsed by or sponsored by the owners of the game. Keep that wording wherever the program
+  is offered.
 - The game's own title screen and logos appear when it runs: they come from the player's disc.
 
 ## 5. The audit
@@ -170,17 +186,27 @@ lines, exit code 1):
    `twoc/data/disc_usa.tsv`), and no `.xbe`, `.iso` or `.xiso` at all;
 2. no trace of this PC: the home folder's path, the user name in a `\Users\<name>\` path, or the PC's name, in any
    file name or contents (text and binary, 8-bit and UTF-16);
-3. no logs, saves or dumps (`*.log`, `*.dmp`, `*.sav`, `*.xbx`, `*.pdb`, `*.zip` except the source zips in
-   `Source\`, `logs\`, `UDATA\`, `UDATA_backups\`, `TDATA\`), no setup leftovers, and no `crash_twoc.ini` in the
-   Share package;
+3. no logs, saves or dumps (`*.log`, `*.dmp`, `*.sav`, `*.xbx`, `*.pdb`, `*.muted`, `*.zip` except the source
+   zips in `Source\`, `logs\`, `UDATA\`, `UDATA_backups\`, `TDATA\`), no setup leftovers, and no ini of the
+   game's (`ProjectWrath.ini`, `crash_twoc.ini`) in the Share package;
 4. the licences (step 108): `LICENSE.txt` is there and is the MIT licence with a copyright line, and
    `THIRD_PARTY_LICENSES.txt` is there. While the copyright line still holds `[NAME TO BE CHOSEN BY THE OWNER]` it
    **warns** loudly in yellow ("NOT READY TO SHARE") and ends "AUDIT PASSED WITH 1 WARNING(S)";
-5. the audio library (step 108): `xemu_apu.dll` beside every `crash_twoc.exe`; in the Share package
+5. the audio library (step 108): `xemu_apu.dll` beside every `ProjectWrath.exe` (or developer `crash_twoc.exe`); in the Share package
    `Source\xemu_apu-source_*.zip`; every zip in `Source\` is unpacked into a temporary folder and audited the same
    way (it must hold the LGPL text and its notice);
 6. no Microsoft runtime DLL (step 108: `vcruntime*`, `msvcp*`, `concrt*`, `vccorlib*`, `ucrtbase`,
-   `api-ms-win-crt-*`).
+   `api-ms-win-crt-*`);
+7. where players report problems (step 109): `PACKAGE.txt`'s "Where to report problems" line, from
+   `twoc/ISSUES_URL.txt`. While ISSUES_URL is the placeholder it **warns** loudly in yellow ("NOT READY TO SHARE"),
+   as for the copyright name; an unfilled `@ISSUES_URL@` left in a text file fails;
+8. the names before Project Wrath (step 109): in a Share package (and the source zip inside it), no `crash_twoc`,
+   `CrashTWOC` or `Crash TWOC` (any case) in a file's name or in a readable text file. Not looked into: the exe and
+   the DLL (binaries; the exe holds the old names on purpose, for the developer's build and to read an old
+   `crash_twoc.ini` or `%LOCALAPPDATA%\CrashTWOC`), and the audio source zip's `src\` and `changes\` (xboxrecomp's
+   LGPL files and their patches, exactly as built and committed: their comments and commit messages keep the old
+   names). The allow-list: a line saying what the project was "formerly" called (none so far), and the source
+   zip's `NOTICE.txt` lines that list xboxrecomp's commits as committed.
 
 `make_package.ps1 -Target Share` runs it at the end and fails if it fails; `make_source_package.ps1` and
 `make_apu_source_package.ps1` run it before zipping. The test packages (Legion Go, Nitro 5) carry `game_files\` for your own devices: the audit says so and skips
@@ -188,9 +214,16 @@ the game-file check inside it only. Run it again on anything you are about to se
 
 ## 6. Logs and privacy
 
-- The game writes `run_twoc.err.log` (the last run), `logs\` (earlier runs), `xbox_kernel.log` and
-  `run_twoc.power.log`, all in its own folder, never anywhere else, and **sends nothing over the network** (the
-  program has no network code).
+- The game writes `ProjectWrath.err.log` (the last run; `run_twoc.err.log` for the developer's `crash_twoc.exe`),
+  `logs\` (earlier runs), `xbox_kernel.log` and `ProjectWrath.power.log`, all in its own folder (or
+  `%LOCALAPPDATA%\ProjectWrath`), plus xboxrecomp's sparse Xbox hard-disk images in `%LOCALAPPDATA%\xboxrecomp`
+  (a few MB on the disk, no saves), and **sends nothing over the network** (the program has no network code; the
+  About tab's "Report a problem" only opens the player's browser on ISSUES_URL, when they press it).
+- The About tab's **Copy build info** (step 109) puts a text block on the clipboard for a report: the build,
+  Windows, the processor, the graphics card and driver, the display and refresh rate, the picture, the Frame rate
+  setting, the settings changed from the defaults and the game files' check. It is scrubbed as Collect logs scrubs
+  (the user's name, the PC's name, the game's, exe's, home and profile folders, any other path left), and logs how
+  many it took out; nothing leaves the PC unless the player pastes it somewhere.
 - They hold: the folder paths (with the Windows user name in them), the graphics card and driver, the display's
   mode, the processor, Windows' version, the power plan and battery, the controllers' names, the settings, and the
   game's technical messages. No account names, no files from outside the game's folder.
@@ -205,9 +238,18 @@ the game-file check inside it only. Run it again on anything you are about to se
 
 ## 7. Support and bug reports
 
-To decide: where players report problems (a GitHub issue tracker, a Discord, an e-mail address) and whether you
-want reports at all. Whatever the channel, ask for: the zip from `Collect logs.bat`, what happened and where in
-the game, the frame rate setting, and whether it happens again. The logs' `[FILES]` line says whether the game files
+**Prepared in step 109, nothing published:** ISSUES_URL, one value in `twoc/ISSUES_URL.txt` (a marked placeholder
+until you choose where reports go: a GitHub issue tracker, a Discord, a web form). The About tab shows "Report a
+problem" only once it is a real `https://` address; the Share README says "Where to report problems: to be
+announced" until then; the audit warns. `.github/ISSUE_TEMPLATE/` holds a bug report form (the build from Copy
+build info, Windows, graphics card and driver, display and refresh rate, the Frame rate setting, the level and
+where, whether it also happens at Game (60), what was done, what happened, what should happen, the Collect logs zip,
+screenshots, and a "Verify game files" check box), a feature request form, and `config.yml` (blank reports off, a
+link to the README's FAQ whose `OWNER/REPOSITORY` is to be filled in once the repository is published). No personal
+information is in them. The Share README has "Reporting a problem" and a FAQ (setup, the frozen first logo, the
+audio DLL message, SmartScreen for the unsigned exe, antivirus false positives, saves and logs). Whatever the
+channel, ask for: Copy build info, the zip from `Collect logs.bat`, what happened and where in the game, the frame
+rate setting, and whether it happens again. The logs' `[FILES]` line says whether the game files
 were the supported disc's; the `[ABOUT]` line names the build. Expect most reports to be about the disc image (the
 setup screen's messages name the common cases) and about slow PCs (the README's Frame rate part).
 

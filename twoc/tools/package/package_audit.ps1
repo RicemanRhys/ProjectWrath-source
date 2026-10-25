@@ -16,7 +16,15 @@
 #      concrt*.dll, vccorlib*.dll, ucrtbase.dll or api-ms-win-crt-*.dll anywhere in a package.
 #   7. where players report problems (step 109): PACKAGE.txt's "Where to report problems" line; while ISSUES_URL
 #      (twoc\ISSUES_URL.txt) is the placeholder, it WARNS loudly (yellow), without failing.
-# It fails loudly (red lines, exit code 1) on any of 1-6, and on an unfilled @ISSUES_URL@.
+#   8. the names before Project Wrath (step 109, notes 18.112), in a Share package (and in its source zip, -OldNames):
+#      no "crash_twoc", "CrashTWOC" or "Crash TWOC" (any case) in a file's name or in a readable text file (.txt,
+#      .bat, .cmd, .ps1, .ini, .md, .yml, .json, .c, .h, CMakeLists.txt). Not looked into: the exe and the DLL
+#      (binaries: the exe holds the old names on purpose, for the developer's crash_twoc.exe and to read an old
+#      crash_twoc.ini and %LOCALAPPDATA%\CrashTWOC), and in the audio library's source zip its src\ and changes\
+#      (xboxrecomp's LGPL files and their patches, exactly as built and committed). The allow-list (below): a line
+#      saying what the project was "formerly" called, and the source zip's NOTICE.txt lines listing xboxrecomp's
+#      commits as committed.
+# It fails loudly (red lines, exit code 1) on any of 1-6 and 8, and on an unfilled @ISSUES_URL@.
 # What it audits: a package (PACKAGE.txt), the whole-program source folder (make_source_package.ps1: twoc\LICENSE)
 # or the audio library's source folder (make_apu_source_package.ps1: xemu_apu_dll.c, LICENSES\, NOTICE.txt).
 #
@@ -26,7 +34,7 @@
 # devices: for them the game-file check is skipped inside game_files\ (and says so), and done everywhere else.
 # A file of the same size as a disc file but another SHA-256 is a coincidence, listed but not a failure.
 # Windows PowerShell 5.1; ASCII only.
-param([Parameter(Mandatory)][string]$Dir, [string]$Manifest)
+param([Parameter(Mandatory)][string]$Dir, [string]$Manifest, [switch]$OldNames)
 $ErrorActionPreference = 'Stop'
 $here = $PSScriptRoot
 if (-not $Manifest) { $Manifest = Join-Path (Split-Path -Parent (Split-Path -Parent $here)) 'data\disc_usa.tsv' }
@@ -46,6 +54,7 @@ if (Test-Path -LiteralPath $pk) {
 }
 $share = $target -eq 'Share'
 $apuSrc = $target -eq 'unknown' -and (Test-Path -LiteralPath (Join-Path $Dir 'xemu_apu_dll.c'))
+$oldCheck = $share -or $OldNames     # part 8: a Share package, and the source zips inside it
 if ($apuSrc) { $target = 'the audio library''s source' }
 Write-Host "Auditing $Dir (target $target)"
 
@@ -200,7 +209,9 @@ foreach ($z in $zips) {
         $top = @(Get-ChildItem -LiteralPath $zt)
         $inner = if ($top.Count -eq 1 -and $top[0].PSIsContainer) { $top[0].FullName } else { $zt }
         Write-Host "   --- $($z.Name), unpacked: ---"
-        & powershell -NoProfile -ExecutionPolicy Bypass -File $PSCommandPath -Dir $inner -Manifest $Manifest
+        $sub = @('-NoProfile', '-ExecutionPolicy', 'Bypass', '-File', $PSCommandPath, '-Dir', $inner, '-Manifest', $Manifest)
+        if ($share) { $sub += '-OldNames' }         # step 109: the zip inside a Share package, part 8 too
+        & powershell @sub
         if ($LASTEXITCODE) { Fail "the zip Source\$($z.Name) failed its own audit (above)" }
         Write-Host "   --- end of $($z.Name) ---"
     } finally { if (Test-Path -LiteralPath $zt) { Remove-Item -Recurse -Force -LiteralPath $zt } }
@@ -233,6 +244,33 @@ if (Test-Path -LiteralPath $pk) {
         if ($f.Extension -notin '.txt', '.bat', '.ps1', '.ini', '.md') { continue }
         if ([IO.File]::ReadAllText($f.FullName).Contains('@ISSUES_URL@')) { Fail "an unfilled @ISSUES_URL@ in $($f.FullName.Substring($Dir.Length + 1))" }
     }
+}
+
+# 8. The names before Project Wrath (step 109): in a Share package's file names and readable text.
+if ($oldCheck) {
+    Write-Host "8. the names before Project Wrath (crash_twoc, CrashTWOC, Crash TWOC)"
+    $old = '(?i)crash_twoc|crashtwoc|crash twoc'
+    $allow = @('(?i)\bformerly\b')                         # a line saying what it was formerly called
+    $textExt = @('.txt', '.bat', '.cmd', '.ps1', '.ini', '.md', '.yml', '.yaml', '.json', '.c', '.h', '.cpp')
+    $seen = 0
+    foreach ($f in $all) {
+        $rel = $f.FullName.Substring($Dir.Length + 1)
+        if ($apuSrc -and ($rel -like 'src\*' -or $rel -like 'changes\*')) { continue }   # as built and committed
+        if ($f.Name -match $old) { Fail "a name from before Project Wrath in a file name: $rel" }
+        if ($f.PSIsContainer -or ($f.Extension -notin $textExt -and $f.Name -ne 'CMakeLists.txt')) { continue }
+        $seen++
+        $n = 0
+        foreach ($line in [IO.File]::ReadAllLines($f.FullName)) {
+            $n++
+            if ($line -notmatch $old) { continue }
+            $ok = $false
+            foreach ($a in $allow) { if ($line -match $a) { $ok = $true } }
+            if ($apuSrc -and $f.Name -eq 'NOTICE.txt' -and $line -match '^\s+[0-9a-f]{7,40} \d{4}-\d\d-\d\d ') { $ok = $true }
+            if ($ok) { Note "allowed (${rel}:$n): $($line.Trim())" }
+            else { Fail "a name from before Project Wrath in ${rel}, line ${n}: $($line.Trim())" }
+        }
+    }
+    Write-Host "   $seen text files read"
 }
 
 $size = ($files | Measure-Object Length -Sum).Sum

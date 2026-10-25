@@ -9,7 +9,7 @@
 #
 # Two ways in:
 #   - from twoc/CMakeLists.txt (add_subdirectory), XEMU_APU_SRC = xboxrecomp/src; the DLL lands beside
-#     the exe (the build's crash_twoc.exe, packaged as ProjectWrath.exe: step 109);
+#     the game's exe (packaged as ProjectWrath.exe: step 109);
 #   - on its own, from the source package (make_apu_source_package.ps1): cmake -S . -B build, then
 #     cmake --build build --config Release; XEMU_APU_SRC = ./src. build.cmd does both.
 cmake_minimum_required(VERSION 3.20)
