@@ -15,8 +15,10 @@
 #      *.exe, *.dll, *.pdb, *.lib, *.obj, folders named UDATA, UDATA_backups, TDATA, captures, logs, dumps,
 #      game_files, *Package;
 #   6. tokens or keys: GitHub tokens, AWS keys, private key blocks, "api_key = ..." style secrets;
-#   7. the git history (when DIR is a repository): more than one commit, a remote, or an author / committer that
-#      isn't the public identity ($publicId below: GitHub's noreply address, never the private e-mail).
+#   7. the git history (when DIR is a repository): more than one commit, a remote, an author / committer that
+#      isn't the public identity ($publicId below: GitHub's noreply address, never the private e-mail), or an author /
+#      committer date that isn't in UTC (+0000: the owner's time zone isn't published);
+#   8. a patch file's Date: line that isn't in UTC (+0000), for the same reason.
 # WARNS (exit 0, "AUDIT PASSED WITH N WARNING(S)") on any placeholder left unfilled: the noreply address, ISSUES_URL
 # (twoc\ISSUES_URL.txt's placeholder; make_package.ps1's @ISSUES_URL@ token is the packaging's, filled at every
 # package and checked by package_audit.ps1) and the issue forms' repository link (the patterns below are written so
@@ -110,6 +112,12 @@ foreach ($f in $files) {
     foreach ($p in $personal) { if ($t -match $p.re) { Fail "$($p.what) ('$($Matches[0])'): $rel" } }
     foreach ($p in $secrets) { if ($t -match $p.re) { Fail "$($p.what): $rel" } }
     foreach ($p in $placeholders) { if ($t -match $p.re) { Warn $p.what $rel } }
+    # 8: dates in patches
+    if ($ext -eq '.patch') {
+        foreach ($m in [regex]::Matches($t, '(?m)^Date: .*?(?=\r?$)')) {
+            if ($m.Value -notmatch ' \+0000$') { Fail "a date that isn't in UTC ('$($m.Value)'): $rel" }
+        }
+    }
 }
 
 # 7: the history
@@ -123,6 +131,11 @@ if (Test-Path -LiteralPath (Join-Path $Dir '.git')) {
         foreach ($who in (& git log --format='%an <%ae>|%cn <%ce>')) {
             foreach ($id in ($who -split '\|')) {
                 if ($id -ne $publicId) { Fail "a commit identity that isn't the public one: $id" }
+            }
+        }
+        foreach ($when in (& git log --format='%ad|%cd' --date=raw)) {
+            foreach ($d in ($when -split '\|')) {
+                if ($d -notmatch '^\d+ \+0000$') { Fail "a commit date that isn't in UTC: $d" }
             }
         }
         $tracked = (& git ls-files | Measure-Object).Count

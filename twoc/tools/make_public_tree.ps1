@@ -15,11 +15,13 @@
 #   - the public files kept in twoc\public\ (README.md, CONTRIBUTING.md, SECURITY.md, .gitignore, docs\) at the top,
 #     with LICENSE, NOTICE and THIRD_PARTY_LICENSES.txt copied from twoc\, and .github\ (the issue forms);
 #   - toolkit\: the xboxrecomp commit the work is based on (upstream's, pinned) and this project's local commits on
-#     top of it as patch files, their author lines set to the public identity; fetch_toolkit.ps1 makes xboxrecomp\
-#     from them (a fork, a submodule or these patches all start from the same two facts);
+#     top of it as patch files, their author lines set to the public identity and their Date: lines to the same
+#     instant in UTC (+0000: the owner's time zone isn't published; the tree they rebuild is unchanged);
+#     fetch_toolkit.ps1 makes xboxrecomp\ from them (a fork, a submodule or these patches all start from the same
+#     two facts);
 #   - a FRESH git repository: one commit, "Initial public release of Project Wrath", author and committer
 #     "RicemanRhys <176650384+RicemanRhys@users.noreply.github.com>" (GitHub's noreply address for the owner's
-#     account: never the private e-mail), no remote; nothing is pushed.
+#     account: never the private e-mail), dated now in UTC (+0000), no remote; nothing is pushed.
 # Then it runs audit_public_tree.ps1 on DIR and fails if the audit does. Re-runnable for later releases: DIR is
 # replaced only with -Force, and only if it holds this script's own marker file (.public-tree-export).
 param(
@@ -35,6 +37,7 @@ $repo = Split-Path -Parent $twoc
 if (-not $Toolkit) { $Toolkit = Join-Path $repo 'xboxrecomp' }
 $identityName = 'RicemanRhys'
 $identityMail = '176650384+RicemanRhys@users.noreply.github.com'   # GitHub's noreply address
+$inv = [Globalization.CultureInfo]::InvariantCulture
 $marker = '.public-tree-export'
 
 # The private repository's files that may be published (paths in the repository, '/' separators; a trailing '/'
@@ -121,7 +124,10 @@ New-Item -ItemType Directory -Force -Path $pd | Out-Null
 $upstreamUrl = (& git -C $Toolkit remote get-url origin).Trim()
 $tkHead = (& git -C $Toolkit rev-parse HEAD).Trim()
 $base = (& git -C $Toolkit merge-base origin/main HEAD).Trim()
-$baseLine = (& git -C $Toolkit log -1 --format='%H %cI %s' $base).Trim()
+# (the upstream commit's date in UTC, like every date in the export)
+$baseParts = (& git -C $Toolkit log -1 --format='%H|%ct|%s' $base).Trim() -split '\|', 3
+$baseWhen = [DateTimeOffset]::FromUnixTimeSeconds([long]$baseParts[1]).ToString("yyyy-MM-dd'T'HH:mm:ss'+00:00'", $inv)
+$baseLine = "$($baseParts[0]) $baseWhen $($baseParts[2])"
 & git -C $Toolkit format-patch --quiet --no-signature --zero-commit -N -o $pd "$base..$tkHead" | Out-Null
 if ($LASTEXITCODE) { throw "git format-patch failed" }
 $n = 0
@@ -129,6 +135,15 @@ foreach ($p in Get-ChildItem -LiteralPath $pd -Filter '*.patch' | Sort-Object Na
     $t = [IO.File]::ReadAllText($p.FullName)
     # the author line: the public identity, never the private one
     $t = [regex]::Replace($t, '(?m)^From: .*$', "From: $identityName <$identityMail>")
+    # the header's Date: line (the first one: a message line could start with "Date:" too): the same instant in UTC
+    $dm = [regex]::Match($t, '(?m)^Date: (?:\w{3}, )?(\d{1,2} \w{3} \d{4} \d{2}:\d{2}:\d{2}) ([+-])(\d{2})(\d{2})\r?$')
+    if (-not $dm.Success) { throw "no Date: line in $($p.Name)" }
+    $off = New-Object TimeSpan([int]$dm.Groups[3].Value, [int]$dm.Groups[4].Value, 0)
+    if ($dm.Groups[2].Value -eq '-') { $off = $off.Negate() }
+    $when = [DateTimeOffset]::new([DateTime]::ParseExact($dm.Groups[1].Value, 'd MMM yyyy HH:mm:ss', $inv), $off).ToUniversalTime()
+    $cr = if ($dm.Value.EndsWith("`r")) { "`r" } else { '' }
+    $t = $t.Substring(0, $dm.Index) + 'Date: ' + $when.ToString('ddd, d MMM yyyy HH:mm:ss', $inv) + ' +0000' + $cr +
+         $t.Substring($dm.Index + $dm.Length)
     [IO.File]::WriteAllText($p.FullName, $t, (New-Object Text.UTF8Encoding($false)))
     $n++
 }
@@ -158,6 +173,9 @@ try {
     & git rm -q --cached $marker
     $env:GIT_AUTHOR_NAME = $identityName; $env:GIT_AUTHOR_EMAIL = $identityMail
     $env:GIT_COMMITTER_NAME = $identityName; $env:GIT_COMMITTER_EMAIL = $identityMail
+    # now, in UTC (git's own form: seconds since 1970 and the offset), so the commit doesn't carry this PC's time zone
+    $env:GIT_AUTHOR_DATE = '{0} +0000' -f [DateTimeOffset]::UtcNow.ToUnixTimeSeconds()
+    $env:GIT_COMMITTER_DATE = $env:GIT_AUTHOR_DATE
     & git commit -q -m "Initial public release of Project Wrath"
     if ($LASTEXITCODE) { throw "git commit failed" }
     $remotes = & git remote
@@ -165,7 +183,8 @@ try {
     Write-Output ("public tree: {0} files in one commit {1}, no remote" -f (& git ls-files | Measure-Object).Count,
                   (& git rev-parse --short HEAD))
 } finally {
-    Remove-Item Env:GIT_AUTHOR_NAME, Env:GIT_AUTHOR_EMAIL, Env:GIT_COMMITTER_NAME, Env:GIT_COMMITTER_EMAIL -ErrorAction SilentlyContinue
+    Remove-Item Env:GIT_AUTHOR_NAME, Env:GIT_AUTHOR_EMAIL, Env:GIT_COMMITTER_NAME, Env:GIT_COMMITTER_EMAIL,
+                Env:GIT_AUTHOR_DATE, Env:GIT_COMMITTER_DATE -ErrorAction SilentlyContinue
     Pop-Location
 }
 
