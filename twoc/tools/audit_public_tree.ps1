@@ -54,7 +54,7 @@ $personal = @(
     @{ re = '(?i)C:/Users/Use[r]\b'; what = "the owner's user folder" },
     @{ re = '(?i)Desktop Stuf[f]|Claude Stuf[f]'; what = "the private repository's folder" },
     @{ re = '(?i)jellybrai[n]892|ricecooke[r]414|protonmai[l]\.com|proton\.m[e]\b'; what = "the owner's e-mail" },
-    @{ re = '(?i)\b[A-Z]:[\\/]Users[\\/](?!(?:<user>|%USERNAME%|Someone|YourName|Public|<name>)[\\/])[^\\/\s"''<>%]+'; what = 'a drive path into a user folder' }
+    @{ re = '(?i)\b[A-Z]:[\\/]Users[\\/](?!(?:<user>|%USERNAME%|Someone|YourName|Public|<name>)[\\/])[^\\/\s"''<>%\[\]]+(?=[\\/\s"''<>,;)]|$)'; what = 'a drive path into a user folder' }
 )
 $secrets = @(
     @{ re = 'gh[pousr]_[A-Za-z0-9]{30,}|github_pat_[A-Za-z0-9_]{40,}'; what = 'a GitHub token' },
