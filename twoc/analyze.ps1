@@ -15,6 +15,10 @@ $py  = Join-Path $repo '.venv\Scripts\python.exe'
 $xbe = Join-Path $repo 'game_files\default.xbe'
 $seed = Join-Path $repo 'twoc\seed_functions.json'
 
+# Step 110: the XBE parser's JSON first (<xbe stem>_analysis.json beside the XBE), which tools.disasm reads; a clean
+# copy has none (tested: with it, the whole pipeline remakes src\recomp\gen byte for byte).
+& $py -m tools.xbe_parser $xbe --json (Join-Path (Split-Path -Parent $xbe) 'default_analysis.json')
+if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
 & $py -m tools.disasm $xbe -v --force --seed-functions $seed
 if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
 & $py -m tools.func_id $xbe -v
