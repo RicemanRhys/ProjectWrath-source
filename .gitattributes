@@ -1,0 +1,7 @@
+# Line ends on checkout (step 116's restore drill: a fresh clone on a PC with core.autocrlf=true, Git for Windows'
+# default, had every .sh outside twoc/tools/diag/sweep with CRLF). Shell scripts stay LF everywhere (bash outside
+# Git Bash reads the CR as part of the line); batch files CRLF (cmd.exe can misread labels in LF files). Everything
+# else follows core.autocrlf as before. twoc/tools/diag/sweep/.gitattributes says the same for its own scripts.
+*.sh text eol=lf
+*.bat text eol=crlf
+*.cmd text eol=crlf
