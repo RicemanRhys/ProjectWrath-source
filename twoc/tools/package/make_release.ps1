@@ -88,12 +88,20 @@ $genHash = [BitConverter]::ToString((New-Object Security.Cryptography.SHA256Mana
 Write-Output "generated code: $(@($genSums).Count) files copied (their hashes' hash $($genHash.Substring(0, 16)))"
 
 # ── 3. The package ────────────────────────────────────────────────────────────────────────────────────────────────
-$sdl = Join-Path $twoc 'build\_deps\sdl3-src'
+# SDL's source (FetchContent's download in this tree's build) copied INTO the clean checkout, where make_package finds
+# it by default: CMake trims the checkout's own folder from SDL's __FILE__ strings (/d1trimfile), so a source outside
+# it would leave this PC's folders in the exe (the first run's audit caught exactly that).
+$sdlHere = Join-Path $twoc 'build\_deps\sdl3-src'
+$sdl = Join-Path $src 'twoc\build\_deps\sdl3-src'
+if (Test-Path -LiteralPath (Join-Path $sdlHere 'CMakeLists.txt')) {
+    New-Item -ItemType Directory -Force -Path $sdl | Out-Null
+    & robocopy $sdlHere $sdl /E /NFL /NDL /NJH /NJS /NP | Out-Null
+    if ($LASTEXITCODE -ge 8) { throw "copying SDL's source failed (robocopy $LASTEXITCODE)" }
+}
 $pkgDir = Join-Path $work $name
 $mp = Join-Path $src 'twoc\tools\package\make_package.ps1'
 $mpArgs = @('-NoProfile', '-ExecutionPolicy', 'Bypass', '-File', $mp, '-Target', 'Share', '-Out', $pkgDir,
             '-Venv', (Join-Path $repo '.venv'))
-if (Test-Path -LiteralPath (Join-Path $sdl 'CMakeLists.txt')) { $mpArgs += @('-SdlSource', $sdl) }
 if ($NoPgo) {
     $b = Join-Path $src 'twoc\build'
     $cfg = @('-S', (Join-Path $src 'twoc'), '-B', $b, '-G', 'Visual Studio 17 2022', '-A', 'x64')
