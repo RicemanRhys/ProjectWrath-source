@@ -45,19 +45,17 @@ package again and audits each; about 15 minutes):
    noreply address for the owner's account. `tools/make_public_tree.ps1` (`$identityMail`) commits the public tree
    and writes the toolkit patches' author lines with it; `tools/audit_public_tree.ps1` (`$publicId`) fails on any
    other commit identity. The private e-mail is never used there.
+9. **Problems are reported at https://github.com/RicemanRhys/ProjectWrath/issues** (step 111): ISSUES_URL in
+   `twoc/ISSUES_URL.txt`, the one place it is written. The build reads it for the About tab's "Report a problem"
+   button, `make_package.ps1` for the Share README's "Where to report problems" line and `PACKAGE.txt`; the public
+   README shows it too (`readme_txt.py` puts the packaging's `@ISSUES_URL@` token in its place, so the packages
+   always follow `twoc/ISSUES_URL.txt`). To change it: that file, the public README's line, build, packages again.
 
 ## What is still open (not decided here)
 
 - **Whether to publish `seed_functions.json`** (52 function addresses in the game): without it the public tree can't
   regenerate a working program (`docs/PUBLIC_REPO.md`); `make_public_tree.ps1 -IncludeSeeds` adds it. A lawyer's
   question with the others.
-- **Where people report problems: ISSUES_URL.** `twoc/ISSUES_URL.txt` reads
-  `ISSUES_URL = [ISSUES URL TO BE CHOSEN BY THE OWNER]`. It is the one place the address is written: the build
-  reads it for the About tab's "Report a problem" button (shown only once it is a real `https://` address), and
-  `make_package.ps1` for the Share README's "Where to report problems" line (now "to be announced") and
-  `PACKAGE.txt`. The audit warns loudly while it is the placeholder. Change it in `twoc/ISSUES_URL.txt` only.
-  When the repository is published, also put its address into `.github/ISSUE_TEMPLATE/config.yml` (its FAQ link,
-  `OWNER/REPOSITORY`).
 - **Whether the name "Project Wrath" is free to use.** Not checked here, and not something a script can settle:
   search the exact name on GitHub (repositories and organisations), on the web (games, mods, apps, companies), in
   the app stores, and in the trademark databases (the USPTO's search at uspto.gov for the USA, EUIPO's eSearch for
@@ -79,9 +77,7 @@ package again and audits each; about 15 minutes):
    is "don't ship it compiled", stop: the Share package is exactly that.
 2. **Check the name "Project Wrath"** as above (the searches are yours or a lawyer's).
 3. ~~Fill in the public identity's noreply address~~ (done in step 111: decided point 8).
-4. **Choose where problems are reported** and write the address into `twoc/ISSUES_URL.txt` in place of
-   `[ISSUES URL TO BE CHOSEN BY THE OWNER]` (an `https://` address, for example the repository's issues page; the
-   issue forms in `.github/ISSUE_TEMPLATE/` are ready for a GitHub repository). Commit it.
+4. ~~Choose where problems are reported~~ (done in step 111: decided point 9).
 5. **Create the public repository and the toolkit's fork on GitHub** (empty; yours to do), put the repository's
    address into `.github/ISSUE_TEMPLATE/config.yml` (`OWNER/REPOSITORY`) and the toolkit fork's branch
    `projectwrath` from `toolkit/patches` (`toolkit/fetch_toolkit.ps1` shows how).

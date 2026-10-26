@@ -10,10 +10,10 @@ still your call, after the points below.
 
 **Decided in step 108 (your choices):** this project's own code is MIT (part 2); the LGPL audio code is its own DLL,
 `xemu_apu.dll`, shipped with its source (part 1); the Visual C++ runtime is linked statically, so no runtime DLL
-ships (part 2). **Decided in step 109:** the project's name, Project Wrath (part 4). **Still open:** the copyright
-holder's name (a placeholder in `twoc/LICENSE`), where people report problems (ISSUES_URL, a placeholder in
-`twoc/ISSUES_URL.txt`: part 7), whether the name is free to use (searches that are yours or a lawyer's: part 4), the
-recompiled code in the exe (part 3, a lawyer's question).
+ships (part 2). **Decided in step 109:** the project's name, Project Wrath (part 4). **Decided in step 111:** where
+people report problems, https://github.com/RicemanRhys/ProjectWrath/issues (ISSUES_URL in `twoc/ISSUES_URL.txt`:
+part 7). **Still open:** the copyright holder's name (a placeholder in `twoc/LICENSE`), whether the name is free to
+use (searches that are yours or a lawyer's: part 4), the recompiled code in the exe (part 3, a lawyer's question).
 **`docs/RELEASE_CHECKLIST.md`** is the short, ordered list of what to do before giving the Share package to anyone.
 
 ## 1. The LGPL audio code from xemu: xemu_apu.dll (decided in step 108)
@@ -238,11 +238,11 @@ the game-file check inside it only. Run it again on anything you are about to se
 
 ## 7. Support and bug reports
 
-**Prepared in step 109, nothing published:** ISSUES_URL, one value in `twoc/ISSUES_URL.txt` (a marked placeholder
-until you choose where reports go: a GitHub issue tracker, a Discord, a web form). The About tab shows "Report a
-problem" only once it is a real `https://` address; the Share README says "Where to report problems: to be
-announced" until then; the audit warns. `.github/ISSUE_TEMPLATE/` holds a bug report form (the build from Copy
-build info, Windows, graphics card and driver, display and refresh rate, the Frame rate setting, the level and
+**Prepared in step 109, filled in in step 111, nothing published:** ISSUES_URL, one value in
+`twoc/ISSUES_URL.txt`: https://github.com/RicemanRhys/ProjectWrath/issues (the repository's issue tracker). The
+About tab shows "Report a problem" only while it is a real `https://` address; with the placeholder, the Share
+README said "Where to report problems: to be announced" and the audit warned. `.github/ISSUE_TEMPLATE/` holds a
+bug report form (the build from Copy build info, Windows, graphics card and driver, display and refresh rate, the Frame rate setting, the level and
 where, whether it also happens at Game (60), what was done, what happened, what should happen, the Collect logs zip,
 screenshots, and a "Verify game files" check box), a feature request form, and `config.yml` (blank reports off, a
 link to the README's FAQ whose `OWNER/REPOSITORY` is to be filled in once the repository is published). No personal

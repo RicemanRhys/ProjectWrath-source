@@ -18,8 +18,9 @@
 #   7. the git history (when DIR is a repository): more than one commit, a remote, or an author / committer that
 #      isn't the public identity ($publicId below: GitHub's noreply address, never the private e-mail).
 # WARNS (exit 0, "AUDIT PASSED WITH N WARNING(S)") on any placeholder left unfilled: the noreply address, ISSUES_URL
-# ([ISSUES URL TO BE CHOSEN BY THE OWNER] / @ISSUES_URL@) and the issue forms' OWNER/REPOSITORY (the patterns below
-# are written so that this file doesn't match itself).
+# (twoc\ISSUES_URL.txt's placeholder; make_package.ps1's @ISSUES_URL@ token is the packaging's, filled at every
+# package and checked by package_audit.ps1) and the issue forms' OWNER/REPOSITORY (the patterns below are written so
+# that this file doesn't match itself).
 param([Parameter(Mandatory)][string]$Dir, [string]$Manifest, [switch]$AllowSeeds)
 $ErrorActionPreference = 'Stop'
 $Dir = (Resolve-Path -LiteralPath $Dir).Path
@@ -65,7 +66,7 @@ $secrets = @(
 )
 $placeholders = @(
     @{ re = 'NOREPLY-ADDRESS-TO-BE-FILLE[D]'; what = "the public identity's noreply address (to fill in)" },
-    @{ re = 'ISSUES URL TO BE CHOSEN BY THE OWNER|@ISSUES_URL@'; what = 'ISSUES_URL (to fill in: twoc\ISSUES_URL.txt)' },
+    @{ re = 'ISSUES URL TO BE CHOSEN BY THE OWNE[R]'; what = 'ISSUES_URL (to fill in: twoc\ISSUES_URL.txt)' },
     @{ re = 'OWNER/REPOSITORY'; what = "the issue forms' link (OWNER/REPOSITORY, to fill in at publishing)" }
 )
 $badExt = '.xbe', '.iso', '.xiso', '.xbx', '.sav', '.log', '.dmp', '.zip', '.7z', '.wav', '.mp4', '.bmp', '.pgd',

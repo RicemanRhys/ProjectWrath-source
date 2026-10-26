@@ -1,14 +1,16 @@
 """readme_txt.py README.md OUT.txt -- the Share package's README.txt from the public README.md (step 110, Part 5, notes
 18.113): one text for both. Plain text for Notepad: headings underlined, tables as aligned columns, links as
 "text (address)", backticks and bold marks dropped, HTML comments (the owner's notes) left out, paragraphs wrapped at
-100 columns, CRLF line ends. The ISSUES_URL placeholder becomes make_package.ps1's @ISSUES_URL@ token (filled from
-twoc/ISSUES_URL.txt) and the "For developers" section is left out (the package has no source tree)."""
+100 columns, CRLF line ends. The "Where to report problems" line's address becomes make_package.ps1's @ISSUES_URL@
+token (filled from twoc/ISSUES_URL.txt, the one place it is written) and the "For developers" section is left out (the
+package has no source tree)."""
 import re, sys, textwrap
 
 src, out = sys.argv[1], sys.argv[2]
 text = open(src, encoding="utf-8").read()
 text = re.sub(r"<!--.*?-->\s*", "", text, flags=re.S)
-text = text.replace("[ISSUES URL TO BE CHOSEN BY THE OWNER]", "@ISSUES_URL@")
+text, n = re.subn(r"(?m)^(Where to report problems: \*\*)[^*\n]+(\*\*)", r"\1@ISSUES_URL@\2", text)
+assert n == 1, "README.md has no \"Where to report problems: **...**\" line"
 W = 100
 
 

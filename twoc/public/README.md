@@ -127,7 +127,7 @@ F1 the settings menu, Alt+Enter full screen.
 
 ## Reporting a problem
 
-Where to report problems: **[ISSUES URL TO BE CHOSEN BY THE OWNER]**
+Where to report problems: **https://github.com/RicemanRhys/ProjectWrath/issues**
 
 1. Make the problem happen again if you can (start with `Play Project Wrath.bat`) and note where in the game.
 2. F1 > About > **Copy build info**, and paste it into your report (no user name, PC name or folders in it).

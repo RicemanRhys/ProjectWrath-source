@@ -9,4 +9,4 @@
 # While it is the placeholder (or not an https:// address), the About tab shows no link, the README says "Where to
 # report problems: to be announced", and the audit warns. After changing it: build again, then make the packages
 # again (docs/RELEASE_CHECKLIST.md, "After choosing the copyright name or the URL").
-ISSUES_URL = [ISSUES URL TO BE CHOSEN BY THE OWNER]
+ISSUES_URL = https://github.com/RicemanRhys/ProjectWrath/issues
