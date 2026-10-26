@@ -2024,7 +2024,7 @@ static void pa_MmGetPhysicalAddress(void)
 extern int mcpx_apu_output_channels(int *device_channels);
 
 /* Windows' "Eastern Daylight Time" as the dashboard's 4 letters: the words'
- * initials ("EDT"; "AUS Eastern Standard Time" -> "AEST"). */
+ * initials ("EDT"; "Pacific Standard Time" -> "PST"). */
 static void nv_tz_name(const WCHAR *w, uint8_t out[4])
 {
     int n = 0, start = 1;
