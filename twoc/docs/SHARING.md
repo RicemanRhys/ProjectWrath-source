@@ -246,8 +246,9 @@ bug report form (the build from Copy build info, Windows, graphics card and driv
 where, whether it also happens at Game (60), what was done, what happened, what should happen, the Collect logs zip,
 screenshots, and a "Verify game files" check box), a feature request form, and `config.yml` (blank reports off, a
 link to the README's FAQ in the repository, `RicemanRhys/ProjectWrath`, filled in in step 111). No personal
-information is in them. The Share README has "Reporting a problem" and a FAQ (setup, the frozen first logo, the
-audio DLL message, SmartScreen for the unsigned exe, antivirus false positives, saves and logs). Whatever the
+information is in them. The Share README has "Reporting a problem", "Known quirks" (SmartScreen for the unsigned
+exe is there) and a FAQ (setup, the frozen first logo, the audio DLL message, antivirus false positives, saves and
+logs). Whatever the
 channel, ask for: Copy build info, the zip from `Collect logs.bat`, what happened and where in the game, the frame
 rate setting, and whether it happens again. The logs' `[FILES]` line says whether the game files
 were the supported disc's; the `[ABOUT]` line names the build. Expect most reports to be about the disc image (the

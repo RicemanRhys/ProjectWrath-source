@@ -27,8 +27,8 @@ anywhere.
 
 1. Download `ProjectWrath-<version>-win64.zip` and extract it somewhere you can write to, for example
    `Documents\Project Wrath` or `C:\Games\Project Wrath` (not `C:\Program Files`).
-2. Double-click `ProjectWrath.exe`. If Windows says "Windows protected your PC", click **More info**, then **Run
-   anyway** (the program isn't signed; that is all the message means).
+2. Double-click `ProjectWrath.exe`. If Windows says "Windows protected your PC", see the last point of "Known
+   quirks" below.
 3. The setup screen asks for your game: choose your disc image (or the folder with the extracted game), or drag it
    onto the window. It checks the disc, copies the files (usually well under a minute), and the game starts.
 
@@ -121,9 +121,14 @@ F1 the settings menu, Alt+Enter full screen.
   Audio tab can silence it); in the asteroid level the pilot looks furry through the cockpit glass (Extras, Character
   fur).
 - Full screen is "borderless": it covers the screen without changing the display's mode.
-- Being looked into: the player's character has been seen to vanish for a moment in one boss level.
-- The first logo can freeze for up to 10 seconds in full screen on some PCs; it recovers by itself (Alt+Tab twice if
+- Rarely, the sound stalls for about 2 seconds, then carries on by itself.
+- There is one report of Crash turning invisible in Drain Damage; it hasn't been reproduced yet. If you see it, a
+  report helps (see "Reporting a problem").
+- In full screen, the first logo can freeze for up to 10 seconds on some PCs; it recovers by itself (Alt+Tab twice if
   not). The game starts in a window by default.
+- "Windows protected your PC": `ProjectWrath.exe` isn't signed with a code-signing certificate, so Windows
+  SmartScreen may show this the first few times it runs. It doesn't say the program is harmful. If you trust where you
+  got it, click **More info**, then **Run anyway**.
 
 ## Reporting a problem
 
@@ -147,10 +152,6 @@ default.
 **A message says xemu_apu.dll is missing or can't be loaded.** `xemu_apu.dll` (the game's audio library) must be
 in the same folder as `ProjectWrath.exe`. Extract the download again; if it keeps disappearing, your antivirus may
 have moved it.
-
-**Windows says "Windows protected your PC".** SmartScreen shows this for programs that aren't signed with a
-code-signing certificate and that few people have run yet. It doesn't say the program is harmful. If you trust where
-you got it, click More info, then Run anyway.
 
 **An antivirus program warns about ProjectWrath.exe or xemu_apu.dll.** New, unsigned programs are sometimes flagged
 by mistake. `PACKAGE.txt` lists both files' SHA-256: compare them with yours (in PowerShell:
