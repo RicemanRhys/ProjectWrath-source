@@ -77,7 +77,7 @@ Write-Output "clean checkout: $src (twoc $($sha.Substring(0, 7)), xboxrecomp $($
 
 # ── 2. The generated code ─────────────────────────────────────────────────────────────────────────────────────────
 $gen = Join-Path $twoc 'src\recomp\gen'
-if (-not (Test-Path -LiteralPath (Join-Path $gen 'recomp_funcs.h'))) { throw "no generated code in $gen: run twoc\analyze.ps1 and twoc\lift.ps1 first" }
+if (-not (Test-Path -LiteralPath (Join-Path $gen 'recomp_funcs.h'))) { throw "no generated code in ${gen}: run twoc\analyze.ps1 and twoc\lift.ps1 first" }
 $genDst = Join-Path $src 'twoc\src\recomp\gen'
 New-Item -ItemType Directory -Force -Path $genDst | Out-Null
 Copy-Item -Path (Join-Path $gen '*') -Destination $genDst
