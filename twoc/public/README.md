@@ -169,7 +169,7 @@ in `%LOCALAPPDATA%\xboxrecomp`: safe to delete.
 
 ## Licences and thanks
 
-Project Wrath's own code is under the MIT licence (`LICENSE`). The other people's code it uses keeps its own licence
+Project Wrath's own code is under the MIT licence (`LICENSE`; `LICENSE.txt` in the download says it in plain words). The other people's code it uses keeps its own licence
 (`THIRD_PARTY_LICENSES.txt` has each one's full text). No game files and no rights to the game are included or
 granted: you supply your own disc.
 
