@@ -1,0 +1,5 @@
+# Python packages for regenerating the translated code (twoc\analyze.ps1, twoc\lift.ps1) with the toolkit's
+# pipeline (xboxrecomp\tools). The versions the 1.0.0 build's code was generated with (docs/REBUILD.md).
+#   python -m venv .venv
+#   .venv\Scripts\python.exe -m pip install -r twoc\tools\requirements.txt
+capstone==5.0.9

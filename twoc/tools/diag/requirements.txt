@@ -1,0 +1,17 @@
+# Python packages for the test harness (twoc\tools\diag) and the toolkit's tests, on top of
+# twoc\tools\requirements.txt. The versions in the repo's .venv at 1.0.0 (docs/REBUILD.md). Most scripts need only
+# the standard library; the rest:
+#   .venv\Scripts\python.exe -m pip install -r twoc\tools\requirements.txt -r twoc\tools\diag\requirements.txt
+numpy==2.5.3                    # 52 scripts: audio, frame and memory analysers
+pillow==12.3.0                  # 38 scripts: grabs, dumps, crops (PIL)
+scipy==1.18.1                   # step108/audcmp.py, sweep/darkmap.py, flat106.py, wedge106.py
+opencv-python-headless==5.0.0.93  # sweep/wedge106.py (cv2)
+pefile==2024.8.26               # sweep/hs84.py; the toolkit's tools/fusion
+pytest==9.1.1                   # the toolkit's tests (xboxrecomp: python -m pytest tools/; clang on PATH for the compiled ones)
+imageio-ffmpeg==0.6.0           # optional: an ffmpeg.exe (in the package's binaries folder) for turning captures into video
+# pytest's own dependencies, pinned too so a new venv matches the old one exactly
+colorama==0.4.6
+iniconfig==2.3.0
+packaging==26.3
+pluggy==1.6.0
+Pygments==2.21.0
