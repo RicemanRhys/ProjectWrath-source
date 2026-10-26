@@ -9,7 +9,14 @@ in game_files\ are your own copy of the disc. There are no saves in this folder:
 game and name it WOMBAT, which opens every warp room, so every level in the tests can be
 reached.
 
-New in this build: the project has its name, Project Wrath. The game is ProjectWrath.exe (Task
+New in this build: your saves, their backups and your settings now live in
+%LOCALAPPDATA%\ProjectWrath (saves\ and ProjectWrath.ini), not in this folder, so a new package never
+loses them; a save in this folder's game_files\UDATA is copied there at the first start (the old
+copy stays), and the game says so at the top of the screen. This package's ProjectWrath.ini is read
+only while %LOCALAPPDATA%\ProjectWrath has none (delete that one to go back to the package's). The
+Saves tab shows the folder ("Open saves folder"); portable.txt next to ProjectWrath.exe keeps
+everything here as before.
+From the build before: the project has its name, Project Wrath. The game is ProjectWrath.exe (Task
 Manager shows "Project Wrath"), its window and settings menu say Project Wrath, the launchers are
 "Play Project Wrath.bat" and its variants, the settings ProjectWrath.ini, the logs
 ProjectWrath.err.log, and "Collect logs.bat" makes ProjectWrath_logs_Nitro5_<date>_<time>.zip. The
@@ -74,8 +81,9 @@ What's in the folder
                                          this is
   THIRD_PARTY_LICENSES.txt               other people's code in the game, and its licences
   LICENSE.txt                            this project's own code (MIT) and what that covers
-When it runs the game also makes logs\, ProjectWrath.*.log, game_files\UDATA (saves) and
-game_files\UDATA_backups (copies of the save) in this folder.
+When it runs the game also makes logs\ and ProjectWrath.*.log in this folder, and
+%LOCALAPPDATA%\ProjectWrath with saves\ (the saves and their copies), ProjectWrath.ini (your
+settings) and cache\ (the Xbox's hard-disk stand-in).
 
 
 A. Set up the laptop (once)
@@ -241,7 +249,7 @@ F. If something goes wrong
   setting at its default, in a window, ProjectWrath.ini not read or changed).
 - The setup screen at the start ("The game files need attention: ..."): game_files\ is
   missing files or has wrong ones; copy the whole folder from the desktop again.
-- "Project Wrath can't write to its save folder": copy the folder somewhere you can write to (not
-  C:\Program Files).
+- "Your saves stay in the game's folder this run" at the top of the screen: %LOCALAPPDATA%\
+  ProjectWrath couldn't be used (the message says why); note it in Test notes.txt.
 - The game window opens and closes at once, or the laptop crashes: run "Collect logs.bat"
   and bring the zip back.

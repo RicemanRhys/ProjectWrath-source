@@ -81,6 +81,11 @@ foreach ($f in 'ProjectWrath.err.log', 'ProjectWrath.out.log', 'xbox_kernel.log'
 if (Test-Path (Join-Path $pkg 'logs')) {
     Copy-Item -Recurse -Path (Join-Path $pkg 'logs') -Destination (Join-Path $work 'logs')
 }
+# Step 110: the settings live in the per-user data folder unless portable.txt is next to the exe (never the saves).
+$dataIni = Join-Path $env:LOCALAPPDATA 'ProjectWrath\ProjectWrath.ini'
+if (-not (Test-Path -LiteralPath (Join-Path $pkg 'portable.txt')) -and (Test-Path -LiteralPath $dataIni)) {
+    Copy-Item -LiteralPath $dataIni -Destination (Join-Path $work 'ProjectWrath (data folder).ini')
+}
 
 # 2. A system summary (after section 0's notes on the game process, if any).
 try {

@@ -40,7 +40,7 @@ Starting for the first time
 ---------------------------
 1. Put this folder somewhere you can write to, for example Documents\Project Wrath or
    C:\Games\Project Wrath. Spaces and any letters in the folder names are fine.
-   (If you put it in C:\Program Files, the game keeps its files, settings and saves in
+   (If you put it in C:\Program Files, the game keeps its game files in
    %LOCALAPPDATA%\ProjectWrath instead, and says so.)
 2. Double-click ProjectWrath.exe.
    If Windows says "Windows protected your PC", click "More info", then "Run anyway"
@@ -64,9 +64,11 @@ From then on, double-click ProjectWrath.exe and the game starts directly.
 "Play Project Wrath.bat" also starts it; it keeps a console window open beside the game,
 which is useful if something goes wrong (see below).
 
-The first start also writes ProjectWrath.ini, the settings, chosen to suit most PCs: the
-picture at your screen's own size and shape, in a window, with extra frames drawn between
-the game's own at your display's refresh rate. Change them in the settings menu (F1).
+The first start also writes the settings, %LOCALAPPDATA%\ProjectWrath\ProjectWrath.ini,
+chosen to suit most PCs: the picture at your screen's own size and shape, in a window, with
+extra frames drawn between the game's own at your display's refresh rate. Change them in the
+settings menu (F1). Your saves and settings live in %LOCALAPPDATA%\ProjectWrath, not in this
+folder (see "Saves, backups and settings").
 
 
 If the setup fails
@@ -113,15 +115,15 @@ F1 (or Start held about a second, or View + Menu on the controller) opens it. Ta
   Graphics   texture filtering, anti-aliasing (FXAA, SMAA, MSAA), ambient occlusion
   Audio      volume, music and effects, stereo or 5.1
   Controls   the controller and keyboard bindings, the controllers found
-  Saves      the save's backups (below)
+  Saves      where your saves are, their backups (below), Open saves folder
   Extras     the characters' fur, pausing in the background, skipping the title animation,
              photo mode
   About      this build, your graphics card and display, the game files: "Verify game
              files" (checks every file against the disc) and "Choose another disc
-             image..." (sets the game files up again; your saves are kept); "Copy build
+             image..." (sets the game files up again; your saves and settings are kept); "Copy build
              info" and "Open logs folder" for a problem report (below)
-Quit game is at the bottom of every tab. Settings are saved in ProjectWrath.ini; delete it
-to start over with the defaults. "Play Project Wrath (safe settings).bat" starts once with
+Quit game is at the bottom of every tab. Settings are saved in
+%LOCALAPPDATA%\ProjectWrath\ProjectWrath.ini; delete it to start over with the defaults. "Play Project Wrath (safe settings).bat" starts once with
 every setting at its default without reading or changing ProjectWrath.ini (if a setting
 stops the game from starting).
 
@@ -139,13 +141,30 @@ corner), use Game (60), a smaller Render size, or turn anti-aliasing and ambient
 off.
 
 
-Saving and backups
-------------------
-Save in the game as on the Xbox (the save console in the warp room hub). The save is in
-game_files\UDATA. The game copies it to game_files\UDATA_backups at each start and shortly
-after each save (the newest 10 and one a day for 14 days are kept). The Saves tab lists the
-backups and restores one at the next start. To keep your progress safe when you move or
-reinstall the game, copy game_files\UDATA and game_files\UDATA_backups.
+Saves, backups and settings
+---------------------------
+Save in the game as on the Xbox (the save console in the warp room hub). Your saves, their
+backups and your settings are kept in your user folder, not in this one:
+  %LOCALAPPDATA%\ProjectWrath\saves              the saves (UDATA) and their backups
+  %LOCALAPPDATA%\ProjectWrath\ProjectWrath.ini   the settings
+(paste %LOCALAPPDATA%\ProjectWrath into File Explorer's address bar, or press "Open saves
+folder" in the settings menu's Saves tab). Replacing this folder with a newer version, moving
+it or deleting it doesn't touch them.
+- Backups: the game copies the save to saves\UDATA_backups at each start and shortly after
+  each save (the newest 10 and one a day for 14 days are kept). The Saves tab lists them and
+  restores one at the next start.
+- To back up your saves or move them to another PC: close the game, copy the saves folder
+  (and ProjectWrath.ini for your settings) and, on the other PC, put them in
+  %LOCALAPPDATA%\ProjectWrath.
+- Every copy of Project Wrath on this PC uses the same saves and settings. To keep one copy
+  apart (portable mode), put a file named portable.txt next to its ProjectWrath.exe: that copy
+  then keeps its saves in its own game_files\UDATA and its settings beside the exe.
+- Updating from a version that kept the saves in this folder (game_files\UDATA): the first
+  start copies them to %LOCALAPPDATA%\ProjectWrath\saves, checks every file, says so once, and
+  leaves the old copy where it was (delete it yourself later). If both places hold saves, the
+  game uses the ones in %LOCALAPPDATA%\ProjectWrath and leaves the others alone.
+- If %LOCALAPPDATA%\ProjectWrath can't be used (the disk is full, or it is read-only), the
+  game says so and keeps the saves in this folder's game_files for that run: nothing is lost.
 
 
 Known quirks
@@ -239,10 +258,10 @@ An antivirus program warns about ProjectWrath.exe or xemu_apu.dll.
   reporting a false positive. If in doubt, don't run it.
 
 Where are my saves and the logs?
-  Saves: game_files\UDATA in this folder, with copies in game_files\UDATA_backups (see
-  "Saving and backups"). Logs: ProjectWrath.err.log and logs\ in this folder. Settings:
-  ProjectWrath.ini. If the game said it keeps its files in %LOCALAPPDATA%\ProjectWrath
-  (when this folder can't be written to), they are all there instead.
+  Saves and settings: %LOCALAPPDATA%\ProjectWrath (see "Saves, backups and settings"; the
+  Saves tab shows the exact folder). Logs: ProjectWrath.err.log and logs\ in this folder. If
+  the game said it keeps its game files in %LOCALAPPDATA%\ProjectWrath (when this folder
+  can't be written to), the logs are there too.
 
 How do I report a problem?
   See "Reporting a problem" above.
@@ -250,11 +269,12 @@ How do I report a problem?
 
 Removing it
 -----------
-Delete this folder (copy game_files\UDATA first if you want to keep your saves). If the game
-said it keeps its files in %LOCALAPPDATA%\ProjectWrath, delete that folder too. The game
-also keeps the Xbox's hard-disk stand-in in %LOCALAPPDATA%\xboxrecomp (a few MB on the disk:
-no saves; safe to delete once the game is gone). Nothing else is installed or changed on your
-PC (Windows remembers the game's volume in its volume mixer).
+Delete this folder. Your saves and settings stay in %LOCALAPPDATA%\ProjectWrath: delete that
+folder too to remove them (copy its saves folder first if you want to keep them). It also
+holds the Xbox's hard-disk stand-in and the game's cache (its cache folder, a few MB on the
+disk). Versions before this one kept that stand-in in %LOCALAPPDATA%\xboxrecomp: safe to
+delete. Nothing else is installed or changed on your PC (Windows remembers the game's volume
+in its volume mixer).
 
 
 Licences

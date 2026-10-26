@@ -8,7 +8,9 @@ reproduce on my own. It has its own exe (the latest build), its own copy of
 your settings (crash_twoc.ini, copied once from twoc\build\Release; since step 109 the exe
 is game\ProjectWrath.exe, which reads that copy until it saves its own ProjectWrath.ini) and its
 own copy of your save (game\game_files\UDATA, copied once). Your build
-folder, your ini and your saves are never used or changed by it. The game
+folder, your ini and your saves are never used or changed by it (since step 110
+game\portable.txt keeps the kit's exe away from %LOCALAPPDATA%\ProjectWrath, where
+the packaged game keeps its saves: don't delete that file). The game
 data (Crashdat) is a link to the repo's, so the kit is small.
 
 How to use it

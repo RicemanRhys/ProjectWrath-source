@@ -20,9 +20,14 @@
 # "[BAT] ... ended with code 0". The log's [GPU] and [CPU] lines are printed too.
 # Needs twoc\tools\diag\wgcgrab.exe (wgcgrab_build.bat) and Python. Never run it on the package itself
 # (the runs make saves and logs in the folder they start from).
+# Step 110 (notes 18.113): a packaged ProjectWrath.exe keeps its saves and ini in %LOCALAPPDATA%\ProjectWrath; the
+# smoke test points it at a scratch data folder instead (RECOMP_DATA_DIR = -DataDir, default OUT\data), so a test
+# never touches the user's own. The data folder's file list goes into the result.
 param([Parameter(Mandatory)][string]$Dir, [Parameter(Mandatory)][string]$Out, [int]$Secs = 60,
-      [string]$Bat, [string]$Log, [switch]$F1, [switch]$Probe, [switch]$Quit)
+      [string]$Bat, [string]$Log, [switch]$F1, [switch]$Probe, [switch]$Quit, [string]$DataDir)
 $ErrorActionPreference = 'Stop'
+if (-not $DataDir) { $DataDir = Join-Path $Out 'data' }
+$env:RECOMP_DATA_DIR = $DataDir
 $here = $PSScriptRoot
 $diag = Join-Path (Split-Path -Parent $here) 'diag'
 $grabExe = Join-Path $diag 'wgcgrab.exe'
@@ -91,6 +96,11 @@ $ok = $p.WaitForExit(30000)
 Copy-Item (Join-Path $Dir $Log) "$Out\" -ErrorAction SilentlyContinue
 $lf = Join-Path $Out (Split-Path -Leaf $Log)
 if (Test-Path $lf) {
-    Select-String -Path $lf -Pattern '^\[(GPU|CPU|QUIT|RESTART|BAT)\]' | ForEach-Object { $_.Line } | Out-File -Append "$Out\result.txt"
+    Select-String -Path $lf -Pattern '^\[(GPU|CPU|QUIT|RESTART|BAT|SAVES)\]' | ForEach-Object { $_.Line } | Out-File -Append "$Out\result.txt"
+}
+"data folder (RECOMP_DATA_DIR) $DataDir :" | Out-File -Append "$Out\result.txt"
+if (Test-Path -LiteralPath $DataDir) {
+    Get-ChildItem -LiteralPath $DataDir -Recurse -File | ForEach-Object { '  ' + $_.FullName.Substring($DataDir.Length) } |
+        Out-File -Append "$Out\result.txt"
 }
 Get-Content "$Out\result.txt"

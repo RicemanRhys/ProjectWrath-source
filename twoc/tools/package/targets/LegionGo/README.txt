@@ -17,6 +17,14 @@ which opens every warp room (all crystals), so every level in the tests can be r
 *** hold comfortably, close the game and let it cool down.
 
 New in this package:
+  - Your saves, their backups and your settings now live in %LOCALAPPDATA%\ProjectWrath
+    (saves\ and ProjectWrath.ini), not in this folder, so a new package never loses them. The
+    first start copies a save that is in this folder's game_files\UDATA there (every file
+    checked; the old copy stays) and says so for a few seconds at the top of the screen. This
+    package's own ProjectWrath.ini is read only while %LOCALAPPDATA%\ProjectWrath has none: to
+    go back to the package's settings, delete %LOCALAPPDATA%\ProjectWrath\ProjectWrath.ini. The
+    settings menu's Saves tab shows the folder ("Open saves folder"). A file named portable.txt
+    next to ProjectWrath.exe keeps everything in this folder, as before.
   - The project has its name, Project Wrath. The game is ProjectWrath.exe (Task Manager
     shows "Project Wrath"), its window and settings menu say Project Wrath, the launchers
     are "Play Project Wrath.bat" and its variants, the settings are ProjectWrath.ini, the
@@ -226,11 +234,10 @@ What's in the folder
                                   no rights to the game are granted
 
 The game also makes these when it runs: logs\ (earlier runs' logs), ProjectWrath.err.log (the
-last run's log), ProjectWrath.power.log (the last run's power log), game_files\UDATA (saves),
-game_files\UDATA_backups (copies of the save,
-part E) and game_files\TDATA, and, outside this folder,
-%LOCALAPPDATA%\xboxrecomp (the Xbox's empty hard-disk images: about 5 GB on paper, but
-"sparse" files that take only a few MB of real space).
+last run's log), ProjectWrath.power.log (the last run's power log), and, outside this folder,
+%LOCALAPPDATA%\ProjectWrath: saves\UDATA (saves), saves\UDATA_backups (copies of the save,
+part E), saves\TDATA, ProjectWrath.ini (your settings) and cache\ (the Xbox's empty hard-disk
+images: about 5 GB on paper, but "sparse" files that take only a few MB of real space).
 
 
 A. Set up the Legion Go (once)
@@ -493,26 +500,26 @@ Steps 1-3 on the Legion Go, step 4 on the desktop.
 
 E. Saves and their backups
 --------------------------
-The game keeps all its save slots in one file, game_files\UDATA\56550003\4D5C926D6357\
-crash.sav. The PC port copies it (with SaveMeta.xbx beside it) to
-game_files\UDATA_backups\<date>_<time>\ at every start and a few seconds after each save
+The game keeps all its save slots in one file, %LOCALAPPDATA%\ProjectWrath\saves\UDATA\56550003\
+4D5C926D6357\crash.sav. The PC port copies it (with SaveMeta.xbx beside it) to
+saves\UDATA_backups\<date>_<time>\ there at every start and a few seconds after each save
 from the hub's Load/Save console, whenever it changed. It keeps the newest 10 copies and
 the newest of each day for 14 days, and deletes older ones by itself. The copying never
 holds the game up.
 In the settings menu (Menu held, or F1), the "Saves" tab lists the copies (date, time,
 size, and when each was taken) with three buttons:
   Back up now ........... a copy of the save as it is now
-  Restore this one ...... the chosen copy replaces the save at the next start (the game
+  Restore at next start . the chosen copy replaces the save at the next start (the game
                           has its save loaded while it runs). It asks "Restart the game to
                           restore ...?": Restart now starts the game again (or Later, and
                           close it yourself), then load at the Load/Save console. The save
                           in use is copied first and kept in the list. "Cancel the restore"
                           undoes it until then.
-  Open backups folder ... shows the copies in File Explorer
+  Open saves folder ..... shows the saves folder (UDATA, the copies, TDATA) in File Explorer
 If a save ever goes wrong (a slot shows the wrong progress, or the game won't load it):
 Restore a copy from before it went wrong, as above.
-To take your progress to another PC, copy game_files\UDATA (and UDATA_backups if you want
-the copies too) into the other folder's game_files\.
+To take your progress to another PC, close the game and copy %LOCALAPPDATA%\ProjectWrath\saves
+(and ProjectWrath.ini for the settings) into %LOCALAPPDATA%\ProjectWrath on the other PC.
 
 
 F. The new settings
@@ -571,13 +578,15 @@ If something goes wrong
   game_files\ from the desktop again (all of it: about 930 MB, 2,267 files) and start
   again, or, with the disc image on the Legion Go, "Choose disc image (.iso)..." there sets
   them up again (your saves are kept).
-- "Project Wrath can't write to its save folder": copy the package somewhere you can write to
-  (not C:\Program Files), or delete game_files\UDATA (the copies in UDATA_backups stay).
+- "Your saves stay in the game's folder this run" at the top of the screen: %LOCALAPPDATA%\
+  ProjectWrath couldn't be used (the message says why: a full disk, a read-only folder); the game
+  keeps the saves in this folder's game_files for that run. Note it in Test notes.txt.
 - If the game won't start after a settings change, use "Play Project Wrath (safe settings).bat": every
   setting at its default, in a window, and ProjectWrath.ini neither read nor changed. Then put
   the setting back in ProjectWrath.ini (or delete the file) and start "Play Project Wrath.bat" again.
 - The game window opens and closes at once: run "Collect logs.bat" and bring the zip back.
 - A black screen or a crash at the start on the Legion Go only: the same; the log says
   which step failed.
-- To go back to the package's settings: copy ProjectWrath.ini from the desktop again (or
-  delete it for the game's own defaults: 4:3, 640 x 480 lines, 60 fps).
+- To go back to the package's settings: delete %LOCALAPPDATA%\ProjectWrath\ProjectWrath.ini
+  (the package's own ProjectWrath.ini is then read again; delete that one too for the game's own
+  defaults: 4:3, 640 x 480 lines, 60 fps).

@@ -55,7 +55,8 @@ for rs in sizes:
     tag = rs
     open(xi, "w").write("\n")
     env = dict(os.environ)
-    env.update(RECOMP_RENDER_SIZE=rs, RECOMP_DEV_OVL_RECT="1", RECOMP_DEV_XINPUT_FILE=xi)
+    env.update(RECOMP_RENDER_SIZE=rs, RECOMP_DEV_OVL_RECT="1", RECOMP_DEV_XINPUT_FILE=xi,
+               RECOMP_DATA_DIR=os.path.join(out, "data"))   # step 110: never the user's %LOCALAPPDATA%\ProjectWrath
     if os.path.exists(log):
         os.remove(log)
     p = subprocess.Popen(["cmd", "/c", os.path.join(copy, "Play Project Wrath.bat" if NEW else "Play Crash.bat")], cwd="C:\\", env=env,

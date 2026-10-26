@@ -6,6 +6,9 @@ These are its scripts. To make a kit folder (Desktop\Crash\CaptureKit in step 10
     it needs RECOMP_D3D_BRIDGE_DUMP_ASKED, step 100);
   - game\xemu_apu.dll: the audio library, from the exe's own build folder (step 108: the game doesn't
     start without it beside the exe);
+  - game\portable.txt (step 110, notes 18.113): ProjectWrath.exe keeps its saves and ini in
+    %LOCALAPPDATA%\ProjectWrath unless this file is beside it; with it the kit keeps its own save copy
+    and ini in game\ as before, and never touches the user's data folder;
   - game\crash_twoc.ini: a copy of the user's ini (twoc\build\Release\crash_twoc.ini; ProjectWrath.exe reads it
     until it saves its own ProjectWrath.ini, never changing it), so the runs have
     their settings without touching theirs;
