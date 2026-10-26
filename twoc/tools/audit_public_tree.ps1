@@ -7,9 +7,10 @@
 #   2. disassembly or listings: docs\option_b, d3d99_asm.txt, table.json, seed_functions.json (unless -AllowSeeds),
 #      a file with more than 20 x86 instruction lines, or more than 5 runs of 8+ hex bytes;
 #   3. anything over 5 MB;
-#   4. personal details: the owner's Windows user folder (\Users\User\, /c/Users/User, C:/Users/User), the private
-#      repository's folder ("Desktop Stuff", "Claude Stuff"), the owner's e-mail addresses or their domain
-#      (protonmail), and any drive path into a user folder (X:\Users\<name>) that isn't a placeholder;
+#   4. personal details: the owner's Windows user folder (in its Windows, Git Bash and forward-slash forms), the
+#      private repository's folder names, the owner's e-mail addresses or their mail domain, and any drive path into
+#      a user folder (X:\Users\<name>) that isn't a placeholder (the patterns below are written so that this file
+#      doesn't match itself);
 #   5. saves, logs, captures, packages and build output: *.log, *.dmp, *.zip, *.7z, *.wav, *.mp4, *.bmp, *.pgd, *.pgc,
 #      *.exe, *.dll, *.pdb, *.lib, *.obj, folders named UDATA, UDATA_backups, TDATA, captures, logs, dumps,
 #      game_files, *Package;
@@ -26,7 +27,11 @@ if (-not $Manifest) { $Manifest = Join-Path (Split-Path -Parent $PSScriptRoot) '
 $fails = New-Object System.Collections.Generic.List[string]
 $warns = New-Object System.Collections.Generic.List[string]
 function Fail($m) { $fails.Add($m) }
-function Warn($m) { if (-not $warns.Contains($m)) { $warns.Add($m) } }
+$warnFiles = @{}                        # placeholder -> the files that hold it (one line each in the output)
+function Warn($m, $file) {
+    if (-not $warnFiles.ContainsKey($m)) { $warnFiles[$m] = New-Object System.Collections.Generic.List[string]; $warns.Add($m) }
+    if ($file -and -not $warnFiles[$m].Contains($file)) { $warnFiles[$m].Add($file) }
+}
 
 # The disc's files: names (lower case) and size+hash pairs.
 $discNames = @{}; $discSizes = @{}
@@ -44,11 +49,11 @@ $mine = (Split-Path -Leaf $Manifest).ToLower()
 $asm = [regex]'(?m)^\s*(?:[0-9A-Fa-f]{6,8}[: ]\s*)?(?:[0-9A-Fa-f]{2} )*\s*(?:mov|push|pop|call|jmp|j[a-z]{1,3}|lea|cmp|test|xor|sub|add|ret|movzx|fld|fstp|shl|shr|inc|dec)\s+(?:e[abcd]x|e[sd]i|e[bs]p|[abcd][lh]|dword|word|byte|\[|0x[0-9a-f]+|[0-9a-f]+h\b)'
 $hexrun = [regex]'(?:\b[0-9A-Fa-f]{2} ){8,}'
 $personal = @(
-    @{ re = '\\Users\\User\\'; what = "the owner's Windows user folder" },
-    @{ re = '(?i)/c/Users/User\b'; what = "the owner's user folder (Git Bash form)" },
-    @{ re = '(?i)C:/Users/User\b'; what = "the owner's user folder" },
-    @{ re = '(?i)Desktop Stuff|Claude Stuff'; what = "the private repository's folder" },
-    @{ re = '(?i)jellybrain892|ricecooker414|protonmail\.com|proton\.me'; what = "the owner's e-mail" },
+    @{ re = '\\Users\\Use[r]\\'; what = "the owner's Windows user folder" },
+    @{ re = '(?i)/c/Users/Use[r]\b'; what = "the owner's user folder (Git Bash form)" },
+    @{ re = '(?i)C:/Users/Use[r]\b'; what = "the owner's user folder" },
+    @{ re = '(?i)Desktop Stuf[f]|Claude Stuf[f]'; what = "the private repository's folder" },
+    @{ re = '(?i)jellybrai[n]892|ricecooke[r]414|protonmai[l]\.com|proton\.m[e]\b'; what = "the owner's e-mail" },
     @{ re = '(?i)\b[A-Z]:[\\/]Users[\\/](?!(?:<user>|%USERNAME%|Someone|YourName|Public|<name>)[\\/])[^\\/\s"''<>%]+'; what = 'a drive path into a user folder' }
 )
 $secrets = @(
@@ -79,7 +84,7 @@ foreach ($f in $files) {
     # 1, 5: kinds of file
     if ($ext -in $badExt) { Fail "a file of a forbidden kind ($ext): $rel" }
     foreach ($seg in ($rel -split '\\' | Select-Object -SkipLast 1)) {
-        if ($seg -in $badDirs -or $seg -like '*Package') { Fail "a folder of saves, logs, captures, packages or generated code: $rel"; break }
+        if ($seg -in $badDirs -or $seg -clike '*Package') { Fail "a folder of saves, logs, captures, packages or generated code: $rel"; break }
     }
     if ($rel -match '(?i)recomp[\\/]gen[\\/]|\brecomp_funcs\.h$|\brecomp_types\.h$') { Fail "the generated code: $rel" }
     if ($lname -ne $mine -and $discNames.ContainsKey($lname)) { Fail "named as a disc file ($($discNames[$lname])): $rel" }
@@ -102,7 +107,7 @@ foreach ($f in $files) {
     if ($nh -gt 5) { Fail "a byte listing ($nh runs of 8+ hex bytes): $rel" }
     foreach ($p in $personal) { if ($t -match $p.re) { Fail "$($p.what) ('$($Matches[0])'): $rel" } }
     foreach ($p in $secrets) { if ($t -match $p.re) { Fail "$($p.what): $rel" } }
-    foreach ($p in $placeholders) { if ($t -match $p.re) { Warn "$($p.what): $rel" } }
+    foreach ($p in $placeholders) { if ($t -match $p.re) { Warn $p.what $rel } }
 }
 
 # 7: the history
@@ -116,7 +121,7 @@ if (Test-Path -LiteralPath (Join-Path $Dir '.git')) {
         foreach ($who in (& git log --format='%an <%ae>|%cn <%ce>')) {
             foreach ($id in ($who -split '\|')) {
                 if ($id -ne 'RicemanRhys <NOREPLY-ADDRESS-TO-BE-FILLED>') { Fail "a commit identity that isn't the public one: $id" }
-                else { Warn "the commit identity's noreply address (to fill in): RicemanRhys <NOREPLY-ADDRESS-TO-BE-FILLED>" }
+                else { Warn "the commit identity's noreply address (to fill in): RicemanRhys <NOREPLY-ADDRESS-TO-BE-FILLED>" $null }
             }
         }
         $tracked = (& git ls-files | Measure-Object).Count
@@ -126,7 +131,11 @@ if (Test-Path -LiteralPath (Join-Path $Dir '.git')) {
 }
 
 Write-Output "audit of $Dir : $n files"
-foreach ($m in $warns) { Write-Output "  WARN  $m" }
+foreach ($m in $warns) {
+    $fl = $warnFiles[$m]
+    if ($fl.Count) { Write-Output ("  WARN  {0}: {1} file(s), e.g. {2}" -f $m, $fl.Count, (($fl | Select-Object -First 3) -join ', ')) }
+    else { Write-Output "  WARN  $m" }
+}
 foreach ($m in $fails) { Write-Output "  FAIL  $m" }
 if ($fails.Count) { Write-Output "AUDIT FAILED: $($fails.Count) problem(s)"; exit 1 }
 if ($warns.Count) { Write-Output "AUDIT PASSED WITH $($warns.Count) WARNING(S) (placeholders to fill in before publishing)" }

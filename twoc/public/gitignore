@@ -23,7 +23,7 @@ game_files/
 # The toolkit: made by toolkit/fetch_toolkit.ps1 (upstream at the pinned commit + the patches)
 xboxrecomp/
 
-# Build output, packages, logs, captures
+# Build output, packages, logs, captures (no "*Package/": git on Windows ignores case, and it hid tools/package)
 build/
 build_pgo/
 out/
@@ -47,7 +47,6 @@ captures/
 UDATA/
 UDATA_backups/
 TDATA/
-*Package/
 CMakeCache.txt
 CMakeFiles/
 

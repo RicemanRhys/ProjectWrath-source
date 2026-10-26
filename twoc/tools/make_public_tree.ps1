@@ -169,6 +169,8 @@ try {
 }
 
 # ── The audit ─────────────────────────────────────────────────────────────────────────────────────────────────────
-& powershell -NoProfile -ExecutionPolicy Bypass -File (Join-Path $PSScriptRoot 'audit_public_tree.ps1') -Dir $Out `
-    -Manifest (Join-Path $twoc 'data\disc_usa.tsv') -AllowSeeds:$IncludeSeeds
+$auditArgs = @('-NoProfile', '-ExecutionPolicy', 'Bypass', '-File', (Join-Path $PSScriptRoot 'audit_public_tree.ps1'),
+               '-Dir', $Out, '-Manifest', (Join-Path $twoc 'data\disc_usa.tsv'))
+if ($IncludeSeeds) { $auditArgs += '-AllowSeeds' }      # (a switch through -File is passed by name only)
+& powershell @auditArgs
 if ($LASTEXITCODE) { throw "the audit failed: nothing to publish from $Out" }
