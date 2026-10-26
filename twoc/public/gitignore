@@ -1,0 +1,63 @@
+# Project Wrath's public repository: nothing of the game, ever.
+
+# The game: disc images, the extracted files, executables, saves and the game's own data formats
+game_files/
+*.iso
+*.xiso
+*.xbe
+*.sav
+*.xbx
+*.xwb
+*.xmv
+*.nux
+*.hgo
+*.ter
+*.dat
+*.bin
+*.wav
+
+# The generated (translated) code: each developer regenerates it from their own disc (CONTRIBUTING.md)
+**/src/recomp/gen/
+*_analysis.json
+
+# The toolkit: made by toolkit/fetch_toolkit.ps1 (upstream at the pinned commit + the patches)
+xboxrecomp/
+
+# Build output, packages, logs, captures
+build/
+build_pgo/
+out/
+*.exe
+*.dll
+*.pdb
+*.lib
+*.obj
+*.ilk
+*.exp
+*.pgd
+*.pgc
+*.zip
+*.log
+*.dmp
+*.mp4
+*.bmp
+logs/
+dumps/
+captures/
+UDATA/
+UDATA_backups/
+TDATA/
+*Package/
+CMakeCache.txt
+CMakeFiles/
+
+# Python, editors, OS
+.venv/
+__pycache__/
+*.pyc
+.vs/
+.vscode/
+.idea/
+*.user
+Thumbs.db
+.DS_Store
