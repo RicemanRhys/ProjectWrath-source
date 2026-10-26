@@ -1,10 +1,9 @@
 # The issue forms' chooser (step 109, notes 18.112). Blank reports are off: the two forms ask for what a fix needs.
 # The link below is to the README's FAQ, as published (step 110: the public repository's README.md, whose text the
-# Share package's README.txt is made from). TO BE FILLED IN when the repository is published: replace
-# OWNER/REPOSITORY with the repository's own (docs/RELEASE_CHECKLIST.md says when). It is not ISSUES_URL
+# Share package's README.txt is made from), RicemanRhys/ProjectWrath (step 111). It is not ISSUES_URL
 # (twoc/ISSUES_URL.txt, the one place that is written): GitHub needs a full address here.
 blank_issues_enabled: false
 contact_links:
   - name: Read the FAQ first (setup, a frozen first logo, the audio DLL, SmartScreen, antivirus, saves and logs)
-    url: https://github.com/OWNER/REPOSITORY#faq
+    url: https://github.com/RicemanRhys/ProjectWrath#faq
     about: The README that comes with the game has a FAQ near its end; most first-start problems are answered there.

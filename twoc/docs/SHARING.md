@@ -245,7 +245,7 @@ README said "Where to report problems: to be announced" and the audit warned. `.
 bug report form (the build from Copy build info, Windows, graphics card and driver, display and refresh rate, the Frame rate setting, the level and
 where, whether it also happens at Game (60), what was done, what happened, what should happen, the Collect logs zip,
 screenshots, and a "Verify game files" check box), a feature request form, and `config.yml` (blank reports off, a
-link to the README's FAQ whose `OWNER/REPOSITORY` is to be filled in once the repository is published). No personal
+link to the README's FAQ in the repository, `RicemanRhys/ProjectWrath`, filled in in step 111). No personal
 information is in them. The Share README has "Reporting a problem" and a FAQ (setup, the frozen first logo, the
 audio DLL message, SmartScreen for the unsigned exe, antivirus false positives, saves and logs). Whatever the
 channel, ask for: Copy build info, the zip from `Collect logs.bat`, what happened and where in the game, the frame

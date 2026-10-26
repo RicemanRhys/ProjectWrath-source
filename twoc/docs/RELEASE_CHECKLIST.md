@@ -50,6 +50,9 @@ package again and audits each; about 15 minutes):
    button, `make_package.ps1` for the Share README's "Where to report problems" line and `PACKAGE.txt`; the public
    README shows it too (`readme_txt.py` puts the packaging's `@ISSUES_URL@` token in its place, so the packages
    always follow `twoc/ISSUES_URL.txt`). To change it: that file, the public README's line, build, packages again.
+10. **The public repository is https://github.com/RicemanRhys/ProjectWrath** (step 111; created empty and private
+    by you, nothing pushed to it, no remote for it here). `.github/ISSUE_TEMPLATE/config.yml`'s FAQ link points at
+    its README (`RicemanRhys/ProjectWrath#faq`).
 
 ## What is still open (not decided here)
 
@@ -78,9 +81,9 @@ package again and audits each; about 15 minutes):
 2. **Check the name "Project Wrath"** as above (the searches are yours or a lawyer's).
 3. ~~Fill in the public identity's noreply address~~ (done in step 111: decided point 8).
 4. ~~Choose where problems are reported~~ (done in step 111: decided point 9).
-5. **Create the public repository and the toolkit's fork on GitHub** (empty; yours to do), put the repository's
-   address into `.github/ISSUE_TEMPLATE/config.yml` (`OWNER/REPOSITORY`) and the toolkit fork's branch
-   `projectwrath` from `toolkit/patches` (`toolkit/fetch_toolkit.ps1` shows how).
+5. **Create the toolkit's fork on GitHub** (yours to do; the repository itself exists since step 111, decided point
+   10, and its address is in `.github/ISSUE_TEMPLATE/config.yml`) and the fork's branch `projectwrath` from
+   `toolkit/patches` (`toolkit/fetch_toolkit.ps1` shows how).
 6. **Export the public tree**: `powershell -NoProfile -ExecutionPolicy Bypass -File twoc\tools\make_public_tree.ps1
    -Out C:\some\scratch\ProjectWrath` (the audit runs by itself and must pass with no warnings left), read it, then
    push that folder's one commit to the new repository yourself.
