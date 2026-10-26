@@ -55,6 +55,12 @@
 # Build first: cmake --build twoc\build --config Release --parallel
 # Then smoke-test a scratch copy (never the package itself): smoke_test.ps1 (notes 18.91).
 #
+# Step 110 (notes 18.113): -Venv DIR (the harness's Python for -Pgo; default the repo's .venv) and -SdlSource DIR (SDL's
+# source for the builds; default twoc\build\_deps\sdl3-src) let make_release.ps1 build in a clean checkout, where
+# -GameFiles may go with -Target Share -Pgo (the training's disc files only: the package still gets none). The
+# Share package's README.txt is made from twoc\public\README.md (readme_txt.py): one text for the public
+# repository and the package.
+#
 # -Target Share (step 107, notes 18.110): the package for other people. NO game files: the exe's first-run setup
 # makes them from the player's own disc image. No ProjectWrath.ini (the first start writes one), no test launchers,
 # no vrrprobe, no Test notes; README.txt for strangers, LICENSE.txt (as every package's), Play Project Wrath.bat
@@ -68,7 +74,9 @@ param(
     [string]$GameFiles,
     [string]$Save,
     [switch]$Force,
-    [switch]$Pgo
+    [switch]$Pgo,
+    [string]$Venv,
+    [string]$SdlSource
 )
 $ErrorActionPreference = 'Stop'
 $here = $PSScriptRoot
@@ -82,17 +90,21 @@ if (-not $Out) {
 }
 $targetDir = Join-Path $here "targets\$Target"
 $share = $Target -eq 'Share'
-$need = if ($share) { @('README.txt') } else { @('ProjectWrath.ini', 'README.txt', 'Test notes.txt') }
+$need = if ($share) { @() } else { @('ProjectWrath.ini', 'README.txt', 'Test notes.txt') }
 foreach ($f in $need) {
     if (-not (Test-Path (Join-Path $targetDir $f))) { throw "No $f in $targetDir" }
 }
+$publicReadme = Join-Path $twoc 'public\README.md'      # step 110: the Share package's README.txt is made from it
+if ($share -and -not (Test-Path $publicReadme)) { throw "No $publicReadme (the Share package's README)" }
+if (-not $Venv) { $Venv = Join-Path $repo '.venv' }
+if (-not $SdlSource) { $SdlSource = Join-Path $twoc 'build\_deps\sdl3-src' }
 $tests = @('Play Project Wrath (72 fps test).bat', 'Play Project Wrath (Vulkan probe).bat',
            'Play Project Wrath (ack wait test).bat', 'Play Project Wrath (bake off).bat',
            'Play Project Wrath (fullscreen start test).bat', 'Play Project Wrath (fullscreen old way).bat')
 $leaveOut = @{ 'LegionGo' = @(); 'Nitro5' = @('Play Project Wrath (Vulkan probe).bat'); 'Share' = $tests }[$Target]
 $targetName = @{ 'LegionGo' = 'Legion Go'; 'Nitro5' = 'Acer Nitro 5'; 'Share' = 'Share (for other people, no game files)' }[$Target]
 if ($Pgo -and $Exe) { throw '-Pgo builds its own exe: leave -Exe out' }
-if ($share -and ($GameFiles -or $Save)) { throw '-Target Share ships no game files and no saves: leave -GameFiles and -Save out' }
+if ($share -and ($Save -or ($GameFiles -and -not $Pgo))) { throw '-Target Share ships no game files and no saves: leave -GameFiles (but for -Pgo''s training) and -Save out' }
 if (-not $Exe) { $Exe = Join-Path $twoc 'build\Release\crash_twoc.exe' }
 if (-not $GameFiles) { $GameFiles = Join-Path $repo 'game_files' }
 if (-not $Pgo) { $Exe = (Resolve-Path $Exe).Path }
@@ -124,11 +136,11 @@ if ($Pgo) {
     $git = (Get-Command git -ErrorAction Stop).Source        # Git for Windows: ...\Git\cmd\git.exe
     $bash = Join-Path (Split-Path -Parent (Split-Path -Parent $git)) 'bin\bash.exe'
     if (-not (Test-Path $bash)) { throw "Git Bash not found beside $git" }
-    if (-not (Test-Path (Join-Path $repo '.venv\Scripts\python.exe'))) { throw 'The repo''s .venv (the harness''s Python) not found' }
+    if (-not (Test-Path (Join-Path $Venv 'Scripts\python.exe'))) { throw "The harness's Python ($Venv) not found" }
     $pb = Join-Path $twoc 'build_pgo'
     $pgd = Join-Path $pb 'crash_twoc.pgd'
     $cfg = @('-S', $twoc, '-B', $pb, "-DTWOC_PGO_PGD=$pgd")
-    $sdl = Join-Path $twoc 'build\_deps\sdl3-src'      # SDL from the ordinary build's download (no network)
+    $sdl = $SdlSource                                   # SDL from the ordinary build's download (no network)
     if (Test-Path (Join-Path $sdl 'CMakeLists.txt')) { $cfg += "-DFETCHCONTENT_SOURCE_DIR_SDL3=$sdl" }
     $t0 = Get-Date
     Write-Host 'PGO: the instrumented build (twoc\build_pgo)'
@@ -313,7 +325,16 @@ $files = Join-Path $here 'files'
 foreach ($f in Get-ChildItem -File $files) {
     if ($leaveOut -notcontains $f.Name) { Put-Text $f.FullName (Join-Path $Out $f.Name) }
 }
-foreach ($f in Get-ChildItem -File $targetDir) { Put-Text $f.FullName (Join-Path $Out $f.Name) }     # step 97
+if (Test-Path $targetDir) {         # step 110: the Share target's folder may be empty (its README is made below)
+    foreach ($f in Get-ChildItem -File $targetDir) { Put-Text $f.FullName (Join-Path $Out $f.Name) }     # step 97
+}
+if ($share) {                       # step 110: the README from twoc\public\README.md (the public repository's)
+    $rt = Join-Path $env:TEMP ('pw_readme_' + [guid]::NewGuid().ToString('N').Substring(0, 8) + '.txt')
+    & python -I (Join-Path $here 'readme_txt.py') $publicReadme $rt | Out-Null
+    if ($LASTEXITCODE -or -not (Test-Path $rt)) { throw 'readme_txt.py failed' }
+    Put-Text $rt (Join-Path $Out 'README.txt')
+    Remove-Item $rt
+}
 Put-Text (Join-Path $files 'tools\collect_logs.ps1') (Join-Path $Out 'tools\collect_logs.ps1')
 # Every third-party component's licence (notes 18.96; twoc/tools/package/third_party_licenses.py writes it).
 Put-Text (Join-Path $twoc 'THIRD_PARTY_LICENSES.txt') (Join-Path $Out 'THIRD_PARTY_LICENSES.txt')

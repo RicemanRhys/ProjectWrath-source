@@ -94,3 +94,23 @@ lifts 4,595 functions instead of 4,647: the 52 reached only by pointer are missi
 first call to one. So a public tree without the seeds can't regenerate a working program (the decision in group (a)
 above). Not run from that copy: the compile (Part 3's release build compiles from a clean clone with the generated
 code copied in).
+
+## The toolkit: how the public repository refers to it (recommendation)
+
+Upstream (https://github.com/sp00nznet/xboxrecomp) is MIT ("Copyright (c) 2026 sp00nz", `LICENSE`); its `NOTICE`
+says the APU files come from xemu under the LGPL 2.1 or later (`apu_core.c`, `apu_dsp.c`, `apu_vp.c`, `apu_regs.h`,
+`apu_state.h`, `apu_debug.h`, `fpconv.h`, `nv2a_regs.h`; `apu_shim.h` by choice) and that distributing the source
+satisfies the LGPL. The MIT parts need their notice kept; the LGPL parts need their source and licence with any
+binary (the Share package already ships `xemu_apu.dll` with its complete source zip and the LGPL text).
+
+| Option | For | Against |
+|---|---|---|
+| **A public fork** of sp00nznet/xboxrecomp with a `projectwrath` branch (the 41 commits), referenced as a **submodule** | Attribution and history in the open; upstream sees the changes and can take them; a normal `git clone --recursive` | The owner creates the fork on GitHub (a step outside this session); the fork must stay available |
+| **Patch files** against a pinned upstream commit (`toolkit/`, already in the export) | Self-contained; works today; nothing to create | A developer runs `fetch_toolkit.ps1`; history only as patches |
+| A submodule of upstream alone | Simple | Can't carry the local commits |
+| Vendored (the toolkit copied into the repository) | One clone builds | Mixes two projects' histories and licences in one tree; harder to send changes upstream |
+
+**Recommended:** keep the patch set in the public repository now (it is tested: applied with `git am` to upstream
+`766ecef` it rebuilds the private toolkit's tree exactly, `da88e858`), and, once the owner has created the public
+fork with the `projectwrath` branch made the same way, add it as a submodule at `xboxrecomp/` and keep the patches as
+the record. Offer the generic fixes upstream as pull requests later, one topic at a time.

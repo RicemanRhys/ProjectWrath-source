@@ -3,7 +3,7 @@
 # touching twoc/src, twoc/CMakeLists.txt or twoc/seed_functions.json, as the package's PACKAGE.txt names it),
 # its date, whether those files had changes not committed, and xboxrecomp's commit; the file is only
 # replaced when that changes, so an unchanged tree rebuilds nothing. -DREPO=<repo root> -DXR=<xboxrecomp>
-# -DOUT=<header> -DLTCG=<ON|OFF>.
+# -DOUT=<header> -DLTCG=<ON|OFF>. Step 110: -DVERSION_FILE=<twoc/VERSION.txt>, the release's version.
 set(_paths twoc/src twoc/CMakeLists.txt twoc/seed_functions.json)
 execute_process(COMMAND git -C "${REPO}" log -1 --format=%h|%cd --date=format:%Y-%m-%d -- ${_paths}
                 OUTPUT_VARIABLE _log OUTPUT_STRIP_TRAILING_WHITESPACE ERROR_QUIET RESULT_VARIABLE _r)
@@ -54,6 +54,19 @@ if(ISSUES AND EXISTS "${ISSUES}")
         endif()
     endif()
 endif()
+# Step 110 (notes 18.113): the version, MAJOR.MINOR.PATCH, from VERSION.txt's first line that is one ("0.0.0" if none).
+set(_ver "0.0.0")
+if(VERSION_FILE AND EXISTS "${VERSION_FILE}")
+    file(STRINGS "${VERSION_FILE}" _vl REGEX "^[ \t]*[0-9]+\\.[0-9]+\\.[0-9]+[ \t]*$")
+    if(_vl)
+        list(GET _vl 0 _ver)
+        string(STRIP "${_ver}" _ver)
+    endif()
+endif()
+string(REPLACE "." ";" _vparts "${_ver}")
+list(GET _vparts 0 _vmaj)
+list(GET _vparts 1 _vmin)
+list(GET _vparts 2 _vpat)
 if(LTCG)
     set(_ltcg 1)
 else()
@@ -69,6 +82,11 @@ file(WRITE "${OUT}.tmp"
      "#define TWOC_BUILD_VER_M ${_vm}\n"
      "#define TWOC_BUILD_VER_D ${_vd}\n"
      "#define TWOC_BUILD_VERSION_TEXT \"${_vtext}\"\n"
+     "#define TWOC_VERSION \"${_ver}\"\n"
+     "#define TWOC_VERSION_FULL \"${_ver}, ${_vtext}\"\n"
+     "#define TWOC_VER_MAJOR ${_vmaj}\n"
+     "#define TWOC_VER_MINOR ${_vmin}\n"
+     "#define TWOC_VER_PATCH ${_vpat}\n"
      "#define TWOC_ISSUES_URL \"${_issues}\"\n"
      "#define TWOC_BUILD_LTCG ${_ltcg}\n")
 file(COPY_FILE "${OUT}.tmp" "${OUT}" ONLY_IF_DIFFERENT)

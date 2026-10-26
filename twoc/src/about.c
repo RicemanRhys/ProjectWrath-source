@@ -140,9 +140,10 @@ void twoc_about_collect(twoc_about_t *a, void *dev, HWND hwnd, double display_hz
     char linked[32];
 
     link_time(linked, sizeof(linked));
-    snprintf(a->build, sizeof(a->build), "%s (%s)%s, xboxrecomp %s; linked %s", TWOC_BUILD_COMMIT,
-             TWOC_BUILD_COMMIT_DATE, TWOC_BUILD_DIRTY ? " with changes not committed" : "", TWOC_BUILD_XBOXRECOMP,
-             linked);
+    /* step 110: the version first (twoc/VERSION.txt, the same as the exe's file version) */
+    snprintf(a->build, sizeof(a->build), "version %s, %s (%s)%s, xboxrecomp %s; linked %s", TWOC_VERSION,
+             TWOC_BUILD_COMMIT, TWOC_BUILD_COMMIT_DATE, TWOC_BUILD_DIRTY ? " with changes not committed" : "",
+             TWOC_BUILD_XBOXRECOMP, linked);
     snprintf(a->ltcg, sizeof(a->ltcg), "%s", TWOC_BUILD_LTCG ? "on (link-time code generation)" : "off");
     if (pads_sdl_version()[0])
         snprintf(a->sdl, sizeof(a->sdl), "%s", pads_sdl_version());
