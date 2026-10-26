@@ -1,7 +1,7 @@
 // The exe's Windows file properties (step 109, notes 18.112): Explorer's Details tab and Task Manager (which shows
 // the description as the process's name). The packages ship this exe as ProjectWrath.exe. No company and no
 // copyright are named: neither has been chosen (twoc/LICENSE's copyright line is the one place for the name).
-// Step 110 (notes 18.113): the version is twoc/VERSION.txt's (0.1.0 for the first release), the file version text
+// Step 110 (notes 18.113): the version is twoc/VERSION.txt's (1.0.0 for the first release), the file version text
 // adds the build's commit and its date (build/generated/build_info.h, tools/build_info.cmake).
 #include <winver.h>
 #include "build_info.h"

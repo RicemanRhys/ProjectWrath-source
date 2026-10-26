@@ -1,4 +1,4 @@
 # Project Wrath's version, the one place it is written (step 110, notes 18.113): MAJOR.MINOR.PATCH on the line
 # below. The build reads it for the exe's file version and the About tab (tools/build_info.cmake), the release
 # script for the zip's name and the release notes (tools/package/make_release.ps1).
-0.1.0
+1.0.0

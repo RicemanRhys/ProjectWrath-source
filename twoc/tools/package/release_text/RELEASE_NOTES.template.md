@@ -9,16 +9,9 @@ copy of the game** (a disc image of the USA Xbox release, or its extracted files
 `{{ZIP}}` ({{SIZE_MB}} MB): extract it, double-click `ProjectWrath.exe`, choose your disc image. The README inside says
 the rest.
 
-## What's new
+## What's in {{VERSION}}
 
 {{CHANGES}}
-
-## Known issues
-
-- Windows 10, AMD and Intel desktop graphics cards, and handhelds are not tested yet.
-- Only the USA Xbox disc works (no PAL or Japanese discs).
-- Full screen can freeze on the first logo for up to 10 seconds on some PCs; it recovers by itself.
-- The player's character has been seen to vanish for a moment in one boss level.
 
 ## Check the download
 

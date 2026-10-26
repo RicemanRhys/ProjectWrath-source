@@ -9,7 +9,7 @@
 #   ProjectWrath-<version>-win64.zip   the Share package (no game files) in a folder ProjectWrath-<version>
 #   xemu_apu-source_*.zip              the audio DLL's complete source (LGPL), as in the zip's Source\
 #   SHA256SUMS.txt                     both zips' SHA-256
-#   RELEASE_NOTES.md                   from release_text\RELEASE_NOTES.template.md, "What's new" from
+#   RELEASE_NOTES.md                   from release_text\RELEASE_NOTES.template.md, "What's in <version>" from
 #                                      release_text\CHANGES.md's section for the version
 #   release.txt                        what was built from what (commits, the generated code's hash, the audit)
 #   work\                              the clean checkout and its builds (kept for a look; delete it when done)
