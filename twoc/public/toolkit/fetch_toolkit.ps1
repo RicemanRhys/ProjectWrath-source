@@ -11,7 +11,9 @@ $pinned = Get-Content -LiteralPath (Join-Path $here 'PINNED.txt')
 $url = ($pinned | Where-Object { $_ -like 'upstream: *' }) -replace '^upstream: ', ''
 $commit = (($pinned | Where-Object { $_ -like 'pinned commit*' }) -split ': ', 2)[1].Split(' ')[0]
 if (Test-Path -LiteralPath $Dir) { throw "$Dir exists already: delete it first, or pass -Dir" }
-& git clone --no-checkout $url $Dir
+# core.autocrlf off for this clone: with it on (Git for Windows' default), a fresh checkout's files "don't match the
+# index" for git am and the first patch fails (tested, step 110); off, the patches rebuild the exact tree.
+& git -c core.autocrlf=false clone -c core.autocrlf=false --no-checkout $url $Dir
 if ($LASTEXITCODE) { throw "git clone failed" }
 Push-Location $Dir
 try {
