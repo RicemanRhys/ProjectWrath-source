@@ -126,7 +126,10 @@ if ($vi.ProductVersion -ne $ver -or -not $vi.FileVersion.StartsWith("$ver,")) {
 }
 Write-Output "exe file version: $($vi.FileVersion); product version $($vi.ProductVersion)"
 $zip = Join-Path $Out "$name-win64.zip"
-Compress-Archive -LiteralPath $pkgDir -DestinationPath $zip -CompressionLevel Optimal
+# Windows' own bsdtar (Windows 10 1803 on) writes a standard zip ('/' between names); PowerShell 5.1's
+# Compress-Archive writes '\', which Explorer takes but other unzip tools warn about (the first run's zip did).
+& (Join-Path $env:SystemRoot 'System32\tar.exe') -a -c -f $zip -C $work $name
+if ($LASTEXITCODE -or -not (Test-Path -LiteralPath $zip)) { throw 'tar.exe could not make the zip' }
 $audDir = Join-Path $work 'unzipped'
 Expand-Archive -LiteralPath $zip -DestinationPath $audDir
 & powershell -NoProfile -ExecutionPolicy Bypass -File (Join-Path $src 'twoc\tools\package\package_audit.ps1') `
