@@ -36,6 +36,7 @@
 #include "gpu.h"
 #include "setup.h"
 #include "names.h"
+#include "userdata.h"
 
 /* xboxrecomp apu.h: the output's channels (2 or 6) and the device's */
 extern "C" int mcpx_apu_output_channels(int *device_channels);
@@ -825,7 +826,7 @@ extern "C" void ovl_rates_text(int ok, double game_ups, double shown_fps, int br
 static void startup_lines(const float *pic, float scale, const char *msg, float alpha, const float *avoid)
 {
     const char *nl = strchr(msg, '\n');
-    char a[128], b[128];
+    char a[1600], b[256];               /* step 110: a line about the saves holds a folder's path */
     float room = (pic[2] < pic[3] * 4.0f / 3.0f ? pic[2] : pic[3] * 4.0f / 3.0f) * 0.92f;
     float fs = pic[4] / scale, wa, wb, wide, padx, pady;
 
@@ -1570,6 +1571,31 @@ static int tab_audio(twoc_settings_t *s)
  * on disk each time the tab opens. */
 static char g_sv_sel[32];
 
+/* Step 110 (notes 18.113): where the saves are this run (userdata.h), and this start's message about them (copied
+ * in, found in two places, or the data folder unusable). Drawn whole in the measuring pass, with a long message. */
+static void saves_where(const char *dir)
+{
+    const char *msg = twoc_userdata_message(), *note = twoc_userdata_note();
+
+    ImGui::SeparatorText("Saves");
+    ImGui::TextWrapped("%s", dir[0] ? dir : twoc_saves_dir_utf8());
+    if (twoc_saves_outside())
+        help("Your saves, their backups and your settings are kept in your user folder, so replacing, updating or "
+             "deleting the game's folder doesn't touch them. Every copy of the game on this PC uses them (unless it "
+             "has a portable.txt next to its exe).");
+    else
+        help("Your saves are kept in the game's own folder (game_files): copy them out before you replace or delete "
+             "that folder.");
+    if (g_measure)
+        amber("Your saves couldn't be copied to C:\\Users\\Someone\\AppData\\Local\\ProjectWrath\\saves (the disk is "
+              "full), so this run keeps using them in the game's folder (C:\\Games\\ProjectWrath-Share\\game_files\\"
+              "UDATA). Nothing was deleted.");
+    else if (msg[0])
+        amber(msg);
+    if (!g_measure && note[0] && strcmp(note, msg) != 0)
+        help(note);
+}
+
 static void tab_saves(void)
 {
     static saves_entry_t list[64];
@@ -1592,6 +1618,7 @@ static void tab_saves(void)
         snprintf(g_sv_sel, sizeof(g_sv_sel), "%s", list[0].name);
     }
 
+    saves_where(st.saves_dir);          /* step 110 */
     ImGui::SeparatorText("Save backups");
     if (!st.on) {
         help("Backups are off for this run (RECOMP_SAVE_BACKUPS=0, or the backups folder couldn't be used: the "
@@ -1645,15 +1672,17 @@ static void tab_saves(void)
     more("Copies the save as it is now (when it differs from the newest backup).");
     ImGui::SameLine();
     ImGui::BeginDisabled(sel < 0 || !list[sel >= 0 ? sel : 0].size);
-    if (ImGui::Button("Restore this one") && sel >= 0)
+    if (ImGui::Button("Restore at next start") && sel >= 0)
         saves_restore_at_next_start(list[sel].name);
     ImGui::EndDisabled();
     more("The game has its save loaded while it runs, so the chosen backup replaces the save at the next start: "
          "quit and start the game again, then load the game at the Load/Save console. The save in use now is "
          "backed up first and kept.");
     ImGui::SameLine();
-    if (ImGui::Button("Open backups folder"))
+    if (ImGui::Button("Open saves folder"))
         saves_open_folder();
+    more("Opens the folder that holds the saves (UDATA), their backups (UDATA_backups) and TDATA in File Explorer. "
+         "To back your saves up or move them to another PC, close the game and copy that folder.");
     ImGui::EndDisabled();
 
     if (st.pending[0]) {
@@ -1859,9 +1888,13 @@ static void about_game_files(void)
         ImGui::EndDisabled();
         more("Verify reads every game file and compares its size and SHA-256 with the disc's (about 1 GB; the game "
              "keeps running). Choose another disc image restarts the game into its setup screen; the current files "
-             "stay until the new ones are copied and checked, and your saves are kept.");
+             "stay until the new ones are copied and checked, and your saves and settings are kept.");
         ImGui::TextWrapped("%s\\game_files%s", twoc_data_dir_utf8(), twoc_data_dir_fallback() ?
                            " (in your user folder: the game's own folder can't be written to)" : "");
+        ImGui::TextWrapped("Saves: %s", twoc_saves_dir_utf8());   /* step 110 (userdata.h) */
+        if (twoc_userdata_message()[0] || g_measure)
+            amber(g_measure ? "Your saves were copied to C:\\Users\\Someone\\AppData\\Local\\ProjectWrath\\saves. The "
+                  "old copy was left where it was." : twoc_userdata_message());
         if (g_measure || (st.verify_only && st.state == SETUP_VERIFYING)) {
             char l[64];
             snprintf(l, sizeof(l), "%.0f of %.0f MB, %u of %u files", (double)st.bytes_done / 1048576.0,

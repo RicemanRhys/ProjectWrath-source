@@ -52,6 +52,7 @@
 #include "selfstart.h"
 #include "apu_dll.h"
 #include "names.h"
+#include "userdata.h"
 
 /*
  * If xboxrecomp.h is not an umbrella header in your setup, include
@@ -344,6 +345,11 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance,
     if (twoc_data_dir_init())
         twoc_self_start();              /* double-clicked: Play Crash.bat's part done here (selfstart.h) */
     twoc_setup_recover();
+    /* Step 110 (notes 18.113): where the saves, their backups, the settings and the toolkit's disk live: the
+     * packaged exe's per-user data folder (%LOCALAPPDATA%\ProjectWrath), with the package's saves copied in at its
+     * first start, or the package's own folder (portable.txt, RECOMP_SAVES_IN_PACKAGE=1, the developer's exe).
+     * Before the settings are read (the ini is there too). */
+    twoc_userdata_init();
 
     wt_out = clear_write_through(STD_OUTPUT_HANDLE);
     wt_err = clear_write_through(STD_ERROR_HANDLE);
@@ -498,10 +504,12 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance,
     printf("Initializing Xbox kernel replacement...\n");
     xbox_kernel_init();
 
-    /* Step 4: Set game directory for file I/O path translation */
+    /* Step 4: Set game directory for file I/O path translation. Step 110: the toolkit's own folder (its partition
+     * images and the game's Z: cache) in the data folder when the saves are there, else its default,
+     * %LOCALAPPDATA%\xboxrecomp (userdata.h). */
     {
         extern void xbox_path_init(const char *game_dir, const char *save_dir);
-        xbox_path_init(YOUR_GAME_DIR, NULL);
+        xbox_path_init(YOUR_GAME_DIR, twoc_xbox_dir_utf8());
     }
 
     /* Step 5: Initialize kernel bridge (thunk table in Xbox memory) */

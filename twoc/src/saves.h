@@ -1,9 +1,10 @@
 /**
  * Save backups (step 83, notes 18.86).
  *
- * The game keeps every slot in one file, game_files\UDATA\56550003\
- * 4D5C926D6357\crash.sav (with SaveMeta.xbx beside it). Copies of both go to
- * game_files\UDATA_backups\<yyyy-mm-dd_hh-mm-ss>\, outside UDATA so the
+ * The game keeps every slot in one file, UDATA\56550003\4D5C926D6357\crash.sav
+ * (with SaveMeta.xbx beside it) in the saves folder: game_files, or since
+ * step 110 the per-user data folder's saves\ (userdata.h). Copies of both go
+ * to UDATA_backups\<yyyy-mm-dd_hh-mm-ss>\ beside UDATA, outside it so the
  * game's own scans of its save folders never see them:
  *
  *   - at each start, before the game runs (saves_startup);
@@ -42,6 +43,7 @@ typedef struct {
 typedef struct {
     int on;                             /* backups are taken */
     char dir[512];                      /* the backups folder (UTF-8) */
+    char saves_dir[512];                /* step 110: the saves folder that holds UDATA and the backups (UTF-8) */
     char status[320];                   /* the last action's outcome, "" none */
     char pending[32];                   /* a restore at the next start: its backup, "" none */
     int busy;                           /* an action is under way */
@@ -70,7 +72,7 @@ void saves_refresh(void);
 void saves_backup_now(void);
 void saves_restore_at_next_start(const char *name);
 void saves_cancel_restore(void);
-void saves_open_folder(void);
+void saves_open_folder(void);           /* step 110: the saves folder (UDATA, TDATA and UDATA_backups) */
 
 /* Step 97: the game is quitting (the menu's Quit game or Restart now): the
  * worker takes on nothing new, and this waits up to `ms` for a copy, a

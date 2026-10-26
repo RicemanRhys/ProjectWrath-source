@@ -41,6 +41,7 @@
 #include "pads.h"         /* step 70: every other pad, through SDL */
 #include "saves.h"        /* step 83: the save's backups */
 #include "names.h"        /* step 109: Project Wrath's name in its message box */
+#include "userdata.h"     /* step 110: the saves outside the package */
 
 /* ── ICALL trace ring buffer ───────────────────────────────── */
 
@@ -2491,7 +2492,8 @@ void twoc_guest_mem_text(char *buf, size_t cap)
 /* ── Step 73: a title that leaves for the dashboard says why ── */
 
 /*
- * XAPI opens U: (game_files\UDATA\56550003) for writing at startup. When it
+ * XAPI opens U: (game_files\UDATA\56550003, or since step 110 the data
+ * folder's saves\UDATA\56550003: userdata.h) for writing at startup. When it
  * can't (the folder read-only for this user), it boots to the dashboard with
  * XLD_LAUNCH_DASHBOARD_ERROR / XLD_ERROR_INVALID_HARD_DISK, and here that was a
  * silent exit about a second after launch. The exit still happens; on that
@@ -2509,9 +2511,8 @@ static void hal_HalReturnToFirmware(void)
     /* LAUNCH_DATA_PAGE: type at +0 (1 = the dashboard), LD_LAUNCH_DASHBOARD
      * at +1024 (dwReason 1 = an error, dwParameter1 2 = the hard disk) */
     if (page && MEM32(page) == 1 && MEM32(page + 1024) == 1 && MEM32(page + 1032) == 2) {
-        char dir[MAX_PATH], msg[MAX_PATH + 256];
-        if (!GetFullPathNameA("game_files\\UDATA\\56550003", sizeof(dir), dir, NULL))
-            strcpy(dir, "game_files\\UDATA\\56550003");
+        char dir[MAX_PATH * 3], msg[MAX_PATH * 3 + 256];
+        snprintf(dir, sizeof(dir), "%s\\UDATA\\56550003", twoc_saves_dir_utf8());
         fprintf(stderr, "[SAVE] the game could not open its save folder %s for writing, and quits"
                 " (the Xbox's \"hard disk\" error)\n", dir);
         fflush(stderr);
@@ -2548,16 +2549,157 @@ static int sv_open_begin(uint32_t oa, uint32_t access, uint32_t share, uint32_t 
                : 0;
 }
 
+/* ── Step 110: the save opens sent to the data folder ──────── */
+
+/*
+ * With the saves outside the package (userdata.h), an open in the game's save
+ * folders (\Device\Harddisk0\partition1\UDATA or TDATA, directly or through
+ * the title's U: and T: links) reaches the kernel with an OBJECT_ATTRIBUTES of
+ * ours that names the data folder's path. The toolkit reads the path through
+ * guest memory, so ours lives in one of a few guest slots, taken once (from
+ * the pool arena, or the heap before the arena is up) and held for the length
+ * of the call; the game's own structures are never written, and the stack
+ * argument is put back after. The [PATH] line the toolkit prints for a path it
+ * maps itself is printed here, so the log reads as before. An open the data
+ * folder can't take (a path too long, no guest memory) fails as a missing
+ * path: it never goes to the game's folder instead. In both layouts a save
+ * file opened to write is handed a copy that replaces the save whole when the
+ * game closes it (userdata.h), so a kill during a save leaves the old one.
+ */
+#define UD_SLOTS              8
+#define UD_SLOT_SIZE          640u
+
+static uint32_t g_ud_base;
+static volatile LONG g_ud_used;            /* a bit per slot */
+static SRWLOCK g_ud_lock = SRWLOCK_INIT;
+
+/* A free slot's guest address (its index in *k), or 0 when no guest memory could be had. */
+static uint32_t ud_slot_take(int *k)
+{
+    int i;
+
+    if (!g_ud_base) {
+        coop_thread_t *self = coop_enter();
+        AcquireSRWLockExclusive(&g_ud_lock);
+        if (!g_ud_base) {
+            uint32_t va = 0;
+            const char *from = "the pool arena";
+            AcquireSRWLockExclusive(&g_pool_lock);
+            if (g_pool_base)
+                va = pool_take(UD_SLOTS * UD_SLOT_SIZE);
+            ReleaseSRWLockExclusive(&g_pool_lock);
+            if (!va) {
+                hg_enter();
+                va = xbox_HeapAlloc(UD_SLOTS * UD_SLOT_SIZE, 16);
+                hg_leave();
+                from = "the heap";
+            }
+            g_ud_base = va;
+            fprintf(stderr, "[SAVES] guest slots for the save opens: %u bytes at %08X (%s)\n", UD_SLOTS * UD_SLOT_SIZE,
+                    va, va ? from : "none: save opens fail");
+        }
+        ReleaseSRWLockExclusive(&g_ud_lock);
+        coop_leave(self);
+    }
+    if (!g_ud_base)
+        return 0;
+    for (;;) {
+        for (i = 0; i < UD_SLOTS; i++)
+            if (!InterlockedBitTestAndSet(&g_ud_used, i)) {
+                *k = i;
+                return g_ud_base + (uint32_t)i * UD_SLOT_SIZE;
+            }
+        SwitchToThread();
+    }
+}
+
+/* Before an open with OBJECT_ATTRIBUTES `oa` (and its access, disposition, options): ours in a slot (*slot), 0 to
+ * pass the game's on, or ~0u to fail it; *wtok a save write to put in place at its close (-1 none). */
+static uint32_t ud_redirect_begin(uint32_t oa, uint32_t access, uint32_t disposition, uint32_t options, int *slot,
+                                  int *wtok)
+{
+    char kp[UD_SLOT_SIZE - 24], eff[UD_SLOT_SIZE];
+    uint32_t name, buf, s = 0;
+    size_t n;
+    int r;
+
+    *slot = -1;
+    *wtok = -1;
+    if (!oa)
+        return 0;
+    name = MEM32(oa + 4);
+    buf = name ? MEM32(name + 4) : 0;
+    if (!buf)
+        return 0;
+    r = twoc_userdata_redirect((const char *)XBOX_PTR(buf), MEM16(name), MEM32(oa), access, disposition, options, kp,
+                               sizeof(kp), eff, sizeof(eff), wtok);
+    if (r == 0)
+        return 0;
+    if (r < 0 || !(s = ud_slot_take(slot))) {
+        if (*wtok >= 0) {
+            twoc_userdata_write_opened(*wtok, 0, 0);
+            *wtok = -1;
+        }
+        fprintf(stderr, "  [PATH] %s\n[SAVES] the open above is refused: %s\n", eff,
+                r < 0 ? "its path in the data folder is too long" : "no guest memory for it");
+        fflush(stderr);
+        return ~0u;
+    }
+    n = strlen(kp);
+    MEM32(s + 0) = 0;                      /* RootDirectory: none, the path is whole */
+    MEM32(s + 4) = s + 12;                 /* ObjectName */
+    MEM32(s + 8) = MEM32(oa + 8);          /* Attributes, the game's */
+    MEM16(s + 12) = (uint16_t)n;           /* STRING { Length, MaximumLength, Buffer } */
+    MEM16(s + 14) = (uint16_t)(n + 1);
+    MEM32(s + 16) = s + 20;
+    memcpy((void *)XBOX_PTR(s + 20), kp, n + 1);
+    fprintf(stderr, "  [PATH] %s\n", eff);  /* as the toolkit's translation prints it */
+    fflush(stderr);
+    return s;
+}
+
+static void ud_slot_give(int k)
+{
+    if (k >= 0)
+        InterlockedBitTestAndReset(&g_ud_used, k);
+}
+
+/* A refused open: STATUS_OBJECT_PATH_NOT_FOUND in eax and the IO_STATUS_BLOCK, the arguments popped (`ret`). */
+static void ud_refuse(uint32_t iosb, uint32_t ret)
+{
+    coop_thread_t *self = coop_enter();
+    if (iosb) {
+        MEM32(iosb) = 0xC000003Au;
+        MEM32(iosb + 4) = 0;
+    }
+    eax = 0xC000003Au;
+    esp += 4 + ret;
+    coop_leave(self);
+}
+
 /* NTSTATUS NtCreateFile(PHANDLE, ACCESS_MASK, POBJECT_ATTRIBUTES, PIO_STATUS_BLOCK,
  *                       PLARGE_INTEGER, ULONG FileAttributes, ULONG ShareAccess,
  *                       ULONG CreateDisposition, ULONG CreateOptions); ret 36 */
 static void sv_NtCreateFile(void)
 {
-    uint32_t handle_va = MEM32(esp + 4);
-    int t = sv_open_begin(MEM32(esp + 12), MEM32(esp + 8), MEM32(esp + 28), MEM32(esp + 32), MEM32(esp + 36));
+    uint32_t handle_va = MEM32(esp + 4), arg = esp + 12, oa = MEM32(esp + 12), ours;
+    int t = sv_open_begin(oa, MEM32(esp + 8), MEM32(esp + 28), MEM32(esp + 32), MEM32(esp + 36)), slot, wtok;
 
-    t_coop_kernel_va = MEM32(SV_NTCREATE_THUNK);
-    coop_kernel_call();
+    ours = ud_redirect_begin(oa, MEM32(esp + 8), MEM32(esp + 32), MEM32(esp + 36), &slot, &wtok);   /* step 110 */
+    if (ours == ~0u)
+        ud_refuse(MEM32(esp + 16), 36);
+    else {
+        if (ours)
+            MEM32(arg) = ours;
+        t_coop_kernel_va = MEM32(SV_NTCREATE_THUNK);
+        coop_kernel_call();
+        if (ours) {
+            MEM32(arg) = oa;
+            ud_slot_give(slot);
+        }
+        if (wtok >= 0)
+            twoc_userdata_write_opened(wtok, eax == 0, handle_va ? MEM32(handle_va) : 0);
+    }
     if (t)
         saves_guest_open_end(t, eax == 0, handle_va ? MEM32(handle_va) : 0);
 }
@@ -2566,11 +2708,24 @@ static void sv_NtCreateFile(void)
  *                     ULONG ShareAccess, ULONG OpenOptions); ret 24 */
 static void sv_NtOpenFile(void)
 {
-    uint32_t handle_va = MEM32(esp + 4);
-    int t = sv_open_begin(MEM32(esp + 12), MEM32(esp + 8), MEM32(esp + 20), 1 /* FILE_OPEN */, MEM32(esp + 24));
+    uint32_t handle_va = MEM32(esp + 4), arg = esp + 12, oa = MEM32(esp + 12), ours;
+    int t = sv_open_begin(oa, MEM32(esp + 8), MEM32(esp + 20), 1 /* FILE_OPEN */, MEM32(esp + 24)), slot, wtok;
 
-    t_coop_kernel_va = MEM32(SV_NTOPEN_THUNK);
-    coop_kernel_call();
+    ours = ud_redirect_begin(oa, MEM32(esp + 8), 1 /* FILE_OPEN */, MEM32(esp + 24), &slot, &wtok);   /* step 110 */
+    if (ours == ~0u)
+        ud_refuse(MEM32(esp + 16), 24);
+    else {
+        if (ours)
+            MEM32(arg) = ours;
+        t_coop_kernel_va = MEM32(SV_NTOPEN_THUNK);
+        coop_kernel_call();
+        if (ours) {
+            MEM32(arg) = oa;
+            ud_slot_give(slot);
+        }
+        if (wtok >= 0)
+            twoc_userdata_write_opened(wtok, eax == 0, handle_va ? MEM32(handle_va) : 0);
+    }
     if (t)
         saves_guest_open_end(t, eax == 0, handle_va ? MEM32(handle_va) : 0);
 }
@@ -2579,9 +2734,12 @@ static void sv_NtOpenFile(void)
 static void sv_NtClose(void)
 {
     int t = saves_guest_tracking() ? saves_guest_close_begin(MEM32(esp + 4)) : 0;
+    int w = twoc_userdata_closing(MEM32(esp + 4));     /* step 110: a save write to put in place after the close */
 
     t_coop_kernel_va = MEM32(SV_NTCLOSE_THUNK);
     coop_kernel_call();
+    if (w >= 0)
+        twoc_userdata_closed(w);
     saves_guest_close_end(t);
 }
 

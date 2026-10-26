@@ -30,8 +30,8 @@
 
 #include "saves.h"
 #include "names.h"
+#include "userdata.h"
 
-#define SV_GAME_DIR     L"game_files"
 #define SV_SAVE_SUB     L"UDATA\\56550003\\4D5C926D6357"
 #define SV_BACKUP_SUB   L"UDATA_backups"
 #define SV_PENDING      L"restore at next start.txt"
@@ -56,10 +56,10 @@ typedef struct {
 static volatile LONG g_init;
 static CRITICAL_SECTION g_cs;           /* the list, the state and the requests below */
 static int g_on;
-static wchar_t g_save[MAX_PATH], g_bak[MAX_PATH];
+static wchar_t g_root[MAX_PATH], g_save[MAX_PATH], g_bak[MAX_PATH];  /* step 110: g_root holds UDATA (userdata.h) */
 static saves_entry_t g_list[SV_MAX_LIST];
 static int g_n;
-static char g_status[320], g_pending[32], g_dir_u8[512];
+static char g_status[320], g_pending[32], g_dir_u8[512], g_root_u8[512];
 static int g_busy_ui;
 
 enum { RQ_RESTORE = 1, RQ_CANCEL = 2, RQ_OPEN = 4, RQ_REFRESH = 8 };
@@ -575,10 +575,11 @@ static int write_pending(const char *name)
 {
     wchar_t p[MAX_PATH];
     char text[512];
+    char save8[MAX_PATH * 3];
+    u8(g_save, save8, sizeof(save8));
     snprintf(text, sizeof(text),
-             "%s\r\n\r\nAt its next start %s replaces its save (game_files\\UDATA\\56550003\\4D5C926D6357) "
-             "with the backup named on the first line, after backing up the save it replaces. Delete this file "
-             "to cancel.\r\n", name, twoc_app_name());
+             "%s\r\n\r\nAt its next start %s replaces its save (%s) with the backup named on the first line, after "
+             "backing up the save it replaces. Delete this file to cancel.\r\n", name, twoc_app_name(), save8);
     swprintf(p, MAX_PATH, L"%s\\%s", g_bak, SV_PENDING);
     return ensure_backup_dir() && write_file(p, text, (DWORD)strlen(text), 1);
 }
@@ -776,14 +777,14 @@ static DWORD WINAPI worker(void *arg)
         }
         if ((rq & RQ_RESTORE) && name[0])
             do_restore_request(name);
-        if (rq & RQ_OPEN) {
+        if (rq & RQ_OPEN) {             /* step 110: the saves folder (UDATA, TDATA and UDATA_backups in it) */
             HINSTANCE h;
             ensure_backup_dir();
-            h = ShellExecuteW(NULL, L"open", g_bak, NULL, NULL, SW_SHOWNORMAL);
+            h = ShellExecuteW(NULL, L"open", g_root, NULL, NULL, SW_SHOWNORMAL);
             if ((INT_PTR)h <= 32)
                 say("Could not open the folder (error %d).", (int)(INT_PTR)h);
             else
-                say("Opened the backups folder in File Explorer (Alt+Tab to it).");
+                say("Opened the saves folder in File Explorer (Alt+Tab to it).");
         }
         if (rq & RQ_REFRESH)
             refresh_list();
@@ -855,17 +856,19 @@ void saves_startup(void)
         fprintf(stderr, "[SAVE] save backups off (RECOMP_SAVE_BACKUPS=0)\n");
         return;
     }
-    if (!GetFullPathNameW(SV_GAME_DIR, MAX_PATH, gd, NULL))
-        return;
+    if (!twoc_saves_dir()[0] || !GetFullPathNameW(twoc_saves_dir(), MAX_PATH, gd, NULL))
+        return;                         /* step 110: game_files, or the data folder's saves (userdata.h) */
     e = getenv("RECOMP_DEV_SAVE_COPY_DELAY_MS");
     if (e && atoi(e) > 0) {
         g_dev_copy_ms = (DWORD)atoi(e);
         fprintf(stderr, "[SAVE] test: each copy after the start takes %lu ms more (RECOMP_DEV_SAVE_COPY_DELAY_MS)\n",
                 (unsigned long)g_dev_copy_ms);
     }
+    swprintf(g_root, MAX_PATH, L"%s", gd);
     swprintf(g_save, MAX_PATH, L"%s\\%s", gd, SV_SAVE_SUB);
     swprintf(g_bak, MAX_PATH, L"%s\\%s", gd, SV_BACKUP_SUB);
     u8(g_bak, g_dir_u8, sizeof(g_dir_u8));
+    u8(g_root, g_root_u8, sizeof(g_root_u8));
     QueryPerformanceFrequency(&f);
     QueryPerformanceCounter(&t0);
 
@@ -1080,6 +1083,7 @@ void saves_state(saves_state_t *st)
     EnterCriticalSection(&g_cs);
     st->on = g_on;
     snprintf(st->dir, sizeof(st->dir), "%s", g_dir_u8);
+    snprintf(st->saves_dir, sizeof(st->saves_dir), "%s", g_root_u8);
     snprintf(st->status, sizeof(st->status), "%s", g_status);
     snprintf(st->pending, sizeof(st->pending), "%s", g_pending);
     st->busy = g_busy_ui;

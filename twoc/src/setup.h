@@ -62,8 +62,11 @@ const char *twoc_data_dir_note(void);
 /* The data folder as UTF-8, for the log and the screen. */
 const char *twoc_data_dir_utf8(void);
 /* A file kept beside the exe (ProjectWrath.ini, ProjectWrath.muted: names.h), or in the data folder when the exe's
- * folder can't be written to. `name` in UTF-8; `out` in the narrow functions' code page. Returns 0 or -1. */
+ * folder can't be written to; step 110: in the per-user data folder when the saves are outside the package
+ * (userdata.h). `name` in UTF-8; `out` in the narrow functions' code page. Returns 0 or -1. */
 int twoc_settings_file(const char *name, char *out, size_t cap);
+/* Step 110: the same file where the package's layout keeps it (beside the exe), for the settings' migration. */
+int twoc_settings_file_pkg(const char *name, char *out, size_t cap);
 
 /* ── Recovery (at every start, before anything else) ───────────────────── */
 

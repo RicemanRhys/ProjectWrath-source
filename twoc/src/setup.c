@@ -21,6 +21,7 @@
 #include "xdvdfs.h"
 #include "disc_manifest.h"
 #include "names.h"
+#include "userdata.h"
 
 #define DM_N ((unsigned)(sizeof(k_dm_files) / sizeof(k_dm_files[0])))
 #define CHUNK (1u << 20)
@@ -240,8 +241,11 @@ static int started_by_itself(void)
 {
     wchar_t *e = GetEnvironmentStringsW(), *p;
     int self = 1;
-    for (p = e; p && *p; p += wcslen(p) + 1)        /* test aids (RECOMP_DEV_*) don't make a launcher */
-        if ((_wcsnicmp(p, L"RECOMP_", 7) == 0 && _wcsnicmp(p, L"RECOMP_DEV_", 11) != 0) ||
+    /* test aids (RECOMP_DEV_*) and step 110's choice of where the saves go (userdata.h) don't make a launcher */
+    for (p = e; p && *p; p += wcslen(p) + 1)
+        if ((_wcsnicmp(p, L"RECOMP_", 7) == 0 && _wcsnicmp(p, L"RECOMP_DEV_", 11) != 0 &&
+             _wcsnicmp(p, L"RECOMP_DATA_DIR=", 16) != 0 && _wcsnicmp(p, L"RECOMP_SAVES_IN_PACKAGE=", 24) != 0 &&
+             _wcsnicmp(p, L"RECOMP_SAVES_OUTSIDE=", 21) != 0) ||
             _wcsnicmp(p, L"TWOC_LAUNCHER=", 14) == 0) {
             self = 0;
             break;
@@ -468,14 +472,16 @@ const char *twoc_data_dir_utf8(void)
     return g_dir8;
 }
 
-int twoc_settings_file(const char *name, char *out, size_t cap)
+static int settings_file(const char *name, char *out, size_t cap, int pkg)
 {
     wchar_t w[SETUP_PATH_MAX], nw[MAX_PATH], *slash;
     DWORD n;
 
     if (!MultiByteToWideChar(CP_UTF8, 0, name, -1, nw, MAX_PATH))     /* step 109: UTF-8 (the exe's own name) */
         wcscpy_s(nw, MAX_PATH, L"settings.ini");
-    if (g_fallback)
+    if (!pkg && twoc_saves_outside())   /* step 110: in the data folder with the saves (userdata.h) */
+        _snwprintf_s(w, SETUP_PATH_MAX, _TRUNCATE, L"%s\\%s", twoc_user_dir(), nw);
+    else if (g_fallback)
         _snwprintf_s(w, SETUP_PATH_MAX, _TRUNCATE, L"%s\\%s", g_dir, nw);
     else if ((n = GetModuleFileNameW(NULL, w, SETUP_PATH_MAX)) > 0 && n < SETUP_PATH_MAX &&
              (slash = wcsrchr(w, L'\\')) != NULL)
@@ -484,6 +490,16 @@ int twoc_settings_file(const char *name, char *out, size_t cap)
         _snwprintf_s(w, SETUP_PATH_MAX, _TRUNCATE, L"%s", nw);
     /* the narrow functions' code page: UTF-8 with the exe's manifest (Windows 10 1903 on) */
     return WideCharToMultiByte(CP_ACP, 0, w, -1, out, (int)cap, NULL, NULL) ? 0 : -1;
+}
+
+int twoc_settings_file(const char *name, char *out, size_t cap)
+{
+    return settings_file(name, out, cap, 0);
+}
+
+int twoc_settings_file_pkg(const char *name, char *out, size_t cap)
+{
+    return settings_file(name, out, cap, 1);
 }
 
 static void dpath(const wchar_t *name, wchar_t *out, size_t cap)

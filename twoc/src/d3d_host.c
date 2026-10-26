@@ -184,6 +184,7 @@
 #include "cpu_info.h"
 #include "mem_log.h"
 #include "names.h"
+#include "userdata.h"     /* step 110: this start's message about the saves */
 
 #define WIN_CLASS          "TwocD3DBridge"
 #define WIN_TITLE           twoc_window_title()   /* step 109: "Project Wrath" (names.h) */
@@ -565,6 +566,7 @@ static volatile LONG g_show_fps;        /* step 82: "Show frame rate" (RECOMP_SH
 static volatile LONG g_startmsg = 1;    /* step 86: "Show the startup message" (RECOMP_STARTUP_MESSAGE, unset: on) */
 static LONGLONG g_startmsg_t0;          /* its first frame (QPC); 0 before it */
 #define STARTMSG_MS 8000.0              /* shown this long from the first frame, */
+#define STARTMSG_SAVES_MS 20000.0       /* step 110: ... with a message about the saves (userdata.h) */
 #define STARTMSG_FADE_MS 1000.0         /* fading out over its last part */
 static SRWLOCK g_pause_lock = SRWLOCK_INIT;
 static d3dh_apply_fn g_apply_game, g_apply_host;   /* step 78: the bridge's parts of a settings change */
@@ -10218,22 +10220,26 @@ static int ovl_draw(ID3D11Texture2D *dst, int running)
 static float startmsg_alpha(void)
 {
     LARGE_INTEGER q;
-    double ms;
+    double ms, len = twoc_userdata_message()[0] ? STARTMSG_SAVES_MS : STARTMSG_MS;
 
     if (!g_startmsg || g_startmsg_t0 < 0)
         return 0.0f;
     QueryPerformanceCounter(&q);
     if (!g_startmsg_t0) {
         g_startmsg_t0 = q.QuadPart;
-        fprintf(stderr, "[D3DB] host startup message: \"Press F1 to open the settings menu\" (with a controller,"
-                " \"or hold Start\") for %.0f s from this frame\n", STARTMSG_MS / 1000.0);
+        if (twoc_userdata_message()[0])
+            fprintf(stderr, "[D3DB] host startup message: \"%s\" for %.0f s from this frame\n", twoc_userdata_message(),
+                    len / 1000.0);
+        else
+            fprintf(stderr, "[D3DB] host startup message: \"Press F1 to open the settings menu\" (with a controller,"
+                    " \"or hold Start\") for %.0f s from this frame\n", len / 1000.0);
     }
     ms = (double)(q.QuadPart - g_startmsg_t0) * 1000.0 / (double)g_qpf.QuadPart;
-    if (ms >= STARTMSG_MS) {
+    if (ms >= len) {
         g_startmsg_t0 = -1;             /* done for this run */
         return 0.0f;
     }
-    return ms <= STARTMSG_MS - STARTMSG_FADE_MS ? 1.0f : (float)((STARTMSG_MS - ms) / STARTMSG_FADE_MS);
+    return ms <= len - STARTMSG_FADE_MS ? 1.0f : (float)((len - ms) / STARTMSG_FADE_MS);
 }
 
 /* Step 82: the frame-rate counter over the picture in `dst` (the visible
@@ -10267,8 +10273,17 @@ static void counter_draw(ID3D11Texture2D *dst, float msg_alpha)
     pic[4] = 1.15f * (pic[3] > 490 ? pic[3] / 650.0f : 0.75f);  /* the counter's rule by the picture's height, +15% */
     if (SUCCEEDED(ID3D11Device_CreateRenderTargetView(d3d8_GetD3D11Device(), (ID3D11Resource *)dst, NULL, &rtv))) {
         /* sized by the picture, not the desktop's DPI: 22 px text at 800 lines */
+        char sm[1800];
+        /* step 110: this start's message about the saves (userdata.h) instead, its first sentence on the first
+         * line, the rest and the menu's key on the second */
+        if (twoc_userdata_message()[0]) {
+            const char *m = twoc_userdata_message(), *dot = strstr(m, ". ");
+            int first = dot ? (int)(dot - m) + 1 : (int)strlen(m);
+            snprintf(sm, sizeof(sm), "%.*s\n%s%sF1: the Saves tab%s", first, m, dot ? dot + 2 : "", dot ? "  " : "",
+                     twoc_pad_connected() ? " (or hold Start)" : "");
+        }
         ovl_counter(rtv, g_buf_w, g_buf_h, g_buf_h > 490 ? (float)g_buf_h / 650.0f : 0.75f,
-                    g_show_fps ? lines : NULL,
+                    g_show_fps ? lines : NULL, twoc_userdata_message()[0] ? sm :
                     twoc_pad_connected() ? "Press F1 to open the settings menu\n(or hold Start on the controller)"
                                          : "Press F1 to open the settings menu", msg_alpha, pic);
         ID3D11RenderTargetView_Release(rtv);

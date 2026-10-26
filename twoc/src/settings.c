@@ -16,6 +16,7 @@
 #include "setup.h"
 #include "pads.h"
 #include "names.h"
+#include "userdata.h"
 
 typedef struct {
     const char *key, *var, *note;
@@ -372,25 +373,42 @@ const char *twoc_settings_path(void)
     static char path[MAX_PATH * 4];
 
     /* step 107: beside the exe, or in %LOCALAPPDATA%\ProjectWrath when the exe's folder can't be written to;
-     * step 109: named after the exe (ProjectWrath.ini, names.h) */
+     * step 109: named after the exe (ProjectWrath.ini, names.h); step 110: in the per-user data folder with the
+     * saves when they are outside the package (userdata.h) */
     if (!path[0] && twoc_settings_file(twoc_ini_name(), path, sizeof(path)))
         snprintf(path, sizeof(path), "%s", twoc_ini_name());
     return path;
 }
 
+static int file_there(const char *p)
+{
+    return p[0] && GetFileAttributesA(p) != INVALID_FILE_ATTRIBUTES;
+}
+
 /* Step 109: the old name's file in the same place (crash_twoc.ini beside ProjectWrath.exe), while the new one isn't
  * there yet: read in its place, never written or deleted; the next save writes the new one. "" otherwise (and for
- * crash_twoc.exe, whose ini is that file). */
+ * crash_twoc.exe, whose ini is that file). Step 110: with the settings in the data folder, the package's own ini
+ * beside the exe (ProjectWrath.ini, then crash_twoc.ini) is that file, read the same way. */
 const char *twoc_settings_old_path(void)
 {
     static char old[MAX_PATH * 4];
+    static int looked;
+    int same = _stricmp(twoc_ini_name(), TWOC_OLD_INI_NAME) == 0;
+    char c[MAX_PATH * 4];
 
-    if (_stricmp(twoc_ini_name(), TWOC_OLD_INI_NAME) == 0 ||
-        GetFileAttributesA(twoc_settings_path()) != INVALID_FILE_ATTRIBUTES)
+    if (file_there(twoc_settings_path()))
         return "";
-    if (!old[0] && twoc_settings_file(TWOC_OLD_INI_NAME, old, sizeof(old)))
-        return "";
-    return GetFileAttributesA(old) != INVALID_FILE_ATTRIBUTES ? old : "";
+    if (!looked) {
+        looked = 1;
+        if (twoc_saves_outside() && !twoc_settings_file_pkg(twoc_ini_name(), c, sizeof(c)) && file_there(c))
+            snprintf(old, sizeof(old), "%s", c);
+        else if (!same && twoc_saves_outside() && !twoc_settings_file_pkg(TWOC_OLD_INI_NAME, c, sizeof(c)) &&
+                 file_there(c))
+            snprintf(old, sizeof(old), "%s", c);
+        else if (!same && !twoc_settings_file(TWOC_OLD_INI_NAME, c, sizeof(c)) && file_there(c))
+            snprintf(old, sizeof(old), "%s", c);
+    }
+    return old;
 }
 
 static char *trim(char *s)
@@ -446,9 +464,8 @@ void twoc_settings_load(void)
     if (!f && twoc_settings_old_path()[0]) {    /* step 109: the old name's file, read in its place */
         f = fopen(twoc_settings_old_path(), "r");
         if (f)
-            fprintf(stderr, "[CFG] %s isn't there yet: the settings from %s (the name before Project Wrath; read "
-                    "only, left as it is: the next save writes %s)\n", twoc_ini_name(), twoc_settings_old_path(),
-                    twoc_ini_name());
+            fprintf(stderr, "[CFG] %s isn't there yet: the settings from %s (read only, left as it is: the next save "
+                    "writes %s)\n", twoc_settings_path(), twoc_settings_old_path(), twoc_settings_path());
     } else if (f)
         fprintf(stderr, "[CFG] settings from %s\n", twoc_settings_path());
     if (!f)

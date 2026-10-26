@@ -136,6 +136,8 @@ set(GAME_SOURCES
     # The save's backups and the game files' check at the start (notes 18.86)
     src/saves.c
     src/gamefiles.c
+    # Saves outside the package: the per-user data folder, the migration, the save opens sent there (notes 18.113)
+    src/userdata.c
     # The first-run setup: the disc image reader, the manifest check and the safe extraction, its screen (notes 18.110)
     src/xdvdfs.c
     src/setup.c
