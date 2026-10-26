@@ -41,12 +41,13 @@ package again and audits each; about 15 minutes):
    disassembly and no personal details (`docs/PUBLIC_REPO.md` says what goes in; `tools/make_public_tree.ps1`
    exports it, `tools/audit_public_tree.ps1` checks it; `tools/package/make_release.ps1` prepares the release).
    Whether this is allowed is the lawyer's question (`docs/LAWYER_QUESTIONS.md`).
+8. **The public identity is `RicemanRhys <176650384+RicemanRhys@users.noreply.github.com>`** (step 111): GitHub's
+   noreply address for the owner's account. `tools/make_public_tree.ps1` (`$identityMail`) commits the public tree
+   and writes the toolkit patches' author lines with it; `tools/audit_public_tree.ps1` (`$publicId`) fails on any
+   other commit identity. The private e-mail is never used there.
 
 ## What is still open (not decided here)
 
-- **The public identity's e-mail.** `tools/make_public_tree.ps1` commits the public tree as
-  `RicemanRhys <NOREPLY-ADDRESS-TO-BE-FILLED>`: put your GitHub noreply address there (GitHub: Settings > Emails >
-  "Keep my email addresses private" shows it), in that script's `$identityMail` and the audit's identity check.
 - **Whether to publish `seed_functions.json`** (52 function addresses in the game): without it the public tree can't
   regenerate a working program (`docs/PUBLIC_REPO.md`); `make_public_tree.ps1 -IncludeSeeds` adds it. A lawyer's
   question with the others.
@@ -77,7 +78,7 @@ package again and audits each; about 15 minutes):
    game-specific parts and the seeds, protection measures, the name, AI-written code, your country). If the answer
    is "don't ship it compiled", stop: the Share package is exactly that.
 2. **Check the name "Project Wrath"** as above (the searches are yours or a lawyer's).
-3. **Fill in the public identity's noreply address** (open point 1) and commit it.
+3. ~~Fill in the public identity's noreply address~~ (done in step 111: decided point 8).
 4. **Choose where problems are reported** and write the address into `twoc/ISSUES_URL.txt` in place of
    `[ISSUES URL TO BE CHOSEN BY THE OWNER]` (an `https://` address, for example the repository's issues page; the
    issue forms in `.github/ISSUE_TEMPLATE/` are ready for a GitHub repository). Commit it.

@@ -18,7 +18,8 @@
 #     top of it as patch files, their author lines set to the public identity; fetch_toolkit.ps1 makes xboxrecomp\
 #     from them (a fork, a submodule or these patches all start from the same two facts);
 #   - a FRESH git repository: one commit, "Initial public release of Project Wrath", author and committer
-#     "RicemanRhys <NOREPLY-ADDRESS-TO-BE-FILLED>" (the owner fills the address in), no remote; nothing is pushed.
+#     "RicemanRhys <176650384+RicemanRhys@users.noreply.github.com>" (GitHub's noreply address for the owner's
+#     account: never the private e-mail), no remote; nothing is pushed.
 # Then it runs audit_public_tree.ps1 on DIR and fails if the audit does. Re-runnable for later releases: DIR is
 # replaced only with -Force, and only if it holds this script's own marker file (.public-tree-export).
 param(
@@ -33,7 +34,7 @@ $twoc = Split-Path -Parent $PSScriptRoot
 $repo = Split-Path -Parent $twoc
 if (-not $Toolkit) { $Toolkit = Join-Path $repo 'xboxrecomp' }
 $identityName = 'RicemanRhys'
-$identityMail = 'NOREPLY-ADDRESS-TO-BE-FILLED'
+$identityMail = '176650384+RicemanRhys@users.noreply.github.com'   # GitHub's noreply address
 $marker = '.public-tree-export'
 
 # The private repository's files that may be published (paths in the repository, '/' separators; a trailing '/'
@@ -144,7 +145,7 @@ $pinned = @(
 [IO.File]::WriteAllLines((Join-Path $tk 'PINNED.txt'), $pinned)
 Write-Output "toolkit: upstream $($base.Substring(0,7)) + $n patches"
 
-# ── A fresh repository: one commit, the placeholder identity, no remote ────────────────────────────────────────────
+# ── A fresh repository: one commit, the public identity, no remote ───────────────────────────────────────────────
 [IO.File]::WriteAllText((Join-Path $Out $marker), "made by twoc\tools\make_public_tree.ps1 from $short`r`n")
 Push-Location $Out
 try {

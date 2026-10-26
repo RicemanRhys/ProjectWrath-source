@@ -16,14 +16,15 @@
 #      game_files, *Package;
 #   6. tokens or keys: GitHub tokens, AWS keys, private key blocks, "api_key = ..." style secrets;
 #   7. the git history (when DIR is a repository): more than one commit, a remote, or an author / committer that
-#      isn't the public identity.
-# WARNS (exit 0, "AUDIT PASSED WITH N WARNING(S)") on the placeholders still to fill in: the noreply address
-# (NOREPLY-ADDRESS-TO-BE-FILLED), ISSUES_URL ([ISSUES URL TO BE CHOSEN BY THE OWNER] / @ISSUES_URL@) and the issue
-# forms' OWNER/REPOSITORY.
+#      isn't the public identity ($publicId below: GitHub's noreply address, never the private e-mail).
+# WARNS (exit 0, "AUDIT PASSED WITH N WARNING(S)") on any placeholder left unfilled: the noreply address, ISSUES_URL
+# ([ISSUES URL TO BE CHOSEN BY THE OWNER] / @ISSUES_URL@) and the issue forms' OWNER/REPOSITORY (the patterns below
+# are written so that this file doesn't match itself).
 param([Parameter(Mandatory)][string]$Dir, [string]$Manifest, [switch]$AllowSeeds)
 $ErrorActionPreference = 'Stop'
 $Dir = (Resolve-Path -LiteralPath $Dir).Path
 if (-not $Manifest) { $Manifest = Join-Path (Split-Path -Parent $PSScriptRoot) 'data\disc_usa.tsv' }
+$publicId = 'RicemanRhys <176650384+RicemanRhys@users.noreply.github.com>'   # the public tree's only identity
 $fails = New-Object System.Collections.Generic.List[string]
 $warns = New-Object System.Collections.Generic.List[string]
 function Fail($m) { $fails.Add($m) }
@@ -63,7 +64,7 @@ $secrets = @(
     @{ re = '(?i)\b(?:api[_-]?key|secret[_-]?key|access[_-]?token)\s*[:=]\s*["'']?[A-Za-z0-9/+_\-]{20,}'; what = 'a secret' }
 )
 $placeholders = @(
-    @{ re = 'NOREPLY-ADDRESS-TO-BE-FILLED'; what = "the public identity's noreply address (to fill in)" },
+    @{ re = 'NOREPLY-ADDRESS-TO-BE-FILLE[D]'; what = "the public identity's noreply address (to fill in)" },
     @{ re = 'ISSUES URL TO BE CHOSEN BY THE OWNER|@ISSUES_URL@'; what = 'ISSUES_URL (to fill in: twoc\ISSUES_URL.txt)' },
     @{ re = 'OWNER/REPOSITORY'; what = "the issue forms' link (OWNER/REPOSITORY, to fill in at publishing)" }
 )
@@ -120,8 +121,7 @@ if (Test-Path -LiteralPath (Join-Path $Dir '.git')) {
         if ($remotes) { Fail "a remote is set: $($remotes -join ', ')" }
         foreach ($who in (& git log --format='%an <%ae>|%cn <%ce>')) {
             foreach ($id in ($who -split '\|')) {
-                if ($id -ne 'RicemanRhys <NOREPLY-ADDRESS-TO-BE-FILLED>') { Fail "a commit identity that isn't the public one: $id" }
-                else { Warn "the commit identity's noreply address (to fill in): RicemanRhys <NOREPLY-ADDRESS-TO-BE-FILLED>" $null }
+                if ($id -ne $publicId) { Fail "a commit identity that isn't the public one: $id" }
             }
         }
         $tracked = (& git ls-files | Measure-Object).Count
