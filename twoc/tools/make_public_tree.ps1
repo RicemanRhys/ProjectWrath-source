@@ -198,7 +198,10 @@ try {
     $env:GIT_AUTHOR_DATE = '{0} +0000' -f [DateTimeOffset]::UtcNow.ToUnixTimeSeconds()
     $env:GIT_COMMITTER_DATE = $env:GIT_AUTHOR_DATE
     if ($parent) {
-        & git commit -q -m $Message
+        # the message through a file: Windows PowerShell splits a native argument at its embedded double quotes
+        $mf = Join-Path ([IO.Path]::GetTempPath()) ("pw-public-msg-" + [guid]::NewGuid().ToString('N').Substring(0, 8) + '.txt')
+        [IO.File]::WriteAllText($mf, ($Message -replace "`r`n", "`n"), (New-Object Text.UTF8Encoding($false)))
+        try { & git commit -q -F $mf } finally { Remove-Item -LiteralPath $mf -ErrorAction SilentlyContinue }
         if ($LASTEXITCODE) { throw "git commit failed (nothing changed since $($parent.Substring(0, 7))?)" }
         & git remote remove origin
         if ($LASTEXITCODE) { throw "git remote remove failed" }
