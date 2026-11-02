@@ -2,9 +2,9 @@
 rem Project Wrath (the packages, twoc/tools/package): starts the game from this folder.
 rem The game finds game_files\ in the working directory and ProjectWrath.ini next to the exe,
 rem so this folder can be anywhere. The switches are the ones run_twoc.ps1 -HostOnly sets on the
-rem desktop (notes 18.40): the host renderer alone. The title animation is sped up by
-rem ProjectWrath.ini's fast_title = 1 (notes 18.93: the settings menu's "Skip the title animation";
-rem it was RECOMP_DEV_FAST_TITLE=1 here, which the menu couldn't turn off).
+rem desktop (notes 18.40): the host renderer alone. The title animation plays in full unless the
+rem settings menu's "Skip the title animation" (Extras, off by default) is on: ProjectWrath.ini's fast_title = 1
+rem (notes 18.93; it was RECOMP_DEV_FAST_TITLE=1 here, which the menu couldn't turn off).
 rem Step 107 (notes 18.110): without game_files the game opens its setup screen (the player's own disc image), so
 rem this no longer stops there; the first start also writes ProjectWrath.ini when there is none. Double-clicking
 rem ProjectWrath.exe does all this by itself too; this launcher keeps the console window and the restart loop.
