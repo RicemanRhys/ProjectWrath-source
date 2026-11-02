@@ -196,6 +196,8 @@ void twoc_first_ini(void)
     if (twoc_settings_old_path()[0])    /* step 109: an old crash_twoc.ini is read instead (settings.c) */
         return;
     asp = aspect_word();
+    /* Step 117: no fast_title line: the title animation plays in full by default (Extras' "Skip the title
+     * animation" writes fast_title = 1 when a player turns it on). */
     snprintf(t, sizeof(t),
              "# %s settings, written by the settings menu (F1 in the game window).\r\n"
              "# Written at the game's first start with the settings that suit most PCs (notes 18.110): the screen's own\r\n"
@@ -215,7 +217,6 @@ void twoc_first_ini(void)
              "adaptive_framerate = 1           # 1: fewer interpolated frames while game frames run late\r\n"
              "render_thread = auto           # auto (on with 4 or more processor cores), on or off\r\n"
              "hud = edges           # centre (the game's 4:3 places) or edges: the HUD counters at the screen's edges\r\n"
-             "fast_title = 1           # 1: the title animation runs fast, so the main menu opens sooner\r\n"
              "gpu = auto           # auto (Windows' choice; the game asks for the high-performance card)\r\n",
              twoc_app_name(), asp);
     h = CreateFileA(path, GENERIC_WRITE, 0, NULL, CREATE_NEW, FILE_ATTRIBUTE_NORMAL, NULL);
