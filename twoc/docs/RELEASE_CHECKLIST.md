@@ -87,6 +87,12 @@ package again and audits each; about 15 minutes):
 6. **Export the public tree**: `powershell -NoProfile -ExecutionPolicy Bypass -File twoc\tools\make_public_tree.ps1
    -Out C:\some\scratch\ProjectWrath` (the audit runs by itself and must pass with no warnings left), read it, then
    push that folder's one commit to the new repository yourself.
+   **Once the repository is published (it has tags, such as `v1.0.0`), never rewrite it**: each later export is one
+   normal commit on top of its `main` (step 117): `... make_public_tree.ps1 -Out C:\some\scratch\ProjectWrath
+   -OnTopOf https://github.com/RicemanRhys/ProjectWrath.git -Message "<what changed>"` (a clone of `main`, its files
+   replaced with the export, one commit with the public identity in UTC, the clone's remote removed; the audit
+   allows that one commit on top), read `git -C <Out> diff --stat HEAD~1 HEAD`, then push it as a fast-forward with
+   no force and no tags: `git -C <Out> push https://github.com/RicemanRhys/ProjectWrath.git main:main`.
 7. **Prepare the release**: `powershell -NoProfile -ExecutionPolicy Bypass -File
    twoc\tools\package\make_release.ps1 -Out C:\some\scratch\release` (a clean clone, the PGO build, the zip, the
    audit, `SHA256SUMS.txt`, the audio source zip, `RELEASE_NOTES.md`; about 30-60 minutes). Then make the packages

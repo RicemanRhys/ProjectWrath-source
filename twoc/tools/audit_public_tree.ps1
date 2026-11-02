@@ -17,13 +17,15 @@
 #   6. tokens or keys: GitHub tokens, AWS keys, private key blocks, "api_key = ..." style secrets;
 #   7. the git history (when DIR is a repository): more than one commit, a remote, an author / committer that
 #      isn't the public identity ($publicId below: GitHub's noreply address, never the private e-mail), or an author /
-#      committer date that isn't in UTC (+0000: the owner's time zone isn't published);
+#      committer date that isn't in UTC (+0000: the owner's time zone isn't published); with -Parent SHA (step 117,
+#      make_public_tree.ps1 -OnTopOf: an update to the published repository), the history must instead be SHA's
+#      (already published) and exactly one commit on top of it, HEAD's only parent being SHA;
 #   8. a patch file's Date: line that isn't in UTC (+0000), for the same reason.
 # WARNS (exit 0, "AUDIT PASSED WITH N WARNING(S)") on any placeholder left unfilled: the noreply address, ISSUES_URL
 # (twoc\ISSUES_URL.txt's placeholder; make_package.ps1's @ISSUES_URL@ token is the packaging's, filled at every
 # package and checked by package_audit.ps1) and the issue forms' repository link (the patterns below are written so
 # that this file doesn't match itself).
-param([Parameter(Mandatory)][string]$Dir, [string]$Manifest, [switch]$AllowSeeds)
+param([Parameter(Mandatory)][string]$Dir, [string]$Manifest, [switch]$AllowSeeds, [string]$Parent)
 $ErrorActionPreference = 'Stop'
 $Dir = (Resolve-Path -LiteralPath $Dir).Path
 if (-not $Manifest) { $Manifest = Join-Path (Split-Path -Parent $PSScriptRoot) 'data\disc_usa.tsv' }
@@ -125,7 +127,16 @@ if (Test-Path -LiteralPath (Join-Path $Dir '.git')) {
     Push-Location $Dir
     try {
         $count = [int](& git rev-list --count HEAD)
-        if ($count -ne 1) { Fail "the history has $count commits (one expected)" }
+        if ($Parent) {      # step 117: one commit on top of the published main
+            $ps = @((& git rev-list --parents -n 1 HEAD).Trim() -split ' ' | Select-Object -Skip 1)
+            $pfull = (& git rev-parse --verify --quiet "$Parent^{commit}")
+            if (-not $pfull) { Fail "the parent $Parent isn't in the history" }
+            elseif ($ps.Count -ne 1 -or $ps[0] -ne $pfull.Trim()) {
+                Fail "HEAD's parents are '$($ps -join ' ')', not only $Parent (one commit on top of it expected)"
+            }
+            $pcount = if ($pfull) { [int](& git rev-list --count $pfull.Trim()) } else { 0 }
+            if ($count -ne $pcount + 1) { Fail "the history has $count commits ($pcount published + 1 expected)" }
+        } elseif ($count -ne 1) { Fail "the history has $count commits (one expected)" }
         $remotes = & git remote
         if ($remotes) { Fail "a remote is set: $($remotes -join ', ')" }
         foreach ($who in (& git log --format='%an <%ae>|%cn <%ce>')) {

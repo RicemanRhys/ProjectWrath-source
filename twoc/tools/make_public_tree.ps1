@@ -24,12 +24,21 @@
 #     account: never the private e-mail), dated now in UTC (+0000), no remote; nothing is pushed.
 # Then it runs audit_public_tree.ps1 on DIR and fails if the audit does. Re-runnable for later releases: DIR is
 # replaced only with -Force, and only if it holds this script's own marker file (.public-tree-export).
+#
+# -OnTopOf REPO -Message TEXT (step 117): an update to the public repository that is already published (its tags,
+# such as v1.0.0, point into its history, so it is never rewritten): instead of a fresh repository, DIR is a clone
+# of REPO's main (a URL or a folder; --no-tags, core.autocrlf false), its files are replaced with the export, and the
+# export is committed as one NORMAL commit on top of that main (the public identity, dated now in UTC, the message
+# TEXT); then the clone's remote is removed, so nothing is pushed from here by accident (push with an explicit URL:
+# a fast-forward of main). The audit then allows that one commit on top of the cloned main (-Parent).
 param(
     [Parameter(Mandatory)][string]$Out,
     [switch]$Force,
     [switch]$IncludeSeeds,
     [string]$Commit = 'HEAD',
-    [string]$Toolkit
+    [string]$Toolkit,
+    [string]$OnTopOf,
+    [string]$Message
 )
 $ErrorActionPreference = 'Stop'
 $twoc = Split-Path -Parent $PSScriptRoot
@@ -73,6 +82,16 @@ if (Test-Path -LiteralPath $Out) {
     Get-ChildItem -LiteralPath $Out -Recurse -Force -Attributes ReparsePoint -ErrorAction SilentlyContinue |
         ForEach-Object { throw "a link inside $Out ($($_.FullName)): left alone" }
     Remove-Item -LiteralPath $Out -Recurse -Force
+}
+$parent = $null
+if ($OnTopOf) {         # step 117: the published main, cloned; its files go, the export replaces them below
+    if (-not $Message) { throw '-OnTopOf needs -Message (the new commit''s message)' }
+    & git clone -q --no-tags --single-branch --branch main -c core.autocrlf=false $OnTopOf $Out
+    if ($LASTEXITCODE) { throw "git clone of $OnTopOf failed" }
+    $parent = (& git -C $Out rev-parse HEAD).Trim()
+    Get-ChildItem -LiteralPath $Out -Force | Where-Object { $_.Name -ne '.git' } |
+        ForEach-Object { Remove-Item -LiteralPath $_.FullName -Recurse -Force }
+    Write-Output "on top of $OnTopOf main $($parent.Substring(0, 7))"
 }
 New-Item -ItemType Directory -Force -Path $Out | Out-Null
 $Out = (Resolve-Path -LiteralPath $Out).Path
@@ -160,12 +179,14 @@ $pinned = @(
 [IO.File]::WriteAllLines((Join-Path $tk 'PINNED.txt'), $pinned)
 Write-Output "toolkit: upstream $($base.Substring(0,7)) + $n patches"
 
-# ── A fresh repository: one commit, the public identity, no remote ───────────────────────────────────────────────
+# ── A fresh repository: one commit, the public identity, no remote (-OnTopOf: one commit on the cloned main) ─────
 [IO.File]::WriteAllText((Join-Path $Out $marker), "made by twoc\tools\make_public_tree.ps1 from $short`r`n")
 Push-Location $Out
 try {
-    & git init -q -b main
-    if ($LASTEXITCODE) { & git init -q; & git checkout -q -b main }
+    if (-not $parent) {
+        & git init -q -b main
+        if ($LASTEXITCODE) { & git init -q; & git checkout -q -b main }
+    }
     & git config user.name $identityName
     & git config user.email $identityMail
     & git config core.autocrlf false
@@ -176,12 +197,19 @@ try {
     # now, in UTC (git's own form: seconds since 1970 and the offset), so the commit doesn't carry this PC's time zone
     $env:GIT_AUTHOR_DATE = '{0} +0000' -f [DateTimeOffset]::UtcNow.ToUnixTimeSeconds()
     $env:GIT_COMMITTER_DATE = $env:GIT_AUTHOR_DATE
-    & git commit -q -m "Initial public release of Project Wrath"
-    if ($LASTEXITCODE) { throw "git commit failed" }
+    if ($parent) {
+        & git commit -q -m $Message
+        if ($LASTEXITCODE) { throw "git commit failed (nothing changed since $($parent.Substring(0, 7))?)" }
+        & git remote remove origin
+        if ($LASTEXITCODE) { throw "git remote remove failed" }
+    } else {
+        & git commit -q -m "Initial public release of Project Wrath"
+        if ($LASTEXITCODE) { throw "git commit failed" }
+    }
     $remotes = & git remote
     if ($remotes) { throw "a remote is set: $remotes" }
-    Write-Output ("public tree: {0} files in one commit {1}, no remote" -f (& git ls-files | Measure-Object).Count,
-                  (& git rev-parse --short HEAD))
+    Write-Output ("public tree: {0} files, commit {1}{2}, no remote" -f (& git ls-files | Measure-Object).Count,
+                  (& git rev-parse --short HEAD), $(if ($parent) { " on top of $($parent.Substring(0, 7))" } else { ' (one commit)' }))
 } finally {
     Remove-Item Env:GIT_AUTHOR_NAME, Env:GIT_AUTHOR_EMAIL, Env:GIT_COMMITTER_NAME, Env:GIT_COMMITTER_EMAIL,
                 Env:GIT_AUTHOR_DATE, Env:GIT_COMMITTER_DATE -ErrorAction SilentlyContinue
@@ -192,5 +220,6 @@ try {
 $auditArgs = @('-NoProfile', '-ExecutionPolicy', 'Bypass', '-File', (Join-Path $PSScriptRoot 'audit_public_tree.ps1'),
                '-Dir', $Out, '-Manifest', (Join-Path $twoc 'data\disc_usa.tsv'))
 if ($IncludeSeeds) { $auditArgs += '-AllowSeeds' }      # (a switch through -File is passed by name only)
+if ($parent) { $auditArgs += @('-Parent', $parent) }
 & powershell @auditArgs
 if ($LASTEXITCODE) { throw "the audit failed: nothing to publish from $Out" }
